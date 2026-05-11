@@ -57,7 +57,7 @@ update to ctx.input.current().
 - `fix: clear ghost overlay before SIGWINCH propagates`
 - `perf: avoid per-keystroke allocation in Guardrail.check`
 - `docs: add example for writing a custom module`
-- `chore: bump zig to 0.13.0`
+- `chore: bump zig to 0.16.0`
 
 ❌
 - `Add OSC 133 support` (missing type)
@@ -88,7 +88,7 @@ If you're adding behaviour:
   first; it has the rationale for the proxy loop, ghost-text rendering,
   signal handling, and the comptime dispatcher.
 
-Match the existing style (Zig 0.13 idioms; doc comments explaining
+Match the existing style (Zig 0.16 idioms; doc comments explaining
 *why*, not what; no allocations in `onInput`).
 
 ## Release flow (maintainers)

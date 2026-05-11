@@ -12,7 +12,7 @@
 	<a href="https://atty.sh">
 		<img alt="atty.sh" src="https://img.shields.io/badge/site-atty.sh-89DCEB?style=for-the-badge&logo=googlechrome&logoColor=D9E0EE&labelColor=302D41"></a>
 	<a href="https://ziglang.org/">
-		<img alt="Zig 0.13" src="https://img.shields.io/badge/zig-0.13.0-F2CDCD?style=for-the-badge&logo=zig&logoColor=D9E0EE&labelColor=302D41"></a>
+		<img alt="Zig 0.16" src="https://img.shields.io/badge/zig-0.16.0-F2CDCD?style=for-the-badge&logo=zig&logoColor=D9E0EE&labelColor=302D41"></a>
 </p>
 
 &nbsp;
@@ -238,7 +238,7 @@ Add your own under `src/modules/` and wire it into `config.modules`. Reference d
 ### 🧪 Build from source
 
 ```bash
-mise use zig@0.13.0           # any other Zig 0.13.0 install also works
+mise use zig@0.16.0           # any other Zig 0.16.0 install also works
 zig build                     # → ./zig-out/bin/atty
 zig build test --summary all  # 33 unit tests
 zig build itest --summary all # PTY round-trip integration test

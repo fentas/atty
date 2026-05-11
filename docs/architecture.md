@@ -55,7 +55,7 @@ values) for two reasons:
 
 1. Stable heap addresses let modules hold long-lived self-references
    (the Atuin worker thread captures `*Shared`).
-2. Zig 0.13's stricter "no comptime-var pointer at runtime" check
+2. Zig's strict "no comptime-var pointer at runtime" check
    fires when dispatch takes `&tuple[i]` on a value tuple. Pointers
    sidestep this.
 

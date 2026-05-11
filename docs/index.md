@@ -77,7 +77,7 @@ cd atty
 ### With Zig
 
 ```sh
-mise use zig@0.13.0          # or any other way to install Zig 0.13
+mise use zig@0.16.0          # or any other way to install Zig 0.16
 zig build                    # → ./zig-out/bin/atty
 zig build test               # 33 unit tests
 zig build itest              # PTY integration test

@@ -43,7 +43,7 @@ pub fn Dispatcher(comptime modules: anytype) type {
         ///   1. Each runtime lives at a stable heap address — modules
         ///      can hold long-lived self-references (e.g. the Atuin
         ///      worker thread captures `*Shared`).
-        ///   2. Zig 0.13's "no comptime-var pointer at runtime" check
+        ///   2. Zig's strict "no comptime-var pointer at runtime" check
         ///      fires when dispatch code computes `&tuple[i]` for a
         ///      value tuple. Storing pointers means we just read them.
         pub const Runtimes = blk: {
@@ -247,7 +247,7 @@ fn makeContext(line: *LineState, scratch: *std.ArrayList(u8)) Context {
     };
 }
 
-// Dispatchers materialised at module scope. Zig 0.13's "comptime var
+// Dispatchers materialised at module scope. Zig's strict "comptime var
 // pointer at runtime" check fires on the @Type-generated tuple
 // metadata when the Dispatcher type is created at function scope —
 // hoisting to module scope keeps the metadata pinned to the binary.

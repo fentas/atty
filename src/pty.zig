@@ -22,9 +22,9 @@ const linux = std.os.linux;
 
 // ----- libc bindings -------------------------------------------------------
 //
-// `std.c` does not surface all of these in Zig 0.13 in a portable form, so
-// we declare them explicitly. They are part of POSIX.1-2001 (XSI), so the
-// signatures are stable across glibc/musl.
+// `std.c` does not surface all of these in a stable, portable form, so
+// we declare them explicitly. They are part of POSIX.1-2001 (XSI), so
+// the signatures are stable across glibc/musl.
 
 extern "c" fn posix_openpt(flags: c_int) c_int;
 extern "c" fn grantpt(fd: c_int) c_int;
