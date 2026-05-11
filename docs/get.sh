@@ -131,12 +131,16 @@ fi
 info "building (ReleaseSafe) — this takes ~5–15 s"
 ( cd "$SRC_DIR" && "$zig_bin" build -Doptimize=ReleaseSafe $build_target )
 
-# ── Step 5: install ─────────────────────────────────────────────────────────
+# ── Step 5: install (symlink, so rebuilds take effect immediately) ─────────
+# Suckless ethos: source is the truth, the install dir is just a pointer.
+# Re-running `zig build` in $SRC_DIR updates the binary live — no extra
+# install step. The trade-off is that deleting $SRC_DIR breaks the link,
+# which is the right failure mode (you'd be deleting your source anyway).
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$SRC_DIR/zig-out/bin/atty" "$INSTALL_DIR/atty"
+ln -sfn "$SRC_DIR/zig-out/bin/atty" "$INSTALL_DIR/atty"
 
 installed_version=$("$INSTALL_DIR/atty" --version 2>/dev/null | head -n1 || true)
-info "installed $(grn "$INSTALL_DIR/atty") ${installed_version:+($installed_version)}"
+info "linked $(grn "$INSTALL_DIR/atty") $(dim '→') $(dim "$SRC_DIR/zig-out/bin/atty") ${installed_version:+($installed_version)}"
 
 # ── PATH hint ───────────────────────────────────────────────────────────────
 case ":$PATH:" in
@@ -152,8 +156,11 @@ esac
 cat <<EOF
 
 $(dim '# Source lives at:') $SRC_DIR
-$(dim '#   Edit src/config.zig anytime, then re-run:') $zig_bin build $build_target
-$(dim '#   Or re-run this installer (it does a fast-forward pull):')
+$(dim '#   Edit src/config.zig anytime, then rebuild:')
+$(dim '#     ') cd $SRC_DIR && $zig_bin build $build_target
+$(dim '#   ~/.local/bin/atty is a symlink — no re-install needed.')
+$(dim '#')
+$(dim '# Or re-run this installer (fast-forward pulls upstream first):')
 $(dim '#     ') curl -fsSL https://get.atty.sh | sh
 
 $(dim '# In ~/.config/ghostty/config:')
