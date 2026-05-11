@@ -46,7 +46,27 @@ worker-thread plumbing vanishes from the binary.
 
 ## Quickstart  {#quickstart}
 
-### Without Zig (Docker)
+### One-line install — pick your philosophy
+
+```sh
+# 🛠  Suckless way — clone source, edit config, compile.
+curl -fsSL https://get.atty.sh | sh
+
+# 📦 Pre-built binary, default modules.
+curl -fsSL https://bin.atty.sh | sh
+```
+
+| Path              | What it does                                                                            |
+|-------------------|-----------------------------------------------------------------------------------------|
+| `get.atty.sh`     | Bootstraps Zig if missing → clones to `~/.local/share/atty/src` → prompts to edit `src/config.zig` → builds → installs |
+| `bin.atty.sh`     | Detects arch → downloads release asset → sha256 verify → installs                       |
+
+Both end up at `~/.local/bin/atty` by default; pass `INSTALL_DIR=…`
+to override. The source installer also honors `ATTY_SRC=…`,
+`ATTY_NONINTERACTIVE=1`, and `REPO_URL=…` so you can fork and
+self-host.
+
+### Or via Docker
 
 ```sh
 git clone https://github.com/fentas/atty
@@ -68,8 +88,13 @@ zig build itest              # PTY integration test
 Ghostty (`~/.config/ghostty/config`):
 
 ```
-command = /usr/local/bin/atty
+# Ghostty starts atty, which then starts your shell.
+command = atty bash
 ```
+
+Prefer the explicit form (`atty bash`/`atty zsh`/…) over relying on
+`$SHELL` — when the terminal emulator spawns atty directly, the
+environment is minimal and `$SHELL` may not yet be set.
 
 Or invoke ad-hoc:
 

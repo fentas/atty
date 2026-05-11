@@ -1,12 +1,15 @@
 //! atty — entry point.
 //!
-//! Usage: atty [flags] [-- shell args...]
+//! Usage: atty [flags] [shell [args...]]
+//!
+//!   atty                       # spawn $SHELL (or /bin/sh)
+//!   atty bash                  # spawn bash
+//!   atty bash -l               # spawn bash with -l
+//!   atty zsh -c 'echo hi'      # spawn zsh -c 'echo hi'
+//!   atty -- --weird-shell-name # `--` forces positional mode if needed
 //!
 //! Flags:
-//!   --shell <path>   Shell binary to spawn (default: $SHELL or /bin/sh)
-//!   -h, --help       Print this help
-//!
-//! Anything after `--` is passed verbatim to the child shell as argv.
+//!   -h, --help    Print this help
 //!
 //! Module composition is *not* a runtime concern — edit `src/config.zig`
 //! and recompile. See README.md for the rationale.
@@ -15,11 +18,16 @@ const std = @import("std");
 const atty = @import("atty");
 
 const usage =
-    \\Usage: atty [flags] [-- shell args...]
+    \\Usage: atty [flags] [shell [args...]]
+    \\
+    \\  atty                  spawn $SHELL (default /bin/sh)
+    \\  atty bash             spawn bash
+    \\  atty bash -l          spawn bash with -l
+    \\  atty zsh -c 'cmd'     spawn zsh -c 'cmd'
     \\
     \\Flags:
-    \\  --shell <path>   Shell binary to spawn (default: $SHELL or /bin/sh)
-    \\  -h, --help       Print this help
+    \\  -h, --help            Print this help
+    \\  -V, --version         Print version and exit
     \\
     \\Module composition is configured at build time via src/config.zig.
     \\Use `-Dconfig=path` to point zig build at a different config file.
@@ -30,8 +38,10 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn isatty(fd: c_int) c_int;
 
 const CliOpts = struct {
-    shell_override: ?[]const u8 = null,
-    shell_args: [][]const u8 = &.{},
+    /// Positional argv for the spawned shell. positional[0] is the shell
+    /// binary; positional[1..] are its args. Empty when the user
+    /// passed no positionals — in that case we resolve $SHELL ourselves.
+    positional: [][]const u8 = &.{},
 };
 
 fn writeStderr(bytes: []const u8) void {
@@ -47,49 +57,52 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args) !CliOpts {
 
     _ = it.next(); // argv[0]
 
-    var opts = CliOpts{};
-    var saw_separator = false;
-
-    var passthrough: std.ArrayList([]const u8) = .empty;
+    var positional: std.ArrayList([]const u8) = .empty;
     errdefer {
-        for (passthrough.items) |s| allocator.free(s);
-        passthrough.deinit(allocator);
+        for (positional.items) |s| allocator.free(s);
+        positional.deinit(allocator);
     }
 
+    var done_with_flags = false;
+
     while (it.next()) |a| {
-        if (saw_separator) {
-            try passthrough.append(allocator, try allocator.dupe(u8, a));
+        if (done_with_flags) {
+            // Once we've started collecting the spawned command, every
+            // subsequent token is part of it — flags included
+            // (`atty bash -l` must pass `-l` to bash, not to atty).
+            try positional.append(allocator, try allocator.dupe(u8, a));
             continue;
         }
         if (std.mem.eql(u8, a, "--")) {
-            saw_separator = true;
+            done_with_flags = true;
             continue;
         }
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             writeStdout(usage);
             std.process.exit(0);
         }
-        if (std.mem.eql(u8, a, "--shell")) {
-            const next = it.next() orelse {
-                writeStderr("error: --shell requires a value\n");
-                std.process.exit(2);
-            };
-            opts.shell_override = try allocator.dupe(u8, next);
-            continue;
+        if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
+            var buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "atty {s}\n", .{atty.version}) catch "atty\n";
+            writeStdout(msg);
+            std.process.exit(0);
         }
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "error: unknown flag: {s}\n\n", .{a}) catch "error: unknown flag\n";
-        writeStderr(msg);
-        writeStderr(usage);
-        std.process.exit(2);
+        if (a.len > 0 and a[0] == '-') {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "error: unknown flag: {s}\n\n", .{a}) catch "error: unknown flag\n";
+            writeStderr(msg);
+            writeStderr(usage);
+            std.process.exit(2);
+        }
+        // First positional ends flag parsing.
+        try positional.append(allocator, try allocator.dupe(u8, a));
+        done_with_flags = true;
     }
 
-    opts.shell_args = try passthrough.toOwnedSlice(allocator);
-    return opts;
+    return .{ .positional = try positional.toOwnedSlice(allocator) };
 }
 
-fn resolveShell(allocator: std.mem.Allocator, override: ?[]const u8) ![:0]u8 {
-    if (override) |s| return try allocator.dupeZ(u8, s);
+fn resolveShell(allocator: std.mem.Allocator) ![:0]u8 {
     if (getenv("SHELL")) |s| return try allocator.dupeZ(u8, std.mem.sliceTo(s, 0));
     return try allocator.dupeZ(u8, "/bin/sh");
 }
@@ -100,15 +113,28 @@ pub fn main(init: std.process.Init) !void {
 
     const opts = try parseArgs(allocator, init.minimal.args);
     defer {
-        if (opts.shell_override) |s| allocator.free(s);
-        for (opts.shell_args) |s| allocator.free(s);
-        allocator.free(opts.shell_args);
+        for (opts.positional) |s| allocator.free(s);
+        allocator.free(opts.positional);
     }
 
-    const shell_path = try resolveShell(allocator, opts.shell_override);
-    defer allocator.free(shell_path);
+    // Resolve the shell + extra args. If user passed positional args,
+    // positional[0] is the shell binary; otherwise fall back to $SHELL.
+    var shell_owned: ?[:0]u8 = null;
+    defer if (shell_owned) |s| allocator.free(s);
 
-    // Build argv = [shell_path, opts.shell_args..., null]
+    const shell_path: []const u8 = if (opts.positional.len > 0)
+        opts.positional[0]
+    else blk: {
+        const s = try resolveShell(allocator);
+        shell_owned = s;
+        break :blk s;
+    };
+    const extra_args: []const []const u8 = if (opts.positional.len > 0)
+        opts.positional[1..]
+    else
+        &.{};
+
+    // Build argv = [shell_path, extra_args..., null]
     var argv_list: std.ArrayList(?[*:0]const u8) = .empty;
     defer {
         for (argv_list.items) |maybe_arg| {
@@ -120,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
         argv_list.deinit(allocator);
     }
     try argv_list.append(allocator, try allocator.dupeZ(u8, shell_path));
-    for (opts.shell_args) |a| try argv_list.append(allocator, try allocator.dupeZ(u8, a));
+    for (extra_args) |a| try argv_list.append(allocator, try allocator.dupeZ(u8, a));
     try argv_list.append(allocator, null);
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(argv_list.items.ptr);
 

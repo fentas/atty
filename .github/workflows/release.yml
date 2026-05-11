@@ -46,6 +46,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"   # strip leading "v"
           stem="atty-${version}-${{ matrix.asset_arch }}"
+          unver="atty-${{ matrix.asset_arch }}"
 
           mkdir -p dist
           install -m 0755 zig-out/bin/atty "dist/atty"
@@ -54,14 +55,20 @@ jobs:
           tar -C dist -czf "dist/${stem}.tar.gz" atty
           ( cd dist && sha256sum "${stem}.tar.gz" > "${stem}.tar.gz.sha256" )
 
-          # Also publish the bare binary for users who don't want to untar
+          # Versioned bare binary (for archives / pinned downloads).
           install -m 0755 zig-out/bin/atty "dist/${stem}"
           ( cd dist && sha256sum "${stem}" > "${stem}.sha256" )
+
+          # Unversioned bare binary — the canonical "latest" download
+          # URL the installer at https://get.atty.sh resolves to.
+          install -m 0755 zig-out/bin/atty "dist/${unver}"
+          ( cd dist && sha256sum "${unver}" > "${unver}.sha256" )
 
           rm dist/atty
 
           {
             echo "stem=${stem}"
+            echo "unver=${unver}"
             echo "version=${version}"
           } >> "$GITHUB_OUTPUT"
 
@@ -80,6 +87,8 @@ jobs:
             dist/atty-*.tar.gz.sha256
             dist/atty-*-${{ matrix.asset_arch }}
             dist/atty-*-${{ matrix.asset_arch }}.sha256
+            dist/atty-${{ matrix.asset_arch }}
+            dist/atty-${{ matrix.asset_arch }}.sha256
 
   # ---------------------------------------------------------------------------
   # Publish artifacts to the GitHub Release once every binary is built.
@@ -103,6 +112,7 @@ jobs:
             dist/atty-*.tar.gz
             dist/atty-*.tar.gz.sha256
             dist/atty-*-linux-*
+            dist/atty-linux-*
           generate_release_notes: false
           fail_on_unmatched_files: true
 

@@ -52,44 +52,71 @@ A live, animated demo lives on [atty.sh](https://atty.sh).
 
 ### 🚀 Install
 
+Two installers, two philosophies. Pick one.
+
 ```bash
-# Option 1 — pre-built binary (no toolchain on your host)
-curl -fsSL https://github.com/fentas/atty/releases/latest/download/atty-linux-x86_64 \
-    -o /usr/local/bin/atty && chmod +x /usr/local/bin/atty
+# 🛠  The Suckless way — get the source, edit src/config.zig, compile.
+#    Bootstraps Zig if you don't have it. Prompts before opening config.
+curl -fsSL https://get.atty.sh | sh
 
-# Option 2 — build inside Docker, drop the binary in ./dist
-./scripts/install.sh
+# 📦 Just give me the binary — no toolchain, no source, default modules.
+#    Resolves arch, verifies sha256, chmods, hints at $PATH.
+curl -fsSL https://bin.atty.sh | sh
+```
 
-# Option 3 — pull the OCI image
+Either one installs to `~/.local/bin/atty` by default. Both honor
+`INSTALL_DIR=…`. The binary installer additionally honors
+`ATTY_VERSION=…`; the source installer honors `ATTY_SRC=…`,
+`ATTY_NONINTERACTIVE=1`, and `REPO_URL=…`.
+
+For container use:
+
+```bash
 docker pull ghcr.io/fentas/atty:latest
 ```
 
-Then make it your terminal's startup command. Ghostty (`~/.config/ghostty/config`):
+Supported pre-built targets: `linux-x86_64`, `linux-aarch64`
+(musl-static). The source flow works anywhere Zig 0.16 does.
+
+Then make it your terminal's startup command. Ghostty
+(`~/.config/ghostty/config`):
 
 ```
-command = /usr/local/bin/atty
+# Ghostty starts atty, which then starts your shell.
+command = atty bash
 ```
+
+Pin the shell explicitly (`atty bash`/`atty zsh`/…) in your terminal
+config rather than relying on `$SHELL` — when the terminal is what
+spawns atty, the environment is minimal and `$SHELL` may not yet be
+set. Inside the shell that atty spawns, your `.bashrc`/`.zshrc` will
+of course see `$SHELL` normally.
 
 Or invoke ad-hoc:
 
 ```bash
-atty                    # spawns $SHELL through the proxy
-atty --shell /bin/bash  # different shell
-atty -- -c 'echo hi'    # passthrough args after `--`
+atty                       # spawn $SHELL through the proxy
+atty bash                  # spawn bash explicitly
+atty bash -l               # bash with -l
+atty zsh -c 'echo hi'      # zsh -c 'echo hi'
 ```
+
+The first non-flag positional is the shell binary; everything after it
+is passed to that shell verbatim — same convention as `env(1)` or
+`sudo(1)`. Use `--` only if your shell's name starts with a dash.
 
 #### Detecting atty from your shell
 
-When atty spawns a shell it injects three env vars; use them in your
+atty injects three env vars into every spawned shell. Use them in your
 `.bashrc`/`.zshrc` to avoid double-wrapping:
 
 ```bash
-# Only wrap once — don't re-launch atty if we're already inside it.
-if [ -z "$ATTY" ]; then
-    exec atty
+# Only run atty if we aren't already inside an atty session,
+# and only if the binary is actually on PATH (so a missing install
+# never locks you out of your shell).
+if [[ -z "${ATTY}" ]] && command -v atty >/dev/null; then
+    exec atty bash
 fi
-
-echo "running under atty $ATTY_VERSION (pid $ATTY_PID)"
 ```
 
 | Variable       | Value                                |
@@ -97,6 +124,10 @@ echo "running under atty $ATTY_VERSION (pid $ATTY_PID)"
 | `ATTY`         | `1`                                  |
 | `ATTY_PID`     | pid of the atty proxy (parent)       |
 | `ATTY_VERSION` | semver string (e.g. `0.1.0`)         |
+
+The `command -v` guard is a footgun saver: if atty disappears (uninstall,
+upgrade gone wrong, fresh machine), your shell still starts normally
+instead of bailing on `exec` failure.
 
 &nbsp;
 
