@@ -3,6 +3,8 @@
 //! Re-exports the public API so external code (tests, user configs)
 //! can `@import("atty")` and pull everything from one place.
 
+pub const version = @import("version.zig").version;
+
 pub const module = @import("module.zig");
 pub const dispatch = @import("dispatch.zig");
 pub const line_state = @import("line_state.zig");

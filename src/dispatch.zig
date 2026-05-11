@@ -56,14 +56,14 @@ pub fn Dispatcher(comptime modules: anytype) type {
         // Lifecycle
         // ---------------------------------------------------------------------
 
-        pub fn attachAll(allocator: std.mem.Allocator) !Runtimes {
+        pub fn attachAll(allocator: std.mem.Allocator, io: std.Io) !Runtimes {
             var rts: Runtimes = undefined;
             var attached: usize = 0;
-            errdefer detachUpTo(allocator, &rts, attached);
+            errdefer detachUpTo(allocator, io, &rts, attached);
 
             inline for (modules, 0..) |M, i| {
                 const slot = try allocator.create(M.Runtime);
-                slot.* = M.attach(allocator) catch |err| {
+                slot.* = M.attach(allocator, io) catch |err| {
                     allocator.destroy(slot);
                     return err;
                 };
@@ -73,14 +73,14 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return rts;
         }
 
-        pub fn detachAll(allocator: std.mem.Allocator, rts: *Runtimes) void {
-            detachUpTo(allocator, rts, N);
+        pub fn detachAll(allocator: std.mem.Allocator, io: std.Io, rts: *Runtimes) void {
+            detachUpTo(allocator, io, rts, N);
         }
 
-        fn detachUpTo(allocator: std.mem.Allocator, rts: *Runtimes, count: usize) void {
+        fn detachUpTo(allocator: std.mem.Allocator, io: std.Io, rts: *Runtimes, count: usize) void {
             inline for (modules, 0..) |M, i| {
                 if (i < count) {
-                    if (comptime @hasDecl(M, "detach")) M.detach(rts[i]);
+                    if (comptime @hasDecl(M, "detach")) M.detach(rts[i], io);
                     allocator.destroy(rts[i]);
                 }
             }
@@ -165,15 +165,16 @@ pub fn Dispatcher(comptime modules: anytype) type {
 
 const testing = std.testing;
 const LineState = @import("line_state.zig").LineState;
+const test_io: std.Io = std.Io.failing;
 
 const NoOpA = struct {
     pub const name = "noop-a";
     pub const Runtime = struct { input_count: usize = 0 };
 
-    pub fn attach(_: std.mem.Allocator) !Runtime {
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
         return .{};
     }
-    pub fn detach(_: *Runtime) void {}
+    pub fn detach(_: *Runtime, _: std.Io) void {}
     pub fn onInput(rt: *Runtime, _: *Context, _: []const u8) Error!Action {
         rt.input_count += 1;
         return .forward;
@@ -184,10 +185,10 @@ const Swallower = struct {
     pub const name = "swallower";
     pub const Runtime = struct {};
 
-    pub fn attach(_: std.mem.Allocator) !Runtime {
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
         return .{};
     }
-    pub fn detach(_: *Runtime) void {}
+    pub fn detach(_: *Runtime, _: std.Io) void {}
     pub fn onInput(_: *Runtime, _: *Context, _: []const u8) Error!Action {
         return .swallow;
     }
@@ -197,10 +198,10 @@ const Replacer = struct {
     pub const name = "replacer";
     pub const Runtime = struct { buf: [16]u8 = undefined };
 
-    pub fn attach(_: std.mem.Allocator) !Runtime {
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
         return .{};
     }
-    pub fn detach(_: *Runtime) void {}
+    pub fn detach(_: *Runtime, _: std.Io) void {}
     pub fn onInput(rt: *Runtime, _: *Context, input: []const u8) Error!Action {
         const n = @min(input.len, rt.buf.len);
         for (input[0..n], 0..) |b, i| rt.buf[i] = std.ascii.toUpper(b);
@@ -212,10 +213,10 @@ const GhostProvider = struct {
     pub const name = "ghost";
     pub const Runtime = struct { suggestion: []const u8 = "" };
 
-    pub fn attach(_: std.mem.Allocator) !Runtime {
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
         return .{};
     }
-    pub fn detach(_: *Runtime) void {}
+    pub fn detach(_: *Runtime, _: std.Io) void {}
     pub fn provideGhostText(rt: *Runtime, _: *Context) Error!?[]const u8 {
         if (rt.suggestion.len == 0) return null;
         return rt.suggestion;
@@ -226,10 +227,10 @@ const Ticker = struct {
     pub const name = "ticker";
     pub const Runtime = struct { ticks: u64 = 0, total_elapsed: u64 = 0 };
 
-    pub fn attach(_: std.mem.Allocator) !Runtime {
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
         return .{};
     }
-    pub fn detach(_: *Runtime) void {}
+    pub fn detach(_: *Runtime, _: std.Io) void {}
     pub fn onTick(rt: *Runtime, _: *Context, elapsed_ms: u64) Error!void {
         rt.ticks += 1;
         rt.total_elapsed += elapsed_ms;
@@ -239,6 +240,7 @@ const Ticker = struct {
 fn makeContext(line: *LineState, scratch: *std.ArrayList(u8)) Context {
     return .{
         .allocator = testing.allocator,
+        .io = test_io,
         .line = line,
         .scratch = scratch,
         .is_tty = false,
@@ -256,20 +258,20 @@ const D_ReplacerNoOp = Dispatcher(.{ Replacer, NoOpA });
 
 test "Dispatcher attaches and detaches all modules" {
     const D = D_NoOpSwallower;
-    var rts = try D.attachAll(testing.allocator);
-    defer D.detachAll(testing.allocator, &rts);
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
 
     try testing.expectEqual(@as(usize, 0), rts[0].input_count);
 }
 
 test "dispatchInput forwards through all modules" {
     const D = D_NoOpNoOp;
-    var rts = try D.attachAll(testing.allocator);
-    defer D.detachAll(testing.allocator, &rts);
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
 
     var line = LineState{};
-    var scratch = std.ArrayList(u8).init(testing.allocator);
-    defer scratch.deinit();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
     var ctx = makeContext(&line, &scratch);
 
     const action = try D.dispatchInput(&rts, &ctx, "hi");
@@ -280,12 +282,12 @@ test "dispatchInput forwards through all modules" {
 
 test "dispatchInput short-circuits on swallow" {
     const D = D_SwallowerNoOp;
-    var rts = try D.attachAll(testing.allocator);
-    defer D.detachAll(testing.allocator, &rts);
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
 
     var line = LineState{};
-    var scratch = std.ArrayList(u8).init(testing.allocator);
-    defer scratch.deinit();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
     var ctx = makeContext(&line, &scratch);
 
     const action = try D.dispatchInput(&rts, &ctx, "x");
@@ -296,12 +298,12 @@ test "dispatchInput short-circuits on swallow" {
 
 test "dispatchInput passes replaced bytes downstream" {
     const D = D_ReplacerNoOp;
-    var rts = try D.attachAll(testing.allocator);
-    defer D.detachAll(testing.allocator, &rts);
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
 
     var line = LineState{};
-    var scratch = std.ArrayList(u8).init(testing.allocator);
-    defer scratch.deinit();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
     var ctx = makeContext(&line, &scratch);
 
     const action = try D.dispatchInput(&rts, &ctx, "hi");
@@ -311,10 +313,10 @@ test "dispatchInput passes replaced bytes downstream" {
 
 const EmptyGhost = struct {
     pub const Runtime = struct {};
-    pub fn attach(_: std.mem.Allocator) !Runtime {
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
         return .{};
     }
-    pub fn detach(_: *Runtime) void {}
+    pub fn detach(_: *Runtime, _: std.Io) void {}
     pub fn provideGhostText(_: *Runtime, _: *Context) Error!?[]const u8 {
         return null;
     }
@@ -324,13 +326,13 @@ const D_EmptyGhost = Dispatcher(.{ EmptyGhost, GhostProvider });
 
 test "gatherGhostText returns first non-null" {
     const D = D_EmptyGhost;
-    var rts = try D.attachAll(testing.allocator);
-    defer D.detachAll(testing.allocator, &rts);
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
     rts[1].suggestion = "tail";
 
     var line = LineState{};
-    var scratch = std.ArrayList(u8).init(testing.allocator);
-    defer scratch.deinit();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
     var ctx = makeContext(&line, &scratch);
 
     const got = try D.gatherGhostText(&rts, &ctx);
@@ -341,12 +343,12 @@ const D_TickerTicker = Dispatcher(.{ Ticker, NoOpA, Ticker });
 
 test "dispatchTick fans out to every module with onTick" {
     const D = D_TickerTicker;
-    var rts = try D.attachAll(testing.allocator);
-    defer D.detachAll(testing.allocator, &rts);
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
 
     var line = LineState{};
-    var scratch = std.ArrayList(u8).init(testing.allocator);
-    defer scratch.deinit();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
     var ctx = makeContext(&line, &scratch);
 
     try D.dispatchTick(&rts, &ctx, 100);

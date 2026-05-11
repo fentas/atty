@@ -25,17 +25,18 @@ const std = @import("std");
 const ansi = @import("ansi.zig");
 
 pub const Ghost = struct {
+    allocator: std.mem.Allocator,
     /// Currently-rendered suggestion text (the part AFTER the user's
     /// cursor). Empty when no overlay is on screen.
-    rendered: std.ArrayList(u8),
+    rendered: std.ArrayList(u8) = .empty,
     visible: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Ghost {
-        return .{ .rendered = std.ArrayList(u8).init(allocator) };
+        return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *Ghost) void {
-        self.rendered.deinit();
+        self.rendered.deinit(self.allocator);
     }
 
     /// Compute the trailing portion of `suggestion` that should be
@@ -52,21 +53,21 @@ pub const Ghost = struct {
     /// non-empty. Idempotent: if the same text is already rendered we
     /// emit nothing — that matters because the proxy re-renders on
     /// every tick, and naive re-paints would flicker.
-    pub fn show(self: *Ghost, writer: anytype, text: []const u8) !void {
+    pub fn show(self: *Ghost, w: *std.Io.Writer, text: []const u8) !void {
         if (self.visible and std.mem.eql(u8, self.rendered.items, text)) return;
-        if (self.visible) try self.clear(writer);
-        try ansi.writeGhost(writer, text);
+        if (self.visible) try self.clear(w);
+        try ansi.writeGhost(w, text);
         self.rendered.clearRetainingCapacity();
-        try self.rendered.appendSlice(text);
+        try self.rendered.appendSlice(self.allocator, text);
         self.visible = true;
     }
 
     /// Remove any rendered overlay. Cheap to call when nothing is
     /// rendered — just emits the conservative "save/erase-eol/restore"
     /// sequence when visible.
-    pub fn clear(self: *Ghost, writer: anytype) !void {
+    pub fn clear(self: *Ghost, w: *std.Io.Writer) !void {
         if (!self.visible) return;
-        try ansi.writeClearGhost(writer);
+        try ansi.writeClearGhost(w);
         self.rendered.clearRetainingCapacity();
         self.visible = false;
     }
@@ -91,14 +92,15 @@ test "trailing rejects shorter suggestion" {
 test "show then clear toggles visibility" {
     var g = Ghost.init(std.testing.allocator);
     defer g.deinit();
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
+
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
 
     try std.testing.expect(!g.visible);
-    try g.show(buf.writer(), " -la");
+    try g.show(&w, " -la");
     try std.testing.expect(g.visible);
     try std.testing.expectEqualSlices(u8, " -la", g.rendered.items);
 
-    try g.clear(buf.writer());
+    try g.clear(&w);
     try std.testing.expect(!g.visible);
 }

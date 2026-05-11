@@ -18,6 +18,15 @@ const config = @import("config");
 const dispatch = @import("dispatch.zig");
 const module = @import("module.zig");
 
+extern "c" fn clock_gettime(clk_id: c_int, tp: *posix.timespec) c_int;
+const CLOCK_MONOTONIC: c_int = 1;
+
+fn nowMs() i64 {
+    var ts: posix.timespec = undefined;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
+}
+
 const Pty = @import("pty.zig").Pty;
 const RawMode = @import("terminal.zig").RawMode;
 const LineState = @import("line_state.zig").LineState;
@@ -50,39 +59,41 @@ const SignalPipe = struct {
     write: posix.fd_t,
 
     fn init() !SignalPipe {
-        const fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        var fds: [2]posix.fd_t = undefined;
+        const rc = std.c.pipe2(&fds, .{ .CLOEXEC = true, .NONBLOCK = true });
+        if (rc != 0) return error.PipeFailed;
         return .{ .read = fds[0], .write = fds[1] };
     }
 
     fn deinit(self: *SignalPipe) void {
-        posix.close(self.read);
-        posix.close(self.write);
+        _ = std.c.close(self.read);
+        _ = std.c.close(self.write);
     }
 };
 
 var g_sig_pipe_write: posix.fd_t = -1;
 
-fn sigHandler(sig: c_int) callconv(.C) void {
+fn sigHandler(sig: posix.SIG) callconv(.c) void {
     if (g_sig_pipe_write < 0) return;
-    const tag: [1]u8 = .{@intCast(sig & 0xFF)};
+    const tag: [1]u8 = .{@intCast(@intFromEnum(sig) & 0xFF)};
     _ = std.c.write(g_sig_pipe_write, &tag, 1);
 }
 
-fn installSignalHandlers() !void {
-    var sa = posix.Sigaction{
+fn installSignalHandlers() void {
+    const sa = posix.Sigaction{
         .handler = .{ .handler = sigHandler },
-        .mask = posix.empty_sigset,
+        .mask = posix.sigemptyset(),
         .flags = posix.SA.RESTART,
     };
-    try posix.sigaction(posix.SIG.WINCH, &sa, null);
-    try posix.sigaction(posix.SIG.CHLD, &sa, null);
+    posix.sigaction(posix.SIG.WINCH, &sa, null);
+    posix.sigaction(posix.SIG.CHLD, &sa, null);
 }
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(allocator: std.mem.Allocator, args: Args) !ExitInfo {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // --- PTY + child --------------------------------------------------------
     var pty = try Pty.open(allocator);
     defer pty.deinit();
@@ -98,7 +109,7 @@ pub fn run(allocator: std.mem.Allocator, args: Args) !ExitInfo {
     g_sig_pipe_write = sig_pipe.write;
     defer g_sig_pipe_write = -1;
 
-    try installSignalHandlers();
+    installSignalHandlers();
 
     const empty_envp: [*:null]const ?[*:0]const u8 = @ptrCast(&[_:null]?[*:0]const u8{});
     const child_pid = try pty.spawn(args.argv, empty_envp);
@@ -111,20 +122,21 @@ pub fn run(allocator: std.mem.Allocator, args: Args) !ExitInfo {
     defer if (raw_guard) |*g| g.deinit();
 
     // --- Module runtimes ---------------------------------------------------
-    var runtimes = try D.attachAll(allocator);
-    defer D.detachAll(allocator, &runtimes);
+    var runtimes = try D.attachAll(allocator, io);
+    defer D.detachAll(allocator, io, &runtimes);
 
     // --- Loop state --------------------------------------------------------
     var line_state = LineState{};
-    var scratch = std.ArrayList(u8).init(allocator);
-    defer scratch.deinit();
-    try scratch.ensureTotalCapacity(buf_size);
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(allocator);
+    try scratch.ensureTotalCapacity(allocator, buf_size);
 
     var ghost = Ghost.init(allocator);
     defer ghost.deinit();
 
     var ctx = module.Context{
         .allocator = allocator,
+        .io = io,
         .line = &line_state,
         .scratch = &scratch,
         .is_tty = args.is_tty,
@@ -137,24 +149,28 @@ pub fn run(allocator: std.mem.Allocator, args: Args) !ExitInfo {
     };
 
     var read_buf: [buf_size]u8 = undefined;
-    const stdout = std.io.getStdOut();
-    const stdout_writer = stdout.writer();
+
+    // Stdout assembly buffer + fixed Writer.
+    //   • ANSI sequences (ghost overlay show/clear) are written into
+    //     `out_buf` via the Writer, then flushed in one std.c.write.
+    //   • Shell output bypasses the writer and goes straight to STDOUT.
+    var out_buf: [buf_size]u8 = undefined;
 
     var exit_code: u8 = 0;
     var child_alive = true;
 
-    var last_tick_ms = std.time.milliTimestamp();
+    var last_tick_ms = nowMs();
 
     while (child_alive) {
         const n = try posix.poll(&pfds, config.tick_interval_ms);
 
         // ---- timeout → tick ----------------------------------------------
         if (n == 0) {
-            const now = std.time.milliTimestamp();
+            const now = nowMs();
             const elapsed: u64 = @intCast(@max(0, now - last_tick_ms));
             last_tick_ms = now;
             D.dispatchTick(&runtimes, &ctx, elapsed) catch {};
-            renderGhost(&runtimes, &ctx, &ghost, stdout_writer) catch {};
+            renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             continue;
         }
 
@@ -164,7 +180,7 @@ pub fn run(allocator: std.mem.Allocator, args: Args) !ExitInfo {
             if (read_n > 0) {
                 const input = read_buf[0..read_n];
 
-                if (ghost.visible) try ghost.clear(stdout_writer);
+                if (ghost.visible) try clearGhost(&ghost, &out_buf);
                 _ = line_state.applyInput(input);
 
                 const action = D.dispatchInput(&runtimes, &ctx, input) catch .forward;
@@ -174,7 +190,7 @@ pub fn run(allocator: std.mem.Allocator, args: Args) !ExitInfo {
                     .replace => |bytes| try writeAll(pty.master, bytes),
                 }
 
-                renderGhost(&runtimes, &ctx, &ghost, stdout_writer) catch {};
+                renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             }
         }
 
@@ -184,11 +200,11 @@ pub fn run(allocator: std.mem.Allocator, args: Args) !ExitInfo {
             if (read_n > 0) {
                 const output = read_buf[0..read_n];
 
-                if (ghost.visible) try ghost.clear(stdout_writer);
+                if (ghost.visible) try clearGhost(&ghost, &out_buf);
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
                 try writeAll(posix.STDOUT_FILENO, output);
 
-                renderGhost(&runtimes, &ctx, &ghost, stdout_writer) catch {};
+                renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             } else if (read_n == 0) {
                 child_alive = false;
             }
@@ -203,7 +219,7 @@ pub fn run(allocator: std.mem.Allocator, args: Args) !ExitInfo {
             const sn = posix.read(sig_pipe.read, &sig_buf) catch 0;
             var i: usize = 0;
             while (i < sn) : (i += 1) {
-                const sig = sig_buf[i];
+                const sig: posix.SIG = @enumFromInt(sig_buf[i]);
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
                         _ = pty.setSize(s) catch {};
@@ -238,32 +254,44 @@ const POLLERR: i16 = 0x008;
 fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
     var i: usize = 0;
     while (i < bytes.len) {
-        const n = posix.write(fd, bytes[i..]) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            else => return err,
-        };
-        if (n == 0) return error.EndOfFile;
-        i += n;
+        const rc = std.c.write(fd, bytes[i..].ptr, bytes.len - i);
+        if (rc < 0) {
+            // EINTR / EAGAIN are vanishingly rare on PTY master; retry.
+            continue;
+        }
+        if (rc == 0) return error.EndOfFile;
+        i += @intCast(rc);
     }
 }
 
-/// Idempotent: renders the current best suggestion, or clears any
-/// overlay if no module wants to show one (e.g. line is empty,
-/// uncertain, or TTL expired).
-fn renderGhost(rts: *D.Runtimes, ctx: *module.Context, ghost: *Ghost, writer: anytype) !void {
+/// Render the current best suggestion (or clear the overlay if no
+/// module wants one). Idempotent.
+///
+/// `out_buf` is a caller-owned scratch buffer; we wrap it in a fixed
+/// `std.Io.Writer`, let the Ghost state machine emit ANSI bytes into
+/// it, then flush in a single `std.c.write` syscall.
+fn renderGhost(rts: *D.Runtimes, ctx: *module.Context, ghost: *Ghost, out_buf: []u8) !void {
     if (!ctx.is_tty) return;
 
     if (ctx.line.uncertain) {
-        if (ghost.visible) try ghost.clear(writer);
+        if (ghost.visible) try clearGhost(ghost, out_buf);
         return;
     }
 
     const sug_opt = D.gatherGhostText(rts, ctx) catch null;
     if (sug_opt) |sug| {
         if (sug.len > 0) {
-            try ghost.show(writer, sug);
+            var w: std.Io.Writer = .fixed(out_buf);
+            ghost.show(&w, sug) catch return;
+            try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
             return;
         }
     }
-    if (ghost.visible) try ghost.clear(writer);
+    if (ghost.visible) try clearGhost(ghost, out_buf);
+}
+
+fn clearGhost(ghost: *Ghost, out_buf: []u8) !void {
+    var w: std.Io.Writer = .fixed(out_buf);
+    ghost.clear(&w) catch return;
+    try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
 }

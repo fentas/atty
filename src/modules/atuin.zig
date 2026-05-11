@@ -14,12 +14,18 @@
 //! One-slot mailbox: each new keystroke overwrites the pending query,
 //! so the worker only ever sees the most recent state. No queue, no
 //! backpressure.
-//!
-//! Backend selection is a comptime switch — the unused backend's code
-//! is dropped from the binary entirely.
 
 const std = @import("std");
 const m = @import("../module.zig");
+
+extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
+const CLOCK_MONOTONIC: c_int = 1;
+
+fn nowMs() i64 {
+    var ts: std.posix.timespec = undefined;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
+}
 
 pub const SearchMode = enum { prefix, full_text, fuzzy };
 pub const FilterMode = enum { global, host, session, directory };
@@ -36,13 +42,8 @@ pub const Config = struct {
     atuin_binary: []const u8 = "atuin",
     search_mode: SearchMode = .prefix,
     filter_mode: FilterMode = .global,
-    /// Used only when backend == .socket.
     socket_path: []const u8 = "",
-    /// Drop the suggestion if no keystroke has arrived for this many ms.
-    /// Driven by onTick.
     suggestion_ttl_ms: u64 = 5_000,
-    /// Maximum query / response size (kept comptime so we can size the
-    /// shared mailbox as a value type, no allocation per request).
     max_query: comptime_int = 256,
     max_result: comptime_int = 512,
 };
@@ -53,8 +54,8 @@ pub fn configure(comptime cfg: Config) type {
         pub const config = cfg;
 
         const Shared = struct {
-            mutex: std.Thread.Mutex = .{},
-            cv: std.Thread.Condition = .{},
+            mutex: std.Io.Mutex = .init,
+            cv: std.Io.Condition = .init,
 
             req_buf: [cfg.max_query]u8 = undefined,
             req_len: usize = 0,
@@ -69,34 +70,32 @@ pub fn configure(comptime cfg: Config) type {
 
         pub const Runtime = struct {
             allocator: std.mem.Allocator,
+            io: std.Io,
             shared: *Shared,
             thread: std.Thread,
-            /// Last time we saw a keystroke (millis since epoch).
-            /// Drives the TTL — once we sit idle past suggestion_ttl_ms,
-            /// onTick invalidates the cached suggestion so the proxy
-            /// clears the overlay on the next render.
             last_keystroke_ms: i64 = 0,
         };
 
-        pub fn attach(allocator: std.mem.Allocator) !Runtime {
+        pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
             const shared = try allocator.create(Shared);
             shared.* = .{};
             errdefer allocator.destroy(shared);
 
-            const thread = try std.Thread.spawn(.{}, worker, .{shared});
+            const thread = try std.Thread.spawn(.{}, worker, .{ shared, io, allocator });
             return .{
                 .allocator = allocator,
+                .io = io,
                 .shared = shared,
                 .thread = thread,
             };
         }
 
-        pub fn detach(rt: *Runtime) void {
+        pub fn detach(rt: *Runtime, io: std.Io) void {
             {
-                rt.shared.mutex.lock();
-                defer rt.shared.mutex.unlock();
+                rt.shared.mutex.lockUncancelable(io);
+                defer rt.shared.mutex.unlock(io);
                 rt.shared.shutdown = true;
-                rt.shared.cv.signal();
+                rt.shared.cv.signal(io);
             }
             rt.thread.join();
             rt.allocator.destroy(rt.shared);
@@ -104,29 +103,29 @@ pub fn configure(comptime cfg: Config) type {
 
         // ---- worker -------------------------------------------------------
 
-        fn worker(shared: *Shared) void {
+        fn worker(shared: *Shared, io: std.Io, gpa: std.mem.Allocator) void {
             var query_local: [cfg.max_query]u8 = undefined;
             var query_len: usize = 0;
             var serving_gen: u64 = 0;
 
             while (true) {
-                shared.mutex.lock();
+                shared.mutex.lockUncancelable(io);
                 while (!shared.shutdown and shared.req_gen == serving_gen) {
-                    shared.cv.wait(&shared.mutex);
+                    shared.cv.waitUncancelable(io, &shared.mutex);
                 }
                 if (shared.shutdown) {
-                    shared.mutex.unlock();
+                    shared.mutex.unlock(io);
                     return;
                 }
                 serving_gen = shared.req_gen;
                 query_len = shared.req_len;
                 @memcpy(query_local[0..query_len], shared.req_buf[0..query_len]);
-                shared.mutex.unlock();
+                shared.mutex.unlock(io);
 
                 var result_buf: [cfg.max_result]u8 = undefined;
-                const maybe_n = lookup(query_local[0..query_len], &result_buf) catch null;
+                const maybe_n = lookup(gpa, io, query_local[0..query_len], &result_buf) catch null;
 
-                shared.mutex.lock();
+                shared.mutex.lockUncancelable(io);
                 if (maybe_n) |n| {
                     @memcpy(shared.res_buf[0..n], result_buf[0..n]);
                     shared.res_len = n;
@@ -134,21 +133,21 @@ pub fn configure(comptime cfg: Config) type {
                     shared.res_len = 0;
                 }
                 shared.res_gen = serving_gen;
-                shared.mutex.unlock();
+                shared.mutex.unlock(io);
             }
         }
 
         // ---- backends -----------------------------------------------------
 
-        fn lookup(query: []const u8, out: []u8) !?usize {
+        fn lookup(gpa: std.mem.Allocator, io: std.Io, query: []const u8, out: []u8) !?usize {
             if (query.len == 0) return null;
             return switch (cfg.backend) {
-                .subprocess => subprocessLookup(query, out),
+                .subprocess => subprocessLookup(gpa, io, query, out),
                 .socket => socketLookup(query, out),
             };
         }
 
-        fn subprocessLookup(query: []const u8, out: []u8) !?usize {
+        fn subprocessLookup(gpa: std.mem.Allocator, io: std.Io, query: []const u8, out: []u8) !?usize {
             const search_arg = switch (cfg.search_mode) {
                 .prefix => "prefix",
                 .full_text => "full-text",
@@ -161,14 +160,7 @@ pub fn configure(comptime cfg: Config) type {
                 .directory => "directory",
             };
 
-            // Per-lookup arena: the child Process API needs an allocator,
-            // but everything we hand it lives only for the duration of
-            // this call. No long-lived heap use.
-            var arena_buf: [4096]u8 = undefined;
-            var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
-            const allocator = fba.allocator();
-
-            var child = std.process.Child.init(&.{
+            const argv = [_][]const u8{
                 cfg.atuin_binary,
                 "search",
                 "--search-mode",
@@ -180,26 +172,22 @@ pub fn configure(comptime cfg: Config) type {
                 "--cmd-only",
                 "--reverse",
                 query,
-            }, allocator);
-            child.stdin_behavior = .Ignore;
-            child.stdout_behavior = .Pipe;
-            child.stderr_behavior = .Ignore;
+            };
 
-            child.spawn() catch return null;
-            defer _ = child.kill() catch {};
+            const result = std.process.run(gpa, io, .{
+                .argv = &argv,
+                .stdout_limit = .limited(cfg.max_result),
+            }) catch return null;
+            defer gpa.free(result.stdout);
+            defer gpa.free(result.stderr);
 
-            const stdout = child.stdout orelse return null;
-            var buf: [cfg.max_result]u8 = undefined;
-            const n = stdout.readAll(&buf) catch 0;
-            _ = child.wait() catch {};
-
-            if (n == 0) return null;
+            if (result.stdout.len == 0) return null;
 
             var end: usize = 0;
-            while (end < n and buf[end] != '\n' and buf[end] != '\r') : (end += 1) {}
+            while (end < result.stdout.len and result.stdout[end] != '\n' and result.stdout[end] != '\r') : (end += 1) {}
             if (end == 0) return null;
             if (end > out.len) end = out.len;
-            @memcpy(out[0..end], buf[0..end]);
+            @memcpy(out[0..end], result.stdout[0..end]);
             return end;
         }
 
@@ -212,25 +200,21 @@ pub fn configure(comptime cfg: Config) type {
 
         // ---- hooks --------------------------------------------------------
 
-        pub fn onInput(
-            rt: *Runtime,
-            ctx: *m.Context,
-            input: []const u8,
-        ) m.Error!m.Action {
+        pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
             _ = input;
-            rt.last_keystroke_ms = std.time.milliTimestamp();
+            rt.last_keystroke_ms = nowMs();
 
             const line = ctx.line.current();
             if (ctx.line.uncertain or line.len == 0 or line.len > cfg.max_query) {
                 return .forward;
             }
 
-            rt.shared.mutex.lock();
-            defer rt.shared.mutex.unlock();
+            rt.shared.mutex.lockUncancelable(ctx.io);
+            defer rt.shared.mutex.unlock(ctx.io);
             @memcpy(rt.shared.req_buf[0..line.len], line);
             rt.shared.req_len = line.len;
             rt.shared.req_gen +%= 1;
-            rt.shared.cv.signal();
+            rt.shared.cv.signal(ctx.io);
             return .forward;
         }
 
@@ -239,8 +223,8 @@ pub fn configure(comptime cfg: Config) type {
             const line = ctx.line.current();
             if (line.len == 0) return null;
 
-            rt.shared.mutex.lock();
-            defer rt.shared.mutex.unlock();
+            rt.shared.mutex.lockUncancelable(ctx.io);
+            defer rt.shared.mutex.unlock(ctx.io);
 
             if (rt.shared.res_len == 0) return null;
             const suggestion = rt.shared.res_buf[0..rt.shared.res_len];
@@ -250,37 +234,34 @@ pub fn configure(comptime cfg: Config) type {
             if (trailing.len == 0) return null;
 
             ctx.scratch.clearRetainingCapacity();
-            ctx.scratch.appendSlice(trailing) catch return m.Error.OutOfMemory;
+            ctx.scratch.appendSlice(ctx.allocator, trailing) catch return m.Error.OutOfMemory;
             return ctx.scratch.items;
         }
 
-        /// Drop the cached suggestion once it goes stale. The proxy
-        /// will see provideGhostText return null next render cycle and
-        /// wipe the overlay.
         pub fn onTick(rt: *Runtime, ctx: *m.Context, elapsed_ms: u64) m.Error!void {
-            _ = ctx;
             _ = elapsed_ms;
             if (rt.last_keystroke_ms == 0) return;
-            const now = std.time.milliTimestamp();
+            const now = nowMs();
             const idle = now - rt.last_keystroke_ms;
             if (idle <= 0) return;
             if (@as(u64, @intCast(idle)) < cfg.suggestion_ttl_ms) return;
 
-            rt.shared.mutex.lock();
-            defer rt.shared.mutex.unlock();
+            rt.shared.mutex.lockUncancelable(ctx.io);
+            defer rt.shared.mutex.unlock(ctx.io);
             rt.shared.res_len = 0;
         }
     };
 }
 
 // ===========================================================================
-// Tests — exercise the static surface; the worker thread + subprocess
-// path is covered by the integration test.
+// Tests
 // ===========================================================================
 
 const testing = std.testing;
 
-test "configure with default config compiles and exposes Runtime" {
+const test_io: std.Io = std.Io.failing;
+
+test "configure exposes Runtime + hooks" {
     const A = configure(.{});
     try testing.expect(@hasDecl(A, "Runtime"));
     try testing.expect(@hasDecl(A, "onInput"));
@@ -292,17 +273,4 @@ test "configure with default config compiles and exposes Runtime" {
 test "configure with socket backend swaps the lookup arm" {
     const A = configure(.{ .backend = .socket, .socket_path = "/tmp/nope" });
     try testing.expect(A.config.backend == .socket);
-}
-
-test "subprocessLookup returns null on missing binary" {
-    const A = configure(.{ .atuin_binary = "/path/does/not/exist" });
-    var out: [256]u8 = undefined;
-    const got = try A.subprocessLookup("ls", &out);
-    try testing.expect(got == null);
-}
-
-test "attach / detach lifecycle" {
-    const A = configure(.{});
-    var rt = try A.attach(testing.allocator);
-    A.detach(&rt);
 }

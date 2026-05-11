@@ -30,8 +30,13 @@ extern "c" fn posix_openpt(flags: c_int) c_int;
 extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]u8;
-extern "c" fn setsid() c_int;
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn fork() c_int;
+extern "c" fn setsid() c_int;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn getpid() c_int;
+
+const version = @import("version.zig").version;
 
 // posix_openpt() takes a raw int (C ABI). On Linux: O_RDWR (0o2) | O_NOCTTY (0o400).
 const O_RDWR_NOCTTY_RAW: c_int = 0o2 | 0o400;
@@ -64,12 +69,12 @@ pub const WinSize = extern struct {
     xpixel: u16 = 0,
     ypixel: u16 = 0,
 
-    pub fn fromLinux(ws: linux.winsize) WinSize {
+    pub fn fromLinux(ws: posix.winsize) WinSize {
         return .{
-            .rows = ws.ws_row,
-            .cols = ws.ws_col,
-            .xpixel = ws.ws_xpixel,
-            .ypixel = ws.ws_ypixel,
+            .rows = ws.row,
+            .cols = ws.col,
+            .xpixel = ws.xpixel,
+            .ypixel = ws.ypixel,
         };
     }
 };
@@ -105,11 +110,11 @@ pub const Pty = struct {
     }
 
     pub fn setSize(self: Pty, size: WinSize) Error!void {
-        const ws = linux.winsize{
-            .ws_row = size.rows,
-            .ws_col = size.cols,
-            .ws_xpixel = size.xpixel,
-            .ws_ypixel = size.ypixel,
+        const ws = posix.winsize{
+            .row = size.rows,
+            .col = size.cols,
+            .xpixel = size.xpixel,
+            .ypixel = size.ypixel,
         };
         const rc = linux.ioctl(self.master, TIOCSWINSZ, @intFromPtr(&ws));
         if (@as(isize, @bitCast(rc)) < 0) return Error.IoctlFailed;
@@ -118,7 +123,7 @@ pub const Pty = struct {
     /// Read window size from a TTY (typically our own stdout). Used at
     /// startup and on each SIGWINCH to keep the child in sync.
     pub fn querySize(fd: posix.fd_t) Error!WinSize {
-        var ws: linux.winsize = undefined;
+        var ws: posix.winsize = undefined;
         const rc = linux.ioctl(fd, TIOCGWINSZ, @intFromPtr(&ws));
         if (@as(isize, @bitCast(rc)) < 0) return Error.IoctlFailed;
         return WinSize.fromLinux(ws);
@@ -135,7 +140,13 @@ pub const Pty = struct {
         argv: [*:null]const ?[*:0]const u8,
         envp: [*:null]const ?[*:0]const u8,
     ) Error!posix.pid_t {
-        const pid = posix.fork() catch return Error.ForkFailed;
+        // Capture our own pid so the child can advertise it as ATTY_PID.
+        // getpid() inside the child would return the child's pid (atty
+        // is the parent), so we read it here and pass it down.
+        const atty_pid = getpid();
+
+        const pid = fork();
+        if (pid < 0) return Error.ForkFailed;
         if (pid == 0) {
             // ---- Child ------------------------------------------------------
             //
@@ -148,6 +159,10 @@ pub const Pty = struct {
             // why we died.
             childSetup(self.master, self.slave_path) catch std.c._exit(127);
 
+            // Inject the ATTY env markers so shell rc files can detect
+            // "running inside atty" and skip wrapping themselves again.
+            injectAttyEnv(atty_pid);
+
             // execvp returns only on failure.
             _ = execvp(argv[0].?, argv);
             std.c._exit(127);
@@ -156,6 +171,23 @@ pub const Pty = struct {
         return pid;
     }
 };
+
+/// Inject ATTY / ATTY_PID / ATTY_VERSION into the child's environment.
+/// Best-effort — failures are silent because we're past the fork point
+/// and the shell can survive without these.
+fn injectAttyEnv(atty_pid: c_int) void {
+    _ = setenv("ATTY", "1", 1);
+
+    var pid_buf: [24]u8 = undefined;
+    if (std.fmt.bufPrintZ(&pid_buf, "{d}", .{atty_pid})) |s| {
+        _ = setenv("ATTY_PID", s.ptr, 1);
+    } else |_| {}
+
+    var ver_buf: [32]u8 = undefined;
+    if (std.fmt.bufPrintZ(&ver_buf, "{s}", .{version})) |s| {
+        _ = setenv("ATTY_VERSION", s.ptr, 1);
+    } else |_| {}
+}
 
 fn childSetup(master_fd: posix.fd_t, slave_path: [:0]const u8) !void {
     // Detach from the current controlling TTY (the user's real terminal)
@@ -174,9 +206,9 @@ fn childSetup(master_fd: posix.fd_t, slave_path: [:0]const u8) !void {
 
     // Wire the slave to stdin/stdout/stderr of the child. dup2 closes the
     // target fd if it was open, which is what we want.
-    posix.dup2(slave_fd, 0) catch return Error.OpenSlaveFailed;
-    posix.dup2(slave_fd, 1) catch return Error.OpenSlaveFailed;
-    posix.dup2(slave_fd, 2) catch return Error.OpenSlaveFailed;
+    if (std.c.dup2(slave_fd, 0) < 0) return Error.OpenSlaveFailed;
+    if (std.c.dup2(slave_fd, 1) < 0) return Error.OpenSlaveFailed;
+    if (std.c.dup2(slave_fd, 2) < 0) return Error.OpenSlaveFailed;
 
     if (slave_fd > 2) _ = std.c.close(slave_fd);
     _ = std.c.close(master_fd);

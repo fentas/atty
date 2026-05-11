@@ -13,6 +13,9 @@ const atty = @import("atty");
 
 const Pty = atty.pty.Pty;
 
+extern "c" fn clock_gettime(clk_id: c_int, tp: *posix.timespec) c_int;
+const CLOCK_MONOTONIC: c_int = 1;
+
 test "PTY round-trips bytes through /bin/echo" {
     const allocator = std.testing.allocator;
 
@@ -29,12 +32,18 @@ test "PTY round-trips bytes through /bin/echo" {
     const pid = try pty.spawn(@ptrCast(&argv), @ptrCast(&envp));
 
     // Read until EOF or a short timeout.
-    var collected = std.ArrayList(u8).init(allocator);
-    defer collected.deinit();
+    var collected: std.ArrayList(u8) = .empty;
+    defer collected.deinit(allocator);
 
-    const start = std.time.milliTimestamp();
+    var start_ts: posix.timespec = undefined;
+    _ = clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    const start_ms: i64 = @as(i64, start_ts.sec) * 1000 + @divFloor(@as(i64, start_ts.nsec), 1_000_000);
     var buf: [256]u8 = undefined;
-    while (std.time.milliTimestamp() - start < 2000) {
+    while (true) {
+        var now_ts: posix.timespec = undefined;
+        _ = clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        const now_ms: i64 = @as(i64, now_ts.sec) * 1000 + @divFloor(@as(i64, now_ts.nsec), 1_000_000);
+        if (now_ms - start_ms >= 2000) break;
         var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = 0x001, .revents = 0 }};
         const n = posix.poll(&pfd, 200) catch 0;
         if (n == 0) {
@@ -47,7 +56,7 @@ test "PTY round-trips bytes through /bin/echo" {
         if (pfd[0].revents & 0x001 != 0) {
             const r = posix.read(pty.master, &buf) catch 0;
             if (r == 0) break;
-            try collected.appendSlice(buf[0..r]);
+            try collected.appendSlice(allocator, buf[0..r]);
             if (std.mem.indexOf(u8, collected.items, "hello-from-pty") != null) break;
         }
         if (pfd[0].revents & 0x010 != 0) break;

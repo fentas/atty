@@ -13,10 +13,8 @@
       "package-name": "atty",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        {
-          "type": "generic",
-          "path": "build.zig.zon"
-        }
+        { "type": "generic", "path": "build.zig.zon" },
+        { "type": "generic", "path": "src/version.zig" }
       ]
     }
   },

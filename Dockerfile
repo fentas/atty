@@ -13,14 +13,14 @@
 #   docker build --target builder -t atty:builder .         # binary only
 #
 # Build args:
-#   ZIG_VERSION   - default 0.13.0
+#   ZIG_VERSION   - default 0.16.0
 #   BUILDARCH     - host arch for the Zig toolchain (auto)
 #   TARGETARCH    - destination arch (auto, set by buildx)
 
 # ---- Stage 1: builder ------------------------------------------------------
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS builder
 
-ARG ZIG_VERSION=0.13.0
+ARG ZIG_VERSION=0.16.0
 ARG BUILDARCH
 ARG TARGETARCH
 
@@ -31,8 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Download a Zig toolchain matching the *host* arch.
 RUN set -eux; \
     case "${BUILDARCH:-amd64}" in \
-        amd64) ZIG_HOST="linux-x86_64"  ;; \
-        arm64) ZIG_HOST="linux-aarch64" ;; \
+        amd64) ZIG_HOST="x86_64-linux"  ;; \
+        arm64) ZIG_HOST="aarch64-linux" ;; \
         *)     echo "Unsupported BUILDARCH=${BUILDARCH}" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_HOST}-${ZIG_VERSION}.tar.xz" \
@@ -57,7 +57,7 @@ RUN set -eux; \
 # Alpine has busybox /bin/sh, which is enough for `atty` to spawn a
 # shell inside the container. The atty binary itself is musl-static and
 # has no library dependencies of its own.
-FROM alpine:3.20 AS runtime
+FROM alpine:3.22 AS runtime
 
 # Optional: include bash + zsh for users who want them inside the
 # container. Lean — total image stays well under 20 MB.

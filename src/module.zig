@@ -45,6 +45,9 @@ pub const Action = union(enum) {
 /// owns the underlying memory for the lifetime of the call.
 pub const Context = struct {
     allocator: std.mem.Allocator,
+    /// Threadsafe I/O instance — needed for std.Io.Mutex/Condition and
+    /// any synchronous std.process.run calls modules want to make.
+    io: std.Io,
     /// Current best-effort model of the user's input line.
     line: *LineState,
     /// Per-event scratch buffer. Modules may write into it (e.g. to

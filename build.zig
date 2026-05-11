@@ -17,30 +17,27 @@ pub fn build(b: *std.Build) void {
         "Path to config.zig (default: src/config.zig)",
     ) orelse "src/config.zig";
 
-    // The `atty` library module owns every source file under src/ that
-    // isn't config.zig — including the built-in modules. Keeping
-    // everything in a single named module avoids "file in multiple
-    // modules" errors when both the proxy and a user config reach the
-    // same internal helper.
+    // atty library module — owns every source file under src/ except
+    // config.zig. Keeping them in a single named module avoids
+    // "file in multiple modules" collisions.
     const atty_module = b.addModule("atty", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
-    // The user's config lives in its own named module so the proxy can
-    // `@import("config")` without dragging the whole tree through a
-    // user-edited file.
+    // User-editable config module.
     const config_module = b.createModule(.{
         .root_source_file = b.path(config_path),
         .target = target,
         .optimize = optimize,
     });
-    config_module.addImport("atty", atty_module);
 
-    // atty's proxy reads `config.modules` at comptime — wire the
-    // dependency the other way too. Zig resolves the cycle lazily:
-    // each side only needs the *types* exposed by the other.
+    // Two-way cycle: proxy reads `config.modules`; config reads
+    // `atty.modules.*`. Zig resolves the cycle lazily because each side
+    // only needs the *types* exposed by the other.
+    config_module.addImport("atty", atty_module);
     atty_module.addImport("config", config_module);
 
     // -------------------------------------------------------------------------
@@ -48,13 +45,17 @@ pub fn build(b: *std.Build) void {
     // -------------------------------------------------------------------------
     const exe = b.addExecutable(.{
         .name = "atty",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "atty", .module = atty_module },
+                .{ .name = "config", .module = config_module },
+            },
+        }),
     });
-    exe.linkLibC();
-    exe.root_module.addImport("atty", atty_module);
-    exe.root_module.addImport("config", config_module);
 
     b.installArtifact(exe);
 
@@ -66,15 +67,16 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // -------------------------------------------------------------------------
-    // Unit tests — use a separate root so the test exe doesn't share a
-    // source file with the `atty` library module.
+    // Unit tests
     // -------------------------------------------------------------------------
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/unit_tests.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/unit_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
     });
-    unit_tests.linkLibC();
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
@@ -82,15 +84,19 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
 
     // -------------------------------------------------------------------------
-    // Integration tests — exercise the real PTY plumbing.
+    // Integration tests
     // -------------------------------------------------------------------------
     const integration_tests = b.addTest(.{
-        .root_source_file = b.path("src/test/integration.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test/integration.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "atty", .module = atty_module },
+            },
+        }),
     });
-    integration_tests.linkLibC();
-    integration_tests.root_module.addImport("atty", atty_module);
 
     const run_integration_tests = b.addRunArtifact(integration_tests);
 

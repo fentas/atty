@@ -14,12 +14,12 @@ jobs:
     name: zig build + test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.13.0
+          version: 0.16.0
 
       - name: zig fmt --check
         run: zig fmt --check src/ build.zig
@@ -40,7 +40,7 @@ jobs:
           echo "echo atty-ci-ok; exit" | ./zig-out/bin/atty 2>&1 | tee /tmp/out
           grep -q atty-ci-ok /tmp/out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: atty-linux-x86_64
           path: zig-out/bin/atty
@@ -50,9 +50,9 @@ jobs:
     name: docker build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: build (builder stage only)
         # We only build the binary; pushing an image isn't a CI concern.

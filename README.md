@@ -78,6 +78,26 @@ atty --shell /bin/bash  # different shell
 atty -- -c 'echo hi'    # passthrough args after `--`
 ```
 
+#### Detecting atty from your shell
+
+When atty spawns a shell it injects three env vars; use them in your
+`.bashrc`/`.zshrc` to avoid double-wrapping:
+
+```bash
+# Only wrap once — don't re-launch atty if we're already inside it.
+if [ -z "$ATTY" ]; then
+    exec atty
+fi
+
+echo "running under atty $ATTY_VERSION (pid $ATTY_PID)"
+```
+
+| Variable       | Value                                |
+|----------------|--------------------------------------|
+| `ATTY`         | `1`                                  |
+| `ATTY_PID`     | pid of the atty proxy (parent)       |
+| `ATTY_VERSION` | semver string (e.g. `0.1.0`)         |
+
 &nbsp;
 
 ### 🛠 Configure
@@ -227,7 +247,7 @@ Before pushing: `make fmt && make test`.
 
 ### 📜 License
 
-Pending. (`atty` is currently unlicensed — that will change before `v1.0.0`; until then, treat the source as "all rights reserved" and contact the maintainers for any use beyond reading.)
+[MIT](LICENSE). Use it, ship it, fork it, sell it — keep the copyright notice intact.
 
 &nbsp;
 

@@ -23,7 +23,7 @@ jobs:
       #   • opens (or updates) a "chore(release): X.Y.Z" PR
       #   • on merge of that PR, creates the vX.Y.Z tag
       # The tag push then triggers .github/workflows/release.yml.
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           config-file: release-please-config.json

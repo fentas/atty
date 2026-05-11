@@ -85,13 +85,15 @@ pub fn configure(comptime cfg: Config) type {
             sink_fn: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void = null,
         };
 
-        pub fn attach(allocator: std.mem.Allocator) !Runtime {
+        pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
             _ = allocator;
+            _ = io;
             return .{};
         }
 
-        pub fn detach(rt: *Runtime) void {
+        pub fn detach(rt: *Runtime, io: std.Io) void {
             _ = rt;
+            _ = io;
         }
 
         /// First matching rule wins, in declaration order.
@@ -159,8 +161,7 @@ pub fn configure(comptime cfg: Config) type {
                 f(rt.sink_ctx.?, msg) catch {};
                 return;
             }
-            const stderr = std.io.getStdErr();
-            _ = stderr.writeAll(msg) catch {};
+            _ = std.c.write(std.posix.STDERR_FILENO, msg.ptr, msg.len);
         }
     };
 }
@@ -177,7 +178,7 @@ const TestSink = struct {
 
     fn write(ctx: *anyopaque, bytes: []const u8) !void {
         const self: *TestSink = @ptrCast(@alignCast(ctx));
-        try self.buf.appendSlice(bytes);
+        try self.buf.appendSlice(testing.allocator, bytes);
     }
 };
 
@@ -190,21 +191,25 @@ test "check matches default rules" {
     try testing.expect(G.check("ls -la") == null);
 }
 
+// std.Io.failing — a no-op Io for tests that don't touch I/O.
+const test_io: std.Io = std.Io.failing;
+
 test "Enter on dangerous line swallows and arms" {
     const G = configure(.{});
-    var rt = try G.attach(testing.allocator);
-    defer G.detach(&rt);
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
 
-    var sink = TestSink{ .buf = std.ArrayList(u8).init(testing.allocator) };
-    defer sink.buf.deinit();
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
     G.setSink(&rt, &sink, TestSink.write);
 
     var line = LineState{};
     _ = line.applyInput("rm -rf /home/user");
-    var scratch = std.ArrayList(u8).init(testing.allocator);
-    defer scratch.deinit();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
     var ctx = m.Context{
         .allocator = testing.allocator,
+        .io = test_io,
         .line = &line,
         .scratch = &scratch,
         .is_tty = false,
@@ -222,19 +227,20 @@ test "Enter on dangerous line swallows and arms" {
 
 test "non-Enter keystroke disarms" {
     const G = configure(.{});
-    var rt = try G.attach(testing.allocator);
-    defer G.detach(&rt);
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
 
-    var sink = TestSink{ .buf = std.ArrayList(u8).init(testing.allocator) };
-    defer sink.buf.deinit();
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
     G.setSink(&rt, &sink, TestSink.write);
 
     var line = LineState{};
     _ = line.applyInput("rm -rf /");
-    var scratch = std.ArrayList(u8).init(testing.allocator);
-    defer scratch.deinit();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
     var ctx = m.Context{
         .allocator = testing.allocator,
+        .io = test_io,
         .line = &line,
         .scratch = &scratch,
         .is_tty = false,
@@ -248,15 +254,16 @@ test "non-Enter keystroke disarms" {
 
 test "Enter on safe line passes through" {
     const G = configure(.{});
-    var rt = try G.attach(testing.allocator);
-    defer G.detach(&rt);
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
 
     var line = LineState{};
     _ = line.applyInput("ls -la");
-    var scratch = std.ArrayList(u8).init(testing.allocator);
-    defer scratch.deinit();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
     var ctx = m.Context{
         .allocator = testing.allocator,
+        .io = test_io,
         .line = &line,
         .scratch = &scratch,
         .is_tty = false,

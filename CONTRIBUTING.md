@@ -113,5 +113,5 @@ message itself (before merge), not the changelog file.
 
 ## License
 
-Pending. By contributing you agree your changes will be licensed
-under whatever ends up in the LICENSE file at the top of the repo.
+atty is [MIT licensed](LICENSE). By contributing you agree your
+changes will be released under the same terms.
