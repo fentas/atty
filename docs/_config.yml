@@ -1,0 +1,43 @@
+title: atty
+description: A Suckless-style PTY proxy in Zig — comptime-composed modules, Atuin autosuggestions, dangerous-command guardrails.
+url: https://atty.sh
+baseurl: ""
+author: fentas
+
+# Use GitHub Pages' built-in Jekyll renderer. No remote_theme — the layout
+# in `_layouts/` is the whole design.
+theme: null
+
+# Markdown engine
+markdown: kramdown
+kramdown:
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: "highlight"
+
+# Don't drag the source tree into the site output.
+exclude:
+  - Makefile
+  - Dockerfile
+  - build.zig
+  - build.zig.zon
+  - src
+  - scripts
+  - mise.toml
+  - "*.zig"
+  - plan.md
+  - .zig-cache
+  - zig-out
+  - dist
+  - vendor
+  - Gemfile
+  - Gemfile.lock
+
+# Permalinks: /architecture/ /modules/ /providers/
+permalink: /:title/
+
+# Defaults — every page renders with the default layout unless overridden.
+defaults:
+  - scope: { path: "" }
+    values:
+      layout: default

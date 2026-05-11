@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ site.title }} — a Suckless-style PTY proxy in Zig</title>
+  <meta name="description" content="{{ site.description }}">
+
+  <meta property="og:title" content="{{ site.title }} — a Suckless-style PTY proxy in Zig">
+  <meta property="og:description" content="{{ site.description }}">
+  <meta property="og:url" content="{{ site.url }}">
+  <meta property="og:type" content="website">
+
+  <link rel="stylesheet" href="{{ '/assets/style.css' | relative_url }}">
+  <link rel="icon" type="image/svg+xml" href="{{ '/assets/favicon.svg' | relative_url }}">
+</head>
+<body class="home">
+  <header>
+    <a class="logo" href="{{ '/' | relative_url }}">
+      <span class="prompt">$</span>&nbsp;atty<span class="cursor"></span>
+    </a>
+    <nav>
+      <a href="{{ '/architecture/' | relative_url }}">architecture</a>
+      <a href="{{ '/modules/' | relative_url }}">modules</a>
+      <a href="{{ '/providers/' | relative_url }}">providers</a>
+      <a href="https://github.com/fentas/atty" rel="noopener">github&nbsp;→</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h1><span class="prompt">$</span>&nbsp;atty<span class="cursor"></span></h1>
+    <p class="tagline">A Suckless-style PTY proxy in Zig.<br>
+       Composed at <em>compile time</em>, not loaded at run time.</p>
+
+    <div class="demo">
+      <div class="demo-bar">
+        <span class="bar-dot dot-r"></span>
+        <span class="bar-dot dot-y"></span>
+        <span class="bar-dot dot-g"></span>
+        <span class="bar-title">~/code/atty</span>
+      </div>
+      <div class="demo-body">
+        <div class="line"><span class="prompt">$</span> <span class="typed">git checkout featu</span><span class="ghost">re/auth-refactor</span></div>
+        <div class="line dim">  <span class="comment"># ↑ atuin module surfaces your last matching command as dim ghost text</span></div>
+        <div class="line">&nbsp;</div>
+        <div class="line"><span class="prompt">$</span> <span class="typed">rm -rf /home/work/</span></div>
+        <div class="line danger"><span class="warn-glyph">!</span> atty guardrail: rm -rf on a root-ish path</div>
+        <div class="line dim">        line: rm -rf /home/work/</div>
+        <div class="line dim">        press Enter again to confirm, any other key to cancel.</div>
+      </div>
+    </div>
+
+    <p class="cta-row">
+      <a class="cta primary" href="#quickstart">▸ install</a>
+      <a class="cta" href="{{ '/architecture/' | relative_url }}">architecture</a>
+      <a class="cta" href="{{ '/modules/' | relative_url }}">write a module</a>
+    </p>
+  </section>
+
+  <main>
+    {{ content }}
+  </main>
+
+  <footer>
+    <p>
+      <span class="prompt">#</span> Suckless-style PTY proxy in Zig 0.13 ·
+      <a href="https://github.com/fentas/atty">source</a> ·
+      <a href="https://atty.sh">atty.sh</a>
+    </p>
+  </footer>
+</body>
+</html>

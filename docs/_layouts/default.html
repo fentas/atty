@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if page.title %}{{ page.title }} · {{ site.title }}{% else %}{{ site.title }}{% endif %}</title>
+  <meta name="description" content="{{ page.description | default: site.description }}">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="{{ page.title | default: site.title }}">
+  <meta property="og:description" content="{{ page.description | default: site.description }}">
+  <meta property="og:url" content="{{ site.url }}{{ page.url | relative_url }}">
+  <meta property="og:type" content="website">
+
+  <link rel="stylesheet" href="{{ '/assets/style.css' | relative_url }}">
+  <link rel="icon" type="image/svg+xml" href="{{ '/assets/favicon.svg' | relative_url }}">
+</head>
+<body>
+  <header>
+    <a class="logo" href="{{ '/' | relative_url }}">
+      <span class="prompt">$</span>&nbsp;atty<span class="cursor"></span>
+    </a>
+    <nav>
+      <a href="{{ '/architecture/' | relative_url }}">architecture</a>
+      <a href="{{ '/modules/' | relative_url }}">modules</a>
+      <a href="{{ '/providers/' | relative_url }}">providers</a>
+      <a href="https://github.com/fentas/atty" rel="noopener">github&nbsp;→</a>
+    </nav>
+  </header>
+
+  <main>
+    {{ content }}
+  </main>
+
+  <footer>
+    <p>
+      <span class="prompt">#</span> Suckless-style PTY proxy in Zig 0.13 ·
+      <a href="https://github.com/fentas/atty">source</a> ·
+      <a href="https://atty.sh">atty.sh</a>
+    </p>
+  </footer>
+</body>
+</html>

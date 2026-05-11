@@ -1,0 +1,30 @@
+name: release-please
+
+on:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Avoid racing the per-push CI run; release-please is fast but should
+# never collide with itself.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: maintain release PR
+    runs-on: ubuntu-24.04
+    steps:
+      # The action reads commits since the last release and:
+      #   • opens (or updates) a "chore(release): X.Y.Z" PR
+      #   • on merge of that PR, creates the vX.Y.Z tag
+      # The tag push then triggers .github/workflows/release.yml.
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

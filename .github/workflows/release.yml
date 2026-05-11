@@ -1,0 +1,149 @@
+name: release
+
+# Fires when release-please merges its release PR and pushes a tag.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write     # upload release assets
+  packages: write     # push to ghcr.io
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build static musl binaries for every supported target. Zig cross-
+  # compiles from a single amd64 host — no QEMU, no host toolchain
+  # juggling, all artifacts go in one fan-in step.
+  # ---------------------------------------------------------------------------
+  binaries:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            asset_arch: linux-x86_64
+          - target: aarch64-linux-musl
+            asset_arch: linux-aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: zig build (${{ matrix.target }})
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+
+      - name: package
+        id: pkg
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"   # strip leading "v"
+          stem="atty-${version}-${{ matrix.asset_arch }}"
+
+          mkdir -p dist
+          install -m 0755 zig-out/bin/atty "dist/atty"
+
+          # tarball contains a single `atty` binary at the top level
+          tar -C dist -czf "dist/${stem}.tar.gz" atty
+          ( cd dist && sha256sum "${stem}.tar.gz" > "${stem}.tar.gz.sha256" )
+
+          # Also publish the bare binary for users who don't want to untar
+          install -m 0755 zig-out/bin/atty "dist/${stem}"
+          ( cd dist && sha256sum "${stem}" > "${stem}.sha256" )
+
+          rm dist/atty
+
+          {
+            echo "stem=${stem}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: smoke test (${{ matrix.target }})
+        if: matrix.target == 'x86_64-linux-musl'
+        run: |
+          chmod +x dist/${{ steps.pkg.outputs.stem }}
+          echo "echo atty-release-ok; exit" | dist/${{ steps.pkg.outputs.stem }} 2>&1 | tee /tmp/out
+          grep -q atty-release-ok /tmp/out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_arch }}
+          path: |
+            dist/atty-*.tar.gz
+            dist/atty-*.tar.gz.sha256
+            dist/atty-*-${{ matrix.asset_arch }}
+            dist/atty-*-${{ matrix.asset_arch }}.sha256
+
+  # ---------------------------------------------------------------------------
+  # Publish artifacts to the GitHub Release once every binary is built.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: attach release assets
+    needs: binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: list
+        run: ls -la dist/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/atty-*.tar.gz
+            dist/atty-*.tar.gz.sha256
+            dist/atty-*-linux-*
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Multi-arch Docker image to ghcr.io/<owner>/atty.
+  # Re-uses the Dockerfile's BUILDPLATFORM/TARGETARCH split so the Zig
+  # toolchain only runs on amd64 (no QEMU).
+  # ---------------------------------------------------------------------------
+  docker:
+    name: docker push
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

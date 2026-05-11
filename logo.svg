@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120" viewBox="0 0 240 120" role="img" aria-label="atty">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#181c20"/>
+      <stop offset="100%" stop-color="#0e1116"/>
+    </linearGradient>
+  </defs>
+
+  <!-- terminal card -->
+  <rect x="0" y="0" width="240" height="120" rx="14" fill="url(#bgGrad)" stroke="#232830" stroke-width="1"/>
+
+  <!-- traffic lights -->
+  <circle cx="18" cy="18" r="4.5" fill="#f38ba8"/>
+  <circle cx="32" cy="18" r="4.5" fill="#f9e2af"/>
+  <circle cx="46" cy="18" r="4.5" fill="#a6e3a1"/>
+
+  <!-- title bar separator -->
+  <line x1="0" y1="34" x2="240" y2="34" stroke="#232830" stroke-width="1"/>
+
+  <!-- prompt + name -->
+  <text x="20" y="78" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace"
+        font-size="28" font-weight="700" letter-spacing="-0.5">
+    <tspan fill="#7ee787">$</tspan>
+    <tspan fill="#d8d2c2" dx="6">atty</tspan>
+  </text>
+
+  <!-- blinking cursor -->
+  <rect x="120" y="58" width="13" height="24" fill="#d8d2c2">
+    <animate attributeName="opacity" values="1;1;0;0" dur="1.05s" repeatCount="indefinite"/>
+  </rect>
+
+  <!-- dim suggestion line (ghost text demo) -->
+  <text x="20" y="104" font-family="ui-monospace, monospace" font-size="11" fill="#6c7086" font-style="italic">
+    <tspan>checkout</tspan>
+    <tspan dx="6">feature/auth-refactor</tspan>
+  </text>
+</svg>

@@ -1,0 +1,31 @@
+# ---- Zig --------------------------------------------------------------------
+zig-out/
+.zig-cache/
+
+# ---- atty build outputs -----------------------------------------------------
+dist/
+*.tar.gz
+*.sha256
+
+# ---- Jekyll / docs ----------------------------------------------------------
+_site/
+docs/.jekyll-cache/
+docs/.jekyll-metadata
+docs/.bundle/
+docs/vendor/
+
+# ---- Editors / OS -----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- direnv / asdf-style ----------------------------------------------------
+.envrc.local
+.tool-versions.local
+
+# ---- Test / coverage tmp ----------------------------------------------------
+*.log
+coverage/

@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zig:
+    name: zig build + test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: zig fmt --check
+        run: zig fmt --check src/ build.zig
+
+      - name: zig build
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: zig build test
+        run: zig build test --summary all
+
+      - name: zig build itest
+        # GitHub-hosted runners have /dev/ptmx; integration test
+        # spawns /bin/echo through a real PTY.
+        run: zig build itest --summary all
+
+      - name: smoke test
+        run: |
+          echo "echo atty-ci-ok; exit" | ./zig-out/bin/atty 2>&1 | tee /tmp/out
+          grep -q atty-ci-ok /tmp/out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atty-linux-x86_64
+          path: zig-out/bin/atty
+          retention-days: 14
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build (builder stage only)
+        # We only build the binary; pushing an image isn't a CI concern.
+        run: docker build --target builder -t atty:builder .
+
+      - name: extract + smoke-test binary
+        run: |
+          mkdir -p dist
+          docker run --rm -v "$PWD/dist:/out" atty:builder \
+              cp /src/zig-out/bin/atty /out/atty
+          file dist/atty
+          echo "echo atty-docker-ok; exit" | ./dist/atty 2>&1 | tee /tmp/out
+          grep -q atty-docker-ok /tmp/out

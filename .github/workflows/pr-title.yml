@@ -1,0 +1,40 @@
+name: pr-title
+
+# Enforce conventional-commit style on PR titles. release-please reads
+# the commit log on merge, and when "Squash and merge" is used the PR
+# title becomes the commit message — so this is the single chokepoint
+# we need to police.
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate:
+    name: validate title
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            build
+            ci
+            chore
+            revert
+            style
+          requireScope: false
+          # Disallow titles ending in punctuation.
+          subjectPattern: ^[^.!?]+$
+          subjectPatternError: |
+            The subject "{subject}" should not end with punctuation.

@@ -1,0 +1,362 @@
+/* ──────────────────────────────────────────────────────────────────
+ * atty.sh — terminal-aesthetic stylesheet.
+ *
+ * Design rules:
+ *   • One typeface, monospace, no exceptions.
+ *   • Limited palette. Phosphor green for the prompt; dim gray for
+ *     anything that mimics ghost text.
+ *   • Generous line-height so dense code reads cleanly.
+ *   • No JS. Animations are pure CSS keyframes.
+ * ────────────────────────────────────────────────────────────── */
+
+:root {
+  --bg:        #0e1116;
+  --bg-soft:   #181c20;
+  --bg-code:   #15191d;
+  --fg:        #d8d2c2;
+  --fg-soft:   #a9a395;
+  --fg-dim:    #6c7086;
+  --accent:    #7ee787;   /* phosphor green */
+  --accent-2:  #89dceb;   /* cyan */
+  --warn:      #fab387;
+  --danger:    #f38ba8;
+  --border:    #232830;
+  --rule:      #1c2026;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace,
+               SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Scanline tint — barely perceptible vertical gradient that gives the
+ * page just a hint of CRT phosphor warmth. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at top, rgba(126,231,135,0.025), transparent 60%),
+    radial-gradient(ellipse at bottom, rgba(137,220,235,0.02), transparent 60%);
+  z-index: 0;
+}
+
+a {
+  color: var(--accent-2);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 120ms, border-color 120ms;
+}
+a:hover { border-color: currentColor; }
+
+/* ── Header ─────────────────────────────────────────────────────── */
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.1rem 2rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(14, 17, 22, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.logo {
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--fg);
+  border-bottom: none !important;
+}
+.logo:hover { color: var(--accent); }
+.logo .prompt { color: var(--accent); margin-right: 0.2em; }
+
+nav { display: flex; gap: 1.5rem; font-size: 0.92rem; }
+nav a { color: var(--fg-dim); }
+nav a:hover { color: var(--accent-2); }
+
+@media (max-width: 640px) {
+  header { flex-direction: column; gap: 0.8rem; padding: 1rem; }
+  nav { gap: 1rem; font-size: 0.85rem; }
+}
+
+/* ── Cursor block (blinks) ──────────────────────────────────────── */
+
+.cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.1em;
+  background: var(--fg);
+  vertical-align: text-bottom;
+  margin-left: 3px;
+  animation: blink 1.05s steps(2, start) infinite;
+}
+@keyframes blink { to { visibility: hidden; } }
+
+/* ── Main column ────────────────────────────────────────────────── */
+
+main {
+  max-width: 78ch;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+  position: relative;
+  z-index: 1;
+}
+
+h1, h2, h3, h4 {
+  color: var(--fg);
+  margin-top: 2.4em;
+  margin-bottom: 0.6em;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+h1 { font-size: 1.9rem; margin-top: 0; }
+h2 {
+  font-size: 1.35rem;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.35em;
+}
+h3 { font-size: 1.05rem; color: var(--accent-2); }
+h4 { font-size: 0.95rem; color: var(--accent); margin-top: 1.8em; }
+
+h2::before, h3::before {
+  color: var(--accent);
+  margin-right: 0.5em;
+  opacity: 0.65;
+}
+h2::before { content: "##"; }
+h3::before { content: "###"; }
+
+p { margin: 1em 0; }
+em { color: var(--fg); font-style: italic; }
+strong { color: var(--accent); font-weight: 600; }
+
+/* ── Code ────────────────────────────────────────────────────────── */
+
+code {
+  background: var(--bg-code);
+  padding: 0.12em 0.4em;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  font-size: 0.92em;
+  color: var(--fg);
+}
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  position: relative;
+}
+pre::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.4;
+  border-radius: 6px 0 0 6px;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  border: 0;
+  font-size: 1em;
+  color: var(--fg);
+}
+
+/* Rouge syntax tokens — terminal-ish palette */
+.highlight .c, .highlight .c1, .highlight .cm, .highlight .cp { color: var(--fg-dim); font-style: italic; }
+.highlight .k, .highlight .kd, .highlight .kr, .highlight .kt { color: var(--accent); }
+.highlight .s, .highlight .s1, .highlight .s2, .highlight .sx { color: var(--accent-2); }
+.highlight .mi, .highlight .mf, .highlight .il               { color: var(--warn); }
+.highlight .n, .highlight .nv                                { color: var(--fg); }
+.highlight .nf, .highlight .nb                               { color: var(--accent-2); }
+.highlight .o, .highlight .p                                 { color: var(--fg-soft); }
+
+/* ── Blockquotes ────────────────────────────────────────────────── */
+
+blockquote {
+  border-left: 2px solid var(--accent);
+  padding-left: 1em;
+  margin-left: 0;
+  color: var(--fg-soft);
+  font-style: italic;
+}
+blockquote p { margin: 0.3em 0; }
+
+/* ── Tables ─────────────────────────────────────────────────────── */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1.2em 0;
+  font-size: 0.88rem;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.5em 0.8em;
+  text-align: left;
+  vertical-align: top;
+}
+th {
+  background: var(--bg-soft);
+  color: var(--accent-2);
+  font-weight: 600;
+}
+tr:nth-child(even) td { background: rgba(24, 28, 32, 0.4); }
+
+/* ── Lists ──────────────────────────────────────────────────────── */
+
+ul, ol { padding-left: 1.4em; }
+ul li::marker { color: var(--accent); }
+ol li::marker { color: var(--accent-2); }
+li { margin: 0.35em 0; }
+
+/* ── Horizontal rule ────────────────────────────────────────────── */
+
+hr { border: 0; border-top: 1px dashed var(--border); margin: 2.5em 0; }
+
+/* ── Footer ─────────────────────────────────────────────────────── */
+
+footer {
+  border-top: 1px solid var(--border);
+  padding: 1.5rem 2rem;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 0.82rem;
+  position: relative;
+  z-index: 1;
+}
+footer .prompt { color: var(--accent); margin-right: 0.4em; }
+footer a { color: var(--fg-soft); }
+
+/* ──────────────────────────────────────────────────────────────────
+ * Home page specifics
+ * ────────────────────────────────────────────────────────────── */
+
+.home main { padding-top: 1.5rem; }
+
+.hero {
+  max-width: 78ch;
+  margin: 0 auto;
+  padding: 4rem 1.5rem 2.5rem;
+  position: relative;
+  z-index: 1;
+}
+.hero h1 {
+  font-size: 3rem;
+  margin: 0 0 0.5rem;
+  letter-spacing: -0.02em;
+}
+.hero h1 .prompt { color: var(--accent); }
+.hero .tagline {
+  color: var(--fg-soft);
+  font-size: 1.1rem;
+  margin: 0 0 2rem;
+}
+
+/* ── Terminal demo card ─────────────────────────────────────────── */
+
+.demo {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 2rem 0 2.5rem;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.35),
+              0 0 0 1px rgba(126,231,135,0.04);
+}
+.demo-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 0.9rem;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.bar-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot-r { background: #f38ba8; }
+.dot-y { background: #f9e2af; }
+.dot-g { background: #a6e3a1; }
+.bar-title {
+  margin-left: 0.8rem;
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+}
+.demo-body {
+  padding: 1.2rem 1.4rem 1.4rem;
+  font-size: 0.92rem;
+  line-height: 1.7;
+}
+.demo .line { white-space: pre; }
+.demo .line.dim { color: var(--fg-dim); }
+.demo .line.danger { color: var(--danger); font-weight: 500; }
+.demo .prompt { color: var(--accent); font-weight: 600; }
+.demo .typed { color: var(--fg); }
+.demo .ghost {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+.demo .comment { color: var(--fg-dim); }
+.demo .warn-glyph {
+  color: var(--danger);
+  font-weight: 700;
+  margin-right: 0.5em;
+}
+
+/* CTA buttons */
+.cta-row { margin-top: 1.5rem; }
+.cta {
+  display: inline-block;
+  padding: 0.6em 1.1em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-soft);
+  background: transparent;
+  margin: 0.25em 0.25em 0.25em 0;
+  font-weight: 500;
+  font-size: 0.92rem;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+.cta:hover {
+  background: var(--bg-soft);
+  color: var(--fg);
+  border-color: var(--fg-dim);
+  border-bottom-color: var(--fg-dim);
+}
+.cta.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.cta.primary:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/* ── Selection ──────────────────────────────────────────────────── */
+
+::selection { background: rgba(126,231,135,0.25); color: var(--fg); }
