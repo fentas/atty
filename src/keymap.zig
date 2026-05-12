@@ -199,6 +199,54 @@ pub fn isCsiU(input: []const u8) bool {
     return true;
 }
 
+/// Linear scan over `bindings` looking for an exact byte match against
+/// `input`. Returns the bound action, or null when no binding matches
+/// (or the input is empty / a binding has an empty `.bytes`). Pulled
+/// out of the proxy loop so the dispatch logic is testable without a
+/// PTY fixture.
+pub fn match(bindings: []const Binding, input: []const u8) ?Action {
+    if (input.len == 0) return null;
+    for (bindings) |bind| {
+        if (bind.bytes.len == 0) continue;
+        if (std.mem.eql(u8, input, bind.bytes)) return bind.action;
+    }
+    return null;
+}
+
+test "match returns null on empty input" {
+    const bs = [_]Binding{.{ .bytes = "\x06", .action = .ghost_accept }};
+    try std.testing.expectEqual(@as(?Action, null), match(&bs, ""));
+}
+
+test "match skips bindings with empty .bytes (so a half-built config can't always-fire)" {
+    const bs = [_]Binding{
+        .{ .bytes = "", .action = .ghost_accept },
+        .{ .bytes = "\x06", .action = .ghost_accept },
+    };
+    try std.testing.expectEqual(@as(?Action, null), match(&bs, ""));
+    try std.testing.expectEqual(Action.ghost_accept, match(&bs, "\x06").?);
+}
+
+test "match resolves a real binding by exact byte sequence" {
+    const bs = [_]Binding{
+        .{ .bytes = key("Right"), .action = .ghost_accept },
+        .{ .bytes = key("Ctrl+Shift+I"), .action = .incognito_toggle },
+        .{ .bytes = key("Ctrl+Shift+D"), .action = .delete_history_match },
+    };
+    try std.testing.expectEqual(Action.ghost_accept, match(&bs, "\x1b[C").?);
+    try std.testing.expectEqual(Action.incognito_toggle, match(&bs, "\x1B[105;6u").?);
+    try std.testing.expectEqual(Action.delete_history_match, match(&bs, "\x1B[100;6u").?);
+    try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b[A"));
+}
+
+test "match requires byte-exact equality (chunked reads don't trigger)" {
+    const bs = [_]Binding{.{ .bytes = "\x1b[C", .action = .ghost_accept }};
+    // partial match
+    try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b["));
+    // trailing junk
+    try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b[Cx"));
+}
+
 test "isCsiU recognises kitty-protocol CSI-u shapes" {
     try std.testing.expect(isCsiU("\x1B[105;6u")); // Ctrl+Shift+I
     try std.testing.expect(isCsiU("\x1B[57;5u")); // Ctrl+9

@@ -236,12 +236,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // the line uncertain and we'd lose the chance to act.
                 var accept_buf: [4096]u8 = undefined;
                 var swallow_after_binding = false;
-                var matched_binding = false;
-                for (config.keymap.bindings) |bind| {
-                    if (bind.bytes.len == 0) continue;
-                    if (!std.mem.eql(u8, input, bind.bytes)) continue;
-                    matched_binding = true;
-                    switch (bind.action) {
+                const matched_action = @import("keymap.zig").match(config.keymap.bindings, input);
+                const matched_binding = matched_action != null;
+                if (matched_action) |act| {
+                    switch (act) {
                         .ghost_accept => {
                             // Don't gate on `ghost.visible` — the
                             // flicker fix moved overlay painting to
@@ -304,7 +302,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             swallow_after_binding = true;
                         },
                     }
-                    break;
                 }
                 // Kitty keyboard protocol cleanup: when the terminal
                 // sends a CSI-u sequence we don't have a binding for
