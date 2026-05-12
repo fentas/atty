@@ -269,15 +269,21 @@ pub fn configure(comptime cfg: Config) type {
             // write is a single atomic syscall (≤ PIPE_BUF = 4096
             // bytes; max_line caps us at that).
             var buf: [cfg.max_line + 64]u8 = undefined;
-            var w = std.Io.Writer.fixed(&buf);
-            switch (rt.format) {
-                .zsh_extended => w.print(": {d}:0;", .{unixTs()}) catch return,
+            const out = formatHistoryLine(&buf, line, rt.format, unixTs()) orelse return;
+            _ = std.c.write(fd, out.ptr, out.len);
+        }
+
+        /// Pure formatting helper — separable from the file I/O so it
+        /// can be unit-tested without touching disk.
+        fn formatHistoryLine(buf: []u8, line: []const u8, format: Format, ts: i64) ?[]const u8 {
+            var w = std.Io.Writer.fixed(buf);
+            switch (format) {
+                .zsh_extended => w.print(": {d}:0;", .{ts}) catch return null,
                 else => {},
             }
-            w.writeAll(line) catch return;
-            w.writeByte('\n') catch return;
-            const out = w.buffered();
-            _ = std.c.write(fd, out.ptr, out.len);
+            w.writeAll(line) catch return null;
+            w.writeByte('\n') catch return null;
+            return w.buffered();
         }
 
         // ---- hooks ------------------------------------------------------
@@ -403,6 +409,55 @@ test "findSuggestion returns the most recent prefix match" {
 
     const got = H.findSuggestion(&rt, "git ") orelse return error.TestFailed;
     try testing.expectEqualStrings("git push origin", got);
+}
+
+test "formatHistoryLine emits zsh extended prefix" {
+    const H = configure(.{});
+    var buf: [128]u8 = undefined;
+    const out = H.formatHistoryLine(&buf, "ls -la", .zsh_extended, 1_700_000_000).?;
+    try testing.expectEqualStrings(": 1700000000:0;ls -la\n", out);
+}
+
+test "formatHistoryLine bash + plain emit bare lines" {
+    const H = configure(.{});
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("git status\n", H.formatHistoryLine(&buf, "git status", .bash, 0).?);
+    try testing.expectEqualStrings("ls\n", H.formatHistoryLine(&buf, "ls", .plain, 0).?);
+}
+
+test "formatHistoryLine round-trips through parseHistoryLine" {
+    const H = configure(.{});
+    var buf: [128]u8 = undefined;
+    const formatted = H.formatHistoryLine(&buf, "echo hi", .zsh_extended, 42).?;
+    const without_nl = std.mem.trimEnd(u8, formatted, "\n");
+    try testing.expectEqualStrings("echo hi", H.parseHistoryLine(without_nl));
+}
+
+test "onLineCommit pushes into the ring" {
+    const H = configure(.{});
+    var rt: H.Runtime = .{
+        .allocator = testing.allocator,
+        .path = try testing.allocator.dupe(u8, ""), // empty path = no file I/O
+        .format = .plain,
+        .entries = .empty,
+    };
+    defer H.detach(&rt, std.Io.failing);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try H.onLineCommit(&rt, &ctx, "ls -la");
+    try H.onLineCommit(&rt, &ctx, "git status");
+    try testing.expectEqual(@as(usize, 2), rt.entries.items.len);
+    try testing.expectEqualStrings("git status", rt.entries.items[1]);
 }
 
 test "findSuggestion ignores entries equal to query (no useful trailing)" {
