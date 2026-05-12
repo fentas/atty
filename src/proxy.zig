@@ -292,7 +292,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     line_state.clearLastCommitted();
                 }
 
-                renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
+                // Deliberately NO renderGhost here. The shell hasn't
+                // echoed yet, so the terminal cursor is still at its
+                // pre-keystroke position. Painting the ghost now lands
+                // it one column off; when the echo arrives in the
+                // master-output path below we render the ghost there
+                // with the cursor at the correct (post-echo) position.
+                // Sub-millisecond delay on a local shell; eliminates
+                // the "flickers one char left/right" jitter on every
+                // keystroke.
                 if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             }
         }
