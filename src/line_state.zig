@@ -36,8 +36,30 @@ pub const LineState = struct {
     /// against a remembered generation to skip duplicate work.
     generation: u64 = 0,
 
+    /// Snapshot of the line that was just committed (Enter pressed), held
+    /// here for one dispatch pass so the proxy can fire onLineCommit
+    /// hooks with the pre-submit content. `committed_len == 0` means no
+    /// commit pending. Callers must call `clearLastCommitted` after they
+    /// consume it.
+    committed: [max_line]u8 = undefined,
+    committed_len: usize = 0,
+    committed_was_uncertain: bool = false,
+
     pub fn current(self: *const LineState) []const u8 {
         return self.buffer[0..self.len];
+    }
+
+    /// Returns the line that was just committed (Enter pressed) since
+    /// the last clear, or null if no commit happened. The returned
+    /// slice is valid until the next `submit()` or `clearLastCommitted`.
+    pub fn lastCommitted(self: *const LineState) ?[]const u8 {
+        if (self.committed_len == 0) return null;
+        return self.committed[0..self.committed_len];
+    }
+
+    pub fn clearLastCommitted(self: *LineState) void {
+        self.committed_len = 0;
+        self.committed_was_uncertain = false;
     }
 
     pub fn reset(self: *LineState) void {
@@ -132,6 +154,15 @@ pub const LineState = struct {
     }
 
     fn submit(self: *LineState) void {
+        // Snapshot the pre-Enter line so onLineCommit hooks can fire
+        // after applyInput. Overwrites any prior un-consumed snapshot —
+        // if two Enters land in one read, only the latest non-empty
+        // line is recorded, which matches what a human would expect.
+        if (self.len > 0) {
+            @memcpy(self.committed[0..self.len], self.buffer[0..self.len]);
+            self.committed_len = self.len;
+            self.committed_was_uncertain = self.uncertain;
+        }
         self.len = 0;
         self.uncertain = false;
         self.generation +%= 1;

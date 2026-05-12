@@ -190,6 +190,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     .replace => |bytes| try writeAll(pty.master, bytes),
                 }
 
+                // Fire onLineCommit if Enter was pressed during this read
+                // and the pre-Enter line was non-empty and certain.
+                if (line_state.lastCommitted()) |committed| {
+                    if (!line_state.committed_was_uncertain)
+                        D.dispatchLineCommit(&runtimes, &ctx, committed) catch {};
+                    line_state.clearLastCommitted();
+                }
+
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             }
         }

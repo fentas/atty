@@ -1,6 +1,10 @@
-//! Atuin module — fish-style history autosuggestion as ghost text.
+//! Atuin module — fish-style history autosuggestion as ghost text,
+//! plus manual command recording (since the shell plugin is opt-in and
+//! requires ble.sh on bash). atty doing the recording itself means the
+//! shell stays vanilla.
 //!
-//! Architecture:
+//! Architecture (latest-wins mailbox for query, single-pending slot
+//! for record):
 //!
 //!   main thread          shared (mutex)              worker thread
 //!   ───────────          ──────────────              ─────────────
@@ -10,10 +14,14 @@
 //!                                                    res_buf  ◀────
 //!                        res_gen ↑
 //!   provideGhost ◀───    read res_buf
+//!   onLineCommit ───▶    rec_buf  ──────────────▶   run record
+//!                        rec_pending ↑              maybe run sync
 //!
-//! One-slot mailbox: each new keystroke overwrites the pending query,
-//! so the worker only ever sees the most recent state. No queue, no
-//! backpressure.
+//! "Sync" here means firing `atuin sync` from the worker after either
+//! `sync_after_records` commits or `sync_interval_ms` of wall time,
+//! whichever is sooner. The CLI is the source of truth — we never
+//! touch atuin's sqlite directly. One final sync runs on detach so an
+//! interactive session always flushes before exit.
 
 const std = @import("std");
 const m = @import("../module.zig");
@@ -46,6 +54,18 @@ pub const Config = struct {
     suggestion_ttl_ms: u64 = 5_000,
     max_query: comptime_int = 256,
     max_result: comptime_int = 512,
+
+    /// Record committed commands via `atuin history start <cmd>`.
+    /// Set false to disable recording (suggestions still work).
+    record: bool = true,
+    /// Fire `atuin sync` after this many recorded commits (per session).
+    /// 0 disables the count-based trigger.
+    sync_after_records: u32 = 10,
+    /// Fire `atuin sync` after this many ms since the previous sync.
+    /// 0 disables the time-based trigger.
+    sync_interval_ms: u64 = 60_000,
+    /// Run one final `atuin sync` on detach if we recorded anything.
+    sync_on_detach: bool = true,
 };
 
 pub fn configure(comptime cfg: Config) type {
@@ -64,6 +84,14 @@ pub fn configure(comptime cfg: Config) type {
             res_buf: [cfg.max_result]u8 = undefined,
             res_len: usize = 0,
             res_gen: u64 = 0,
+
+            // Latest-wins record slot. Two Enter-presses arriving before
+            // the worker drains: only the newer is recorded. Acceptable
+            // — typing two commands within ~50 ms is rare and we'd
+            // rather drop than queue unbounded.
+            rec_buf: [cfg.max_query]u8 = undefined,
+            rec_len: usize = 0,
+            rec_pending: bool = false,
 
             shutdown: bool = false,
         };
@@ -108,32 +136,73 @@ pub fn configure(comptime cfg: Config) type {
             var query_len: usize = 0;
             var serving_gen: u64 = 0;
 
+            var record_local: [cfg.max_query]u8 = undefined;
+            var record_len: usize = 0;
+            var records_since_sync: u32 = 0;
+            var last_sync_ms: i64 = 0;
+            var total_records: u32 = 0;
+
             while (true) {
                 shared.mutex.lockUncancelable(io);
-                while (!shared.shutdown and shared.req_gen == serving_gen) {
+                while (!shared.shutdown and
+                    shared.req_gen == serving_gen and
+                    !shared.rec_pending)
+                {
                     shared.cv.waitUncancelable(io, &shared.mutex);
                 }
                 if (shared.shutdown) {
                     shared.mutex.unlock(io);
+                    // Final sync on the way out so an interactive session
+                    // leaves no commits stranded locally.
+                    if (cfg.record and cfg.sync_on_detach and total_records > 0)
+                        runSync(gpa, io);
                     return;
                 }
-                serving_gen = shared.req_gen;
-                query_len = shared.req_len;
-                @memcpy(query_local[0..query_len], shared.req_buf[0..query_len]);
-                shared.mutex.unlock(io);
 
-                var result_buf: [cfg.max_result]u8 = undefined;
-                const maybe_n = lookup(gpa, io, query_local[0..query_len], &result_buf) catch null;
-
-                shared.mutex.lockUncancelable(io);
-                if (maybe_n) |n| {
-                    @memcpy(shared.res_buf[0..n], result_buf[0..n]);
-                    shared.res_len = n;
-                } else {
-                    shared.res_len = 0;
+                const has_query = shared.req_gen != serving_gen;
+                if (has_query) {
+                    serving_gen = shared.req_gen;
+                    query_len = shared.req_len;
+                    @memcpy(query_local[0..query_len], shared.req_buf[0..query_len]);
                 }
-                shared.res_gen = serving_gen;
+
+                const has_record = shared.rec_pending;
+                if (has_record) {
+                    record_len = shared.rec_len;
+                    @memcpy(record_local[0..record_len], shared.rec_buf[0..record_len]);
+                    shared.rec_pending = false;
+                }
                 shared.mutex.unlock(io);
+
+                if (has_query) {
+                    var result_buf: [cfg.max_result]u8 = undefined;
+                    const maybe_n = lookup(gpa, io, query_local[0..query_len], &result_buf) catch null;
+                    shared.mutex.lockUncancelable(io);
+                    if (maybe_n) |n| {
+                        @memcpy(shared.res_buf[0..n], result_buf[0..n]);
+                        shared.res_len = n;
+                    } else {
+                        shared.res_len = 0;
+                    }
+                    shared.res_gen = serving_gen;
+                    shared.mutex.unlock(io);
+                }
+
+                if (has_record and cfg.record) {
+                    runRecord(gpa, io, record_local[0..record_len]);
+                    total_records += 1;
+                    records_since_sync += 1;
+                    const now = nowMs();
+                    const count_due = cfg.sync_after_records > 0 and records_since_sync >= cfg.sync_after_records;
+                    const time_due = cfg.sync_interval_ms > 0 and
+                        last_sync_ms > 0 and
+                        @as(u64, @intCast(now - last_sync_ms)) >= cfg.sync_interval_ms;
+                    if (count_due or time_due or last_sync_ms == 0) {
+                        runSync(gpa, io);
+                        records_since_sync = 0;
+                        last_sync_ms = now;
+                    }
+                }
             }
         }
 
@@ -198,6 +267,41 @@ pub fn configure(comptime cfg: Config) type {
             return null;
         }
 
+        /// Fire-and-forget — we don't capture the entry ID. The entry
+        /// stays "open" in atuin's DB (no end timestamp, no exit code),
+        /// which atuin tolerates gracefully and surfaces in searches.
+        /// We accept the imperfect record over the cost of two CLI
+        /// invocations + ID tracking. atuin's own shell plugin sets
+        /// exit code via PROMPT_COMMAND; we don't see that signal.
+        fn runRecord(gpa: std.mem.Allocator, io: std.Io, line: []const u8) void {
+            if (line.len == 0) return;
+            const argv = [_][]const u8{
+                cfg.atuin_binary,
+                "history",
+                "start",
+                line,
+            };
+            const result = std.process.run(gpa, io, .{
+                .argv = &argv,
+                .stdout_limit = .limited(256),
+            }) catch return;
+            gpa.free(result.stdout);
+            gpa.free(result.stderr);
+        }
+
+        fn runSync(gpa: std.mem.Allocator, io: std.Io) void {
+            const argv = [_][]const u8{
+                cfg.atuin_binary,
+                "sync",
+            };
+            const result = std.process.run(gpa, io, .{
+                .argv = &argv,
+                .stdout_limit = .limited(4096),
+            }) catch return;
+            gpa.free(result.stdout);
+            gpa.free(result.stderr);
+        }
+
         // ---- hooks --------------------------------------------------------
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
@@ -249,6 +353,23 @@ pub fn configure(comptime cfg: Config) type {
             rt.shared.mutex.lockUncancelable(ctx.io);
             defer rt.shared.mutex.unlock(ctx.io);
             rt.shared.res_len = 0;
+        }
+
+        /// Fired by the dispatcher when the user presses Enter on a
+        /// non-empty, certain line. We push it into the worker's
+        /// single-slot record mailbox; the worker shells out to
+        /// `atuin history start <cmd>` on its own thread so the proxy
+        /// loop stays responsive.
+        pub fn onLineCommit(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
+            if (!cfg.record) return;
+            if (line.len == 0 or line.len > cfg.max_query) return;
+
+            rt.shared.mutex.lockUncancelable(ctx.io);
+            defer rt.shared.mutex.unlock(ctx.io);
+            @memcpy(rt.shared.rec_buf[0..line.len], line);
+            rt.shared.rec_len = line.len;
+            rt.shared.rec_pending = true;
+            rt.shared.cv.signal(ctx.io);
         }
     };
 }

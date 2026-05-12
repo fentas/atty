@@ -142,6 +142,24 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return null;
         }
 
+        /// Fired exactly once per Enter-press, after applyInput has
+        /// cleared the line. `line` is the pre-Enter content — modules
+        /// use it for history recording, audit logs, etc. We do not
+        /// fire on uncertain commits (arrow-key history nav, multi-line
+        /// continuations, …) — recording a wrong line is worse than
+        /// missing one.
+        pub fn dispatchLineCommit(
+            rts: *Runtimes,
+            ctx: *Context,
+            line: []const u8,
+        ) Error!void {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "onLineCommit")) {
+                    try M.onLineCommit(rts[i], ctx, line);
+                }
+            }
+        }
+
         /// Fired on poll() timeout. Modules use this for periodic
         /// work: ghost-text TTL expiry, status indicators, etc.
         pub fn dispatchTick(
