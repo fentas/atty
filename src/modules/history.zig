@@ -585,3 +585,59 @@ test "deleteHistoryMatch is a no-op for an empty query" {
     try H.deleteHistoryMatch(&rt, &ctx, "");
     try testing.expectEqual(@as(usize, 1), rt.entries.items.len);
 }
+
+test "loadRecent populates the ring from an existing file" {
+    // Write three lines to a temp path, then ask history.attach to
+    // load them. Run inside a fresh /tmp file unique to this test so
+    // we don't collide with the user's real history or with the e2e
+    // scenarios that use their own fixed paths.
+    const path = "/tmp/atty-unit-history-load.txt";
+
+    // Write the file.
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    _ = std.c.unlink(path_z.ptr); // ensure clean slate
+    const fd = std.c.open(
+        path_z.ptr,
+        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
+        @as(std.c.mode_t, 0o600),
+    );
+    try testing.expect(fd >= 0);
+    const payload = "echo one\necho two\necho three\n";
+    _ = std.c.write(fd, payload.ptr, payload.len);
+    _ = std.c.close(fd);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    const H = configure(.{ .path = path, .format = .plain });
+    var rt = try H.attach(testing.allocator, std.Io.failing);
+    defer H.detach(&rt, std.Io.failing);
+
+    try testing.expectEqual(@as(usize, 3), rt.entries.items.len);
+    try testing.expectEqualStrings("echo one", rt.entries.items[0]);
+    try testing.expectEqualStrings("echo three", rt.entries.items[2]);
+}
+
+test "loadRecent strips zsh extended-history prefixes on load" {
+    const path = "/tmp/atty-unit-history-zsh.txt";
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    _ = std.c.unlink(path_z.ptr);
+    const fd = std.c.open(
+        path_z.ptr,
+        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
+        @as(std.c.mode_t, 0o600),
+    );
+    try testing.expect(fd >= 0);
+    const payload = ": 1700000000:0;echo zsh-style\n: 1700000001:0;ls\n";
+    _ = std.c.write(fd, payload.ptr, payload.len);
+    _ = std.c.close(fd);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    const H = configure(.{ .path = path, .format = .zsh_extended });
+    var rt = try H.attach(testing.allocator, std.Io.failing);
+    defer H.detach(&rt, std.Io.failing);
+
+    try testing.expectEqual(@as(usize, 2), rt.entries.items.len);
+    try testing.expectEqualStrings("echo zsh-style", rt.entries.items[0]);
+    try testing.expectEqualStrings("ls", rt.entries.items[1]);
+}

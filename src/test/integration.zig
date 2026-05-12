@@ -144,3 +144,50 @@ test "StatusBar deactivate clears reserved rows and resets scroll" {
     // Resets the scroll region.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[r") != null);
 }
+
+test "RawMode.enter applies raw flags + deinit restores the saved termios" {
+    const RawMode = atty.terminal.RawMode;
+
+    var pty = try Pty.open(std.testing.allocator);
+    defer pty.deinit();
+
+    // Open the slave side — that's a real TTY we can tcgetattr on.
+    const slave_path_z = pty.slave_path; // already sentinel-terminated
+    const slave_fd = std.c.open(slave_path_z.ptr, @bitCast(std.c.O{ .ACCMODE = .RDWR, .NOCTTY = true }), @as(std.c.mode_t, 0));
+    try std.testing.expect(slave_fd >= 0);
+    defer _ = std.c.close(slave_fd);
+
+    const before = try std.posix.tcgetattr(slave_fd);
+
+    var guard = try RawMode.enter(slave_fd);
+    {
+        // Raw-mode flags should be reflected on the live fd.
+        const during = try std.posix.tcgetattr(slave_fd);
+        try std.testing.expect(!during.iflag.ICRNL);
+        try std.testing.expect(!during.oflag.OPOST);
+        try std.testing.expect(!during.lflag.ECHO);
+        try std.testing.expect(!during.lflag.ICANON);
+        try std.testing.expect(!during.lflag.ISIG);
+    }
+    guard.deinit();
+
+    const after = try std.posix.tcgetattr(slave_fd);
+    // After deinit the flags we changed should match what was there
+    // before — RawMode keeps a snapshot and restores it on the way out.
+    try std.testing.expectEqual(before.iflag.ICRNL, after.iflag.ICRNL);
+    try std.testing.expectEqual(before.lflag.ECHO, after.lflag.ECHO);
+    try std.testing.expectEqual(before.lflag.ICANON, after.lflag.ICANON);
+    try std.testing.expectEqual(before.lflag.ISIG, after.lflag.ISIG);
+}
+
+test "RawMode.enter on a non-TTY fd surfaces NotATty" {
+    const RawMode = atty.terminal.RawMode;
+    var pipe_fds: [2]std.posix.fd_t = undefined;
+    const rc = std.c.pipe2(&pipe_fds, .{});
+    try std.testing.expectEqual(@as(c_int, 0), rc);
+    defer {
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.close(pipe_fds[1]);
+    }
+    try std.testing.expectError(error.NotATty, RawMode.enter(pipe_fds[0]));
+}
