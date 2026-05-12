@@ -152,7 +152,44 @@ The dispatcher walks `config.modules` front-to-back. Put
 short-circuiting modules (guardrail) first; passive ones (Atuin) last.
 
 For `provideGhostText` the *first non-null* result wins, so order
-expresses priority.
+expresses priority. There's no negotiation between modules — a later
+module is asked only if every earlier one returned null.
+
+### Composing two ghost providers
+
+With both atuin and history enabled:
+
+```zig
+pub const modules = .{
+    atty.modules.guardrail.configure(.{}),
+    atty.modules.atuin.configure(.{}),     // asked first
+    atty.modules.history.configure(.{}),   // fallback when atuin is null
+};
+```
+
+Per keystroke, the proxy calls `gatherGhostText` once. It iterates
+front-to-back and returns the first non-null:
+
+```zig
+inline for (modules, 0..) |M, i| {
+    if (comptime @hasDecl(M, "provideGhostText")) {
+        if (try M.provideGhostText(rts[i], ctx)) |text| return text;
+    }
+}
+```
+
+**The async/sync subtlety.** Atuin's `provideGhostText` reads a
+worker-thread mailbox (`res_buf`). On the very first keystroke of a
+new prefix the mailbox is still empty — atuin returns null while its
+worker shells out to `atuin search`. During that ~50 ms window the
+fallback (history, which is synchronous in-memory) gets to serve the
+suggestion. Once atuin's worker finishes writing `res_buf`, the next
+render swaps in atuin's answer. If atuin and history disagree, the
+overlay briefly switches as you type.
+
+This is a deliberate trade-off, not a bug: it keeps ghost text visible
+during atuin's lookup latency. If you'd rather see a single source,
+remove the fallback or put history first.
 
 ## Testing
 

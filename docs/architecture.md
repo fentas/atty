@@ -118,9 +118,10 @@ values) for two reasons:
                             write(stdout, output)
                                        │
                                        ▼
-                            renderGhost() — gatherGhostText,
-                            render dim/italic after the cursor
-                            (or clear if no module wants one)
+                            renderGhost() — gatherGhostText:
+                            walks config.modules front-to-back,
+                            first non-null suggestion wins
+                            (or clear if every module returned null)
 
       (poll() timeout) ───▶ dispatchTick(elapsed_ms)
                             (TTL expiry, status indicators)
