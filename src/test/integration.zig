@@ -70,7 +70,7 @@ test "PTY round-trips bytes through /bin/echo" {
     try std.testing.expect(std.mem.indexOf(u8, collected.items, "hello-from-pty") != null);
 }
 
-test "StatusBar activate emits DECSTBM and render lays text on the last row" {
+test "StatusBar activate emits DECSTBM + clears reserved rows, render lays text on the last row" {
     const StatusBar = atty.statusbar.StatusBar;
     const Style = atty.Style;
 
@@ -85,6 +85,10 @@ test "StatusBar activate emits DECSTBM and render lays text on the last row" {
 
     // DECSTBM: scroll bounded to rows 1..22 (24 - 2 reserved).
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[1;22r") != null);
+    // Reserved rows (23 + 24) cleared so prior shell content doesn't
+    // bleed into the gap above the status text.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H\x1B[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[24;1H\x1B[K") != null);
     // CUP to last row (24), column 1, before painting.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[24;1H") != null);
     // Dim SGR is emitted from the Style.

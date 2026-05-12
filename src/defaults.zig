@@ -39,23 +39,31 @@ pub const ghost_style: atty.Style = atty.style.presets.muted;
 
 // ───── Key bindings ───────────────────────────────────────────────────────
 
-/// Right-arrow, End, and Ctrl+F accept the ghost suggestion; Ctrl+Shift+I
-/// toggles incognito mode (requires `enable_kitty_keyboard` so the
-/// terminal sends a distinct sequence rather than collapsing to Tab).
+/// Right-arrow / End / Ctrl+F accept the ghost suggestion; Alt+I
+/// toggles incognito. Alt+letter is encoded classically (`ESC i`)
+/// so it works on any terminal without protocol negotiation.
+///
+/// Ctrl+Shift+I would be a nicer mnemonic but classic terminal mode
+/// collapses it to Tab. Binding it requires the kitty keyboard
+/// protocol enabled *AND* a translator that converts the resulting
+/// CSI-u sequences back to legacy bytes for the shell — otherwise
+/// Ctrl+D, Ctrl+C and friends start arriving at the shell as
+/// `\x1b[100;5u` etc and break it. Both are TODO.
 pub const bindings: []const atty.keymap.Binding = &.{
     .{ .bytes = atty.keymap.key("Right"), .action = .ghost_accept },
     .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
     .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
-    .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
+    .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
 };
 
 /// Push the kitty keyboard protocol's `disambiguate` flag on startup
-/// (and pop it on exit). Lets terminals that support it (Ghostty,
-/// kitty, foot, WezTerm, …) emit distinct sequences for Ctrl+Shift+
-/// combos that would otherwise collide with control bytes
-/// (Ctrl+Shift+I vs Tab, …). Terminals that don't support it ignore
-/// the enable sequence; nothing else breaks.
-pub const enable_kitty_keyboard: bool = true;
+/// (and pop it on exit). **Off by default** because the disambiguated
+/// sequences (e.g. `\x1b[100;5u` for Ctrl+D) reach the shell as
+/// literal bytes — atty doesn't yet translate them back to the legacy
+/// control codes the shell expects. Opt in only if you have a binding
+/// (like `Ctrl+Shift+I`) that needs the disambiguated form and you're
+/// OK with the shell-side breakage until the translator lands.
+pub const enable_kitty_keyboard: bool = false;
 
 // ───── Bottom status bar ──────────────────────────────────────────────────
 

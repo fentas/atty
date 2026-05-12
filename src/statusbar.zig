@@ -70,10 +70,16 @@ pub const StatusBar = struct {
         self.text_len = n;
     }
 
-    /// Emit DECSTBM to confine shell scrolling to rows 1..effectiveRows.
-    /// Call once at startup and after every resize.
+    /// Emit DECSTBM to confine shell scrolling to rows 1..effectiveRows,
+    /// then clear the rows we just reserved so old shell content (from
+    /// before atty started) doesn't show through. Call once at startup
+    /// and after every resize.
     pub fn activate(self: *StatusBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
+        var r: u16 = self.effectiveRows() + 1;
+        while (r <= self.rows) : (r += 1) {
+            try w.print("\x1B[{d};1H\x1B[K", .{r});
+        }
         // Force the next render() to actually emit bytes, even if the
         // text hasn't changed since last paint.
         self.last_valid = false;

@@ -252,14 +252,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         .incognito_toggle => {
                             incognito_on = !incognito_on;
                             ctx.incognito = incognito_on;
-                            const toast = if (incognito_on)
-                                "\r\natty: incognito on\r\n"
-                            else
-                                "\r\natty: incognito off\r\n";
-                            _ = std.c.write(posix.STDERR_FILENO, toast.ptr, toast.len);
                             // Don't forward the binding bytes to the shell.
                             swallow_after_binding = true;
-                            // Force the status bar to repaint.
+                            // Force the status bar to repaint so the
+                            // 🔒 prefix appears/disappears immediately.
                             if (statusbar) |*sb| sb.last_valid = false;
                         },
                     }
