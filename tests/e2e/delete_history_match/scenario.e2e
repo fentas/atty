@@ -1,0 +1,53 @@
+# delete_history_match — full round-trip for the Ctrl+Shift+D action.
+#
+# Flow:
+#   1. Record a unique entry into the history module's file/ring.
+#   2. Snapshot the ghost on a prefix (proves the entry is suggestable).
+#   3. Accept the ghost (line becomes the full entry).
+#   4. Fire Ctrl+Shift+D — encoded as the kitty-keyboard CSI-u byte
+#      sequence (`\x1b[100;6u`, keycode 100 = 'd', modifier 6 = Ctrl+
+#      Shift). atty's binding fires; history's deleteHistoryMatch
+#      removes every matching entry and rewrites the file; the proxy
+#      sends Ctrl+U to the shell so the prompt clears.
+#   5. Snapshot the prefix again — there should be NO ghost (the
+#      entry was deleted, so findSuggestion returns null).
+#
+# The grid.sgr diff between the two snapshots is the assertion:
+# `before` has a dim span where the ghost was painted, `after` has no
+# dim cells (entry gone).
+
+cols 60
+rows 6
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Record the entry.
+type "echo TARGET-LINE\r"
+wait_for "TARGET-LINE"
+sleep 200
+
+# Confirm: prefix → dim ghost trailing.
+type "echo TARG"
+sleep 400
+snapshot ghost_before_delete
+
+# Accept the ghost so the full line is in the buffer.
+key Right
+sleep 200
+
+# Ctrl+Shift+D — kitty kbd CSI-u for 'd' with Ctrl+Shift modifier (6).
+type "\x1b[100;6u"
+sleep 400
+
+# Same prefix again — entry deleted, no ghost.
+type "echo TARG"
+sleep 400
+snapshot ghost_after_delete
+
+# Clean exit.
+key Enter
+sleep 100
+type "exit\r"
+exit_code 0
