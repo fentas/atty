@@ -19,6 +19,7 @@ pub const proxy = @import("proxy.zig");
 pub const modules = struct {
     pub const atuin = @import("modules/atuin.zig");
     pub const guardrail = @import("modules/guardrail.zig");
+    pub const history = @import("modules/history.zig");
 };
 
 // Pull every test in the project into the runner.

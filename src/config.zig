@@ -32,6 +32,20 @@ pub const Atuin = atty.modules.atuin.configure(.{
     .suggestion_ttl_ms = 5_000,
 });
 
+// Shell-native history (no daemon). Reads ~/.bash_history /
+// ~/.zsh_history / ~/.history depending on $SHELL, records each
+// committed command, and serves the same file for ghost suggestions.
+// Useful on machines where atuin isn't installed, or as a *fallback*
+// provider — composed after Atuin in the modules tuple, it only
+// surfaces a suggestion when atuin has nothing to offer.
+//
+// pub const History = atty.modules.history.configure(.{
+//     // .path = "",            // auto-detect from $HISTFILE / $SHELL
+//     // .format = .auto,       // zsh_extended for zsh, bash for bash
+//     // .capacity = 5_000,     // in-memory ring size
+//     // .suggestion_ttl_ms = 5_000,
+// });
+
 // ---------------------------------------------------------------------------
 // The active module set. Order matters:
 //
@@ -45,6 +59,7 @@ pub const Atuin = atty.modules.atuin.configure(.{
 pub const modules = .{
     Guardrail,
     Atuin,
+    // History,    // ← uncomment to enable shell-native history fallback
 };
 
 // ---------------------------------------------------------------------------
