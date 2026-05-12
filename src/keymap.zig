@@ -176,6 +176,39 @@ test "key resolves multi-modifier arrows" {
     try std.testing.expectEqualStrings("\x1b[1;7B", key("Ctrl+Alt+Down"));
 }
 
+/// True if `input` is a kitty-keyboard CSI-u sequence: `ESC [`
+/// followed by digit / `;` / `:` parameters, terminated by `u`.
+/// Used by the proxy to drop unmapped kitty-protocol keys so they
+/// don't reach the shell as mojibake when the protocol is enabled.
+pub fn isCsiU(input: []const u8) bool {
+    if (input.len < 4) return false; // min: `ESC [ <digit> u`
+    if (input[0] != 0x1B or input[1] != '[') return false;
+    if (input[input.len - 1] != 'u') return false;
+    for (input[2 .. input.len - 1]) |b| {
+        switch (b) {
+            '0'...'9', ';', ':' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+test "isCsiU recognises kitty-protocol CSI-u shapes" {
+    try std.testing.expect(isCsiU("\x1B[105;6u")); // Ctrl+Shift+I
+    try std.testing.expect(isCsiU("\x1B[57;5u")); // Ctrl+9
+    try std.testing.expect(isCsiU("\x1B[27u")); // Esc (single param)
+    try std.testing.expect(isCsiU("\x1B[1;5:2u")); // alternate-key indicator
+}
+
+test "isCsiU rejects non-CSI-u sequences" {
+    try std.testing.expect(!isCsiU("\x1B[C")); // arrow (CSI final = C)
+    try std.testing.expect(!isCsiU("\x1B[1;5C")); // Ctrl+Right (CSI-1 form)
+    try std.testing.expect(!isCsiU("\t")); // bare Tab
+    try std.testing.expect(!isCsiU("\x1B[2J")); // ED
+    try std.testing.expect(!isCsiU("u")); // too short
+    try std.testing.expect(!isCsiU("\x1B[abc;6u")); // non-digit in params
+}
+
 test "key resolves Ctrl+Shift+letter via kitty kbd encoding" {
     // i = 105
     try std.testing.expectEqualStrings("\x1B[105;6u", key("Ctrl+Shift+I"));

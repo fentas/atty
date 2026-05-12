@@ -235,9 +235,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // the line uncertain and we'd lose the chance to act.
                 var accept_buf: [4096]u8 = undefined;
                 var swallow_after_binding = false;
+                var matched_binding = false;
                 for (config.keymap.bindings) |bind| {
                     if (bind.bytes.len == 0) continue;
                     if (!std.mem.eql(u8, input, bind.bytes)) continue;
+                    matched_binding = true;
                     switch (bind.action) {
                         .ghost_accept => {
                             // Don't gate on `ghost.visible` — the
@@ -275,6 +277,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                     break;
                 }
+                // Kitty keyboard protocol cleanup: when the terminal
+                // sends a CSI-u sequence we don't have a binding for
+                // (Ctrl+9, Ctrl+Shift+Right, etc.), drop it instead of
+                // forwarding to the shell. Shells don't speak the
+                // protocol — they'd echo the bytes as mojibake.
+                if (!matched_binding and config.terminal.enable_kitty_keyboard and @import("keymap.zig").isCsiU(input)) {
+                    swallow_after_binding = true;
+                }
+
                 if (swallow_after_binding) {
                     if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     continue;

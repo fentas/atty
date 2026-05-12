@@ -51,31 +51,38 @@ pub const ghost: Ghost = .{};
 
 pub const Terminal = struct {
     /// Push the kitty keyboard protocol's `disambiguate` flag on
-    /// startup (and pop on exit). **Off by default** because the
-    /// disambiguated sequences (e.g. `\x1b[100;5u` for Ctrl+D) reach
-    /// the shell as literal bytes — atty doesn't yet translate them
-    /// back to the legacy control codes the shell expects. Opt in
-    /// only if you have a binding (like Ctrl+Shift+I) that needs the
-    /// disambiguated form, and you're OK with shell-side breakage
-    /// until the translator lands.
-    enable_kitty_keyboard: bool = false,
+    /// startup (and pop on exit). When on, terminals that support it
+    /// (Ghostty/kitty/foot/WezTerm/…) emit distinct CSI-u sequences
+    /// for keys that would otherwise collide with control bytes:
+    ///
+    ///     Ctrl+Shift+I  →  \x1b[105;6u   (instead of \t)
+    ///     Ctrl+Tab      →  \x1b[9;5u
+    ///     Ctrl+9        →  \x1b[57;5u    (had no legacy encoding)
+    ///
+    /// atty intercepts CSI-u sequences in the stdin path: matched
+    /// bindings fire, unmatched ones are dropped (never forwarded to
+    /// the shell). Without that drop, the shell would see the raw
+    /// CSI-u bytes as input — most shells don't speak the protocol
+    /// and would echo them as mojibake. The unaffected legacy keys
+    /// (Ctrl+D/Ctrl+C/arrows/etc.) pass through unchanged.
+    enable_kitty_keyboard: bool = true,
 };
 pub const terminal: Terminal = .{};
 
 // ───── Keymap ─────────────────────────────────────────────────────────────
 
 pub const Keymap = struct {
-    /// dwm-style bindings array. Right / End / Ctrl+F accept the ghost
-    /// suggestion; Alt+i toggles incognito. Alt+letter is encoded
-    /// classically (`ESC i`) so it works on any terminal without
-    /// protocol negotiation. Ctrl+Shift+I would be a nicer mnemonic
-    /// but classic terminal mode collapses it to Tab — see
-    /// `Terminal.enable_kitty_keyboard` for the path that unlocks it
-    /// (with caveats).
+    /// dwm-style bindings array. Right / End / Ctrl+F accept the
+    /// ghost suggestion; Ctrl+Shift+I toggles incognito (resolved via
+    /// `keymap.key()` to the kitty-keyboard CSI-u byte sequence —
+    /// requires `Terminal.enable_kitty_keyboard = true`, default on).
+    /// Alt+i is bound as a fallback so it still works on terminals
+    /// that don't speak the protocol.
     bindings: []const atty.keymap.Binding = &.{
         .{ .bytes = atty.keymap.key("Right"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
+        .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
     },
 };

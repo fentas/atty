@@ -97,13 +97,12 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 - **Cycle:** `atty` module imports `config`, `config_resolver` imports `defaults`, `defaults` imports `atty` for module-factory types. Works because each side only consumes the other's *types* lazily. Don't add eager value-level imports across the cycle.
 - **Multi-module file rule (0.16):** a `.zig` file can only belong to *one* module. `defaults.zig` lives in the `config` module; don't `@import("defaults.zig")` from `root.zig` (in the `atty` module) — go via `@import("config")` and re-export.
 - **DECSTBM + slave winsize must stay coordinated.** When the status bar is enabled, slim the slave PTY's reported `rows` by `reserve_rows` or the shell wraps wrong. SIGWINCH path in `proxy.zig` re-applies both.
-- **Don't enable kitty keyboard protocol by default.** Disambiguated sequences (Ctrl+D → `\x1b[100;5u`) reach the shell as literal bytes until atty grows a CSI-u → legacy translator. Hard-broken Ctrl+D otherwise.
+- **Kitty keyboard protocol is on by default** with flag 1 (disambiguate). atty pushes `\x1b[>1u` at startup, pops on exit. The proxy's stdin handler intercepts unmapped CSI-u sequences (via `keymap.isCsiU`) and drops them so the shell never sees mojibake. Legacy keys (Ctrl+D/Ctrl+C/arrows/…) are not CSI-u shaped and pass through unchanged. `Ctrl+Shift+I` and Alt+i both bind to `incognito_toggle` — first uses the kitty CSI-u encoding, second is the classic-encoding fallback for terminals that don't support the protocol.
 - **e2e goldens are config-sensitive.** The e2e harness uses the user's compiled binary. If `src/config.zig` has `statusbar.enabled = true`, snapshots include the bar. CI/release builds use `config.def.zig` defaults (statusbar off) — that's the canonical environment.
 - **First-paint after activate** of the statusbar should clear the reserved rows (old shell content can leak through DECSTBM otherwise).
 
 ## Things deliberately not yet built (don't propose without checking with user)
 
-- `Ctrl+Shift+I` as the incognito-toggle default (needs kitty kbd protocol + CSI-u translator).
 - OSC 133 prompt-marker support (would clean up the line-state `uncertain` mess but needs shell-side cooperation).
 - A persistent visual indicator other than the statusbar segment (cursor-color / cursor-shape were discussed and dropped).
 - Atuin `history end` with exit codes (needs ID capture + double CLI invocation; deferred).

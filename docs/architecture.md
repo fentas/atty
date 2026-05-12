@@ -415,9 +415,20 @@ requires the terminal to emit a distinct sequence — classic terminal
 mode collapses it to Tab. atty pushes the kitty keyboard protocol's
 `disambiguate` flag (`\x1b[>1u`) at startup so Ghostty / kitty /
 foot / WezTerm send `\x1b[105;6u` for Ctrl+Shift+I. Terminals that
-don't support the protocol ignore the enable byte; binding silently
-no-ops in those environments. Disable via
+don't support the protocol ignore the enable byte; the binding then
+silently no-ops in those environments — `Alt+i` is bound as a
+classic-encoding fallback. Disable the protocol push via
 `config.terminal.enable_kitty_keyboard = false` if you have a reason.
+
+**CSI-u intercept.** With the protocol on, the terminal sends CSI-u
+sequences not just for our bound keys but for *any* key that gets
+disambiguated (Ctrl+9, Ctrl+Shift+Right, Shift+Tab, …). The shell
+doesn't speak the protocol — if those bytes reached it, you'd see
+mojibake echoed back. The proxy's stdin handler runs `keymap.isCsiU`
+on every read: if the input is a CSI-u sequence that didn't match a
+binding, atty drops it instead of forwarding. Legacy keys (Ctrl+D,
+Ctrl+C, plain typing, arrows, …) are *not* CSI-u shaped and pass
+through unchanged.
 
 ## Concurrency
 
