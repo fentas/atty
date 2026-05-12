@@ -617,6 +617,59 @@ test "loadRecent populates the ring from an existing file" {
     try testing.expectEqualStrings("echo three", rt.entries.items[2]);
 }
 
+test "deleteHistoryMatch rewrites the on-disk file atomically" {
+    // The in-memory ring filter is the visible behaviour, but the
+    // atomic rewrite (write-temp + rename) is the durability story.
+    // If the file isn't rewritten the deleted entry comes back on
+    // the next atty session — that's the user-facing regression.
+    const path = "/tmp/atty-unit-history-delete-roundtrip.txt";
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    _ = std.c.unlink(path_z.ptr);
+    const fd = std.c.open(
+        path_z.ptr,
+        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
+        @as(std.c.mode_t, 0o600),
+    );
+    try testing.expect(fd >= 0);
+    const payload = "keep one\nDELETE-ME\nkeep two\nDELETE-ME\n";
+    _ = std.c.write(fd, payload.ptr, payload.len);
+    _ = std.c.close(fd);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    const H = configure(.{ .path = path, .format = .plain });
+    var rt = try H.attach(testing.allocator, std.Io.failing);
+    defer H.detach(&rt, std.Io.failing);
+
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var line: @import("../line_state.zig").LineState = .{};
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try H.deleteHistoryMatch(&rt, &ctx, "DELETE-ME");
+
+    // Ring: 4 → 2.
+    try testing.expectEqual(@as(usize, 2), rt.entries.items.len);
+
+    // File: re-read and confirm the on-disk content matches.
+    const rd_fd = std.c.open(path_z.ptr, @bitCast(std.c.O{ .ACCMODE = .RDONLY }), @as(std.c.mode_t, 0));
+    try testing.expect(rd_fd >= 0);
+    defer _ = std.c.close(rd_fd);
+    var buf: [256]u8 = undefined;
+    const n = std.c.read(rd_fd, &buf, buf.len);
+    try testing.expect(n > 0);
+    const disk = buf[0..@as(usize, @intCast(n))];
+    try testing.expect(std.mem.indexOf(u8, disk, "DELETE-ME") == null);
+    try testing.expect(std.mem.indexOf(u8, disk, "keep one") != null);
+    try testing.expect(std.mem.indexOf(u8, disk, "keep two") != null);
+}
+
 test "loadRecent strips zsh extended-history prefixes on load" {
     const path = "/tmp/atty-unit-history-zsh.txt";
     const path_z = try testing.allocator.dupeZ(u8, path);
