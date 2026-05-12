@@ -13,7 +13,7 @@ ifdef CONFIG
 ZIG_CONFIG_ARG := -Dconfig=$(CONFIG)
 endif
 
-.PHONY: help build debug test itest run install clean docker docker-binary fmt
+.PHONY: help build debug test itest run install link unlink clean docker docker-binary fmt
 
 help:
 	@printf "atty — build targets\n\n"
@@ -22,7 +22,10 @@ help:
 	@printf "  test            Run unit tests.\n"
 	@printf "  itest           Run integration tests (real PTY).\n"
 	@printf "  run             Build and run.\n"
-	@printf "  install         Install to \$$PREFIX/bin (default: ~/.local/bin).\n"
+	@printf "  install         Copy zig-out/bin/atty to \$$PREFIX/bin (default: ~/.local/bin).\n"
+	@printf "  link            Symlink \$$PREFIX/bin/atty -> this clone's zig-out/bin/atty.\n"
+	@printf "                  Rebuilds in this tree update the installed binary live.\n"
+	@printf "  unlink          Remove the symlink at \$$PREFIX/bin/atty (only if it's a symlink).\n"
 	@printf "  docker          Build the Docker runtime image (atty:latest).\n"
 	@printf "  docker-binary   Build the binary in Docker, copy to ./dist/atty.\n"
 	@printf "  fmt             zig fmt on src/.\n"
@@ -49,6 +52,25 @@ install: build
 	install -d $(PREFIX)/bin
 	install -m 0755 zig-out/bin/atty $(PREFIX)/bin/atty
 	@printf "→ installed to %s/bin/atty\n" "$(PREFIX)"
+
+# Symlink the installed binary at $(PREFIX)/bin/atty to this clone's
+# zig-out/bin/atty. Same model as get.sh: source is the truth, install
+# dir is just a pointer. Re-running `make build` (or `zig build`) here
+# updates the live binary with no extra step.
+link: build
+	install -d $(PREFIX)/bin
+	ln -sfn $(CURDIR)/zig-out/bin/atty $(PREFIX)/bin/atty
+	@printf "→ linked %s/bin/atty → %s/zig-out/bin/atty\n" "$(PREFIX)" "$(CURDIR)"
+
+# Remove the symlink (but never a real file — guarded by [ -L ]).
+unlink:
+	@if [ -L "$(PREFIX)/bin/atty" ]; then \
+	    rm "$(PREFIX)/bin/atty" && printf "→ removed %s/bin/atty\n" "$(PREFIX)"; \
+	elif [ -e "$(PREFIX)/bin/atty" ]; then \
+	    printf "⚠ %s/bin/atty is a real file, not a symlink — refusing to remove\n" "$(PREFIX)"; exit 1; \
+	else \
+	    printf "(nothing to unlink)\n"; \
+	fi
 
 fmt:
 	$(ZIG) fmt src/ build.zig
