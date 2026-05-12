@@ -719,3 +719,46 @@ test "Grid ED 2 clears the visible screen" {
     try g.renderText(&w);
     try std.testing.expectEqualStrings("\n\n", w.buffered());
 }
+
+test "Grid SGR italic is captured (atty.style.italic emits \\x1B[3m)" {
+    var g = try Grid.init(std.testing.allocator, 1, 16);
+    defer g.deinit();
+    g.feed("\x1B[3mx\x1B[0m");
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderSgr(&w);
+    try std.testing.expectEqualStrings("R0 C0-0 italic\n", w.buffered());
+}
+
+test "Grid SGR 0 reset clears all attrs and colors mid-line" {
+    // The guardrail warning style is dim+italic; ansi.writeGhost
+    // wraps in sgr_reset; statusbar.render emits sgr_reset between
+    // its text and the restore_cursor. If reset didn't actually
+    // clear, trailing cells would inherit the dim attribute and our
+    // e2e grid.sgr diffs would be noisy.
+    var g = try Grid.init(std.testing.allocator, 1, 16);
+    defer g.deinit();
+    g.feed("\x1B[2;3mdim\x1B[0m clr");
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderSgr(&w);
+    // First run carries dim + italic; second run is plain (no entry
+    // emitted because Cell.isBlankDefault skips the default run).
+    try std.testing.expectEqualStrings("R0 C0-2 dim italic\n", w.buffered());
+}
+
+test "Grid DECSTBM is parsed without crashing (no grid effect today)" {
+    // Statusbar emits `\x1B[1;22r` to confine scrolling to rows 1..22.
+    // The VT grid doesn't model scroll regions, so the directive is a
+    // no-op — but it MUST NOT crash the parser or leave bytes in the
+    // buffer. If a future change adds DECSTBM semantics, the assert
+    // here gives us a concrete signal to update.
+    var g = try Grid.init(std.testing.allocator, 4, 6);
+    defer g.deinit();
+    g.feed("\x1B[1;3rabc"); // DECSTBM then ASCII
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderText(&w);
+    // "abc" lands on row 0; DECSTBM is silently consumed.
+    try std.testing.expectEqualStrings("abc\n\n\n\n", w.buffered());
+}
