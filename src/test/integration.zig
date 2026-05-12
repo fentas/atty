@@ -83,6 +83,9 @@ test "StatusBar activate emits DECSTBM + clears reserved rows, render lays text 
     try bar.render(&w);
     const out = buf[0..w.end];
 
+    // ED 2 — clear the visible screen so atty starts on a clean slate
+    // (no stray outer-shell content above the new prompt).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[2J") != null);
     // DECSTBM: scroll bounded to rows 1..22 (24 - 2 reserved).
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[1;22r") != null);
     // Reserved rows (23 + 24) cleared so prior shell content doesn't

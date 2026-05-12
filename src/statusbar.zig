@@ -70,28 +70,30 @@ pub const StatusBar = struct {
         self.text_len = n;
     }
 
-    /// Emit DECSTBM to confine shell scrolling to rows 1..effectiveRows,
-    /// clear the rows we just reserved so old shell content (from
-    /// before atty started) doesn't show through, and park the cursor
-    /// at (1,1) so the shell's first output lands in the scroll
-    /// region rather than the reserved area. Call once at startup and
-    /// after every resize.
+    /// Set up the bar's reserved region:
+    ///
+    ///   1. ED `\x1B[2J` — clear the visible screen. Without this,
+    ///      DECSTBM's cursor-to-home reset leaves prior outer-shell
+    ///      content on rows above where the new prompt renders,
+    ///      making atty look like it "jumped to the top" of a
+    ///      half-filled screen. Terminal scrollback keeps the
+    ///      pre-atty content, so nothing is truly lost — the user
+    ///      can scroll up to see what was on screen before.
+    ///   2. Belt-and-suspenders: explicit per-row erase of the
+    ///      reserved rows (redundant after ED 2 but cheap, and
+    ///      defensive against terminals with non-standard ED).
+    ///   3. DECSTBM `\x1B[1;<top>r` — confine shell scrolling to the
+    ///      non-reserved rows.
+    ///   4. CUP home so the first byte the shell writes lands at
+    ///      (1,1), not in the reserved area.
     pub fn activate(self: *StatusBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        // Clear the reserved rows first. We do this before DECSTBM
-        // because the CUP commands move the cursor — if we emitted
-        // DECSTBM first (which the spec says resets cursor to home),
-        // these clears would leave the cursor at the bottom of the
-        // screen and the shell would draw its prompt there.
+        try w.writeAll("\x1B[2J");
         var r: u16 = self.effectiveRows() + 1;
         while (r <= self.rows) : (r += 1) {
             try w.print("\x1B[{d};1H\x1B[K", .{r});
         }
         try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
-        // Explicit home — most terminals reset cursor on DECSTBM, but
-        // not all do reliably, and we want a deterministic state.
         try w.writeAll("\x1B[1;1H");
-        // Force the next render() to actually emit bytes, even if the
-        // text hasn't changed since last paint.
         self.last_valid = false;
     }
 
