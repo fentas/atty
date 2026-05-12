@@ -17,6 +17,7 @@ pub fn   detach    (rt: *Runtime) void
 pub fn   onInput   (rt: *Runtime, ctx: *Context, input: []const u8) !Action
 pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
+pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 ```
 

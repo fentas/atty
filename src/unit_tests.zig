@@ -17,6 +17,7 @@ test {
     _ = @import("style.zig");
     _ = @import("modules/atuin.zig");
     _ = @import("modules/guardrail.zig");
+    _ = @import("modules/history.zig");
     _ = @import("test/e2e/vt.zig");
     _ = @import("test/e2e/dsl.zig");
     _ = @import("test/e2e/snapshot.zig");

@@ -40,6 +40,10 @@ worker-thread plumbing vanishes from the binary.
 - **Atuin module** — async worker thread, prefix-matched history
   lookups via the `atuin` CLI, dim/italic ghost text after the
   cursor, recording on Enter, detached-thread `atuin sync`.
+- **History module** — shell-native fallback that reads + writes
+  the same `~/.bash_history` / `~/.zsh_history` your shell uses,
+  no daemon, no shell plugin. Composes with Atuin as a backup
+  suggestion source.
 - **Keymap** — dwm-style `bindings[]` of `{ bytes, action }` pairs;
   ships with right-arrow / End / Ctrl-F bound to `ghost_accept` so
   fish-style suggestions can be accepted with one keypress.

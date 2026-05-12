@@ -161,3 +161,82 @@ proxy. Default style is `.{ .dim = true, .italic = true }`.
   need one, write a new module; do **not** add it here. A
   pathological regex on the input hot path would be a strict
   regression.
+
+---
+
+## History (`src/modules/history.zig`)
+
+Shell-native command history with fish-style ghost suggestions —
+no daemon, no shell plugin. Reads and writes the file your shell
+already uses (`~/.bash_history`, `~/.zsh_history`, `~/.history`),
+so commands typed through atty are visible to everything else
+that reads the file (and vice-versa).
+
+### How it works
+
+**Init.** Resolves the history file from `$HISTFILE` if set,
+otherwise `~/.zsh_history` / `~/.bash_history` / `~/.history`
+based on `$SHELL`. Reads the tail (up to 1 MiB) and loads the
+most recent `capacity` entries into a ring kept in memory.
+
+**Record.** `onLineCommit` appends each committed line to the
+history file via a single atomic `O_APPEND` write (≤ PIPE_BUF =
+4096 B; `max_line` caps lines below that). The line also goes
+into the in-memory ring, evicting the oldest entry if at capacity.
+For zsh the extended-history prefix `: <unix_ts>:0;` is prepended;
+bash and others get a bare line.
+
+**Suggest.** `provideGhostText` walks the ring newest-first and
+returns the first entry that prefix-matches the current input.
+
+### Composing with Atuin
+
+Put `History` *after* `Atuin` in `config.modules`:
+
+```zig
+pub const modules = .{ Guardrail, Atuin, History };
+```
+
+`provideGhostText` is "first non-null wins" across modules — atuin
+gets to suggest first, history fills the gap when atuin is empty,
+not installed, or hasn't synced recently.
+
+### Configuration
+
+```zig
+pub const History = atty.modules.history.configure(.{
+    .path               = "",         // "" = auto-detect from $HISTFILE / $SHELL
+    .format             = .auto,      // .auto, .bash, .zsh_extended, .plain
+    .record             = true,
+    .suggest            = true,
+    .capacity           = 5_000,
+    .max_line           = 4_096,
+    .suggestion_ttl_ms  = 5_000,
+    .match              = .prefix,    // .substring is reserved for later
+});
+```
+
+| Field                  | Default       | Notes                                                  |
+|------------------------|---------------|--------------------------------------------------------|
+| `path`                 | `""`          | `""` auto-detects from `$HISTFILE` then `$SHELL`       |
+| `format`               | `.auto`       | `.bash`, `.zsh_extended`, `.plain`                     |
+| `record`               | `true`        | Append on Enter                                        |
+| `suggest`              | `true`        | Serve ghost-text suggestions                           |
+| `capacity`             | 5000          | Ring size; oldest evicted past this                    |
+| `max_line`             | 4096          | Anything longer is dropped (likely pasted garbage)     |
+| `suggestion_ttl_ms`    | 5000          | TTL on cached ghost match                              |
+| `match`                | `.prefix`     | `.substring` not yet wired                             |
+
+### Limitations
+
+- **No exit-code tracking.** Records fire on Enter, before the
+  shell completes the command. Atuin's official shell plugin uses
+  `PROMPT_COMMAND` for that; we don't. Entries land in the file with
+  no exit code attached (bash format has no slot for one; zsh
+  extended-history's duration field is set to `0`).
+- **Tab completion isn't followed.** Same `uncertain` limitation as
+  every other input-only module — see the [line-state](/architecture/#line-state-model)
+  section.
+- **Substring-mode ghost** isn't implemented yet — the ghost renderer
+  only paints the tail past the query position, which is wrong for
+  non-prefix hits. Set `.match = .prefix` (the default).
