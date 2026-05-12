@@ -655,3 +655,67 @@ test "Grid ESC 7 / ESC 8 save and restore cursor" {
     try g.renderText(&w);
     try std.testing.expectEqualStrings("abcd\nXY\n\n", w.buffered());
 }
+
+test "Grid wraps at row width and CR + LF advance correctly" {
+    var g = try Grid.init(std.testing.allocator, 2, 4);
+    defer g.deinit();
+    g.feed("abcdef"); // 4 fit on row 0, 2 wrap to row 1
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderText(&w);
+    try std.testing.expectEqualStrings("abcd\nef\n", w.buffered());
+}
+
+test "Grid backspace moves cursor one column left without erasing" {
+    var g = try Grid.init(std.testing.allocator, 1, 6);
+    defer g.deinit();
+    // Type "ab", backspace once, type "X" — overwrites the 'b'.
+    g.feed("ab\x08X");
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderText(&w);
+    try std.testing.expectEqualStrings("aX\n", w.buffered());
+}
+
+test "Grid SGR dim is observable in renderSgr (the ghost-text canary)" {
+    var g = try Grid.init(std.testing.allocator, 1, 16);
+    defer g.deinit();
+    g.feed("ls\x1B[2m -la\x1B[0m");
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderSgr(&w);
+    // Dim attribute should land on the trailing run, not on "ls".
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "dim") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "R0 C2-5 dim") != null);
+}
+
+test "Grid SGR 256-color fg is captured" {
+    var g = try Grid.init(std.testing.allocator, 1, 10);
+    defer g.deinit();
+    g.feed("\x1B[38;5;244mhi\x1B[0m");
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderSgr(&w);
+    try std.testing.expectEqualStrings("R0 C0-1 fg=244\n", w.buffered());
+}
+
+test "Grid CUP positions cursor; subsequent writes land at the new spot" {
+    var g = try Grid.init(std.testing.allocator, 3, 8);
+    defer g.deinit();
+    // CUP to row 2, col 3 then write "XY". Row indices in VT are 1-based.
+    g.feed("\x1B[2;3HXY");
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderText(&w);
+    try std.testing.expectEqualStrings("\n  XY\n\n", w.buffered());
+}
+
+test "Grid ED 2 clears the visible screen" {
+    var g = try Grid.init(std.testing.allocator, 2, 6);
+    defer g.deinit();
+    g.feed("abc\r\nxyz\x1B[2J");
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderText(&w);
+    try std.testing.expectEqualStrings("\n\n", w.buffered());
+}
