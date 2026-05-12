@@ -71,15 +71,25 @@ pub const StatusBar = struct {
     }
 
     /// Emit DECSTBM to confine shell scrolling to rows 1..effectiveRows,
-    /// then clear the rows we just reserved so old shell content (from
-    /// before atty started) doesn't show through. Call once at startup
-    /// and after every resize.
+    /// clear the rows we just reserved so old shell content (from
+    /// before atty started) doesn't show through, and park the cursor
+    /// at (1,1) so the shell's first output lands in the scroll
+    /// region rather than the reserved area. Call once at startup and
+    /// after every resize.
     pub fn activate(self: *StatusBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
+        // Clear the reserved rows first. We do this before DECSTBM
+        // because the CUP commands move the cursor — if we emitted
+        // DECSTBM first (which the spec says resets cursor to home),
+        // these clears would leave the cursor at the bottom of the
+        // screen and the shell would draw its prompt there.
         var r: u16 = self.effectiveRows() + 1;
         while (r <= self.rows) : (r += 1) {
             try w.print("\x1B[{d};1H\x1B[K", .{r});
         }
+        try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
+        // Explicit home — most terminals reset cursor on DECSTBM, but
+        // not all do reliably, and we want a deterministic state.
+        try w.writeAll("\x1B[1;1H");
         // Force the next render() to actually emit bytes, even if the
         // text hasn't changed since last paint.
         self.last_valid = false;
