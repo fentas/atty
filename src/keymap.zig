@@ -182,6 +182,14 @@ test "key resolves multi-modifier arrows" {
     try std.testing.expectEqualStrings("\x1b[1;7B", key("Ctrl+Alt+Down"));
 }
 
+/// Kitty keyboard protocol — disambiguate-flag push/pop bytes. atty
+/// emits the push on startup (so terminals like Ghostty/kitty/foot
+/// send CSI-u for keys that would otherwise collide with control
+/// bytes — Ctrl+Shift+I vs Tab, …) and the pop on exit. Terminals
+/// that don't speak the protocol silently ignore these bytes.
+pub const kitty_kbd_push = "\x1B[>1u";
+pub const kitty_kbd_pop = "\x1B[<u";
+
 /// True if `input` is a kitty-keyboard CSI-u sequence: `ESC [`
 /// followed by digit / `;` / `:` parameters, terminated by `u`.
 /// Used by the proxy to drop unmapped kitty-protocol keys so they

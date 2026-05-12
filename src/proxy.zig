@@ -35,6 +35,7 @@ const StatusBar = @import("statusbar.zig").StatusBar;
 const ansi = @import("ansi.zig");
 const style_mod = @import("style.zig");
 const status_text = @import("status_text.zig");
+const keymap = @import("keymap.zig");
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -180,10 +181,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // (Ctrl+Shift+I vs Tab, Ctrl+Shift+M vs Enter, …). Terminals that
     // don't understand the CSI just ignore it.
     if (args.is_tty and config.terminal.enable_kitty_keyboard) {
-        _ = std.c.write(posix.STDOUT_FILENO, "\x1B[>1u", 5);
+        _ = std.c.write(posix.STDOUT_FILENO, keymap.kitty_kbd_push.ptr, keymap.kitty_kbd_push.len);
     }
     defer if (args.is_tty and config.terminal.enable_kitty_keyboard) {
-        _ = std.c.write(posix.STDOUT_FILENO, "\x1B[<u", 4);
+        _ = std.c.write(posix.STDOUT_FILENO, keymap.kitty_kbd_pop.ptr, keymap.kitty_kbd_pop.len);
     };
 
     // --- Incognito state -------------------------------------------------
@@ -236,7 +237,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // the line uncertain and we'd lose the chance to act.
                 var accept_buf: [4096]u8 = undefined;
                 var swallow_after_binding = false;
-                const matched_action = @import("keymap.zig").match(config.keymap.bindings, input);
+                const matched_action = keymap.match(config.keymap.bindings, input);
                 const matched_binding = matched_action != null;
                 if (matched_action) |act| {
                     switch (act) {
@@ -308,7 +309,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // (Ctrl+9, Ctrl+Shift+Right, etc.), drop it instead of
                 // forwarding to the shell. Shells don't speak the
                 // protocol — they'd echo the bytes as mojibake.
-                if (!matched_binding and config.terminal.enable_kitty_keyboard and @import("keymap.zig").isCsiU(input)) {
+                if (!matched_binding and config.terminal.enable_kitty_keyboard and keymap.isCsiU(input)) {
                     swallow_after_binding = true;
                 }
 
