@@ -40,6 +40,16 @@ jobs:
       - name: zig build (${{ matrix.target }})
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
+      # End-to-end scenarios — spawn atty under a controlled PTY and
+      # diff a rendered terminal grid against goldens. We only run on
+      # the native target because cross-built musl binaries can't be
+      # executed on the x86_64 GitHub runner.
+      - name: e2e (native only)
+        if: matrix.target == 'x86_64-linux-musl'
+        run: |
+          zig build -Doptimize=ReleaseSafe
+          zig build e2e
+
       - name: package
         id: pkg
         run: |

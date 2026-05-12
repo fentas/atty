@@ -1,0 +1,16 @@
+# smoke_echo — minimum-viable scenario.
+#
+# Verifies the e2e harness can spawn atty, that atty in turn spawns a
+# child shell, and that we capture both the output and the final exit.
+# The `$ATTY` token is replaced by the runner with the path to the built
+# atty binary, so this scenario tests the *installed* artifact, not some
+# library shim.
+
+cols 60
+rows 6
+timeout_ms 3000
+
+spawn $ATTY /bin/sh -c "echo hello-atty"
+wait_for "hello-atty"
+snapshot final
+exit_code 0

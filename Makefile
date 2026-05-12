@@ -13,7 +13,7 @@ ifdef CONFIG
 ZIG_CONFIG_ARG := -Dconfig=$(CONFIG)
 endif
 
-.PHONY: help build debug test itest run install link unlink clean docker docker-binary fmt
+.PHONY: help build debug test itest e2e e2e-update run install link unlink clean docker docker-binary fmt
 
 help:
 	@printf "atty — build targets\n\n"
@@ -21,6 +21,8 @@ help:
 	@printf "  debug           Compile in Debug mode.\n"
 	@printf "  test            Run unit tests.\n"
 	@printf "  itest           Run integration tests (real PTY).\n"
+	@printf "  e2e             Run end-to-end scenarios under tests/e2e/.\n"
+	@printf "  e2e-update      Refresh goldens from current output.\n"
 	@printf "  run             Build and run.\n"
 	@printf "  install         Copy zig-out/bin/atty to \$$PREFIX/bin (default: ~/.local/bin).\n"
 	@printf "  link            Symlink \$$PREFIX/bin/atty -> this clone's zig-out/bin/atty.\n"
@@ -44,6 +46,15 @@ test:
 
 itest:
 	$(ZIG) build itest --summary all
+
+# End-to-end: spawn atty under a controlled PTY, drive .e2e scripts,
+# diff a rendered terminal grid against goldens in tests/e2e/<name>/golden/.
+e2e:
+	$(ZIG) build e2e
+
+# Refresh goldens to match current output. Review the diff before committing.
+e2e-update:
+	$(ZIG) build e2e -- --update
 
 run: build
 	./zig-out/bin/atty
