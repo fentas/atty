@@ -5,50 +5,54 @@
 //! user's declaration wins via `@hasDecl`; otherwise we fall through
 //! to `defaults.zig`. New tunables added upstream don't break user
 //! configs because the user simply doesn't declare them and the
-//! default value flows through.
+//! default value flows through (per-field via struct defaults inside
+//! grouped subsystems, or whole-knob via this resolver).
 //!
-//! When adding a new knob: declare it in `defaults.zig`, mirror the
-//! resolver entry below, and optionally show it as a commented
-//! example in `src/config.zig`.
+//! When adding a new knob: add a field to the relevant struct in
+//! `defaults.zig`. Existing user configs pick it up via Zig's
+//! per-field struct defaults — no resolver change needed. When adding
+//! a whole new subsystem, add a struct + instance to `defaults.zig`
+//! plus one resolver entry + type re-export here.
 
 const user = @import("user_config");
 const defaults = @import("defaults.zig");
 
-// Re-export config TYPES (not values) so consumers can use
-// `@import("config").StatusBar` to annotate their own overrides. The
-// values themselves (statusbar, bindings, …) get @hasDecl-resolved
-// below.
+// ───── Type re-exports ─────────────────────────────────────────────────
+// Consumers annotate their overrides with these:
+//   pub const ghost: atty.config.Ghost = .{ .style = ... };
+pub const Proxy = defaults.Proxy;
+pub const Ghost = defaults.Ghost;
+pub const Terminal = defaults.Terminal;
+pub const Keymap = defaults.Keymap;
 pub const StatusBar = defaults.StatusBar;
 
+// ───── Resolved values ─────────────────────────────────────────────────
 pub const modules = if (@hasDecl(user, "modules"))
     user.modules
 else
     defaults.modules;
 
-pub const tick_interval_ms = if (@hasDecl(user, "tick_interval_ms"))
-    user.tick_interval_ms
+pub const proxy = if (@hasDecl(user, "proxy"))
+    user.proxy
 else
-    defaults.tick_interval_ms;
+    defaults.proxy;
 
-pub const ghost_style = if (@hasDecl(user, "ghost_style"))
-    user.ghost_style
+pub const ghost = if (@hasDecl(user, "ghost"))
+    user.ghost
 else
-    defaults.ghost_style;
+    defaults.ghost;
 
-pub const bindings = if (@hasDecl(user, "bindings"))
-    user.bindings
+pub const terminal = if (@hasDecl(user, "terminal"))
+    user.terminal
 else
-    defaults.bindings;
+    defaults.terminal;
 
-// Grouped configs come through as a single decl. The user supplies a
-// partial struct literal; Zig's per-field defaults fill the rest, so
-// adding a new knob upstream doesn't break existing user configs.
+pub const keymap = if (@hasDecl(user, "keymap"))
+    user.keymap
+else
+    defaults.keymap;
+
 pub const statusbar = if (@hasDecl(user, "statusbar"))
     user.statusbar
 else
     defaults.statusbar;
-
-pub const enable_kitty_keyboard = if (@hasDecl(user, "enable_kitty_keyboard"))
-    user.enable_kitty_keyboard
-else
-    defaults.enable_kitty_keyboard;

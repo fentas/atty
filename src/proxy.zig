@@ -147,7 +147,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     defer scratch.deinit(allocator);
     try scratch.ensureTotalCapacity(allocator, buf_size);
 
-    var ghost = Ghost.init(allocator, config.ghost_style);
+    var ghost = Ghost.init(allocator, config.ghost.style);
     defer ghost.deinit();
 
     var ctx = module.Context{
@@ -178,10 +178,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // keys that would otherwise collide with control bytes
     // (Ctrl+Shift+I vs Tab, Ctrl+Shift+M vs Enter, …). Terminals that
     // don't understand the CSI just ignore it.
-    if (args.is_tty and config.enable_kitty_keyboard) {
+    if (args.is_tty and config.terminal.enable_kitty_keyboard) {
         _ = std.c.write(posix.STDOUT_FILENO, "\x1B[>1u", 5);
     }
-    defer if (args.is_tty and config.enable_kitty_keyboard) {
+    defer if (args.is_tty and config.terminal.enable_kitty_keyboard) {
         _ = std.c.write(posix.STDOUT_FILENO, "\x1B[<u", 4);
     };
 
@@ -207,7 +207,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var last_tick_ms = nowMs();
 
     while (child_alive) {
-        const n = try posix.poll(&pfds, config.tick_interval_ms);
+        const n = try posix.poll(&pfds, config.proxy.tick_interval_ms);
 
         // ---- timeout → tick ----------------------------------------------
         if (n == 0) {
@@ -235,7 +235,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // the line uncertain and we'd lose the chance to act.
                 var accept_buf: [4096]u8 = undefined;
                 var swallow_after_binding = false;
-                for (config.bindings) |bind| {
+                for (config.keymap.bindings) |bind| {
                     if (bind.bytes.len == 0) continue;
                     if (!std.mem.eql(u8, input, bind.bytes)) continue;
                     switch (bind.action) {

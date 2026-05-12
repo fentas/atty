@@ -198,12 +198,12 @@ tick (default 100 ms), and naive re-paints would flicker.
 | ESC 7          | DECSC — save cursor + attributes                     |
 | ESC 8          | DECRC — restore cursor + attributes                  |
 | CSI 2 m        | SGR dim (≈ 50% intensity in most terminals)          |
-| CSI 3 m        | SGR italic (optional via `ghost_style.italic`)       |
-| CSI 38;5;n m   | SGR 256-colour fg (optional via `ghost_style.fg`)    |
+| CSI 3 m        | SGR italic (optional via `ghost.style.italic`)       |
+| CSI 38;5;n m   | SGR 256-colour fg (optional via `ghost.style.fg`)    |
 | CSI 0 m        | SGR reset                                            |
 | CSI K          | EL — erase to end of line                            |
 
-The exact SGR bytes emitted are driven by `config.ghost_style` — an
+The exact SGR bytes emitted are driven by `config.ghost.style` — an
 `atty.Style` value. `atty.Style` is the shared styling primitive used
 by every visible element (ghost overlay, guardrail warning banner,
 future status indicators). Fields: `bold`, `dim`, `italic`,
@@ -288,9 +288,9 @@ src/
               │                               │
               ▼                               ▼
         proxy.zig                       dispatch.zig
-        (reads config.bindings,         (Dispatcher(config.modules))
-         config.tick_interval_ms,
-         config.ghost_style, …)
+        (reads config.keymap.bindings,  (Dispatcher(config.modules))
+         config.proxy.tick_interval_ms,
+         config.ghost.style, …)
 ```
 
 `@hasDecl` is comptime, so the missing branch is constant-folded —
@@ -301,19 +301,45 @@ zero runtime cost compared to declaring everything explicitly.
 | Scenario | What happens |
 |---|---|
 | **Fresh clone**, run `zig build` | build.zig sees no `config.zig`, copies `config.def.zig` across. Build succeeds with all defaults. |
-| **You edit `config.zig`** to set `ghost_style` | Resolver returns *your* `ghost_style`. Other knobs still come from `defaults.zig`. |
+| **You edit `config.zig`** to set `ghost` | Resolver returns *your* `ghost` struct. Per-field defaults inside the struct fill any fields you didn't list. Other subsystems still come from `defaults.zig`. |
 | **atty adds a new knob** | Lands in `defaults.zig` + resolver, optionally surfaced in `config.def.zig` comments. Your `config.zig` is untouched. You get the new default automatically. |
 | **atty changes a default** | If you didn't override it, you get the new value. If you did, your override still wins. |
 | **You `git pull`** | `config.zig` is untracked → no conflict, ever. `config.def.zig` may have new commented examples — read them at leisure. |
 | **You delete `config.zig`** | Next `zig build` recreates it from the template. |
 | **You want config in your dotfiles** | `make CONFIG=/path/to/mine.zig build` (or `-Dconfig=…`). Bypasses the bootstrap entirely. |
 
+### Style rule — struct-grouped subsystems
+
+Every subsystem is a **struct with per-field defaults**, even if it
+only has one knob today. Reasons:
+
+- New fields added upstream flow through to existing user configs via
+  Zig's struct field defaults — no migration needed.
+- Going flat → struct later forces every user to rewrite
+  `pub const xxx_yyy = …` to `pub const xxx = .{ .yyy = … }`, which
+  defeats the resolver's "no merge churn" promise.
+
+The only flat exception is `modules`, which is a heterogeneous comptime
+tuple and can't be a struct field. Type names follow `atty.Style` /
+`atty.style` casing convention: `atty.Proxy` (the type) vs
+`atty.proxy` (a namespace/value where one exists).
+
 ### Adding a new knob (maintainer's checklist)
 
-1. Add it to `defaults.zig` with a sensible default value.
-2. Mirror it in `config_resolver.zig` with the `if (@hasDecl) … else defaults.…` line.
-3. Optionally show it as a commented example in `config.def.zig`.
-4. Document it in `docs/providers.md` (if module-specific) or here (if cross-cutting).
+**Inside an existing subsystem** (the common case):
+
+1. Add a field to the relevant struct in `defaults.zig` with a default.
+2. That's it. The resolver passes the struct through whole; existing
+   user configs pick up the new field via Zig's per-field defaults.
+3. Document it in `docs/providers.md` (module-specific) or here.
+
+**New subsystem** (rare):
+
+1. Add a new struct type + instance to `defaults.zig`.
+2. Re-export the type + add the value resolver line in
+   `config_resolver.zig`.
+3. Add a top-level alias in `root.zig`.
+4. Update `config.def.zig` + the docs.
 
 That's the entire surface area. No user file ever has to change.
 
@@ -391,7 +417,7 @@ mode collapses it to Tab. atty pushes the kitty keyboard protocol's
 foot / WezTerm send `\x1b[105;6u` for Ctrl+Shift+I. Terminals that
 don't support the protocol ignore the enable byte; binding silently
 no-ops in those environments. Disable via
-`config.enable_kitty_keyboard = false` if you have a reason.
+`config.terminal.enable_kitty_keyboard = false` if you have a reason.
 
 ## Concurrency
 

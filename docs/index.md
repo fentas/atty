@@ -138,16 +138,21 @@ pub const modules = .{
 };
 
 // Override the visual style if you don't want the dim-only default.
-pub const ghost_style: atty.Style = atty.style.presets.muted_italic;
+pub const ghost: atty.Ghost = .{ .style = atty.style.presets.muted_italic };
 
 // Override the accept keys if Right / End / Ctrl+F isn't what you want.
-pub const bindings: []const atty.keymap.Binding = &.{
-    .{ .bytes = atty.keymap.key("Tab"), .action = .ghost_accept },
+pub const keymap: atty.Keymap = .{
+    .bindings = &.{
+        .{ .bytes = atty.keymap.key("Tab"), .action = .ghost_accept },
+    },
 };
 ```
 
-Anything you don't declare — `tick_interval_ms`, `bindings`,
-`ghost_style`, `modules` — picks up its value from `defaults.zig`.
+Every subsystem (`proxy`, `ghost`, `terminal`, `keymap`, `statusbar`)
+is a struct with per-field defaults — your `pub const xxx: atty.Xxx = .{ … }`
+only spells out the fields you want different. Anything you don't
+declare picks up `defaults.zig`, and new fields added upstream flow
+through automatically.
 
 Track your config outside the repo: `-Dconfig=/path/to/mine.zig`
 (or `make CONFIG=/path/to/mine.zig build`).

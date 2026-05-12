@@ -17,11 +17,16 @@ pub const keymap = @import("keymap.zig");
 pub const style = @import("style.zig");
 pub const Style = style.Style;
 pub const statusbar = @import("statusbar.zig");
-/// Top-level config types. Users annotate their overrides with these
-/// (e.g. `pub const statusbar: atty.StatusBar = .{ … }`). The values
-/// themselves are resolved from `src/config.zig` against defaults via
-/// `src/config_resolver.zig`.
-pub const StatusBar = @import("config").StatusBar;
+
+/// Config types — every subsystem is a struct, so user overrides
+/// annotate with these and only spell out the fields they care
+/// about. Per-field struct defaults fill the rest.
+const config = @import("config");
+pub const Proxy = config.Proxy;
+pub const Ghost = config.Ghost;
+pub const Terminal = config.Terminal;
+pub const Keymap = config.Keymap;
+pub const StatusBar = config.StatusBar;
 
 /// Built-in modules. User configs compose these via
 /// `atty.modules.atuin.configure(.{...})`.
