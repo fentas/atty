@@ -28,6 +28,12 @@ pub const Action = enum {
     /// recorded (no atuin / history writes); the status bar prepends
     /// a 🔒 segment; a one-line stderr toast announces the flip.
     incognito_toggle,
+    /// Delete every history entry that matches the current line.
+    /// Fires `deleteHistoryMatch` on every module that implements it
+    /// (today: history; atuin's CLI doesn't expose match-delete in a
+    /// portable way), then sends Ctrl+U to the shell so the prompt
+    /// clears, and flashes a transient status-bar message.
+    delete_history_match,
 };
 
 pub const Binding = struct {

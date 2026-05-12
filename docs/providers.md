@@ -94,6 +94,14 @@ label). Future iterations will surface queued-record count and
 last-sync age. The segment is omitted entirely if the user has
 disabled the status bar (`statusbar.enabled = false`).
 
+### deleteHistoryMatch
+
+Not implemented — `atuin history delete` needs an entry ID, and atty
+doesn't capture IDs at record time (one CLI call per commit, not
+two). If you need to delete from atuin's store, do it via the CLI
+directly. The `delete_history_match` action still affects the
+`history` module if you have both wired in your `modules` tuple.
+
 ### Performance
 
 - `onInput` does one `memcpy` + a cv-signal, no I/O. Zero allocations.
@@ -233,6 +241,20 @@ pub const History = atty.modules.history.configure(.{
 | `max_line`             | 4096          | Anything longer is dropped (likely pasted garbage)     |
 | `suggestion_ttl_ms`    | 5000          | TTL on cached ghost match                              |
 | `match`                | `.prefix`     | `.substring` not yet wired                             |
+
+### deleteHistoryMatch
+
+Implements the optional `deleteHistoryMatch` hook. When the user
+fires `Action.delete_history_match` (default `Ctrl+Shift+D`) with the
+target line in their buffer, the module:
+
+  1. Walks the in-memory ring and removes every entry whose payload
+     equals the line — duplicates included.
+  2. Rewrites the on-disk history file via the temp + rename trick
+     so a crash mid-write can't corrupt the existing file.
+
+Errors are swallowed: a read-only or missing parent directory means
+the ring stays filtered in this session but the file isn't updated.
 
 ### Limitations
 

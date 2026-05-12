@@ -383,6 +383,17 @@ user had typed them: shell sees normal input, modules see a normal
 `onInput`, line state grows by the suggestion length. Adding a new
 action is one enum variant + one switch arm; no new global lists.
 
+`incognito_toggle` (default `Ctrl+Shift+I` + `Alt+i`) flips a proxy-
+local flag and forces a status-bar repaint to show the 🔒 segment.
+Commits don't fire `dispatchLineCommit` while on.
+
+`delete_history_match` (default `Ctrl+Shift+D`) fires
+`dispatchDeleteHistoryMatch` on every module that implements the
+hook (today: just `history`), then sends `\x15` (Ctrl+U) to the
+shell so the prompt clears, and calls `StatusBar.setTransient(...)`
+to flash `🗑 deleted: <line>` for 3 s before the bar reverts to its
+normal text.
+
 ## Status bar + incognito
 
 Off by default (`config.statusbar.enabled = false`); opt in if you

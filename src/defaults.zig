@@ -84,6 +84,7 @@ pub const Keymap = struct {
         .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
+        .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match },
     },
 };
 pub const keymap: Keymap = .{};

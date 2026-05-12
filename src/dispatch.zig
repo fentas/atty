@@ -160,6 +160,22 @@ pub fn Dispatcher(comptime modules: anytype) type {
             }
         }
 
+        /// Fire `deleteHistoryMatch` on every module that implements
+        /// it. Used by the proxy when the user triggers the
+        /// `delete_history_match` keymap action. Modules without the
+        /// hook are silently skipped (no-op at comptime).
+        pub fn dispatchDeleteHistoryMatch(
+            rts: *Runtimes,
+            ctx: *Context,
+            line: []const u8,
+        ) Error!void {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "deleteHistoryMatch")) {
+                    try M.deleteHistoryMatch(rts[i], ctx, line);
+                }
+            }
+        }
+
         /// Collect each module's `statusText` (if implemented) into
         /// the writer, separating segments with ` │ `. Used by the
         /// proxy's bottom status bar to paint a shared canvas — every

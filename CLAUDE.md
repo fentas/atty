@@ -106,7 +106,7 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 - OSC 133 prompt-marker support (would clean up the line-state `uncertain` mess but needs shell-side cooperation).
 - A persistent visual indicator other than the statusbar segment (cursor-color / cursor-shape were discussed and dropped).
 - Atuin `history end` with exit codes (needs ID capture + double CLI invocation; deferred).
-- Module-level `deleteLast` for history & atuin (proposed, not shipped).
+- atuin-side `deleteHistoryMatch` — needs entry IDs we don't capture today. history module's implementation is shipped.
 
 ## Release flow
 

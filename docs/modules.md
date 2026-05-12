@@ -18,6 +18,7 @@ pub fn   onInput   (rt: *Runtime, ctx: *Context, input: []const u8) !Action
 pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
 pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
+pub fn   deleteHistoryMatch(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
 ```
@@ -174,6 +175,26 @@ your own segment with a cap.
 
 Don't allocate in `statusText` — it runs every render cycle. Cache
 the formatted string in your `Runtime`.
+
+## deleteHistoryMatch — react to the user's "delete this line" key
+
+When the user fires `Action.delete_history_match` (default `Ctrl+Shift+D`),
+the proxy calls every module's `deleteHistoryMatch` with the current
+line buffer content. Modules that store entries by content (`history`)
+implement this; modules that store entries by ID without exposing a
+content-based delete (`atuin`) skip it.
+
+```zig
+pub fn deleteHistoryMatch(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
+    // Remove every entry in your store whose content equals `line`.
+    // `line` is non-empty and the line state was certain when the
+    // user pressed the key — the proxy gates these conditions.
+    ...
+}
+```
+
+After dispatching, the proxy sends `\x15` (Ctrl+U) to the shell so
+the prompt clears, and flashes a transient message in the status bar.
 
 ## ctx.incognito — opt into stricter behavior
 

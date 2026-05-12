@@ -305,6 +305,53 @@ pub fn configure(comptime cfg: Config) type {
             pushEntry(rt, line) catch {};
         }
 
+        /// Remove every ring entry whose payload equals `line`, then
+        /// rewrite the file with what's left. Atomic via the
+        /// write-temp + rename trick so a crash leaves the original
+        /// in place. Best-effort: a file-write failure leaves the
+        /// in-memory ring filtered but the on-disk file untouched.
+        pub fn deleteHistoryMatch(rt: *Runtime, _: *m.Context, line: []const u8) m.Error!void {
+            if (line.len == 0) return;
+            // Filter the ring in place.
+            var i: usize = 0;
+            while (i < rt.entries.items.len) {
+                if (std.mem.eql(u8, rt.entries.items[i], line)) {
+                    const removed = rt.entries.orderedRemove(i);
+                    rt.allocator.free(removed);
+                    continue; // don't advance; the next item shifted into i
+                }
+                i += 1;
+            }
+            // Rewrite the file atomically.
+            rewriteFile(rt) catch {};
+        }
+
+        /// Write the current ring to disk via a temp + rename so a
+        /// crash or write failure can't corrupt the user's history.
+        fn rewriteFile(rt: *Runtime) !void {
+            if (rt.path.len == 0) return;
+
+            const tmp_path = try std.fmt.allocPrint(rt.allocator, "{s}.atty-tmp", .{rt.path});
+            defer rt.allocator.free(tmp_path);
+            const tmp_z = try rt.allocator.dupeZ(u8, tmp_path);
+            defer rt.allocator.free(tmp_z);
+            const path_z = try rt.allocator.dupeZ(u8, rt.path);
+            defer rt.allocator.free(path_z);
+
+            const fd = open(tmp_z.ptr, O_WRONLY | O_CREAT | 0o1000, FILE_MODE); // 0o1000 = O_TRUNC
+            if (fd < 0) return error.WriteFailed;
+            defer _ = close(fd);
+
+            var buf: [cfg.max_line + 64]u8 = undefined;
+            for (rt.entries.items) |entry| {
+                const out = formatHistoryLine(&buf, entry, rt.format, unixTs()) orelse continue;
+                _ = std.c.write(fd, out.ptr, out.len);
+            }
+
+            // rename(tmp, path) — atomic replacement on POSIX.
+            if (std.c.rename(tmp_z.ptr, path_z.ptr) != 0) return error.WriteFailed;
+        }
+
         pub fn provideGhostText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             if (!cfg.suggest) return null;
             if (ctx.line.uncertain) return null;
@@ -472,4 +519,69 @@ test "findSuggestion ignores entries equal to query (no useful trailing)" {
 
     try H.pushEntry(&rt, "ls");
     try testing.expectEqual(@as(?[]const u8, null), H.findSuggestion(&rt, "ls"));
+}
+
+test "deleteHistoryMatch removes every matching ring entry" {
+    const H = configure(.{});
+    var rt: H.Runtime = .{
+        .allocator = testing.allocator,
+        // Empty path → file write path is a no-op, ring is the
+        // only thing we test here.
+        .path = try testing.allocator.dupe(u8, ""),
+        .format = .plain,
+        .entries = .empty,
+    };
+    defer H.detach(&rt, std.Io.failing);
+
+    try H.pushEntry(&rt, "ls");
+    try H.pushEntry(&rt, "rm -rf /tmp/secret");
+    try H.pushEntry(&rt, "echo hi");
+    try H.pushEntry(&rt, "rm -rf /tmp/secret"); // duplicate
+    try H.pushEntry(&rt, "ls -la");
+
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var line: @import("../line_state.zig").LineState = .{};
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try H.deleteHistoryMatch(&rt, &ctx, "rm -rf /tmp/secret");
+
+    // Both duplicates gone, other entries preserved in order.
+    try testing.expectEqual(@as(usize, 3), rt.entries.items.len);
+    try testing.expectEqualStrings("ls", rt.entries.items[0]);
+    try testing.expectEqualStrings("echo hi", rt.entries.items[1]);
+    try testing.expectEqualStrings("ls -la", rt.entries.items[2]);
+}
+
+test "deleteHistoryMatch is a no-op for an empty query" {
+    const H = configure(.{});
+    var rt: H.Runtime = .{
+        .allocator = testing.allocator,
+        .path = try testing.allocator.dupe(u8, ""),
+        .format = .plain,
+        .entries = .empty,
+    };
+    defer H.detach(&rt, std.Io.failing);
+
+    try H.pushEntry(&rt, "ls");
+
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var line: @import("../line_state.zig").LineState = .{};
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try H.deleteHistoryMatch(&rt, &ctx, "");
+    try testing.expectEqual(@as(usize, 1), rt.entries.items.len);
 }

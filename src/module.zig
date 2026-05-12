@@ -11,6 +11,7 @@
 //!     pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 //!     pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
 //!     pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
+//!     pub fn   deleteHistoryMatch(rt: *Runtime, ctx: *Context, line: []const u8) !void
 //!     pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub const name: []const u8                          // optional, for logs

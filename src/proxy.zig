@@ -274,6 +274,34 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // 🔒 prefix appears/disappears immediately.
                             if (statusbar) |*sb| sb.last_valid = false;
                         },
+                        .delete_history_match => {
+                            const current = line_state.current();
+                            if (!line_state.uncertain and current.len > 0) {
+                                // Fire the deletion across modules that
+                                // implement the hook.
+                                D.dispatchDeleteHistoryMatch(&runtimes, &ctx, current) catch {};
+                                // Clear the shell prompt: send Ctrl+U
+                                // (NAK / kill-line). Bash, zsh, dash
+                                // and friends all bind it to
+                                // unix-line-discard. We also reset
+                                // our own line model.
+                                _ = std.c.write(pty.master, "\x15", 1);
+                                line_state.reset();
+                                if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
+                                // Flash a status-bar message that
+                                // auto-fades after 3 s.
+                                if (statusbar) |*sb| {
+                                    var buf: [128]u8 = undefined;
+                                    const msg = std.fmt.bufPrint(
+                                        &buf,
+                                        "🗑 deleted: {s}",
+                                        .{current},
+                                    ) catch buf[0..0];
+                                    sb.setTransient(msg, 3_000);
+                                }
+                            }
+                            swallow_after_binding = true;
+                        },
                     }
                     break;
                 }
