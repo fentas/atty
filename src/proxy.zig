@@ -240,14 +240,27 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     if (!std.mem.eql(u8, input, bind.bytes)) continue;
                     switch (bind.action) {
                         .ghost_accept => {
-                            if (ghost.visible and
-                                !line_state.uncertain and
-                                ghost.rendered.items.len > 0 and
-                                ghost.rendered.items.len <= accept_buf.len)
-                            {
-                                const accept_n = ghost.rendered.items.len;
-                                @memcpy(accept_buf[0..accept_n], ghost.rendered.items);
-                                input = accept_buf[0..accept_n];
+                            // Don't gate on `ghost.visible` — the
+                            // flicker fix moved overlay painting to
+                            // the master-output path, so fast typers
+                            // can press the accept key before the
+                            // ghost has been visibly rendered. We
+                            // ask the module chain for a fresh
+                            // suggestion instead; if it's there, we
+                            // accept it regardless of whether it's
+                            // been painted yet.
+                            //
+                            // gatherGhostText returns the *trailing*
+                            // portion (what would be painted after
+                            // the cursor) — i.e. the bytes we want
+                            // to inject. Use it directly.
+                            if (!line_state.uncertain) {
+                                if (D.gatherGhostText(&runtimes, &ctx) catch null) |trailing| {
+                                    if (trailing.len > 0 and trailing.len <= accept_buf.len) {
+                                        @memcpy(accept_buf[0..trailing.len], trailing);
+                                        input = accept_buf[0..trailing.len];
+                                    }
+                                }
                             }
                         },
                         .incognito_toggle => {

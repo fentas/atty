@@ -221,6 +221,46 @@ test "CSI escape marks uncertain" {
     try std.testing.expect(l.uncertain);
 }
 
+test "Tab marks uncertain (shell completion changes the line behind atty's back)" {
+    // Regression-document: Tab is in the "we don't model this" bucket
+    // because the shell does completion and atty has no way to follow
+    // what the shell wrote. The ghost overlay stays suppressed until
+    // the line resets. If a future change unsuppresses this without
+    // first growing an output-side tracker (OSC 133 or full VT
+    // grid), the test will catch it.
+    var l = LineState{};
+    _ = l.applyInput("ec");
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("\t");
+    try std.testing.expect(l.uncertain);
+}
+
+test "backspace to empty clears uncertain (recovery from arrow/Tab)" {
+    // After the user gets stuck in uncertain mode (e.g. accidentally
+    // pressed an arrow), they should be able to recover by holding
+    // backspace until the buffer is empty — the rationale being that
+    // an empty buffer can't be wrong about its content.
+    var l = LineState{};
+    _ = l.applyInput("ls");
+    _ = l.applyInput("\x1B[A"); // arrow → uncertain
+    try std.testing.expect(l.uncertain);
+    _ = l.applyInput("\x7F\x7F"); // backspace twice → len reaches 0
+    try std.testing.expect(l.len == 0);
+    try std.testing.expect(!l.uncertain);
+}
+
+test "ctrl-u clears uncertain when killing the line" {
+    // Same motivation as backspace-to-empty: a deliberate kill-line
+    // also means "I'm starting fresh".
+    var l = LineState{};
+    _ = l.applyInput("ls");
+    _ = l.applyInput("\t"); // tab → uncertain
+    try std.testing.expect(l.uncertain);
+    _ = l.applyInput("\x15"); // ctrl-u
+    try std.testing.expect(l.len == 0);
+    try std.testing.expect(!l.uncertain);
+}
+
 test "generation increments on real changes only" {
     var l = LineState{};
     const g0 = l.generation;
