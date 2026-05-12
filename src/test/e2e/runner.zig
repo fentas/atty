@@ -185,8 +185,73 @@ const Result = union(enum) {
     fail: []const u8,
 };
 
+/// Per-scenario binary selection. If `<scenario>/config.zig` exists,
+/// build atty with that config into a scenario-private prefix and
+/// return its path. Otherwise return the default binary.
+///
+/// Extra build flags (e.g. `-Dtarget=x86_64-linux-gnu` for hosts where
+/// the native crt1 doesn't link) flow through `ATTY_E2E_BUILD_FLAGS`,
+/// space-separated. Zig's own build cache handles "did the inputs
+/// change" — repeated runs are no-ops when nothing changed.
+fn buildScenarioBin(io: std.Io, gpa: Allocator, sc: Scenario, default_bin: []const u8) ![]const u8 {
+    var cwd = std.Io.Dir.cwd();
+    const cfg_path = try std.fmt.allocPrint(gpa, "{s}/config.zig", .{sc.dir});
+    defer gpa.free(cfg_path);
+
+    cwd.access(io, cfg_path, .{}) catch return try gpa.dupe(u8, default_bin);
+
+    const prefix = try std.fmt.allocPrint(gpa, ".zig-cache/e2e/{s}", .{sc.name});
+    defer gpa.free(prefix);
+
+    const dconfig = try std.fmt.allocPrint(gpa, "-Dconfig={s}", .{cfg_path});
+    defer gpa.free(dconfig);
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, "zig");
+    try argv.append(gpa, "build");
+    try argv.append(gpa, "install");
+    try argv.append(gpa, "-Doptimize=ReleaseSafe");
+    try argv.append(gpa, dconfig);
+    try argv.append(gpa, "--prefix");
+    try argv.append(gpa, prefix);
+
+    if (getenv("ATTY_E2E_BUILD_FLAGS")) |raw| {
+        var it = std.mem.tokenizeAny(u8, std.mem.sliceTo(raw, 0), " \t");
+        while (it.next()) |tok| try argv.append(gpa, tok);
+    }
+
+    const result = std.process.run(gpa, io, .{
+        .argv = argv.items,
+        .stdout_limit = .limited(1 << 16),
+    }) catch return error.ScenarioBuildFailed;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code != 0) {
+            std.debug.print("\n[e2e] {s}: scenario build failed (exit {d}):\n{s}\n", .{ sc.name, code, result.stderr });
+            return error.ScenarioBuildFailed;
+        },
+        else => {
+            std.debug.print("\n[e2e] {s}: scenario build terminated abnormally\n", .{sc.name});
+            return error.ScenarioBuildFailed;
+        },
+    }
+
+    return try std.fmt.allocPrint(gpa, "{s}/bin/atty", .{prefix});
+}
+
 fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, update: bool) !Result {
     var cwd = std.Io.Dir.cwd();
+
+    // Per-scenario config support: if <scenario>/config.zig exists, we
+    // rebuild atty with that config into a scenario-private prefix.
+    // The returned path is either the default bin (no per-scenario
+    // config) or our freshly-built one.
+    const scenario_bin = try buildScenarioBin(io, gpa, sc, atty_bin);
+    defer gpa.free(scenario_bin);
+
     const source = try cwd.readFileAlloc(io, sc.script_path, gpa, .limited(1 << 20));
     defer gpa.free(source);
 
@@ -234,7 +299,7 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     };
 
     var session = try harness.spawn(gpa, .{
-        .atty_bin = atty_bin,
+        .atty_bin = scenario_bin,
         .argv = spawn_argv,
         .cols = cols,
         .rows = rows,

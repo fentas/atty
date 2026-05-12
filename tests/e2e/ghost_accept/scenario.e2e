@@ -1,0 +1,49 @@
+# ghost_accept — verify the ghost overlay renders dim AND that the
+# bound key (Right) consumes the keystroke and forwards the suggestion
+# bytes to the shell.
+#
+# Flow:
+#   1. Record a unique command ("echo unique-1234") so history's ring
+#      has something to suggest from.
+#   2. Type "echo u" — history.provideGhostText returns "nique-1234"
+#      and the proxy paints it dim after the cursor.
+#   3. snapshot ghost_visible — grid.txt has "$ echo unique-1234"
+#      (the ghost), grid.sgr has a dim span on the trailing cells.
+#   4. Press Right — config.keymap.bindings maps it to ghost_accept,
+#      which substitutes the keystroke with the suggestion bytes.
+#      Shell echoes them; the line becomes the full command.
+#   5. snapshot accepted — grid.txt unchanged, grid.sgr empty (no
+#      more dim cells; what was a ghost is now real shell output).
+#
+# History pollution from prior runs is fine: findSuggestion walks
+# newest-first and the most-recent entry is always the one we just
+# recorded.
+
+cols 60
+rows 6
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Record an entry so the history ring has a match.
+type "echo unique-1234\r"
+wait_for "unique-1234"
+sleep 200
+
+# Type a prefix; let the ghost render.
+type "echo u"
+sleep 400
+snapshot ghost_visible
+
+# Right-arrow should be bound to ghost_accept.
+key Right
+sleep 300
+snapshot accepted
+
+key Enter
+sleep 200
+
+# Cleanly exit bash so exit_code can read the child's status.
+type "exit\r"
+exit_code 0

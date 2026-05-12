@@ -1,0 +1,27 @@
+# statusbar_visible — regression for the "prompt lands in the bar" bug.
+#
+# With statusbar.enabled = true (per ./config.zig), the proxy reserves
+# the bottom 2 rows via DECSTBM. After activate, the cursor MUST sit
+# inside the scroll region (row 1), not in the reserved area — or the
+# shell's first prompt writes into the bar's row and the next render
+# overwrites it.
+#
+# Snapshot expectations:
+#   row 1     →  "$ " (the forced PS1 from the harness)
+#   rows 2-7  →  blank
+#   row 8     →  blank (reserved padding)
+#   row 9     →  blank (reserved padding; wait — only one)
+#
+# Actually we reserve 2 rows: row N-1 = blank padding, row N = "atty".
+# So with rows=8: row 7 blank, row 8 "atty". Row 1 should have "$ ".
+
+cols 60
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 500
+snapshot rendered
+type "exit\r"
+exit_code 0
