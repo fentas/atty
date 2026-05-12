@@ -18,6 +18,7 @@ docs/vendor/
 .DS_Store
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
@@ -29,6 +30,9 @@ docs/vendor/
 # ---- Test / coverage tmp ----------------------------------------------------
 *.log
 coverage/
+# e2e harness writes `actual/` next to `golden/` when a snapshot diff
+# fails, as diagnostic output. Not tracked.
+/tests/e2e/*/actual/
 
 # ---- User config -------------------------------------------------------------
 # src/config.zig is per-user; src/config.def.zig is the committed template.
