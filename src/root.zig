@@ -17,6 +17,7 @@ pub const keymap = @import("keymap.zig");
 pub const style = @import("style.zig");
 pub const Style = style.Style;
 pub const statusbar = @import("statusbar.zig");
+pub const status_text = @import("status_text.zig");
 
 /// Config types — every subsystem is a struct, so user overrides
 /// annotate with these and only spell out the fields they care

@@ -34,6 +34,7 @@ const Ghost = @import("ghost.zig").Ghost;
 const StatusBar = @import("statusbar.zig").StatusBar;
 const ansi = @import("ansi.zig");
 const style_mod = @import("style.zig");
+const status_text = @import("status_text.zig");
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -480,43 +481,30 @@ fn renderStatus(
 ) !void {
     if (!ctx.is_tty) return;
 
-    // Assemble text into a scratch buffer. First-segment tracking lets
-    // us insert " │ " separators only between non-empty segments.
-    var text_buf: [256]u8 = undefined;
-    var tw: std.Io.Writer = .fixed(&text_buf);
-    var any: bool = false;
-    // The incognito segment gets its own SGR — muted red by default —
-    // so it pops out of the bar's overall style. After the segment we
-    // emit sgr_reset and re-apply the bar's `statusbar_style` so the
-    // subsequent segments paint in the normal colour.
-    if (incognito) {
-        var seg_buf: [96]u8 = undefined;
-        var sw: std.Io.Writer = .fixed(&seg_buf);
-        sw.print("{f}\u{1F512} incognito{s}{f}", .{
-            config.statusbar.incognito_style,
-            style_mod.reset,
-            config.statusbar.style,
-        }) catch {};
-        writeSegment(&tw, &any, sw.buffered());
-    }
-    if (config.statusbar.base_text.len > 0) writeSegment(&tw, &any, config.statusbar.base_text);
-
+    // First gather the module contributions into a scratch buffer.
     var mod_buf: [192]u8 = undefined;
     var mw: std.Io.Writer = .fixed(&mod_buf);
     D.gatherStatus(rts, ctx, &mw) catch {};
-    if (mw.end > 0) writeSegment(&tw, &any, mod_buf[0..mw.end]);
+
+    // Then ask the pure assembler to join incognito + base + modules
+    // with " │ " separators, skipping empty segments. Pure logic +
+    // own tests live in src/status_text.zig.
+    var text_buf: [256]u8 = undefined;
+    var tw: std.Io.Writer = .fixed(&text_buf);
+    status_text.assemble(.{
+        .w = &tw,
+        .incognito = incognito,
+        .incognito_style = config.statusbar.incognito_style,
+        .bar_style = config.statusbar.style,
+        .base_text = config.statusbar.base_text,
+        .module_text = mod_buf[0..mw.end],
+    }) catch {};
 
     sb.setText(text_buf[0..tw.end]);
 
     var w: std.Io.Writer = .fixed(out_buf);
     sb.render(&w) catch return;
     if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
-}
-
-fn writeSegment(w: *std.Io.Writer, any: *bool, text: []const u8) void {
-    if (any.*) w.writeAll(" \u{2502} ") catch return;
-    w.writeAll(text) catch return;
-    any.* = true;
 }
 
 fn clearGhost(ghost: *Ghost, out_buf: []u8) !void {
