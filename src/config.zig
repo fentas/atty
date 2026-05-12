@@ -60,20 +60,20 @@ pub const tick_interval_ms: i32 = 100;
 /// `action` runs instead of the keystroke flowing through to the
 /// shell.
 ///
-/// Common byte sequences:
+/// Use `atty.keymap.key("Right")` rather than raw byte sequences —
+/// the helper resolves at compile time, so typos error the build.
+/// Supported names: arrows + nav (`Right`/`Left`/`Up`/`Down`/`Home`/
+/// `End`/`PageUp`/`PageDown`/`Insert`/`Delete`), `Tab`/`Enter`/
+/// `Backspace`/`Esc`, xterm CSI-1 modifier combos (`Ctrl+Right`,
+/// `Shift+End`, `Ctrl+Shift+Up`, `Ctrl+Alt+Left`, …), `Ctrl+<letter>`,
+/// `Alt+<char>`, `F1`–`F12`. See src/keymap.zig.
 ///
-///   "\x1b[C"     right-arrow
-///   "\x1b[F"     End
-///   "\x1bOC"     right-arrow       (terminals in application-cursor mode)
-///   "\x1b[1;5C"  Ctrl-Right-arrow  (xterm-style)
-///   "\x1b[Z"     Shift-Tab
-///   "\x06"       Ctrl-F            (Emacs-style end-of-line)
-///   "\t"         Tab               (warning: clobbers shell completion)
-///
-/// Note: Ctrl-Tab is not a standard terminal sequence — most terminals
-/// don't emit anything distinct for it. Use Ctrl-F or right-arrow.
+/// Super/Win/Cmd has no portable terminal sequence; `Ctrl+Tab` etc.
+/// is indistinguishable from `Tab` on most terminals. For exotic
+/// sequences (kitty keyboard protocol) the `.bytes` field still
+/// accepts raw byte literals.
 pub const bindings: []const atty.keymap.Binding = &.{
-    .{ .bytes = "\x1b[C", .action = .ghost_accept }, // right-arrow (fish, zsh-autosuggestions)
-    .{ .bytes = "\x1b[F", .action = .ghost_accept }, // End
-    .{ .bytes = "\x06", .action = .ghost_accept }, // Ctrl-F
+    .{ .bytes = atty.keymap.key("Right"), .action = .ghost_accept }, // fish, zsh-autosuggestions
+    .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept }, // Emacs end-of-line
 };

@@ -39,10 +39,13 @@ worker-thread plumbing vanishes from the binary.
   `rm -rf /`, `dd if=…`, `… | sh`, etc. Confirm with a second Enter.
 - **Atuin module** — async worker thread, prefix-matched history
   lookups via the `atuin` CLI, dim/italic ghost text after the
-  cursor with TTL-driven fadeout.
-- **Module framework** — write your own. Five optional hooks:
-  `onInput`, `onOutput`, `provideGhostText`, `onTick`, plus the
-  `attach`/`detach` lifecycle.
+  cursor, recording on Enter, detached-thread `atuin sync`.
+- **Keymap** — dwm-style `bindings[]` of `{ bytes, action }` pairs;
+  ships with right-arrow / End / Ctrl-F bound to `ghost_accept` so
+  fish-style suggestions can be accepted with one keypress.
+- **Module framework** — write your own. Six optional hooks:
+  `onInput`, `onOutput`, `provideGhostText`, `onTick`, `onLineCommit`,
+  plus the `attach`/`detach` lifecycle.
 
 ## Quickstart  {#quickstart}
 
@@ -116,14 +119,25 @@ pub const Guardrail = atty.modules.guardrail.configure(.{
 });
 
 pub const Atuin = atty.modules.atuin.configure(.{
-    .backend           = .subprocess,
-    .search_mode       = .prefix,
-    .filter_mode       = .global,
-    .suggestion_ttl_ms = 5_000,
+    .backend             = .subprocess,
+    .search_mode         = .prefix,
+    .filter_mode         = .global,
+    .suggestion_ttl_ms   = 5_000,
+    .record              = true,         // record on Enter via `atuin history start`
+    .sync_after_records  = 10,           // 0 = disable count-based sync
+    .sync_interval_ms    = 60_000,       // 0 = disable time-based sync
 });
 
 pub const modules = .{ Guardrail, Atuin };   // order matters
 pub const tick_interval_ms: i32 = 100;
+
+// dwm-style key bindings. Use atty.keymap.key("Right") for readability;
+// the helper resolves at compile time, so typos break the build.
+pub const bindings: []const atty.keymap.Binding = &.{
+    .{ .bytes = atty.keymap.key("Right"),  .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("End"),    .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
+};
 ```
 
 Want your config tracked in dotfiles? Build with `-Dconfig=/path/to/mine.zig`
@@ -141,7 +155,8 @@ Want your config tracked in dotfiles? Build with `-Dconfig=/path/to/mine.zig`
 
 ## Status
 
-`v0.1` — 33 unit tests, 1 integration test, all green. PTY core
-production-ready; Atuin subprocess backend works today; daemon socket
-stub waiting on upstream IPC stabilisation. License pending. Bugs
-welcome at [github.com/fentas/atty](https://github.com/fentas/atty).
+`v0.1` — unit tests, integration test, e2e scenario harness with
+visual grid diff, all green. PTY core production-ready; Atuin
+subprocess backend records and syncs today; daemon socket stub
+waiting on upstream IPC stabilisation. MIT-licensed. Bugs welcome at
+[github.com/fentas/atty](https://github.com/fentas/atty).

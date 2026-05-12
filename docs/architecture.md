@@ -15,17 +15,19 @@ src/
 ├── proxy.zig                 # poll() loop, signal handling, ghost-text scheduling
 ├── module.zig                # shared types: Action, Context, Error
 ├── dispatch.zig              # Dispatcher(modules) — comptime walker
+├── keymap.zig                # Action enum + Binding struct for bindings[]
 ├── pty.zig                   # posix_openpt / grantpt / unlockpt / fork+exec child
 ├── terminal.zig              # cfmakeraw-equivalent termios guard for our stdin
 ├── line_state.zig            # best-effort user-input buffer model
 ├── ansi.zig                  # SGR/CSI helpers + escape stripping
 ├── ghost.zig                 # ghost-text overlay state machine
 ├── modules/
-│   ├── atuin.zig             # async Atuin module
+│   ├── atuin.zig             # async Atuin module (suggest + record + sync)
 │   └── guardrail.zig         # dangerous-command confirmation module
 ├── unit_tests.zig            # entry for `zig build test`
 └── test/
-    └── integration.zig       # PTY round-trip tests (`zig build itest`)
+    ├── integration.zig       # PTY round-trip tests (`zig build itest`)
+    └── e2e/                  # scripted PTY scenarios + VT grid diff (`zig build e2e`)
 ```
 
 ## Comptime composition
@@ -71,10 +73,21 @@ values) for two reasons:
                                        │
                                        ▼
                     ┌──────────────────────────────────────┐
+                    │  Keymap match (bindings[])            │
+                    │  ───────────────────────              │
+                    │  bytes-equal? → run Action:           │
+                    │    ghost_accept → replace bytes with  │
+                    │                   current suggestion  │
+                    └──────────────────────────────────────┘
+                                       │
+                                       ▼
+                            line_state.applyInput
+                                       │
+                                       ▼
+                    ┌──────────────────────────────────────┐
                     │  Dispatcher.dispatchInput             │
                     │  ───────────────────────              │
                     │  guardrail.onInput → atuin.onInput    │
-                    │                                       │
                     │  short-circuits on .swallow           │
                     └──────────────────────────────────────┘
                                        │
@@ -84,6 +97,13 @@ values) for two reasons:
               │ Action.swallow                                  │
               │   → do nothing (keystroke eaten)                │
               └─────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+                    ┌──────────────────────────────────────┐
+                    │  if Enter committed a certain line   │
+                    │  dispatchLineCommit(line)            │
+                    │  (atuin records, history appends, …) │
+                    └──────────────────────────────────────┘
 
       (shell stdout) ◀────  ┌──────────────────────────┐ ◀── read(master)
                             │ dispatchOutput            │
@@ -194,26 +214,83 @@ an `uncertain` flag. While uncertain, providers suppress ghost text
 until the next newline. **Stale suggestions are worse than no
 suggestions** — this is the safety invariant.
 
+Recovery: `uncertain` clears on Enter, Ctrl-C, Ctrl-D, Ctrl-G (line
+reset), Ctrl-U (kill line), Ctrl-W (kill word, when it empties the
+buffer), and on Backspace that brings the buffer to empty. The
+principle: when the buffer is empty we can't be wrong about its
+content, so we lift the gate. Arrow-key history navigation does *not*
+self-recover — the user has to explicitly clear the line.
+
+## Keymap
+
+`src/keymap.zig` defines a closed `Action` enum and a `Binding` struct
+(`{ bytes, action }`). `src/config.zig` exposes `bindings: []const
+Binding` — the dwm `keys[]` equivalent. The proxy iterates the array
+once per stdin read; the first byte-exact match wins.
+
+```zig
+pub const bindings: []const atty.keymap.Binding = &.{
+    .{ .bytes = atty.keymap.key("Right"),  .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("End"),    .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
+};
+```
+
+`atty.keymap.key(name)` is a comptime-only string→bytes resolver — it
+unfolds to the same `[]const u8` constant that the proxy compares
+against (`"\x1b[C"` for `"Right"` and so on). Typos error at compile
+time, not runtime.
+
+Recognised names include arrows + nav (`Right`, `Home`, …),
+modifier-composed forms in the xterm CSI-1 family (`Ctrl+Right`,
+`Shift+End`, `Ctrl+Shift+Up`, `Ctrl+Alt+Left`), `Ctrl+<letter>`,
+`Alt+<char>`, `F1`–`F12`, `Tab`, `Shift+Tab`, `Enter`, `Backspace`,
+`Esc`. Things terminals can't portably encode — `Super+…` /
+`Win+…` / `Cmd+…`, `Ctrl+Tab`, multi-key chords (Emacs-style
+`Ctrl+X Ctrl+S`) — are not supported. For terminals that speak the
+kitty keyboard protocol and emit something distinct, drop in the raw
+byte literal instead.
+
+The match must happen *before* `line_state.applyInput`, because a CSI
+sequence like `\x1b[C` would otherwise flip the line into `uncertain`
+state and the ghost would clear before we got a chance to consume it.
+
+`ghost_accept` substitutes the keystroke bytes with the current
+ghost-overlay text. The rest of the loop then treats them as if the
+user had typed them: shell sees normal input, modules see a normal
+`onInput`, line state grows by the suggestion length. Adding a new
+action is one enum variant + one switch arm; no new global lists.
+
 ## Concurrency
 
 The proxy is single-threaded except that each module may own a
 background worker thread.
 
-The Atuin module uses a one-slot mailbox:
+The Atuin module's worker handles three jobs through one mailbox:
 
 ```
 main thread          shared (mutex)              worker thread
 ───────────          ──────────────              ─────────────
-on keystroke ─────▶  req_buf  ───────────────▶  read latest
+onInput      ─────▶  req_buf  ───────────────▶  read latest
                      req_gen ↑                   run lookup
                                                  res_buf  ◀──── write result
                      res_gen ↑
 provideGhostText ◀── read res_buf
+
+onLineCommit ─────▶  rec_buf  ───────────────▶  read pending
+                     rec_pending ↑               atuin history start
+                                                 (then maybe atuin sync
+                                                  on a detached thread)
 ```
 
 Coalescing falls out naturally: each new keystroke overwrites the
 pending request, so the worker only ever sees the most recent state.
 No queue, no backpressure.
+
+`atuin sync` runs on a *detached* `std.Thread.spawn` so the worker
+never blocks on network round-trips — without that, every record
+would stall the next ~5–30 seconds of queries and the ghost would
+appear stuck.
 
 ## Future work
 

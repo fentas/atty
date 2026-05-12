@@ -147,14 +147,25 @@ pub const Guardrail = atty.modules.guardrail.configure(.{
 });
 
 pub const Atuin = atty.modules.atuin.configure(.{
-    .backend           = .subprocess,
-    .search_mode       = .prefix,
-    .filter_mode       = .global,
-    .suggestion_ttl_ms = 5_000,
+    .backend            = .subprocess,
+    .search_mode        = .prefix,
+    .filter_mode        = .global,
+    .suggestion_ttl_ms  = 5_000,
+    .record             = true,        // atuin history start <cmd> on Enter
+    .sync_after_records = 10,
+    .sync_interval_ms   = 60_000,
 });
 
 pub const modules          = .{ Guardrail, Atuin };  // order = priority
 pub const tick_interval_ms : i32 = 100;
+
+// dwm-style key bindings. atty.keymap.key("Right") resolves to its
+// byte sequence at compile time — typos fail the build.
+pub const bindings: []const atty.keymap.Binding = &.{
+    .{ .bytes = atty.keymap.key("Right"),  .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("End"),    .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
+};
 ```
 
 To track a config outside the repo:
@@ -177,6 +188,7 @@ A module is a Zig type — typically returned from `configure(comptime cfg) type
 | `detach(rt)`         | once at shutdown                           | no       |
 | `onInput`            | every keystroke from the user              | **yes**  |
 | `onOutput`           | every chunk from the shell                 | **yes**  |
+| `onLineCommit`       | Enter pressed on a non-empty, certain line | no       |
 | `provideGhostText`   | when atty wants to render an overlay       | yes      |
 | `onTick`             | on poll() timeout (default 100 ms)         | no       |
 
