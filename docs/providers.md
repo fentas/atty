@@ -87,6 +87,13 @@ pub const Atuin = atty.modules.atuin.configure(.{
   selected, the socket path is comptime-eliminated from the binary,
   and vice versa.
 
+### Status bar segment
+
+Atuin contributes `"atuin"` as its `statusText` segment (always-on
+label). Future iterations will surface queued-record count and
+last-sync age. The segment is omitted entirely if the user has
+disabled the status bar (`statusbar_enabled = false`).
+
 ### Performance
 
 - `onInput` does one `memcpy` + a cv-signal, no I/O. Zero allocations.

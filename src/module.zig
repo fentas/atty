@@ -59,4 +59,12 @@ pub const Context = struct {
     /// True when stdin/stdout are real TTYs. Modules can use this to
     /// skip work in non-interactive runs.
     is_tty: bool,
+    /// True while the user has toggled incognito mode on. The proxy
+    /// already gates `dispatchLineCommit` for the recording step
+    /// (atuin / history skip writes). This field exists so a module
+    /// can opt in to *stricter* behavior if it wants — e.g. suppress
+    /// its own suggestions while typing a secret. Default behavior
+    /// (ghost text keeps working) matches what most fish/zsh users
+    /// expect; incognito is about not *recording*, not about hiding.
+    incognito: bool = false,
 };

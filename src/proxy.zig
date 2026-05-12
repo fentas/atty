@@ -155,6 +155,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         .line = &line_state,
         .scratch = &scratch,
         .is_tty = args.is_tty,
+        .incognito = false,
     };
 
     var pfds = [_]posix.pollfd{
@@ -170,6 +171,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     //     `out_buf` via the Writer, then flushed in one std.c.write.
     //   • Shell output bypasses the writer and goes straight to STDOUT.
     var out_buf: [buf_size]u8 = undefined;
+
+    // --- Kitty keyboard protocol (push flag 1 = disambiguate) ------------
+    // Lets terminals that support it send distinct CSI sequences for
+    // keys that would otherwise collide with control bytes
+    // (Ctrl+Shift+I vs Tab, Ctrl+Shift+M vs Enter, …). Terminals that
+    // don't understand the CSI just ignore it.
+    if (args.is_tty and config.enable_kitty_keyboard) {
+        _ = std.c.write(posix.STDOUT_FILENO, "\x1B[>1u", 5);
+    }
+    defer if (args.is_tty and config.enable_kitty_keyboard) {
+        _ = std.c.write(posix.STDOUT_FILENO, "\x1B[<u", 4);
+    };
+
+    // --- Incognito state -------------------------------------------------
+    var incognito_on: bool = false;
 
     // Emit the initial DECSTBM + first paint of the status bar (after
     // RawMode + child spawn, before the loop runs).
@@ -199,7 +215,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             last_tick_ms = now;
             D.dispatchTick(&runtimes, &ctx, elapsed) catch {};
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
-            if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf) catch {};
+            if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             continue;
         }
 
@@ -217,6 +233,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // because a CSI like `ESC [ C` would otherwise mark
                 // the line uncertain and we'd lose the chance to act.
                 var accept_buf: [4096]u8 = undefined;
+                var swallow_after_binding = false;
                 for (config.bindings) |bind| {
                     if (bind.bytes.len == 0) continue;
                     if (!std.mem.eql(u8, input, bind.bytes)) continue;
@@ -232,8 +249,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 input = accept_buf[0..accept_n];
                             }
                         },
+                        .incognito_toggle => {
+                            incognito_on = !incognito_on;
+                            ctx.incognito = incognito_on;
+                            const toast = if (incognito_on)
+                                "\r\natty: incognito on\r\n"
+                            else
+                                "\r\natty: incognito off\r\n";
+                            _ = std.c.write(posix.STDERR_FILENO, toast.ptr, toast.len);
+                            // Don't forward the binding bytes to the shell.
+                            swallow_after_binding = true;
+                            // Force the status bar to repaint.
+                            if (statusbar) |*sb| sb.last_valid = false;
+                        },
                     }
                     break;
+                }
+                if (swallow_after_binding) {
+                    if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    continue;
                 }
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
@@ -247,15 +281,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 // Fire onLineCommit if Enter was pressed during this read
-                // and the pre-Enter line was non-empty and certain.
+                // and the pre-Enter line was non-empty and certain. Skip
+                // when incognito is on, or when the line starts with a
+                // space (bash HISTCONTROL=ignorespace convention).
                 if (line_state.lastCommitted()) |committed| {
-                    if (!line_state.committed_was_uncertain)
+                    const leading_space = committed.len > 0 and committed[0] == ' ';
+                    if (!line_state.committed_was_uncertain and
+                        !incognito_on and
+                        !leading_space)
+                    {
                         D.dispatchLineCommit(&runtimes, &ctx, committed) catch {};
+                    }
                     line_state.clearLastCommitted();
                 }
 
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
-                if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf) catch {};
+                if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             }
         }
 
@@ -274,7 +315,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     // Shell output may have scrolled or overwritten our
                     // reserved row — force a repaint.
                     sb.last_valid = false;
-                    renderStatus(&runtimes, &ctx, sb, &out_buf) catch {};
+                    renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                 }
             } else if (read_n == 0) {
                 child_alive = false;
@@ -371,26 +412,41 @@ fn renderGhost(rts: *D.Runtimes, ctx: *module.Context, ghost: *Ghost, out_buf: [
 
 /// Collect modules' status-text segments + the configured base text,
 /// paint into the reserved bottom row. Idempotent — no bytes emitted
-/// if the assembled text matches the last paint.
+/// if the assembled text matches the last paint. When `incognito` is
+/// true, prepends a 🔒 segment.
 fn renderStatus(
     rts: *D.Runtimes,
     ctx: *module.Context,
     sb: *StatusBar,
     out_buf: []u8,
+    incognito: bool,
 ) !void {
     if (!ctx.is_tty) return;
 
-    // Assemble text in a scratch buffer.
+    // Assemble text into a scratch buffer. First-segment tracking lets
+    // us insert " │ " separators only between non-empty segments.
     var text_buf: [256]u8 = undefined;
     var tw: std.Io.Writer = .fixed(&text_buf);
-    if (config.statusbar_base_text.len > 0) tw.writeAll(config.statusbar_base_text) catch {};
-    if (config.statusbar_base_text.len > 0) tw.writeAll(" │ ") catch {};
-    D.gatherStatus(rts, ctx, &tw) catch {};
+    var any: bool = false;
+    if (incognito) writeSegment(&tw, &any, "\u{1F512} incognito");
+    if (config.statusbar_base_text.len > 0) writeSegment(&tw, &any, config.statusbar_base_text);
+
+    var mod_buf: [192]u8 = undefined;
+    var mw: std.Io.Writer = .fixed(&mod_buf);
+    D.gatherStatus(rts, ctx, &mw) catch {};
+    if (mw.end > 0) writeSegment(&tw, &any, mod_buf[0..mw.end]);
+
     sb.setText(text_buf[0..tw.end]);
 
     var w: std.Io.Writer = .fixed(out_buf);
     sb.render(&w) catch return;
     if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+}
+
+fn writeSegment(w: *std.Io.Writer, any: *bool, text: []const u8) void {
+    if (any.*) w.writeAll(" \u{2502} ") catch return;
+    w.writeAll(text) catch return;
+    any.* = true;
 }
 
 fn clearGhost(ghost: *Ghost, out_buf: []u8) !void {

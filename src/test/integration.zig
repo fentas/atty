@@ -69,3 +69,42 @@ test "PTY round-trips bytes through /bin/echo" {
 
     try std.testing.expect(std.mem.indexOf(u8, collected.items, "hello-from-pty") != null);
 }
+
+test "StatusBar activate emits DECSTBM and render lays text on the last row" {
+    const StatusBar = atty.statusbar.StatusBar;
+    const Style = atty.Style;
+
+    var bar = StatusBar.init(24, 80, 2, Style{ .dim = true });
+    bar.setText("atty | atuin");
+
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try bar.activate(&w);
+    try bar.render(&w);
+    const out = buf[0..w.end];
+
+    // DECSTBM: scroll bounded to rows 1..22 (24 - 2 reserved).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[1;22r") != null);
+    // CUP to last row (24), column 1, before painting.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[24;1H") != null);
+    // Dim SGR is emitted from the Style.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[2m") != null);
+    // The actual text.
+    try std.testing.expect(std.mem.indexOf(u8, out, "atty | atuin") != null);
+}
+
+test "StatusBar deactivate clears reserved rows and resets scroll" {
+    const StatusBar = atty.statusbar.StatusBar;
+    var bar = StatusBar.init(10, 40, 2, .{});
+
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try bar.deactivate(&w);
+    const out = buf[0..w.end];
+
+    // Clears rows 9 and 10 (the two reserved at the bottom).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[9;1H\x1B[K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[10;1H\x1B[K") != null);
+    // Resets the scroll region.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1B[r") != null);
+}

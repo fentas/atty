@@ -39,13 +39,23 @@ pub const ghost_style: atty.Style = atty.style.presets.muted;
 
 // ───── Key bindings ───────────────────────────────────────────────────────
 
-/// Right-arrow, End, and Ctrl+F all accept the ghost suggestion —
-/// covering the conventions of fish, zsh-autosuggestions, and Emacs.
+/// Right-arrow, End, and Ctrl+F accept the ghost suggestion; Ctrl+Shift+I
+/// toggles incognito mode (requires `enable_kitty_keyboard` so the
+/// terminal sends a distinct sequence rather than collapsing to Tab).
 pub const bindings: []const atty.keymap.Binding = &.{
     .{ .bytes = atty.keymap.key("Right"), .action = .ghost_accept },
     .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
     .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
 };
+
+/// Push the kitty keyboard protocol's `disambiguate` flag on startup
+/// (and pop it on exit). Lets terminals that support it (Ghostty,
+/// kitty, foot, WezTerm, …) emit distinct sequences for Ctrl+Shift+
+/// combos that would otherwise collide with control bytes
+/// (Ctrl+Shift+I vs Tab, …). Terminals that don't support it ignore
+/// the enable sequence; nothing else breaks.
+pub const enable_kitty_keyboard: bool = true;
 
 // ───── Bottom status bar ──────────────────────────────────────────────────
 

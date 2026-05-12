@@ -19,6 +19,7 @@ pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
 pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
+pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
 ```
 
 The framework introspects each module via `@hasDecl` at comptime —
@@ -145,6 +146,46 @@ If a module returns `.replace`, downstream modules see the *replaced*
 bytes, not the original. This composes guardrail with autosuggestion:
 guardrail can swallow Enter, and Atuin never sees the keystroke that
 would have submitted a dangerous command.
+
+## statusText — contributing to the status bar
+
+Modules can advertise a one-line segment to the bottom status bar by
+implementing the optional `statusText` hook:
+
+```zig
+pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+    if (rt.queued_records > 0) {
+        // Cache in your Runtime; this runs on every render cycle.
+        return rt.cached_status_line;
+    }
+    return null;   // null = no segment this frame
+}
+```
+
+The proxy collects every module's segment, joins them with ` │ `,
+prefixes the optional `config.statusbar_base_text`, and paints the
+result into the reserved row. Returning `null` (or an empty string)
+skips the segment cleanly — separators stay correct.
+
+Segment order = module declaration order. There's no claim on
+columns; the assembled text is left-aligned in the row and silently
+truncated past 256 bytes. If you want per-module max-width, format
+your own segment with a cap.
+
+Don't allocate in `statusText` — it runs every render cycle. Cache
+the formatted string in your `Runtime`.
+
+## ctx.incognito — opt into stricter behavior
+
+The proxy gates `dispatchLineCommit` when the user has flipped
+incognito on (or when the line starts with a space —
+`HISTCONTROL=ignorespace` convention), so atuin / history never see
+the commit and don't record. Ghost suggestions and queries keep
+working — incognito is about not *recording*, not about hiding.
+
+If your module wants to be stricter — e.g. suppress its own
+suggestions while typing a secret — read `ctx.incognito` and
+short-circuit. The default is "still suggest".
 
 ## Order matters
 

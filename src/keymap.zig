@@ -24,6 +24,10 @@ pub const Action = enum {
     /// No-op when no ghost is showing or the line is in an uncertain
     /// state.
     ghost_accept,
+    /// Flip incognito mode on/off. While on: line commits aren't
+    /// recorded (no atuin / history writes); the status bar prepends
+    /// a 🔒 segment; a one-line stderr toast announces the flip.
+    incognito_toggle,
 };
 
 pub const Binding = struct {
@@ -141,6 +145,20 @@ pub fn key(comptime name: []const u8) []const u8 {
         return comptime "\x1b" ++ name[4..5];
     }
 
+    // Ctrl+Shift+<letter> → kitty-keyboard `CSI <code> ; 6 u` form.
+    // This is the *disambiguated* encoding for Ctrl+letter combos that
+    // would otherwise collide with control bytes (Ctrl+Shift+I vs Tab,
+    // Ctrl+Shift+M vs Enter, …). Requires the terminal to be in kitty
+    // keyboard protocol mode — proxy.zig sends `\x1b[>1u` on startup
+    // when `enable_kitty_keyboard` is true (default).
+    if (comptime name.len == 12 and std.mem.eql(u8, name[0..11], "Ctrl+Shift+")) {
+        const c: u8 = name[11];
+        const code: u8 = if (c >= 'a' and c <= 'z') c else if (c >= 'A' and c <= 'Z') c + 32 else 0;
+        if (comptime code != 0) {
+            return comptime std.fmt.comptimePrint("\x1B[{d};6u", .{code});
+        }
+    }
+
     @compileError("unknown key name: '" ++ name ++ "' — see src/keymap.zig");
 }
 
@@ -156,6 +174,15 @@ test "key resolves multi-modifier arrows" {
     try std.testing.expectEqualStrings("\x1b[1;2D", key("Shift+Left"));
     try std.testing.expectEqualStrings("\x1b[1;6A", key("Ctrl+Shift+Up"));
     try std.testing.expectEqualStrings("\x1b[1;7B", key("Ctrl+Alt+Down"));
+}
+
+test "key resolves Ctrl+Shift+letter via kitty kbd encoding" {
+    // i = 105
+    try std.testing.expectEqualStrings("\x1B[105;6u", key("Ctrl+Shift+I"));
+    try std.testing.expectEqualStrings("\x1B[105;6u", key("Ctrl+Shift+i"));
+    // a = 97, z = 122
+    try std.testing.expectEqualStrings("\x1B[97;6u", key("Ctrl+Shift+A"));
+    try std.testing.expectEqualStrings("\x1B[122;6u", key("Ctrl+Shift+z"));
 }
 
 test "key folds Ctrl+letter to control byte" {

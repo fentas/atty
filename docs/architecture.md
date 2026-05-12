@@ -357,6 +357,42 @@ user had typed them: shell sees normal input, modules see a normal
 `onInput`, line state grows by the suggestion length. Adding a new
 action is one enum variant + one switch arm; no new global lists.
 
+## Status bar + incognito
+
+Off by default (`config.statusbar_enabled = false`); opt in if you
+want a persistent indicator. When enabled:
+
+1. **Startup**: emit DECSTBM `\x1b[1;<rows-2>r` to confine shell
+   scrolling to rows 1..N-2. Set the slave PTY size to `rows-2` via
+   `TIOCSWINSZ` so the shell wraps inside the visible region.
+2. **Each render cycle** (tick, keystroke, shell-output flush): the
+   proxy assembles a status line — `incognito` prefix if on, then
+   `config.statusbar_base_text`, then every module's `statusText`
+   segment joined with ` │ ` — and paints it into row N inside a
+   save-cursor / CUP-N,1 / SGR / text / sgr_reset / restore-cursor
+   wrap so the shell's cursor model is untouched.
+3. **SIGWINCH**: reapply DECSTBM with new bounds and resize the
+   slave winsize.
+4. **Exit / detach**: clear the reserved rows and reset DECSTBM.
+
+Modules participate via the optional `statusText` hook (see
+[Writing a module](/modules/#statustext--contributing-to-the-status-bar)).
+The keymap action `incognito_toggle` flips a proxy-local boolean
+that becomes `ctx.incognito`; the proxy then prepends a 🔒 segment
+and gates `dispatchLineCommit` (no records written while on).
+Bash-style **leading-space** is treated the same as incognito for a
+single line — `HISTCONTROL=ignorespace` muscle memory works without
+toggling.
+
+`Ctrl+Shift+I` as the default binding for `incognito_toggle`
+requires the terminal to emit a distinct sequence — classic terminal
+mode collapses it to Tab. atty pushes the kitty keyboard protocol's
+`disambiguate` flag (`\x1b[>1u`) at startup so Ghostty / kitty /
+foot / WezTerm send `\x1b[105;6u` for Ctrl+Shift+I. Terminals that
+don't support the protocol ignore the enable byte; binding silently
+no-ops in those environments. Disable via
+`config.enable_kitty_keyboard = false` if you have a reason.
+
 ## Concurrency
 
 The proxy is single-threaded except that each module may own a

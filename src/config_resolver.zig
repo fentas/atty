@@ -53,3 +53,8 @@ pub const statusbar_base_text = if (@hasDecl(user, "statusbar_base_text"))
     user.statusbar_base_text
 else
     defaults.statusbar_base_text;
+
+pub const enable_kitty_keyboard = if (@hasDecl(user, "enable_kitty_keyboard"))
+    user.enable_kitty_keyboard
+else
+    defaults.enable_kitty_keyboard;
