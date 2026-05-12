@@ -23,8 +23,9 @@ history.
 3. `provideGhostText` reads the latest result under a mutex; if it
    still starts with the current input, the trailing portion is
    rendered after the cursor.
-4. `onTick` expires the suggestion after `suggestion_ttl_ms` of
-   keyboard inactivity, so stale offers don't linger.
+4. `onTick` optionally expires the suggestion after
+   `suggestion_ttl_ms` of keyboard inactivity (`0` = disabled,
+   suggestion persists until it no longer prefix-matches — fish-style).
 
 **Record path:**
 
@@ -53,7 +54,7 @@ pub const Atuin = atty.modules.atuin.configure(.{
     .atuin_binary        = "atuin",
     .search_mode         = .prefix,
     .filter_mode         = .global,
-    .suggestion_ttl_ms   = 5_000,
+    .suggestion_ttl_ms   = 0,
     .max_query           = 256,
     .max_result          = 512,
 
@@ -70,7 +71,7 @@ pub const Atuin = atty.modules.atuin.configure(.{
 | `atuin_binary`         | `"atuin"`     | path to atuin executable                     |
 | `search_mode`          | `.prefix`     | `.prefix`, `.full_text`, `.fuzzy`            |
 | `filter_mode`          | `.global`     | `.global`, `.host`, `.session`, `.directory` |
-| `suggestion_ttl_ms`    | 5000          | ms of idleness before suggestion expires     |
+| `suggestion_ttl_ms`    | 0             | ms of idleness before suggestion fades; 0 disables |
 | `max_query`, `max_result` | 256 / 512  | comptime mailbox sizes                       |
 | `record`               | `true`        | shell out to `atuin history start` on Enter  |
 | `sync_after_records`   | 10            | sync after N records; 0 disables             |

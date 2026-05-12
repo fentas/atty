@@ -150,7 +150,7 @@ pub const Atuin = atty.modules.atuin.configure(.{
     .backend            = .subprocess,
     .search_mode        = .prefix,
     .filter_mode        = .global,
-    .suggestion_ttl_ms  = 5_000,
+    .suggestion_ttl_ms  = 0,            // 0 = no fadeout (fish-style)
     .record             = true,        // atuin history start <cmd> on Enter
     .sync_after_records = 10,
     .sync_interval_ms   = 60_000,

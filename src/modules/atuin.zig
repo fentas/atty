@@ -51,7 +51,12 @@ pub const Config = struct {
     search_mode: SearchMode = .prefix,
     filter_mode: FilterMode = .global,
     socket_path: []const u8 = "",
-    suggestion_ttl_ms: u64 = 5_000,
+    /// Drop the cached suggestion after this many ms of keyboard idle.
+    /// `0` disables the timer — the suggestion persists until the user
+    /// types something that no longer prefix-matches it (which is how
+    /// fish + zsh-autosuggestions behave). Default 0; set to a non-zero
+    /// value if you specifically want stale offers to fade.
+    suggestion_ttl_ms: u64 = 0,
     max_query: comptime_int = 256,
     max_result: comptime_int = 512,
 
@@ -358,6 +363,7 @@ pub fn configure(comptime cfg: Config) type {
 
         pub fn onTick(rt: *Runtime, ctx: *m.Context, elapsed_ms: u64) m.Error!void {
             _ = elapsed_ms;
+            if (cfg.suggestion_ttl_ms == 0) return; // timer disabled
             if (rt.last_keystroke_ms == 0) return;
             const now = nowMs();
             const idle = now - rt.last_keystroke_ms;
