@@ -278,6 +278,48 @@ test "Enter on safe line passes through" {
     try testing.expect(!rt.armed);
 }
 
+test "prefix rule requires the line to start with the pattern (no mid-line match)" {
+    const rules = [_]Rule{
+        .{
+            .name = "dd-prefix",
+            .kind = .{ .prefix = "dd " },
+            .reason = "raw write",
+        },
+    };
+    const G = configure(.{ .rules = &rules });
+    try testing.expect(G.check("dd if=/dev/zero of=/tmp/x") != null);
+    // Should NOT fire when "dd " appears mid-line — that's the
+    // substring rule's job, not prefix's.
+    try testing.expect(G.check("echo dd ") == null);
+    try testing.expect(G.check("sudo dd if=...") == null);
+}
+
+test "first matching rule wins (declaration-order)" {
+    const rules = [_]Rule{
+        .{
+            .name = "first",
+            .kind = .{ .substring = "danger" },
+            .reason = "first rule's reason",
+        },
+        .{
+            .name = "second",
+            .kind = .{ .substring = "danger" },
+            .reason = "second rule's reason",
+        },
+    };
+    const G = configure(.{ .rules = &rules });
+    const r = G.check("very danger here").?;
+    try testing.expectEqualStrings("first", r.name);
+    try testing.expectEqualStrings("first rule's reason", r.reason);
+}
+
+test "empty rules list always returns null" {
+    const empty = [_]Rule{};
+    const G = configure(.{ .rules = &empty });
+    try testing.expect(G.check("rm -rf /") == null);
+    try testing.expect(G.check("") == null);
+}
+
 test "custom rule list" {
     const my_rules = [_]Rule{
         .{
