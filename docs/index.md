@@ -37,13 +37,13 @@ worker-thread plumbing vanishes from the binary.
   SIGWINCH propagation.
 - **Guardrail module** — substring/prefix rules to swallow Enter on
   `rm -rf /`, `dd if=…`, `… | sh`, etc. Confirm with a second Enter.
-- **Atuin module** — async worker thread, prefix-matched history
-  lookups via the `atuin` CLI, dim/italic ghost text after the
-  cursor, recording on Enter, detached-thread `atuin sync`.
-- **History module** — shell-native fallback that reads + writes
-  the same `~/.bash_history` / `~/.zsh_history` your shell uses,
-  no daemon, no shell plugin. Composes with Atuin as a backup
-  suggestion source.
+- **History module** *(default)* — shell-native; reads + writes the
+  same `~/.bash_history` / `~/.zsh_history` your shell uses. No
+  daemon, no shell plugin, no external dependency.
+- **Atuin module** *(opt-in)* — async worker thread, prefix-matched
+  history lookups via the `atuin` CLI, recording on Enter,
+  detached-thread `atuin sync`. Enable in `config.zig` if you have
+  atuin installed.
 - **Keymap** — dwm-style `bindings[]` of `{ bytes, action }` pairs;
   ships with right-arrow / End / Ctrl-F bound to `ghost_accept` so
   fish-style suggestions can be accepted with one keypress.
@@ -127,7 +127,7 @@ tunables added upstream just appear without you touching anything.
 ```zig
 const atty = @import("atty");
 
-// Pick your modules. Default = { guardrail, atuin } with .configure(.{}).
+// Pick your modules. Default = { guardrail, history } — dependency-free.
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.atuin.configure(.{

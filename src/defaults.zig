@@ -12,10 +12,18 @@
 const atty = @import("atty");
 
 // ───── Modules ────────────────────────────────────────────────────────────
+//
+// The default tuple is dependency-free: history reads/writes your
+// shell's own ~/.bash_history / ~/.zsh_history file — no `atuin`
+// binary required, no daemon. Atty's `bin.atty.sh` prebuilt
+// distribution runs out of the box.
+//
+// Want atuin? Override `modules` in your `src/config.zig` — see
+// `src/config.def.zig` for the documented opt-in.
 
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
-    atty.modules.atuin.configure(.{}),
+    atty.modules.history.configure(.{}),
 };
 
 // ───── Proxy tunables ─────────────────────────────────────────────────────

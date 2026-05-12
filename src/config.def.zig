@@ -13,9 +13,13 @@ const atty = @import("atty");
 
 // ───── Modules ──────────────────────────────────────────────────────────
 //
-// Order = priority. Short-circuiting modules first (Guardrail). The
-// default tuple is `{ guardrail, atuin }` with each module's
-// `configure(.{})` defaults. Uncomment + edit to override.
+// Order = priority. Short-circuiting modules first (Guardrail).
+//
+// Default tuple is dependency-free — `{ guardrail, history }`. The
+// history module reads/writes your shell's own ~/.bash_history /
+// ~/.zsh_history; nothing else has to be installed.
+//
+// Want atuin instead of (or alongside) history? Uncomment and edit:
 //
 // pub const modules = .{
 //     atty.modules.guardrail.configure(.{
@@ -27,7 +31,7 @@ const atty = @import("atty");
 //         // .sync_after_records = 10,
 //         // .sync_interval_ms = 60_000,
 //     }),
-//     atty.modules.history.configure(.{}),  // shell-native fallback
+//     atty.modules.history.configure(.{}),  // optional fallback after atuin
 // };
 
 // ───── Proxy tunables ───────────────────────────────────────────────────

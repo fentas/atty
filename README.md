@@ -144,7 +144,7 @@ Edit `src/config.zig`. Recompile. Your edits never conflict on `git pull` becaus
 ```zig
 const atty = @import("atty");
 
-// Pick your modules. Default = { guardrail, atuin } with .configure(.{}).
+// Pick your modules. Default = { guardrail, history } — dependency-free.
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.atuin.configure(.{
@@ -235,10 +235,11 @@ The image is multi-arch (`linux/amd64`, `linux/arm64`) and the binary is musl-st
 
 ### 📦 Built-in modules
 
-| Module                                                | Hook surface                              | Purpose                                                                |
-|-------------------------------------------------------|-------------------------------------------|------------------------------------------------------------------------|
-| [`atuin`](src/modules/atuin.zig)                      | `onInput`, `provideGhostText`, `onTick`   | Fish-style autosuggestions from your Atuin history                     |
-| [`guardrail`](src/modules/guardrail.zig)              | `onInput`                                 | Confirm-on-Enter for `rm -rf /`, `dd`, `mkfs`, fork bombs, curl-pipe-sh |
+| Module                                                | Hook surface                                              | Purpose                                                                |
+|-------------------------------------------------------|-----------------------------------------------------------|------------------------------------------------------------------------|
+| [`guardrail`](src/modules/guardrail.zig)              | `onInput`                                                 | Confirm-on-Enter for `rm -rf /`, `dd`, `mkfs`, fork bombs, curl-pipe-sh |
+| [`history`](src/modules/history.zig) *(default)*      | `onInput`, `onLineCommit`, `provideGhostText`, `onTick`   | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history`     |
+| [`atuin`](src/modules/atuin.zig) *(opt-in)*           | `onInput`, `onLineCommit`, `provideGhostText`, `onTick`   | Fish-style autosuggestions from your Atuin history + record on Enter   |
 
 Add your own under `src/modules/` and wire it into `config.modules`. Reference docs: [atty.sh/providers](https://atty.sh/providers/).
 

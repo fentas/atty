@@ -237,45 +237,84 @@ self-recover — the user has to explicitly clear the line.
 
 ## Config resolution
 
-Same shape as dwm's `config.def.h` / `config.h` split:
+Same shape as dwm's `config.def.h` / `config.h` split, plus a tiny
+resolver layer so user files only have to spell out overrides.
 
-- **`src/config.def.zig`** — the committed template. atty maintains
-  this file with the latest commented examples.
-- **`src/config.zig`** — gitignored. The user's actual file. `build.zig`
-  copies the template across on first build if the file is missing.
-- **`src/defaults.zig`** — atty-shipped value for every overridable
-  knob. The user never edits this.
-- **`src/config_resolver.zig`** — merges the two via `@hasDecl`.
-
-Every internal consumer imports the `config` module — but that
-module's root is `config_resolver.zig`, not the user's file directly.
-The resolver:
-
-```zig
-const user = @import("user_config");          // src/config.zig
-const defaults = @import("defaults.zig");     // atty-shipped values
-
-pub const tick_interval_ms = if (@hasDecl(user, "tick_interval_ms"))
-    user.tick_interval_ms
-else
-    defaults.tick_interval_ms;
-// … same shape for modules, ghost_style, bindings, …
+```
+src/
+├── defaults.zig          atty-shipped value for every knob
+├── config.def.zig        committed template (commented examples)
+├── config.zig            YOUR overrides (gitignored)
+├── config_resolver.zig   merges user ↔ defaults via @hasDecl
 ```
 
-`@hasDecl` is comptime, so the missing branch is constant-folded
-away — zero runtime cost vs declaring everything explicitly.
+### Who owns what
 
-What this buys:
+| File | Tracked by git? | Edited by | Purpose |
+|---|---|---|---|
+| `defaults.zig` | ✅ yes | atty maintainers | Actual value of every knob when the user doesn't override. New knobs land here. |
+| `config.def.zig` | ✅ yes | atty maintainers | Documentation surface — `cp`-able starter with commented examples. Never read at compile time. |
+| `config.zig` | ❌ **gitignored** | **you** | Your `pub const X = …` overrides. Anything you don't declare falls through. |
+| `config_resolver.zig` | ✅ yes | atty maintainers | One `if (@hasDecl) user.X else defaults.X` per knob. Comptime — folded away. |
 
-1. **No `git pull` conflicts** on `src/config.zig` — it's gitignored.
-   Your edits are entirely yours.
-2. **New defaults flow through.** When atty adds a knob to
-   `defaults.zig` + the resolver, your config picks up the value
-   without you touching anything.
-3. **The template stays as documentation.** Pulling `src/config.def.zig`
-   shows you the latest examples; you choose what to copy across.
-4. **Power users still get `-Dconfig=/path/to/mine.zig`** for tracking
-   a config in a dotfiles repo.
+### The flow
+
+```
+                  ┌──────────────────────────┐
+   first build →  │ does src/config.zig      │  no → cp config.def.zig → config.zig
+                  │ exist?                   │
+                  └──────────────────────────┘
+                              │ yes
+                              ▼
+   build.zig wires:
+     - user_config module ← src/config.zig
+     - config module      ← src/config_resolver.zig
+                              │
+                              ▼
+   internal code does @import("config")
+                              │
+                              ▼
+   ┌─────────────────────────────────────────────────┐
+   │ config_resolver.zig                              │
+   │                                                  │
+   │ pub const X = if (@hasDecl(user, "X"))           │
+   │     user.X                                       │
+   │ else                                             │
+   │     defaults.X;                                  │
+   └─────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+              ▼                               ▼
+        proxy.zig                       dispatch.zig
+        (reads config.bindings,         (Dispatcher(config.modules))
+         config.tick_interval_ms,
+         config.ghost_style, …)
+```
+
+`@hasDecl` is comptime, so the missing branch is constant-folded —
+zero runtime cost compared to declaring everything explicitly.
+
+### Day-to-day, by scenario
+
+| Scenario | What happens |
+|---|---|
+| **Fresh clone**, run `zig build` | build.zig sees no `config.zig`, copies `config.def.zig` across. Build succeeds with all defaults. |
+| **You edit `config.zig`** to set `ghost_style` | Resolver returns *your* `ghost_style`. Other knobs still come from `defaults.zig`. |
+| **atty adds a new knob** | Lands in `defaults.zig` + resolver, optionally surfaced in `config.def.zig` comments. Your `config.zig` is untouched. You get the new default automatically. |
+| **atty changes a default** | If you didn't override it, you get the new value. If you did, your override still wins. |
+| **You `git pull`** | `config.zig` is untracked → no conflict, ever. `config.def.zig` may have new commented examples — read them at leisure. |
+| **You delete `config.zig`** | Next `zig build` recreates it from the template. |
+| **You want config in your dotfiles** | `make CONFIG=/path/to/mine.zig build` (or `-Dconfig=…`). Bypasses the bootstrap entirely. |
+
+### Adding a new knob (maintainer's checklist)
+
+1. Add it to `defaults.zig` with a sensible default value.
+2. Mirror it in `config_resolver.zig` with the `if (@hasDecl) … else defaults.…` line.
+3. Optionally show it as a commented example in `config.def.zig`.
+4. Document it in `docs/providers.md` (if module-specific) or here (if cross-cutting).
+
+That's the entire surface area. No user file ever has to change.
 
 ## Keymap
 
