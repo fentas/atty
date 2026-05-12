@@ -188,16 +188,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // because a CSI like `ESC [ C` would otherwise mark
                 // the line uncertain and we'd lose the chance to act.
                 var accept_buf: [4096]u8 = undefined;
-                if (config.accept_ghost_key.len > 0 and
-                    ghost.visible and
+                if (ghost.visible and
                     !line_state.uncertain and
                     ghost.rendered.items.len > 0 and
-                    ghost.rendered.items.len <= accept_buf.len and
-                    std.mem.eql(u8, input, config.accept_ghost_key))
+                    ghost.rendered.items.len <= accept_buf.len)
                 {
-                    const accept_n = ghost.rendered.items.len;
-                    @memcpy(accept_buf[0..accept_n], ghost.rendered.items);
-                    input = accept_buf[0..accept_n];
+                    for (config.accept_ghost_keys) |key| {
+                        if (key.len == 0) continue;
+                        if (std.mem.eql(u8, input, key)) {
+                            const accept_n = ghost.rendered.items.len;
+                            @memcpy(accept_buf[0..accept_n], ghost.rendered.items);
+                            input = accept_buf[0..accept_n];
+                            break;
+                        }
+                    }
                 }
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);

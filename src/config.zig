@@ -55,12 +55,25 @@ pub const modules = .{
 /// ghost-text expiry; higher = lower idle CPU.
 pub const tick_interval_ms: i32 = 100;
 
-/// Keystroke that accepts the current ghost suggestion (fish-style).
-/// The bytes are checked against the entire stdin read — so this works
-/// best with sequences a terminal emits as a single unit. Set to an
-/// empty string to disable.
+/// Keystrokes that accept the current ghost suggestion (fish-style).
+/// Each entry is matched against the entire stdin read; first match
+/// wins. Works best with sequences a terminal emits as a single unit.
+/// Empty list disables accept-ghost entirely.
 ///
-///   "\x1b[C"  right-arrow (default — matches fish, zsh-autosuggestions)
-///   "\x1b[F"  End
-///   "\x06"    Ctrl-F (Emacs-style end-of-line)
-pub const accept_ghost_key: []const u8 = "\x1b[C";
+/// Common values:
+///
+///   "\x1b[C"     right-arrow
+///   "\x1b[F"     End
+///   "\x06"       Ctrl-F            (Emacs-style end-of-line)
+///   "\x1b[Z"     Shift-Tab         (some terminals)
+///   "\x1bOC"     right-arrow       (terminals in application-cursor mode)
+///   "\x1b[1;5C"  Ctrl-Right-arrow  (xterm-style)
+///   "\t"         Tab               (warning: clobbers shell completion)
+///
+/// Note: Ctrl-Tab is not a standard terminal sequence — most terminals
+/// don't emit anything distinct for it. Use Ctrl-F or right-arrow.
+pub const accept_ghost_keys: []const []const u8 = &.{
+    "\x1b[C", // right-arrow (matches fish, zsh-autosuggestions)
+    "\x1b[F", // End
+    "\x06", // Ctrl-F
+};
