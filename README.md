@@ -133,44 +133,37 @@ instead of bailing on `exec` failure.
 
 ### 🛠 Configure
 
-`atty` has no runtime config file. Edit [`src/config.zig`](src/config.zig), recompile, done.
+`atty` has no runtime config file. dwm-style two-file split:
+
+- [`src/config.def.zig`](src/config.def.zig) — committed template with commented examples (atty maintains).
+- **`src/config.zig`** — your file. Gitignored. `build.zig` copies the template across on first build.
+- [`src/defaults.zig`](src/defaults.zig) — atty-shipped value for every knob.
+
+Edit `src/config.zig`. Recompile. Your edits never conflict on `git pull` because the file isn't tracked, and your config only contains what you override — every other knob falls through to `defaults.zig`, so new tunables added upstream just appear.
 
 ```zig
 const atty = @import("atty");
 
-pub const Guardrail = atty.modules.guardrail.configure(.{
-    // .rules = &.{
-    //     .{ .name = "git-force",
-    //        .kind = .{ .substring = "git push --force" },
-    //        .reason = "force-pushing to a shared branch" },
-    // },
-});
+// Pick your modules. Default = { guardrail, atuin } with .configure(.{}).
+pub const modules = .{
+    atty.modules.guardrail.configure(.{}),
+    atty.modules.atuin.configure(.{
+        .suggestion_ttl_ms  = 0,          // 0 = fish-style (no fade)
+        .sync_after_records = 10,
+    }),
+    atty.modules.history.configure(.{}),  // shell-native fallback
+};
 
-pub const Atuin = atty.modules.atuin.configure(.{
-    .backend            = .subprocess,
-    .search_mode        = .prefix,
-    .filter_mode        = .global,
-    .suggestion_ttl_ms  = 0,            // 0 = no fadeout (fish-style)
-    .record             = true,        // atuin history start <cmd> on Enter
-    .sync_after_records = 10,
-    .sync_interval_ms   = 60_000,
-});
+// Override the visual style if you don't want the dim-only default.
+pub const ghost_style: atty.Style = atty.style.presets.muted_italic;
 
-pub const modules          = .{ Guardrail, Atuin };  // order = priority
-pub const tick_interval_ms : i32 = 100;
-
-// Shared styling primitive — atty.Style. Every module that paints
-// on screen accepts a Style field (Guardrail.warning_style, …).
-pub const ghost_style: atty.Style = atty.style.presets.muted;
-
-// dwm-style key bindings. atty.keymap.key("Right") resolves to its
-// byte sequence at compile time — typos fail the build.
+// Override the accept keys if Right / End / Ctrl+F isn't what you want.
 pub const bindings: []const atty.keymap.Binding = &.{
-    .{ .bytes = atty.keymap.key("Right"),  .action = .ghost_accept },
-    .{ .bytes = atty.keymap.key("End"),    .action = .ghost_accept },
-    .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("Tab"), .action = .ghost_accept },
 };
 ```
+
+Anything not declared — `tick_interval_ms`, `bindings`, `ghost_style`, `modules` — picks up its value from `defaults.zig`.
 
 To track a config outside the repo:
 

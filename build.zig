@@ -17,6 +17,16 @@ pub fn build(b: *std.Build) void {
         "Path to config.zig (default: src/config.zig)",
     ) orelse "src/config.zig";
 
+    // Bootstrap the user config on first build. src/config.zig is
+    // gitignored (per-user); src/config.def.zig is the committed
+    // template. On a fresh clone we copy the template across so the
+    // build doesn't fail and the user has a starting point with
+    // commented examples. Idempotent — only copies if the destination
+    // is missing.
+    if (std.mem.eql(u8, config_path, "src/config.zig")) {
+        bootstrapUserConfig(b);
+    }
+
     // atty library module — owns every source file under src/ except
     // config.zig. Keeping them in a single named module avoids
     // "file in multiple modules" collisions.
@@ -27,17 +37,30 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    // User-editable config module.
-    const config_module = b.createModule(.{
+    // User-editable config — possibly empty. Only declarations the user
+    // makes here win; everything else falls through to defaults.zig.
+    const user_config_module = b.createModule(.{
         .root_source_file = b.path(config_path),
         .target = target,
         .optimize = optimize,
     });
+    user_config_module.addImport("atty", atty_module);
 
-    // Two-way cycle: proxy reads `config.modules`; config reads
-    // `atty.modules.*`. Zig resolves the cycle lazily because each side
-    // only needs the *types* exposed by the other.
+    // The resolver merges user_config with defaults.zig. This is what
+    // every internal consumer sees when it does `@import("config")`.
+    // New tunables added to defaults.zig + the resolver flow through
+    // to existing user configs with zero changes on their side.
+    const config_module = b.createModule(.{
+        .root_source_file = b.path("src/config_resolver.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    config_module.addImport("user_config", user_config_module);
     config_module.addImport("atty", atty_module);
+
+    // Two-way cycle (proxy reads config.modules; defaults reads
+    // atty.modules.*). Zig resolves it lazily — each side only needs
+    // the types the other exposes.
     atty_module.addImport("config", config_module);
 
     // -------------------------------------------------------------------------
@@ -138,4 +161,37 @@ pub fn build(b: *std.Build) void {
 
     const e2e_step = b.step("e2e", "Run end-to-end scenarios (requires PTY)");
     e2e_step.dependOn(&run_e2e.step);
+}
+
+/// Copy `src/config.def.zig` → `src/config.zig` if the latter is missing.
+/// Safe to call on every build — short-circuits when the file exists.
+fn bootstrapUserConfig(b: *std.Build) void {
+    const io = b.graph.io;
+    const cwd = std.Io.Dir.cwd();
+    cwd.access(io, "src/config.zig", .{}) catch {
+        // Open template, create destination, stream bytes.
+        var src = cwd.openFile(io, "src/config.def.zig", .{}) catch |e| {
+            std.debug.print("note: could not open src/config.def.zig: {t}\n", .{e});
+            return;
+        };
+        defer src.close(io);
+
+        var dst = cwd.createFile(io, "src/config.zig", .{}) catch |e| {
+            std.debug.print("note: could not create src/config.zig: {t}\n", .{e});
+            return;
+        };
+        defer dst.close(io);
+
+        var buf: [4096]u8 = undefined;
+        var src_reader_buf: [4096]u8 = undefined;
+        var src_reader = src.reader(io, &src_reader_buf);
+        var dst_writer_buf: [4096]u8 = undefined;
+        var dst_writer = dst.writerStreaming(io, &dst_writer_buf);
+        while (true) {
+            const n = src_reader.interface.readSliceShort(&buf) catch break;
+            if (n == 0) break;
+            dst_writer.interface.writeAll(buf[0..n]) catch break;
+        }
+        dst_writer.interface.flush() catch {};
+    };
 }

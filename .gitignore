@@ -29,3 +29,9 @@ docs/vendor/
 # ---- Test / coverage tmp ----------------------------------------------------
 *.log
 coverage/
+
+# ---- User config -------------------------------------------------------------
+# src/config.zig is per-user; src/config.def.zig is the committed template.
+# build.zig bootstraps config.zig from the template on first build, so a
+# fresh clone "just works" and personal overrides never conflict on pull.
+/src/config.zig

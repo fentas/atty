@@ -11,11 +11,15 @@ title: Architecture
 src/
 ├── main.zig                  # CLI entry: arg parsing → proxy.run
 ├── root.zig                  # library entry: re-exports for `@import("atty")`
-├── config.zig                # user-editable Suckless-style config
+├── config.def.zig            # committed template — atty's reference config
+├── config.zig                # user overrides (gitignored; seeded from .def on first build)
+├── config_resolver.zig       # merges user_config with defaults via @hasDecl
+├── defaults.zig              # atty-shipped default for every overridable knob
 ├── proxy.zig                 # poll() loop, signal handling, ghost-text scheduling
 ├── module.zig                # shared types: Action, Context, Error
 ├── dispatch.zig              # Dispatcher(modules) — comptime walker
 ├── keymap.zig                # Action enum + Binding struct for bindings[]
+├── style.zig                 # Style struct + presets (ghost overlay, warnings, …)
 ├── pty.zig                   # posix_openpt / grantpt / unlockpt / fork+exec child
 ├── terminal.zig              # cfmakeraw-equivalent termios guard for our stdin
 ├── line_state.zig            # best-effort user-input buffer model
@@ -230,6 +234,48 @@ buffer), and on Backspace that brings the buffer to empty. The
 principle: when the buffer is empty we can't be wrong about its
 content, so we lift the gate. Arrow-key history navigation does *not*
 self-recover — the user has to explicitly clear the line.
+
+## Config resolution
+
+Same shape as dwm's `config.def.h` / `config.h` split:
+
+- **`src/config.def.zig`** — the committed template. atty maintains
+  this file with the latest commented examples.
+- **`src/config.zig`** — gitignored. The user's actual file. `build.zig`
+  copies the template across on first build if the file is missing.
+- **`src/defaults.zig`** — atty-shipped value for every overridable
+  knob. The user never edits this.
+- **`src/config_resolver.zig`** — merges the two via `@hasDecl`.
+
+Every internal consumer imports the `config` module — but that
+module's root is `config_resolver.zig`, not the user's file directly.
+The resolver:
+
+```zig
+const user = @import("user_config");          // src/config.zig
+const defaults = @import("defaults.zig");     // atty-shipped values
+
+pub const tick_interval_ms = if (@hasDecl(user, "tick_interval_ms"))
+    user.tick_interval_ms
+else
+    defaults.tick_interval_ms;
+// … same shape for modules, ghost_style, bindings, …
+```
+
+`@hasDecl` is comptime, so the missing branch is constant-folded
+away — zero runtime cost vs declaring everything explicitly.
+
+What this buys:
+
+1. **No `git pull` conflicts** on `src/config.zig` — it's gitignored.
+   Your edits are entirely yours.
+2. **New defaults flow through.** When atty adds a knob to
+   `defaults.zig` + the resolver, your config picks up the value
+   without you touching anything.
+3. **The template stays as documentation.** Pulling `src/config.def.zig`
+   shows you the latest examples; you choose what to copy across.
+4. **Power users still get `-Dconfig=/path/to/mine.zig`** for tracking
+   a config in a dotfiles repo.
 
 ## Keymap
 

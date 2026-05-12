@@ -113,43 +113,43 @@ atty -- -c 'echo hi'         # passthrough args
 
 ## Configuration
 
-Edit `src/config.zig`. Recompile. That is the entire model.
+dwm-style two-file split:
+
+- [`src/config.def.zig`](https://github.com/fentas/atty/blob/master/src/config.def.zig) — committed template with commented examples (atty maintains this).
+- **`src/config.zig`** — your file. Gitignored. `build.zig` copies the template across on first build if it's missing.
+- [`src/defaults.zig`](https://github.com/fentas/atty/blob/master/src/defaults.zig) — atty-shipped value for every knob.
+
+Edit `src/config.zig`. Recompile. Your edits never conflict on `git pull`
+because the file isn't tracked, and your config only contains what you
+override — every other knob falls through to `defaults.zig`, so new
+tunables added upstream just appear without you touching anything.
 
 ```zig
 const atty = @import("atty");
 
-pub const Guardrail = atty.modules.guardrail.configure(.{
-    // .rules = &.{ ... }   // override the defaults if you want
-});
+// Pick your modules. Default = { guardrail, atuin } with .configure(.{}).
+pub const modules = .{
+    atty.modules.guardrail.configure(.{}),
+    atty.modules.atuin.configure(.{
+        .suggestion_ttl_ms  = 0,          // 0 = fish-style (no fade)
+        .sync_after_records = 10,
+    }),
+    atty.modules.history.configure(.{}),  // shell-native fallback
+};
 
-pub const Atuin = atty.modules.atuin.configure(.{
-    .backend             = .subprocess,
-    .search_mode         = .prefix,
-    .filter_mode         = .global,
-    .suggestion_ttl_ms   = 0,            // 0 = no fadeout (fish-style)
-    .record              = true,         // record on Enter via `atuin history start`
-    .sync_after_records  = 10,           // 0 = disable count-based sync
-    .sync_interval_ms    = 60_000,       // 0 = disable time-based sync
-});
+// Override the visual style if you don't want the dim-only default.
+pub const ghost_style: atty.Style = atty.style.presets.muted_italic;
 
-pub const modules = .{ Guardrail, Atuin };   // order matters
-pub const tick_interval_ms: i32 = 100;
-
-// Visual styling — atty.Style is the shared primitive every visible
-// module accepts (ghost overlay, guardrail warning, …). Presets in
-// atty.style.presets; or write Style literals inline.
-pub const ghost_style: atty.Style = atty.style.presets.muted;
-
-// dwm-style key bindings. Use atty.keymap.key("Right") for readability;
-// the helper resolves at compile time, so typos break the build.
+// Override the accept keys if Right / End / Ctrl+F isn't what you want.
 pub const bindings: []const atty.keymap.Binding = &.{
-    .{ .bytes = atty.keymap.key("Right"),  .action = .ghost_accept },
-    .{ .bytes = atty.keymap.key("End"),    .action = .ghost_accept },
-    .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("Tab"), .action = .ghost_accept },
 };
 ```
 
-Want your config tracked in dotfiles? Build with `-Dconfig=/path/to/mine.zig`
+Anything you don't declare — `tick_interval_ms`, `bindings`,
+`ghost_style`, `modules` — picks up its value from `defaults.zig`.
+
+Track your config outside the repo: `-Dconfig=/path/to/mine.zig`
 (or `make CONFIG=/path/to/mine.zig build`).
 
 ## Read on
