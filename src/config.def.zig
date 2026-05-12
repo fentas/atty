@@ -66,7 +66,12 @@ const atty = @import("atty");
 // Modules can contribute segments via the optional `statusText` hook
 // (joined with " │ "). Off by default — opt in if you want it.
 //
-// pub const statusbar_enabled: bool = true;
-// pub const statusbar_reserve_rows: u16 = 2;            // text row + 1 blank above
-// pub const statusbar_style: atty.Style = atty.style.presets.muted;
-// pub const statusbar_base_text: []const u8 = "atty";   // proxy-level prefix
+// Per-field defaults in `atty.StatusBar` fill anything you don't list.
+//
+// pub const statusbar: atty.StatusBar = .{
+//     .enabled = true,
+//     .reserve_rows = 2,                         // text row + 1 blank above
+//     .style = atty.style.presets.muted,
+//     .base_text = "atty",                       // proxy-level prefix
+//     .incognito_style = .{ .dim = true, .fg = 1 },   // muted red 🔒 segment
+// };

@@ -359,7 +359,7 @@ action is one enum variant + one switch arm; no new global lists.
 
 ## Status bar + incognito
 
-Off by default (`config.statusbar_enabled = false`); opt in if you
+Off by default (`config.statusbar.enabled = false`); opt in if you
 want a persistent indicator. When enabled:
 
 1. **Startup**: emit DECSTBM `\x1b[1;<rows-2>r` to confine shell
@@ -367,7 +367,7 @@ want a persistent indicator. When enabled:
    `TIOCSWINSZ` so the shell wraps inside the visible region.
 2. **Each render cycle** (tick, keystroke, shell-output flush): the
    proxy assembles a status line — `incognito` prefix if on, then
-   `config.statusbar_base_text`, then every module's `statusText`
+   `config.statusbar.base_text`, then every module's `statusText`
    segment joined with ` │ ` — and paints it into row N inside a
    save-cursor / CUP-N,1 / SGR / text / sgr_reset / restore-cursor
    wrap so the shell's cursor model is untouched.

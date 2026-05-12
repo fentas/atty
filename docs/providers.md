@@ -92,7 +92,7 @@ pub const Atuin = atty.modules.atuin.configure(.{
 Atuin contributes `"atuin"` as its `statusText` segment (always-on
 label). Future iterations will surface queued-record count and
 last-sync age. The segment is omitted entirely if the user has
-disabled the status bar (`statusbar_enabled = false`).
+disabled the status bar (`statusbar.enabled = false`).
 
 ### Performance
 

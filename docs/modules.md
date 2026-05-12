@@ -163,7 +163,7 @@ pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
 ```
 
 The proxy collects every module's segment, joins them with ` │ `,
-prefixes the optional `config.statusbar_base_text`, and paints the
+prefixes the optional `config.statusbar.base_text`, and paints the
 result into the reserved row. Returning `null` (or an empty string)
 skips the segment cleanly — separators stay correct.
 

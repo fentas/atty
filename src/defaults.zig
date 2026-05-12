@@ -67,24 +67,32 @@ pub const enable_kitty_keyboard: bool = false;
 
 // ───── Bottom status bar ──────────────────────────────────────────────────
 
-/// Reserve rows at the bottom of the terminal for a status indicator
-/// (via DECSTBM). Off by default — costs `statusbar_reserve_rows` of
-/// vertical screen real estate. When enabled, modules can contribute
-/// segments via the optional `statusText` hook (joined with ` │ `).
-pub const statusbar_enabled: bool = false;
+/// Bottom status-bar config. Grouped as a struct so user overrides
+/// only need to spell out the fields they care about — per-field
+/// defaults fill the rest:
+///
+///     pub const statusbar: atty.StatusBar = .{
+///         .enabled = true,
+///         .base_text = "atty",
+///     };
+pub const StatusBar = struct {
+    /// Reserve rows at the bottom of the terminal for the indicator
+    /// (via DECSTBM). Off by default — costs `reserve_rows` of vertical
+    /// screen real estate.
+    enabled: bool = false,
+    /// How many bottom rows to reserve. The last row holds the text;
+    /// rows above are blank visual padding above the shell's content.
+    reserve_rows: u16 = 2,
+    /// Style for the bar's default segments (base text + module
+    /// contributions). Per-segment overrides (like incognito_style)
+    /// take precedence inside their own segment.
+    style: atty.Style = atty.style.presets.muted,
+    /// Base text shown when no module contributes anything. Empty
+    /// means the bar stays blank until a module sets something.
+    base_text: []const u8 = "",
+    /// Style for the 🔒 incognito segment specifically. Defaults to
+    /// muted red (dim + red) so it pops against the rest of the bar.
+    incognito_style: atty.Style = .{ .dim = true, .fg = 1 },
+};
 
-/// How many bottom rows to reserve. The last row holds the text;
-/// rows above are blank visual padding from the shell's content.
-pub const statusbar_reserve_rows: u16 = 2;
-
-/// Visual style for the status bar text.
-pub const statusbar_style: atty.Style = atty.style.presets.muted;
-
-/// Base text shown when no module contributes anything. Empty means
-/// the bar stays blank until a module sets something.
-pub const statusbar_base_text: []const u8 = "";
-
-/// Style for the 🔒 incognito segment in the status bar. Defaults to
-/// muted red (dim + red) so it visually stands out against the rest
-/// of the bar (which uses `statusbar_style`).
-pub const incognito_status_style: atty.Style = .{ .dim = true, .fg = 1 };
+pub const statusbar: StatusBar = .{};

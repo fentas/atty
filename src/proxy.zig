@@ -106,9 +106,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // shell wraps inside the visible region, and emit DECSTBM so its
     // scrolling stays out of our reserved rows.
     var statusbar: ?StatusBar = null;
-    if (args.is_tty and config.statusbar_enabled) {
+    if (args.is_tty and config.statusbar.enabled) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            statusbar = StatusBar.init(s.rows, s.cols, config.statusbar_reserve_rows, config.statusbar_style);
+            statusbar = StatusBar.init(s.rows, s.cols, config.statusbar.reserve_rows, config.statusbar.style);
         } else |_| {}
     }
 
@@ -433,13 +433,13 @@ fn renderStatus(
         var seg_buf: [96]u8 = undefined;
         var sw: std.Io.Writer = .fixed(&seg_buf);
         sw.print("{f}\u{1F512} incognito{s}{f}", .{
-            config.incognito_status_style,
+            config.statusbar.incognito_style,
             style_mod.reset,
-            config.statusbar_style,
+            config.statusbar.style,
         }) catch {};
         writeSegment(&tw, &any, sw.buffered());
     }
-    if (config.statusbar_base_text.len > 0) writeSegment(&tw, &any, config.statusbar_base_text);
+    if (config.statusbar.base_text.len > 0) writeSegment(&tw, &any, config.statusbar.base_text);
 
     var mod_buf: [192]u8 = undefined;
     var mw: std.Io.Writer = .fixed(&mod_buf);

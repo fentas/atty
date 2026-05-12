@@ -14,6 +14,12 @@
 const user = @import("user_config");
 const defaults = @import("defaults.zig");
 
+// Re-export config TYPES (not values) so consumers can use
+// `@import("config").StatusBar` to annotate their own overrides. The
+// values themselves (statusbar, bindings, …) get @hasDecl-resolved
+// below.
+pub const StatusBar = defaults.StatusBar;
+
 pub const modules = if (@hasDecl(user, "modules"))
     user.modules
 else
@@ -34,30 +40,13 @@ pub const bindings = if (@hasDecl(user, "bindings"))
 else
     defaults.bindings;
 
-pub const statusbar_enabled = if (@hasDecl(user, "statusbar_enabled"))
-    user.statusbar_enabled
+// Grouped configs come through as a single decl. The user supplies a
+// partial struct literal; Zig's per-field defaults fill the rest, so
+// adding a new knob upstream doesn't break existing user configs.
+pub const statusbar = if (@hasDecl(user, "statusbar"))
+    user.statusbar
 else
-    defaults.statusbar_enabled;
-
-pub const statusbar_reserve_rows = if (@hasDecl(user, "statusbar_reserve_rows"))
-    user.statusbar_reserve_rows
-else
-    defaults.statusbar_reserve_rows;
-
-pub const statusbar_style = if (@hasDecl(user, "statusbar_style"))
-    user.statusbar_style
-else
-    defaults.statusbar_style;
-
-pub const statusbar_base_text = if (@hasDecl(user, "statusbar_base_text"))
-    user.statusbar_base_text
-else
-    defaults.statusbar_base_text;
-
-pub const incognito_status_style = if (@hasDecl(user, "incognito_status_style"))
-    user.incognito_status_style
-else
-    defaults.incognito_status_style;
+    defaults.statusbar;
 
 pub const enable_kitty_keyboard = if (@hasDecl(user, "enable_kitty_keyboard"))
     user.enable_kitty_keyboard
