@@ -33,3 +33,23 @@ pub const bindings = if (@hasDecl(user, "bindings"))
     user.bindings
 else
     defaults.bindings;
+
+pub const statusbar_enabled = if (@hasDecl(user, "statusbar_enabled"))
+    user.statusbar_enabled
+else
+    defaults.statusbar_enabled;
+
+pub const statusbar_reserve_rows = if (@hasDecl(user, "statusbar_reserve_rows"))
+    user.statusbar_reserve_rows
+else
+    defaults.statusbar_reserve_rows;
+
+pub const statusbar_style = if (@hasDecl(user, "statusbar_style"))
+    user.statusbar_style
+else
+    defaults.statusbar_style;
+
+pub const statusbar_base_text = if (@hasDecl(user, "statusbar_base_text"))
+    user.statusbar_base_text
+else
+    defaults.statusbar_base_text;

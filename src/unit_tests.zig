@@ -15,6 +15,7 @@ test {
     _ = @import("terminal.zig");
     _ = @import("keymap.zig");
     _ = @import("style.zig");
+    _ = @import("statusbar.zig");
     _ = @import("modules/atuin.zig");
     _ = @import("modules/guardrail.zig");
     _ = @import("modules/history.zig");

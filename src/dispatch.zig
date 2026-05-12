@@ -160,6 +160,32 @@ pub fn Dispatcher(comptime modules: anytype) type {
             }
         }
 
+        /// Collect each module's `statusText` (if implemented) into
+        /// the writer, separating segments with ` │ `. Used by the
+        /// proxy's bottom status bar to paint a shared canvas — every
+        /// participating module contributes one segment, in module-
+        /// declaration order. Modules returning null are skipped.
+        pub fn gatherStatus(
+            rts: *Runtimes,
+            ctx: *Context,
+            w: *std.Io.Writer,
+        ) Error!void {
+            var any = false;
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "statusText")) {
+                    if (try M.statusText(rts[i], ctx)) |text| {
+                        if (text.len > 0) {
+                            // Truncate silently if the buffer is full —
+                            // status bar always has finite width anyway.
+                            if (any) w.writeAll(" │ ") catch return;
+                            w.writeAll(text) catch return;
+                            any = true;
+                        }
+                    }
+                }
+            }
+        }
+
         /// Fired on poll() timeout. Modules use this for periodic
         /// work: ghost-text TTL expiry, status indicators, etc.
         pub fn dispatchTick(

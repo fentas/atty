@@ -58,3 +58,15 @@ const atty = @import("atty");
 //     .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
 //     .{ .bytes = atty.keymap.key("End"),    .action = .ghost_accept },
 // };
+
+// ───── Bottom status bar ────────────────────────────────────────────────
+//
+// Reserves rows at the bottom of the terminal via DECSTBM. The shell's
+// reported size is slimmed by the same amount so it wraps correctly.
+// Modules can contribute segments via the optional `statusText` hook
+// (joined with " │ "). Off by default — opt in if you want it.
+//
+// pub const statusbar_enabled: bool = true;
+// pub const statusbar_reserve_rows: u16 = 2;            // text row + 1 blank above
+// pub const statusbar_style: atty.Style = atty.style.presets.muted;
+// pub const statusbar_base_text: []const u8 = "atty";   // proxy-level prefix

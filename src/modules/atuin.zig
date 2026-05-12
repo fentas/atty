@@ -391,6 +391,16 @@ pub fn configure(comptime cfg: Config) type {
             rt.shared.rec_pending = true;
             rt.shared.cv.signal(ctx.io);
         }
+
+        /// Status-bar segment. The runtime caches the rendered string
+        /// so we don't reformat per render cycle.
+        pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            _ = ctx;
+            _ = rt;
+            // Static label for now — future: surface queued records,
+            // last-sync age, sync-in-progress, etc.
+            return "atuin";
+        }
     };
 }
 

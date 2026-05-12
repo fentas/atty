@@ -46,3 +46,22 @@ pub const bindings: []const atty.keymap.Binding = &.{
     .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
     .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
 };
+
+// ───── Bottom status bar ──────────────────────────────────────────────────
+
+/// Reserve rows at the bottom of the terminal for a status indicator
+/// (via DECSTBM). Off by default — costs `statusbar_reserve_rows` of
+/// vertical screen real estate. When enabled, modules can contribute
+/// segments via the optional `statusText` hook (joined with ` │ `).
+pub const statusbar_enabled: bool = false;
+
+/// How many bottom rows to reserve. The last row holds the text;
+/// rows above are blank visual padding from the shell's content.
+pub const statusbar_reserve_rows: u16 = 2;
+
+/// Visual style for the status bar text.
+pub const statusbar_style: atty.Style = atty.style.presets.muted;
+
+/// Base text shown when no module contributes anything. Empty means
+/// the bar stays blank until a module sets something.
+pub const statusbar_base_text: []const u8 = "";

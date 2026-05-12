@@ -31,6 +31,7 @@ const Pty = @import("pty.zig").Pty;
 const RawMode = @import("terminal.zig").RawMode;
 const LineState = @import("line_state.zig").LineState;
 const Ghost = @import("ghost.zig").Ghost;
+const StatusBar = @import("statusbar.zig").StatusBar;
 const ansi = @import("ansi.zig");
 
 /// The single dispatcher specialisation used by the binary. Comptime
@@ -98,9 +99,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var pty = try Pty.open(allocator);
     defer pty.deinit();
 
+    // --- Bottom status bar (DECSTBM reserved region) ----------------------
+    //
+    // When enabled, slim the slave PTY's reported size by N rows so the
+    // shell wraps inside the visible region, and emit DECSTBM so its
+    // scrolling stays out of our reserved rows.
+    var statusbar: ?StatusBar = null;
+    if (args.is_tty and config.statusbar_enabled) {
+        if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+            statusbar = StatusBar.init(s.rows, s.cols, config.statusbar_reserve_rows, config.statusbar_style);
+        } else |_| {}
+    }
+
     if (args.is_tty) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            _ = pty.setSize(s) catch {};
+            var shell_size = s;
+            if (statusbar) |sb| shell_size.rows = sb.effectiveRows();
+            _ = pty.setSize(shell_size) catch {};
         } else |_| {}
     }
 
@@ -156,6 +171,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     //   • Shell output bypasses the writer and goes straight to STDOUT.
     var out_buf: [buf_size]u8 = undefined;
 
+    // Emit the initial DECSTBM + first paint of the status bar (after
+    // RawMode + child spawn, before the loop runs).
+    if (statusbar) |*sb| {
+        var w: std.Io.Writer = .fixed(&out_buf);
+        sb.activate(&w) catch {};
+        try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+    }
+    defer if (statusbar) |*sb| {
+        var w: std.Io.Writer = .fixed(&out_buf);
+        sb.deactivate(&w) catch {};
+        _ = writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]) catch {};
+    };
+
     var exit_code: u8 = 0;
     var child_alive = true;
 
@@ -171,6 +199,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             last_tick_ms = now;
             D.dispatchTick(&runtimes, &ctx, elapsed) catch {};
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
+            if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf) catch {};
             continue;
         }
 
@@ -226,6 +255,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
+                if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf) catch {};
             }
         }
 
@@ -240,6 +270,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 try writeAll(posix.STDOUT_FILENO, output);
 
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
+                if (statusbar) |*sb| {
+                    // Shell output may have scrolled or overwritten our
+                    // reserved row — force a repaint.
+                    sb.last_valid = false;
+                    renderStatus(&runtimes, &ctx, sb, &out_buf) catch {};
+                }
             } else if (read_n == 0) {
                 child_alive = false;
             }
@@ -257,7 +293,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const sig: posix.SIG = @enumFromInt(sig_buf[i]);
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                        _ = pty.setSize(s) catch {};
+                        var shell_size = s;
+                        if (statusbar) |*sb| {
+                            sb.onResize(s.rows, s.cols);
+                            var w: std.Io.Writer = .fixed(&out_buf);
+                            sb.activate(&w) catch {};
+                            try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+                            shell_size.rows = sb.effectiveRows();
+                        }
+                        _ = pty.setSize(shell_size) catch {};
                     } else |_| {}
                 } else if (sig == posix.SIG.CHLD) {
                     var status: u32 = 0;
@@ -323,6 +367,30 @@ fn renderGhost(rts: *D.Runtimes, ctx: *module.Context, ghost: *Ghost, out_buf: [
         }
     }
     if (ghost.visible) try clearGhost(ghost, out_buf);
+}
+
+/// Collect modules' status-text segments + the configured base text,
+/// paint into the reserved bottom row. Idempotent — no bytes emitted
+/// if the assembled text matches the last paint.
+fn renderStatus(
+    rts: *D.Runtimes,
+    ctx: *module.Context,
+    sb: *StatusBar,
+    out_buf: []u8,
+) !void {
+    if (!ctx.is_tty) return;
+
+    // Assemble text in a scratch buffer.
+    var text_buf: [256]u8 = undefined;
+    var tw: std.Io.Writer = .fixed(&text_buf);
+    if (config.statusbar_base_text.len > 0) tw.writeAll(config.statusbar_base_text) catch {};
+    if (config.statusbar_base_text.len > 0) tw.writeAll(" │ ") catch {};
+    D.gatherStatus(rts, ctx, &tw) catch {};
+    sb.setText(text_buf[0..tw.end]);
+
+    var w: std.Io.Writer = .fixed(out_buf);
+    sb.render(&w) catch return;
+    if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
 }
 
 fn clearGhost(ghost: *Ghost, out_buf: []u8) !void {
