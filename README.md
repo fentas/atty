@@ -159,6 +159,9 @@ pub const Atuin = atty.modules.atuin.configure(.{
 pub const modules          = .{ Guardrail, Atuin };  // order = priority
 pub const tick_interval_ms : i32 = 100;
 
+// Ghost suggestion appearance (default = dim only, matches fish).
+pub const ghost_style: atty.ghost.Style = .{ .dim = true };
+
 // dwm-style key bindings. atty.keymap.key("Right") resolves to its
 // byte sequence at compile time — typos fail the build.
 pub const bindings: []const atty.keymap.Binding = &.{

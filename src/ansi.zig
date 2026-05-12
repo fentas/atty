@@ -5,6 +5,7 @@
 //! emulators (xterm, Ghostty, Alacritty, kitty, foot, tmux 3.x).
 
 const std = @import("std");
+const Style = @import("ghost.zig").Style;
 
 // Single-byte CSI introducer — works in 7-bit and 8-bit modes.
 pub const ESC: u8 = 0x1B;
@@ -25,18 +26,24 @@ pub const erase_to_eol = "\x1B[K";
 
 // SGR codes
 pub const sgr_reset = "\x1B[0m";
-/// Dim/faint — what we use to render ghost text. Most terminals render
-/// this as ~50% intensity.
+pub const sgr_bold = "\x1B[1m";
 pub const sgr_dim = "\x1B[2m";
-/// Italic — useful as a secondary cue alongside dim. Skipped by some
-/// terminals; behavior degrades to plain dim, which is fine.
 pub const sgr_italic = "\x1B[3m";
+pub const sgr_underline = "\x1B[4m";
+pub const sgr_reverse = "\x1B[7m";
 
-/// Wraps `text` in dim/italic SGR codes and appends to writer.
-pub fn writeGhost(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+/// Wraps `text` in the SGR sequence described by `style` and appends
+/// to the writer. The cursor is saved before the overlay and restored
+/// after, so the shell's actual cursor position is untouched.
+pub fn writeGhost(w: *std.Io.Writer, text: []const u8, style: Style) std.Io.Writer.Error!void {
     try w.writeAll(save_cursor);
-    try w.writeAll(sgr_dim);
-    try w.writeAll(sgr_italic);
+    if (style.bold) try w.writeAll(sgr_bold);
+    if (style.dim) try w.writeAll(sgr_dim);
+    if (style.italic) try w.writeAll(sgr_italic);
+    if (style.underline) try w.writeAll(sgr_underline);
+    if (style.reverse) try w.writeAll(sgr_reverse);
+    if (style.fg) |f| try w.print("\x1B[38;5;{d}m", .{f});
+    if (style.bg) |b| try w.print("\x1B[48;5;{d}m", .{b});
     try w.writeAll(text);
     try w.writeAll(sgr_reset);
     try w.writeAll(restore_cursor);
@@ -91,15 +98,34 @@ pub fn stripEscapes(input: []const u8, out: *std.ArrayList(u8), gpa: std.mem.All
 // Tests
 // ===========================================================================
 
-test "writeGhost wraps text" {
+test "writeGhost wraps text in the requested style" {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try writeGhost(&w, "hello");
+    try writeGhost(&w, "hello", .{ .dim = true });
     const s = buf[0..w.end];
     try std.testing.expect(std.mem.indexOf(u8, s, "hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, sgr_dim) != null);
     try std.testing.expect(std.mem.indexOf(u8, s, save_cursor) != null);
     try std.testing.expect(std.mem.indexOf(u8, s, restore_cursor) != null);
+}
+
+test "writeGhost honours italic + fg color when set" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeGhost(&w, "x", .{ .italic = true, .fg = 244 });
+    const s = buf[0..w.end];
+    try std.testing.expect(std.mem.indexOf(u8, s, sgr_italic) != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\x1B[38;5;244m") != null);
+}
+
+test "writeGhost emits nothing extra when style is fully default" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeGhost(&w, "x", .{ .dim = false });
+    const s = buf[0..w.end];
+    // Still wraps with save/restore + reset, but no SGR attrs in between.
+    try std.testing.expect(std.mem.indexOf(u8, s, sgr_dim) == null);
+    try std.testing.expect(std.mem.indexOf(u8, s, sgr_italic) == null);
 }
 
 test "stripEscapes removes CSI" {

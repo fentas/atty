@@ -55,6 +55,16 @@ pub const modules = .{
 /// ghost-text expiry; higher = lower idle CPU.
 pub const tick_interval_ms: i32 = 100;
 
+/// Visual style for the ghost-text overlay (the dim suggestion after
+/// the cursor). Default matches fish + zsh-autosuggestions: dim, no
+/// italic, terminal's default colour. Set `.fg` to a 256-colour index
+/// for a specific shade — 244 is a comfortable mid-gray.
+pub const ghost_style: atty.ghost.Style = .{
+    .dim = true,
+    .italic = false,
+    // .fg = 244,
+};
+
 /// Key bindings — dwm-style `keys[]` array. Each entry is a
 /// `{ bytes, action }` pair: when stdin reads exactly `bytes`, the
 /// `action` runs instead of the keystroke flowing through to the

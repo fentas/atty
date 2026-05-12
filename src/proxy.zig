@@ -131,7 +131,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     defer scratch.deinit(allocator);
     try scratch.ensureTotalCapacity(allocator, buf_size);
 
-    var ghost = Ghost.init(allocator);
+    var ghost = Ghost.init(allocator, config.ghost_style);
     defer ghost.deinit();
 
     var ctx = module.Context{

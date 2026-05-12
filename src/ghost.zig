@@ -24,15 +24,40 @@
 const std = @import("std");
 const ansi = @import("ansi.zig");
 
+/// Visual styling for the ghost overlay. Fields default to fish /
+/// zsh-autosuggestions conventions (dim only, no italic, default
+/// color). Override via `src/config.zig`:
+///
+/// ```zig
+/// pub const ghost_style: atty.ghost.Style = .{
+///     .dim = true,
+///     .italic = true,    // some prefer the extra cue
+///     .fg = 244,         // 256-color: a mid-gray
+/// };
+/// ```
+pub const Style = struct {
+    bold: bool = false,
+    dim: bool = true,
+    italic: bool = false,
+    underline: bool = false,
+    reverse: bool = false,
+    /// 256-color foreground index (0–255), or null for the terminal's
+    /// default. Color 8–15 are bright variants of 0–7; 16–231 form a
+    /// 6×6×6 RGB cube; 232–255 are grayscale.
+    fg: ?u8 = null,
+    bg: ?u8 = null,
+};
+
 pub const Ghost = struct {
     allocator: std.mem.Allocator,
     /// Currently-rendered suggestion text (the part AFTER the user's
     /// cursor). Empty when no overlay is on screen.
     rendered: std.ArrayList(u8) = .empty,
     visible: bool = false,
+    style: Style,
 
-    pub fn init(allocator: std.mem.Allocator) Ghost {
-        return .{ .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, style: Style) Ghost {
+        return .{ .allocator = allocator, .style = style };
     }
 
     pub fn deinit(self: *Ghost) void {
@@ -56,7 +81,7 @@ pub const Ghost = struct {
     pub fn show(self: *Ghost, w: *std.Io.Writer, text: []const u8) !void {
         if (self.visible and std.mem.eql(u8, self.rendered.items, text)) return;
         if (self.visible) try self.clear(w);
-        try ansi.writeGhost(w, text);
+        try ansi.writeGhost(w, text, self.style);
         self.rendered.clearRetainingCapacity();
         try self.rendered.appendSlice(self.allocator, text);
         self.visible = true;
@@ -90,7 +115,7 @@ test "trailing rejects shorter suggestion" {
 }
 
 test "show then clear toggles visibility" {
-    var g = Ghost.init(std.testing.allocator);
+    var g = Ghost.init(std.testing.allocator, .{});
     defer g.deinit();
 
     var buf: [256]u8 = undefined;

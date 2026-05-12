@@ -193,9 +193,15 @@ tick (default 100 ms), and naive re-paints would flicker.
 | ESC 7          | DECSC — save cursor + attributes                     |
 | ESC 8          | DECRC — restore cursor + attributes                  |
 | CSI 2 m        | SGR dim (≈ 50% intensity in most terminals)          |
-| CSI 3 m        | SGR italic (secondary cue; ignored gracefully)       |
+| CSI 3 m        | SGR italic (optional via `ghost_style.italic`)       |
+| CSI 38;5;n m   | SGR 256-colour fg (optional via `ghost_style.fg`)    |
 | CSI 0 m        | SGR reset                                            |
 | CSI K          | EL — erase to end of line                            |
+
+The exact SGR bytes emitted are driven by `config.ghost_style`
+(an `atty.ghost.Style` — bold/dim/italic/underline/reverse +
+optional fg/bg 256-colour indices). The defaults match
+fish + zsh-autosuggestions: dim only.
 
 ## Line-state model
 
