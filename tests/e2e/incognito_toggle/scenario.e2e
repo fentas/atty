@@ -1,0 +1,36 @@
+# incognito_toggle — end-to-end coverage for Ctrl+Shift+I.
+#
+# Verifies the action toggles a visible 🔒 segment in the status bar
+# (which proves: the kitty kbd CSI-u byte sequence is recognised, the
+# binding routes to `incognito_toggle`, the proxy flips `incognito_on`
+# and forces a bar repaint, status_text.assemble emits the indicator,
+# and statusbar.render lands it in row N). Second press toggles off,
+# proving the action is symmetric and the bar reverts.
+#
+# Why this is worth its own scenario: the visible 🔒 path is the
+# user-facing contract — incognito's *recording* effect (history not
+# written) is already covered by unit tests. The visual confirmation
+# is what tells a user they're in the protected mode at all.
+
+cols 60
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 400
+
+# Toggle incognito ON via Ctrl+Shift+I — kitty kbd CSI-u for 'i'
+# (keycode 105) with Ctrl+Shift modifier (6).
+type "\x1b[105;6u"
+sleep 400
+snapshot bar_incognito_on
+
+# Toggle OFF — same sequence, action is symmetric.
+type "\x1b[105;6u"
+sleep 400
+snapshot bar_incognito_off
+
+# Clean shutdown.
+type "exit\r"
+exit_code 0
