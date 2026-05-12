@@ -54,6 +54,11 @@ pub const statusbar_base_text = if (@hasDecl(user, "statusbar_base_text"))
 else
     defaults.statusbar_base_text;
 
+pub const incognito_status_style = if (@hasDecl(user, "incognito_status_style"))
+    user.incognito_status_style
+else
+    defaults.incognito_status_style;
+
 pub const enable_kitty_keyboard = if (@hasDecl(user, "enable_kitty_keyboard"))
     user.enable_kitty_keyboard
 else

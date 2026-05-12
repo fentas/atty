@@ -83,3 +83,8 @@ pub const statusbar_style: atty.Style = atty.style.presets.muted;
 /// Base text shown when no module contributes anything. Empty means
 /// the bar stays blank until a module sets something.
 pub const statusbar_base_text: []const u8 = "";
+
+/// Style for the 🔒 incognito segment in the status bar. Defaults to
+/// muted red (dim + red) so it visually stands out against the rest
+/// of the bar (which uses `statusbar_style`).
+pub const incognito_status_style: atty.Style = .{ .dim = true, .fg = 1 };

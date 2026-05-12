@@ -33,6 +33,7 @@ const LineState = @import("line_state.zig").LineState;
 const Ghost = @import("ghost.zig").Ghost;
 const StatusBar = @import("statusbar.zig").StatusBar;
 const ansi = @import("ansi.zig");
+const style_mod = @import("style.zig");
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -424,7 +425,20 @@ fn renderStatus(
     var text_buf: [256]u8 = undefined;
     var tw: std.Io.Writer = .fixed(&text_buf);
     var any: bool = false;
-    if (incognito) writeSegment(&tw, &any, "\u{1F512} incognito");
+    // The incognito segment gets its own SGR — muted red by default —
+    // so it pops out of the bar's overall style. After the segment we
+    // emit sgr_reset and re-apply the bar's `statusbar_style` so the
+    // subsequent segments paint in the normal colour.
+    if (incognito) {
+        var seg_buf: [96]u8 = undefined;
+        var sw: std.Io.Writer = .fixed(&seg_buf);
+        sw.print("{f}\u{1F512} incognito{s}{f}", .{
+            config.incognito_status_style,
+            style_mod.reset,
+            config.statusbar_style,
+        }) catch {};
+        writeSegment(&tw, &any, sw.buffered());
+    }
     if (config.statusbar_base_text.len > 0) writeSegment(&tw, &any, config.statusbar_base_text);
 
     var mod_buf: [192]u8 = undefined;
