@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const atty = @import("atty");
+const args_mod = atty.args;
 
 const usage =
     \\Usage: atty [flags] [shell [args...]]
@@ -37,12 +38,7 @@ const usage =
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn isatty(fd: c_int) c_int;
 
-const CliOpts = struct {
-    /// Positional argv for the spawned shell. positional[0] is the shell
-    /// binary; positional[1..] are its args. Empty when the user
-    /// passed no positionals — in that case we resolve $SHELL ourselves.
-    positional: [][]const u8 = &.{},
-};
+const CliOpts = args_mod.CliOpts;
 
 fn writeStderr(bytes: []const u8) void {
     _ = std.c.write(std.posix.STDERR_FILENO, bytes.ptr, bytes.len);
@@ -57,49 +53,33 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args) !CliOpts {
 
     _ = it.next(); // argv[0]
 
-    var positional: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (positional.items) |s| allocator.free(s);
-        positional.deinit(allocator);
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |s| allocator.free(s);
+        collected.deinit(allocator);
     }
+    while (it.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
 
-    var done_with_flags = false;
-
-    while (it.next()) |a| {
-        if (done_with_flags) {
-            // Once we've started collecting the spawned command, every
-            // subsequent token is part of it — flags included
-            // (`atty bash -l` must pass `-l` to bash, not to atty).
-            try positional.append(allocator, try allocator.dupe(u8, a));
-            continue;
-        }
-        if (std.mem.eql(u8, a, "--")) {
-            done_with_flags = true;
-            continue;
-        }
-        if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
+    switch (try args_mod.parseArgv(allocator, collected.items)) {
+        .ok => |opts| return opts,
+        .help => {
             writeStdout(usage);
             std.process.exit(0);
-        }
-        if (std.mem.eql(u8, a, "-V") or std.mem.eql(u8, a, "--version")) {
+        },
+        .version => {
             var buf: [64]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "atty {s}\n", .{atty.version}) catch "atty\n";
             writeStdout(msg);
             std.process.exit(0);
-        }
-        if (a.len > 0 and a[0] == '-') {
+        },
+        .unknown_flag => |flag| {
             var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "error: unknown flag: {s}\n\n", .{a}) catch "error: unknown flag\n";
+            const msg = std.fmt.bufPrint(&buf, "error: unknown flag: {s}\n\n", .{flag}) catch "error: unknown flag\n";
             writeStderr(msg);
             writeStderr(usage);
             std.process.exit(2);
-        }
-        // First positional ends flag parsing.
-        try positional.append(allocator, try allocator.dupe(u8, a));
-        done_with_flags = true;
+        },
     }
-
-    return .{ .positional = try positional.toOwnedSlice(allocator) };
 }
 
 fn resolveShell(allocator: std.mem.Allocator) ![:0]u8 {
