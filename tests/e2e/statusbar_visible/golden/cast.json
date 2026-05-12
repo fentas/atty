@@ -1,8 +1,0 @@
-{"version":2,"width":60,"height":8,"timestamp":0,"env":{"TERM":"xterm-256color","SHELL":"/bin/sh"}}
-[0.000000, "o", "\u001b[7;1H\u001b[K\u001b[8;1H\u001b[K\u001b[1;6r\u001b[1;1H"]
-[0.002000, "o", "\u001b[?2004h\u001b7\u001b[8;1H\u001b[K\u001b[2matty\u001b[0m\u001b8"]
-[0.002000, "o", "$ \u001b7\u001b[8;1H\u001b[K\u001b[2matty\u001b[0m\u001b8"]
-[0.502000, "i", "exit\r"]
-[0.503000, "o", "exit\r\n\u001b[?2004l\r\u001b7\u001b[8;1H\u001b[K\u001b[2matty\u001b[0m\u001b8"]
-[0.503000, "o", "exit\r\n\u001b7\u001b[8;1H\u001b[K\u001b[2matty\u001b[0m\u001b8"]
-[0.503000, "o", "\u001b[7;1H\u001b[K\u001b[8;1H\u001b[K\u001b[r"]

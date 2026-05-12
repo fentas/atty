@@ -34,6 +34,13 @@ coverage/
 # fails, as diagnostic output. Not tracked.
 /tests/e2e/*/actual/
 
+# cast.json is an asciinema-style replay artifact regenerated on
+# every --update. PTY chunking is non-deterministic, so the byte
+# layout shifts run-to-run even when the test passes. Never compared
+# during snapshot diff (only grid.txt + grid.sgr are), so tracking it
+# just creates diff noise.
+/tests/e2e/*/golden/cast.json
+
 # ---- User config -------------------------------------------------------------
 # src/config.zig is per-user; src/config.def.zig is the committed template.
 # build.zig bootstraps config.zig from the template on first build, so a
