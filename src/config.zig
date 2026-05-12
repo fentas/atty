@@ -55,25 +55,25 @@ pub const modules = .{
 /// ghost-text expiry; higher = lower idle CPU.
 pub const tick_interval_ms: i32 = 100;
 
-/// Keystrokes that accept the current ghost suggestion (fish-style).
-/// Each entry is matched against the entire stdin read; first match
-/// wins. Works best with sequences a terminal emits as a single unit.
-/// Empty list disables accept-ghost entirely.
+/// Key bindings — dwm-style `keys[]` array. Each entry is a
+/// `{ bytes, action }` pair: when stdin reads exactly `bytes`, the
+/// `action` runs instead of the keystroke flowing through to the
+/// shell.
 ///
-/// Common values:
+/// Common byte sequences:
 ///
 ///   "\x1b[C"     right-arrow
 ///   "\x1b[F"     End
-///   "\x06"       Ctrl-F            (Emacs-style end-of-line)
-///   "\x1b[Z"     Shift-Tab         (some terminals)
 ///   "\x1bOC"     right-arrow       (terminals in application-cursor mode)
 ///   "\x1b[1;5C"  Ctrl-Right-arrow  (xterm-style)
+///   "\x1b[Z"     Shift-Tab
+///   "\x06"       Ctrl-F            (Emacs-style end-of-line)
 ///   "\t"         Tab               (warning: clobbers shell completion)
 ///
 /// Note: Ctrl-Tab is not a standard terminal sequence — most terminals
 /// don't emit anything distinct for it. Use Ctrl-F or right-arrow.
-pub const accept_ghost_keys: []const []const u8 = &.{
-    "\x1b[C", // right-arrow (matches fish, zsh-autosuggestions)
-    "\x1b[F", // End
-    "\x06", // Ctrl-F
+pub const bindings: []const atty.keymap.Binding = &.{
+    .{ .bytes = "\x1b[C", .action = .ghost_accept }, // right-arrow (fish, zsh-autosuggestions)
+    .{ .bytes = "\x1b[F", .action = .ghost_accept }, // End
+    .{ .bytes = "\x06", .action = .ghost_accept }, // Ctrl-F
 };
