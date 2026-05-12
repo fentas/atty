@@ -131,10 +131,10 @@ pub const Atuin = atty.modules.atuin.configure(.{
 pub const modules = .{ Guardrail, Atuin };   // order matters
 pub const tick_interval_ms: i32 = 100;
 
-// Visual style for the ghost suggestion (fish/zsh-autosuggestions
-// default: dim, no italic, default colour). Add `.fg = 244` for a
-// specific shade.
-pub const ghost_style: atty.ghost.Style = .{ .dim = true };
+// Visual styling — atty.Style is the shared primitive every visible
+// module accepts (ghost overlay, guardrail warning, …). Presets in
+// atty.style.presets; or write Style literals inline.
+pub const ghost_style: atty.Style = atty.style.presets.muted;
 
 // dwm-style key bindings. Use atty.keymap.key("Right") for readability;
 // the helper resolves at compile time, so typos break the build.

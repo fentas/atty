@@ -141,11 +141,14 @@ pub const Guardrail = atty.modules.guardrail.configure(.{
             .reason = "force-pushing to a shared branch",
         },
     },
+    .warning_style = atty.style.presets.danger,   // bold red
 });
 ```
 
 Passing `.rules` replaces the default list entirely; merge manually
-if you want both.
+if you want both. `warning_style` takes an `atty.Style` — same type
+the ghost overlay uses, so a single palette can drive the whole
+proxy. Default style is `.{ .dim = true, .italic = true }`.
 
 ### Limitations
 

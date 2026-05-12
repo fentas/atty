@@ -23,6 +23,7 @@ pub const Guardrail = atty.modules.guardrail.configure(.{
     // .rules = &.{
     //     .{ .name = "no-force-push", .kind = .{ .substring = "git push --force" }, .reason = "force push" },
     // },
+    // .warning_style = atty.style.presets.danger,
 });
 
 pub const Atuin = atty.modules.atuin.configure(.{
@@ -56,14 +57,15 @@ pub const modules = .{
 pub const tick_interval_ms: i32 = 100;
 
 /// Visual style for the ghost-text overlay (the dim suggestion after
-/// the cursor). Default matches fish + zsh-autosuggestions: dim, no
-/// italic, terminal's default colour. Set `.fg` to a 256-colour index
-/// for a specific shade — 244 is a comfortable mid-gray.
-pub const ghost_style: atty.ghost.Style = .{
-    .dim = true,
-    .italic = false,
-    // .fg = 244,
-};
+/// the cursor). `atty.Style` is the shared styling primitive — every
+/// module that paints something on screen accepts one (see e.g.
+/// `Guardrail.warning_style` above). Named presets live in
+/// `atty.style.presets`; the literal form below also works.
+///
+/// Default matches fish + zsh-autosuggestions: dim only.
+pub const ghost_style: atty.Style = atty.style.presets.muted;
+// pub const ghost_style: atty.Style = .{ .dim = true, .italic = true };
+// pub const ghost_style: atty.Style = .{ .fg = 244 };  // mid-gray
 
 /// Key bindings — dwm-style `keys[]` array. Each entry is a
 /// `{ bytes, action }` pair: when stdin reads exactly `bytes`, the

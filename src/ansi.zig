@@ -5,7 +5,7 @@
 //! emulators (xterm, Ghostty, Alacritty, kitty, foot, tmux 3.x).
 
 const std = @import("std");
-const Style = @import("ghost.zig").Style;
+const Style = @import("style.zig").Style;
 
 // Single-byte CSI introducer — works in 7-bit and 8-bit modes.
 pub const ESC: u8 = 0x1B;
@@ -37,13 +37,7 @@ pub const sgr_reverse = "\x1B[7m";
 /// after, so the shell's actual cursor position is untouched.
 pub fn writeGhost(w: *std.Io.Writer, text: []const u8, style: Style) std.Io.Writer.Error!void {
     try w.writeAll(save_cursor);
-    if (style.bold) try w.writeAll(sgr_bold);
-    if (style.dim) try w.writeAll(sgr_dim);
-    if (style.italic) try w.writeAll(sgr_italic);
-    if (style.underline) try w.writeAll(sgr_underline);
-    if (style.reverse) try w.writeAll(sgr_reverse);
-    if (style.fg) |f| try w.print("\x1B[38;5;{d}m", .{f});
-    if (style.bg) |b| try w.print("\x1B[48;5;{d}m", .{b});
+    try w.print("{f}", .{style});
     try w.writeAll(text);
     try w.writeAll(sgr_reset);
     try w.writeAll(restore_cursor);

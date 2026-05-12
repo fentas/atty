@@ -159,8 +159,9 @@ pub const Atuin = atty.modules.atuin.configure(.{
 pub const modules          = .{ Guardrail, Atuin };  // order = priority
 pub const tick_interval_ms : i32 = 100;
 
-// Ghost suggestion appearance (default = dim only, matches fish).
-pub const ghost_style: atty.ghost.Style = .{ .dim = true };
+// Shared styling primitive — atty.Style. Every module that paints
+// on screen accepts a Style field (Guardrail.warning_style, …).
+pub const ghost_style: atty.Style = atty.style.presets.muted;
 
 // dwm-style key bindings. atty.keymap.key("Right") resolves to its
 // byte sequence at compile time — typos fail the build.

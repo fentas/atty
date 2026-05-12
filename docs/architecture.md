@@ -198,10 +198,14 @@ tick (default 100 ms), and naive re-paints would flicker.
 | CSI 0 m        | SGR reset                                            |
 | CSI K          | EL — erase to end of line                            |
 
-The exact SGR bytes emitted are driven by `config.ghost_style`
-(an `atty.ghost.Style` — bold/dim/italic/underline/reverse +
-optional fg/bg 256-colour indices). The defaults match
-fish + zsh-autosuggestions: dim only.
+The exact SGR bytes emitted are driven by `config.ghost_style` — an
+`atty.Style` value. `atty.Style` is the shared styling primitive used
+by every visible element (ghost overlay, guardrail warning banner,
+future status indicators). Fields: `bold`, `dim`, `italic`,
+`underline`, `reverse`, optional 256-colour `fg`/`bg`. Named
+presets are in `atty.style.presets`; module configs accept their
+own style fields so a user can pull a consistent palette across
+the whole proxy. Default matches fish + zsh-autosuggestions: dim only.
 
 ## Line-state model
 

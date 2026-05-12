@@ -24,29 +24,9 @@
 const std = @import("std");
 const ansi = @import("ansi.zig");
 
-/// Visual styling for the ghost overlay. Fields default to fish /
-/// zsh-autosuggestions conventions (dim only, no italic, default
-/// color). Override via `src/config.zig`:
-///
-/// ```zig
-/// pub const ghost_style: atty.ghost.Style = .{
-///     .dim = true,
-///     .italic = true,    // some prefer the extra cue
-///     .fg = 244,         // 256-color: a mid-gray
-/// };
-/// ```
-pub const Style = struct {
-    bold: bool = false,
-    dim: bool = true,
-    italic: bool = false,
-    underline: bool = false,
-    reverse: bool = false,
-    /// 256-color foreground index (0–255), or null for the terminal's
-    /// default. Color 8–15 are bright variants of 0–7; 16–231 form a
-    /// 6×6×6 RGB cube; 232–255 are grayscale.
-    fg: ?u8 = null,
-    bg: ?u8 = null,
-};
+/// Re-export of the canonical `Style` from `atty.style` for callers
+/// that import via `atty.ghost.Style`. Prefer `atty.Style` in new code.
+pub const Style = @import("style.zig").Style;
 
 pub const Ghost = struct {
     allocator: std.mem.Allocator,
