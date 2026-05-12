@@ -54,3 +54,13 @@ pub const modules = .{
 /// poll() timeout — drives onTick cadence. Lower = more responsive
 /// ghost-text expiry; higher = lower idle CPU.
 pub const tick_interval_ms: i32 = 100;
+
+/// Keystroke that accepts the current ghost suggestion (fish-style).
+/// The bytes are checked against the entire stdin read — so this works
+/// best with sequences a terminal emits as a single unit. Set to an
+/// empty string to disable.
+///
+///   "\x1b[C"  right-arrow (default — matches fish, zsh-autosuggestions)
+///   "\x1b[F"  End
+///   "\x06"    Ctrl-F (Emacs-style end-of-line)
+pub const accept_ghost_key: []const u8 = "\x1b[C";

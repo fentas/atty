@@ -229,6 +229,9 @@ pub fn configure(comptime cfg: Config) type {
                 .directory => "directory",
             };
 
+            // No --reverse: atuin's default order is newest-first, which
+            // is what a "fish-style autosuggest" wants. With --reverse +
+            // --limit 1 we'd pin the OLDEST matching entry instead.
             const argv = [_][]const u8{
                 cfg.atuin_binary,
                 "search",
@@ -239,7 +242,6 @@ pub fn configure(comptime cfg: Config) type {
                 "--limit",
                 "1",
                 "--cmd-only",
-                "--reverse",
                 query,
             };
 
@@ -289,7 +291,19 @@ pub fn configure(comptime cfg: Config) type {
             gpa.free(result.stderr);
         }
 
+        /// Spawn `atuin sync` on a detached thread so it doesn't block
+        /// the next query. Sync can take seconds (network round-trip);
+        /// if we ran it inline the worker would miss every keystroke
+        /// during that window, the suggestion cache would go stale,
+        /// and the ghost would appear "stuck". The thread is detached
+        /// — we never join — so the only cost is one short-lived OS
+        /// thread per sync.
         fn runSync(gpa: std.mem.Allocator, io: std.Io) void {
+            const t = std.Thread.spawn(.{}, syncOnThread, .{ gpa, io }) catch return;
+            t.detach();
+        }
+
+        fn syncOnThread(gpa: std.mem.Allocator, io: std.Io) void {
             const argv = [_][]const u8{
                 cfg.atuin_binary,
                 "sync",
