@@ -23,13 +23,14 @@ pub const Guardrail = atty.modules.guardrail.configure(.{
     // .rules = &.{
     //     .{ .name = "no-force-push", .kind = .{ .substring = "git push --force" }, .reason = "force push" },
     // },
+    // .warning_style = atty.style.presets.danger,
 });
 
 pub const Atuin = atty.modules.atuin.configure(.{
     .backend = .subprocess,
     .search_mode = .prefix,
     .filter_mode = .global,
-    .suggestion_ttl_ms = 5_000,
+    .suggestion_ttl_ms = 0, // 0 = no idle timer (fish-style); set ms to fade
 });
 
 // Shell-native history (no daemon). Reads ~/.bash_history /
@@ -69,3 +70,37 @@ pub const modules = .{
 /// poll() timeout — drives onTick cadence. Lower = more responsive
 /// ghost-text expiry; higher = lower idle CPU.
 pub const tick_interval_ms: i32 = 100;
+
+/// Visual style for the ghost-text overlay (the dim suggestion after
+/// the cursor). `atty.Style` is the shared styling primitive — every
+/// module that paints something on screen accepts one (see e.g.
+/// `Guardrail.warning_style` above). Named presets live in
+/// `atty.style.presets`; the literal form below also works.
+///
+/// Default matches fish + zsh-autosuggestions: dim only.
+pub const ghost_style: atty.Style = atty.style.presets.muted;
+// pub const ghost_style: atty.Style = .{ .dim = true, .italic = true };
+// pub const ghost_style: atty.Style = .{ .fg = 244 };  // mid-gray
+
+/// Key bindings — dwm-style `keys[]` array. Each entry is a
+/// `{ bytes, action }` pair: when stdin reads exactly `bytes`, the
+/// `action` runs instead of the keystroke flowing through to the
+/// shell.
+///
+/// Use `atty.keymap.key("Right")` rather than raw byte sequences —
+/// the helper resolves at compile time, so typos error the build.
+/// Supported names: arrows + nav (`Right`/`Left`/`Up`/`Down`/`Home`/
+/// `End`/`PageUp`/`PageDown`/`Insert`/`Delete`), `Tab`/`Enter`/
+/// `Backspace`/`Esc`, xterm CSI-1 modifier combos (`Ctrl+Right`,
+/// `Shift+End`, `Ctrl+Shift+Up`, `Ctrl+Alt+Left`, …), `Ctrl+<letter>`,
+/// `Alt+<char>`, `F1`–`F12`. See src/keymap.zig.
+///
+/// Super/Win/Cmd has no portable terminal sequence; `Ctrl+Tab` etc.
+/// is indistinguishable from `Tab` on most terminals. For exotic
+/// sequences (kitty keyboard protocol) the `.bytes` field still
+/// accepts raw byte literals.
+pub const bindings: []const atty.keymap.Binding = &.{
+    .{ .bytes = atty.keymap.key("Right"), .action = .ghost_accept }, // fish, zsh-autosuggestions
+    .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
+    .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept }, // Emacs end-of-line
+};

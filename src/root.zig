@@ -13,6 +13,9 @@ pub const ghost = @import("ghost.zig");
 pub const pty = @import("pty.zig");
 pub const terminal = @import("terminal.zig");
 pub const proxy = @import("proxy.zig");
+pub const keymap = @import("keymap.zig");
+pub const style = @import("style.zig");
+pub const Style = style.Style;
 
 /// Built-in modules. User configs compose these via
 /// `atty.modules.atuin.configure(.{...})`.

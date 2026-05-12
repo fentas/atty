@@ -51,7 +51,12 @@ pub const Config = struct {
     search_mode: SearchMode = .prefix,
     filter_mode: FilterMode = .global,
     socket_path: []const u8 = "",
-    suggestion_ttl_ms: u64 = 5_000,
+    /// Drop the cached suggestion after this many ms of keyboard idle.
+    /// `0` disables the timer — the suggestion persists until the user
+    /// types something that no longer prefix-matches it (which is how
+    /// fish + zsh-autosuggestions behave). Default 0; set to a non-zero
+    /// value if you specifically want stale offers to fade.
+    suggestion_ttl_ms: u64 = 0,
     max_query: comptime_int = 256,
     max_result: comptime_int = 512,
 
@@ -229,6 +234,9 @@ pub fn configure(comptime cfg: Config) type {
                 .directory => "directory",
             };
 
+            // No --reverse: atuin's default order is newest-first, which
+            // is what a "fish-style autosuggest" wants. With --reverse +
+            // --limit 1 we'd pin the OLDEST matching entry instead.
             const argv = [_][]const u8{
                 cfg.atuin_binary,
                 "search",
@@ -239,7 +247,6 @@ pub fn configure(comptime cfg: Config) type {
                 "--limit",
                 "1",
                 "--cmd-only",
-                "--reverse",
                 query,
             };
 
@@ -289,7 +296,19 @@ pub fn configure(comptime cfg: Config) type {
             gpa.free(result.stderr);
         }
 
+        /// Spawn `atuin sync` on a detached thread so it doesn't block
+        /// the next query. Sync can take seconds (network round-trip);
+        /// if we ran it inline the worker would miss every keystroke
+        /// during that window, the suggestion cache would go stale,
+        /// and the ghost would appear "stuck". The thread is detached
+        /// — we never join — so the only cost is one short-lived OS
+        /// thread per sync.
         fn runSync(gpa: std.mem.Allocator, io: std.Io) void {
+            const t = std.Thread.spawn(.{}, syncOnThread, .{ gpa, io }) catch return;
+            t.detach();
+        }
+
+        fn syncOnThread(gpa: std.mem.Allocator, io: std.Io) void {
             const argv = [_][]const u8{
                 cfg.atuin_binary,
                 "sync",
@@ -344,6 +363,7 @@ pub fn configure(comptime cfg: Config) type {
 
         pub fn onTick(rt: *Runtime, ctx: *m.Context, elapsed_ms: u64) m.Error!void {
             _ = elapsed_ms;
+            if (cfg.suggestion_ttl_ms == 0) return; // timer disabled
             if (rt.last_keystroke_ms == 0) return;
             const now = nowMs();
             const idle = now - rt.last_keystroke_ms;

@@ -125,6 +125,14 @@ the post-input buffer.
 periodic work — TTL expiry, status updates. Don't do heavy work
 here; ticks are not throttled.
 
+`onLineCommit` fires once per Enter-press, *after* the line buffer has
+been cleared, with the pre-Enter line as its argument. Use it for
+history recording, audit logs, telemetry. The hook **does not fire**
+when the line was empty or when `line_state.uncertain` was true at
+submit time — recording a wrong line is worse than missing one, so
+the proxy skips uncertain commits. Don't block here; spawn a worker
+or detach a thread if your work involves I/O.
+
 ## Action semantics
 
 | Returned action | What happens                                          |

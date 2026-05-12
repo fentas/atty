@@ -12,26 +12,56 @@ history.
 
 ### How it works
 
-1. Every keystroke updates the line model and `onInput` pushes the
-   current buffer to a worker thread via a one-slot mailbox.
-2. The worker calls `atuin search --search-mode prefix --filter-mode global
-   --limit 1 --cmd-only --reverse <query>` and stores the result.
-3. `provideGhostText` reads the latest result; if it still starts with
-   the current input, the trailing portion is rendered after the cursor.
-4. `onTick` expires the suggestion after `suggestion_ttl_ms` of
-   keyboard inactivity, so stale offers don't linger.
+**Suggest path:**
+
+1. Every keystroke updates the line model; `onInput` copies the
+   current buffer into the worker's one-slot mailbox and signals.
+2. The worker calls `atuin search --search-mode prefix --filter-mode
+   global --limit 1 --cmd-only <query>` (newest match wins; no
+   `--reverse` — that flag flips the default and gives the *oldest*
+   match instead).
+3. `provideGhostText` reads the latest result under a mutex; if it
+   still starts with the current input, the trailing portion is
+   rendered after the cursor.
+4. `onTick` optionally expires the suggestion after
+   `suggestion_ttl_ms` of keyboard inactivity (`0` = disabled,
+   suggestion persists until it no longer prefix-matches — fish-style).
+
+**Record path:**
+
+1. `onLineCommit` fires when the user presses Enter on a non-empty,
+   certain line (the proxy snapshots the pre-submit buffer from
+   `LineState.lastCommitted()`).
+2. The module pushes the line into the worker's record mailbox.
+3. The worker shells out to `atuin history start <cmd>` (we don't
+   capture the entry ID, so there's no `history end` — entries land
+   with no exit code or duration; atuin handles that gracefully).
+4. After `sync_after_records` records or `sync_interval_ms` ms,
+   `atuin sync` runs — on a **detached** `std.Thread`, so the worker
+   never blocks on the network. One final sync also runs on detach.
+
+**Accept path:**
+
+Right-arrow / End / Ctrl-F (configured in `bindings[]`) replace the
+keystroke with the current ghost-overlay text before line state sees
+the CSI — see the [Keymap](/architecture/#keymap) docs.
 
 ### Configuration
 
 ```zig
 pub const Atuin = atty.modules.atuin.configure(.{
-    .backend = .subprocess,
-    .atuin_binary = "atuin",
-    .search_mode = .prefix,
-    .filter_mode = .global,
-    .suggestion_ttl_ms = 5_000,
-    .max_query = 256,
-    .max_result = 512,
+    .backend             = .subprocess,
+    .atuin_binary        = "atuin",
+    .search_mode         = .prefix,
+    .filter_mode         = .global,
+    .suggestion_ttl_ms   = 0,
+    .max_query           = 256,
+    .max_result          = 512,
+
+    .record              = true,
+    .sync_after_records  = 10,
+    .sync_interval_ms    = 60_000,
+    .sync_on_detach      = true,
 });
 ```
 
@@ -41,8 +71,12 @@ pub const Atuin = atty.modules.atuin.configure(.{
 | `atuin_binary`         | `"atuin"`     | path to atuin executable                     |
 | `search_mode`          | `.prefix`     | `.prefix`, `.full_text`, `.fuzzy`            |
 | `filter_mode`          | `.global`     | `.global`, `.host`, `.session`, `.directory` |
-| `suggestion_ttl_ms`    | 5000          | ms of idleness before suggestion expires     |
+| `suggestion_ttl_ms`    | 0             | ms of idleness before suggestion fades; 0 disables |
 | `max_query`, `max_result` | 256 / 512  | comptime mailbox sizes                       |
+| `record`               | `true`        | shell out to `atuin history start` on Enter  |
+| `sync_after_records`   | 10            | sync after N records; 0 disables             |
+| `sync_interval_ms`     | 60000         | sync if at least this much time elapsed; 0 disables |
+| `sync_on_detach`       | `true`        | one last sync on shutdown                    |
 
 ### Backends
 
@@ -107,11 +141,14 @@ pub const Guardrail = atty.modules.guardrail.configure(.{
             .reason = "force-pushing to a shared branch",
         },
     },
+    .warning_style = atty.style.presets.danger,   // bold red
 });
 ```
 
 Passing `.rules` replaces the default list entirely; merge manually
-if you want both.
+if you want both. `warning_style` takes an `atty.Style` — same type
+the ghost overlay uses, so a single palette can drive the whole
+proxy. Default style is `.{ .dim = true, .italic = true }`.
 
 ### Limitations
 

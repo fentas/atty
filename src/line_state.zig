@@ -132,12 +132,18 @@ pub const LineState = struct {
     fn backspace(self: *LineState) void {
         if (self.len == 0) return;
         self.len -= 1;
+        // Reaching an empty buffer is the user telling us they've
+        // cleaned house — drop the uncertain flag so ghost suggestions
+        // come back. If we'd been wrong about the *content* before, we
+        // can't be wrong about an empty buffer.
+        if (self.len == 0) self.uncertain = false;
         self.generation +%= 1;
     }
 
     fn killLine(self: *LineState) void {
         if (self.len == 0) return;
         self.len = 0;
+        self.uncertain = false;
         self.generation +%= 1;
     }
 
@@ -149,6 +155,7 @@ pub const LineState = struct {
         while (end > 0 and self.buffer[end - 1] != ' ') : (end -= 1) {}
         if (end != self.len) {
             self.len = end;
+            if (self.len == 0) self.uncertain = false;
             self.generation +%= 1;
         }
     }

@@ -131,7 +131,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     defer scratch.deinit(allocator);
     try scratch.ensureTotalCapacity(allocator, buf_size);
 
-    var ghost = Ghost.init(allocator);
+    var ghost = Ghost.init(allocator, config.ghost_style);
     defer ghost.deinit();
 
     var ctx = module.Context{
@@ -178,7 +178,34 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         if (pfds[0].revents & POLLIN != 0) {
             const read_n = posix.read(posix.STDIN_FILENO, &read_buf) catch 0;
             if (read_n > 0) {
-                const input = read_buf[0..read_n];
+                var input: []const u8 = read_buf[0..read_n];
+
+                // Accept-ghost keystroke: if the user's accept key
+                // arrives while a ghost is visible and the line is
+                // still certain, swap the keystroke for the suggestion
+                // bytes — the rest of the loop then treats them as if
+                // they were typed. Must happen BEFORE applyInput,
+                // because a CSI like `ESC [ C` would otherwise mark
+                // the line uncertain and we'd lose the chance to act.
+                var accept_buf: [4096]u8 = undefined;
+                for (config.bindings) |bind| {
+                    if (bind.bytes.len == 0) continue;
+                    if (!std.mem.eql(u8, input, bind.bytes)) continue;
+                    switch (bind.action) {
+                        .ghost_accept => {
+                            if (ghost.visible and
+                                !line_state.uncertain and
+                                ghost.rendered.items.len > 0 and
+                                ghost.rendered.items.len <= accept_buf.len)
+                            {
+                                const accept_n = ghost.rendered.items.len;
+                                @memcpy(accept_buf[0..accept_n], ghost.rendered.items);
+                                input = accept_buf[0..accept_n];
+                            }
+                        },
+                    }
+                    break;
+                }
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
                 _ = line_state.applyInput(input);

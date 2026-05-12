@@ -8,6 +8,7 @@
 const std = @import("std");
 const m = @import("../module.zig");
 const ansi = @import("../ansi.zig");
+const style_mod = @import("../style.zig");
 
 pub const Rule = struct {
     name: []const u8,
@@ -65,6 +66,9 @@ pub const default_rules = [_]Rule{
 
 pub const Config = struct {
     rules: []const Rule = &default_rules,
+    /// Visual style for the warning banner. Defaults match the
+    /// historical look (dim + italic).
+    warning_style: style_mod.Style = .{ .dim = true, .italic = true },
 };
 
 /// Returns a module type with `cfg` baked in. The rules list, every
@@ -154,8 +158,8 @@ pub fn configure(comptime cfg: Config) type {
             var buf: [512]u8 = undefined;
             const msg = std.fmt.bufPrint(
                 &buf,
-                "\r\n{s}{s}atty guardrail: {s}{s}\r\n        line: {s}\r\n        press Enter again to confirm, any other key to cancel.\r\n",
-                .{ ansi.sgr_dim, ansi.sgr_italic, rule.reason, ansi.sgr_reset, line },
+                "\r\n{f}atty guardrail: {s}{s}\r\n        line: {s}\r\n        press Enter again to confirm, any other key to cancel.\r\n",
+                .{ cfg.warning_style, rule.reason, style_mod.reset, line },
             ) catch return;
             if (rt.sink_fn) |f| {
                 f(rt.sink_ctx.?, msg) catch {};
