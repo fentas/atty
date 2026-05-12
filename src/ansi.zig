@@ -135,3 +135,20 @@ test "stripEscapes removes OSC" {
     try stripEscapes("\x1B]0;title\x07hello", &out, std.testing.allocator);
     try std.testing.expectEqualSlices(u8, "hello", out.items);
 }
+
+test "stripEscapes handles ESC-ST terminated OSC" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try stripEscapes("\x1B]2;t\x1B\\done", &out, std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, "done", out.items);
+}
+
+test "writeClearGhost emits save_cursor + erase_to_eol + restore_cursor" {
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeClearGhost(&w);
+    const s = buf[0..w.end];
+    try std.testing.expect(std.mem.indexOf(u8, s, save_cursor) != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, erase_to_eol) != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, restore_cursor) != null);
+}

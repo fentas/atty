@@ -418,3 +418,146 @@ test "dispatchTick fans out to every module with onTick" {
     try testing.expectEqual(@as(u64, 150), rts[0].total_elapsed);
     try testing.expectEqual(@as(u64, 2), rts[2].ticks);
 }
+
+// ─── coverage for the newer walkers ──────────────────────────────────────
+
+const Recorder = struct {
+    pub const name = "recorder";
+    pub const Runtime = struct {
+        committed: std.ArrayList(u8) = .empty,
+        deleted: std.ArrayList(u8) = .empty,
+    };
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(rt: *Runtime, _: std.Io) void {
+        rt.committed.deinit(testing.allocator);
+        rt.deleted.deinit(testing.allocator);
+    }
+    pub fn onLineCommit(rt: *Runtime, _: *Context, line: []const u8) Error!void {
+        rt.committed.appendSlice(testing.allocator, line) catch return Error.OutOfMemory;
+        rt.committed.append(testing.allocator, '\n') catch return Error.OutOfMemory;
+    }
+    pub fn deleteHistoryMatch(rt: *Runtime, _: *Context, line: []const u8) Error!void {
+        rt.deleted.appendSlice(testing.allocator, line) catch return Error.OutOfMemory;
+        rt.deleted.append(testing.allocator, '\n') catch return Error.OutOfMemory;
+    }
+};
+
+const StatusEmitter = struct {
+    pub const name = "status";
+    pub const Runtime = struct { text: []const u8 = "" };
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn statusText(rt: *Runtime, _: *Context) Error!?[]const u8 {
+        if (rt.text.len == 0) return null;
+        return rt.text;
+    }
+};
+
+const D_Recorder = Dispatcher(.{Recorder});
+const D_StatusPair = Dispatcher(.{ StatusEmitter, StatusEmitter });
+
+test "dispatchLineCommit fans out to every module with onLineCommit" {
+    const D = D_Recorder;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    try D.dispatchLineCommit(&rts, &ctx, "echo hi");
+    try D.dispatchLineCommit(&rts, &ctx, "ls -la");
+
+    try testing.expectEqualStrings("echo hi\nls -la\n", rts[0].committed.items);
+}
+
+test "dispatchDeleteHistoryMatch fans out to every module with the hook" {
+    const D = D_Recorder;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    try D.dispatchDeleteHistoryMatch(&rts, &ctx, "secret");
+    try D.dispatchDeleteHistoryMatch(&rts, &ctx, "another");
+
+    try testing.expectEqualStrings("secret\nanother\n", rts[0].deleted.items);
+}
+
+test "gatherStatus joins module segments with the separator" {
+    const D = D_StatusPair;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+    rts[0].text = "alpha";
+    rts[1].text = "beta";
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try D.gatherStatus(&rts, &ctx, &w);
+    try testing.expectEqualStrings("alpha \u{2502} beta", w.buffered());
+}
+
+test "gatherStatus skips null + empty contributions" {
+    const D = D_StatusPair;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+    rts[0].text = ""; // empty → skipped
+    rts[1].text = "only";
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try D.gatherStatus(&rts, &ctx, &w);
+    try testing.expectEqualStrings("only", w.buffered());
+}
+
+const Observer = struct {
+    pub const name = "observer";
+    pub const Runtime = struct {
+        seen: std.ArrayList(u8) = .empty,
+    };
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(rt: *Runtime, _: std.Io) void {
+        rt.seen.deinit(testing.allocator);
+    }
+    pub fn onOutput(rt: *Runtime, _: *Context, output: []const u8) Error!void {
+        rt.seen.appendSlice(testing.allocator, output) catch return Error.OutOfMemory;
+    }
+};
+
+const D_Observer = Dispatcher(.{Observer});
+
+test "dispatchOutput fans out to every module with onOutput" {
+    const D = D_Observer;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    try D.dispatchOutput(&rts, &ctx, "first ");
+    try D.dispatchOutput(&rts, &ctx, "second");
+
+    try testing.expectEqualStrings("first second", rts[0].seen.items);
+}

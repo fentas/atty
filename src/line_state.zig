@@ -273,3 +273,63 @@ test "generation increments on real changes only" {
     _ = l.applyInput("\x7F"); // already empty
     try std.testing.expectEqual(g2, l.generation);
 }
+
+test "ctrl-w deletes the last word, preserving leading content" {
+    var l = LineState{};
+    _ = l.applyInput("git add foo");
+    _ = l.applyInput("\x17"); // ctrl-w → delete "foo"
+    try std.testing.expectEqualSlices(u8, "git add ", l.current());
+}
+
+test "ctrl-w with trailing spaces eats the spaces first" {
+    var l = LineState{};
+    _ = l.applyInput("git add foo   ");
+    _ = l.applyInput("\x17");
+    try std.testing.expectEqualSlices(u8, "git add ", l.current());
+}
+
+test "ctrl-w on an empty line is a no-op" {
+    var l = LineState{};
+    _ = l.applyInput("\x17");
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expect(!l.uncertain);
+}
+
+test "lastCommitted surfaces the pre-Enter line until cleared" {
+    var l = LineState{};
+    _ = l.applyInput("ls\r");
+    const c = l.lastCommitted().?;
+    try std.testing.expectEqualSlices(u8, "ls", c);
+    try std.testing.expect(!l.committed_was_uncertain);
+    l.clearLastCommitted();
+    try std.testing.expectEqual(@as(?[]const u8, null), l.lastCommitted());
+}
+
+test "committed_was_uncertain flag tracks the pre-Enter state" {
+    var l = LineState{};
+    _ = l.applyInput("ls");
+    _ = l.applyInput("\x1B[A"); // arrow → uncertain
+    _ = l.applyInput("\r");
+    try std.testing.expect(l.lastCommitted() != null);
+    try std.testing.expect(l.committed_was_uncertain);
+}
+
+test "Enter on an empty line does not surface a commit" {
+    var l = LineState{};
+    _ = l.applyInput("\r");
+    try std.testing.expectEqual(@as(?[]const u8, null), l.lastCommitted());
+}
+
+test "buffer overflow marks uncertain instead of writing past end" {
+    var l = LineState{};
+    var i: usize = 0;
+    while (i < max_line + 16) : (i += 1) _ = l.applyInput("a");
+    try std.testing.expectEqual(max_line, l.len);
+    try std.testing.expect(l.uncertain);
+}
+
+test "multiple CSI sequences in one read each mark uncertain" {
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A\x1B[B");
+    try std.testing.expect(l.uncertain);
+}
