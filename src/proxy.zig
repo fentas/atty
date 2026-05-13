@@ -655,23 +655,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // slim size and re-activate the statusbar so the
                 // bottom rows aren't left in whatever state the app
                 // returned them in.
-                if (statusbar) |*sb| {
-                    if (alt_screen.takeTransition()) {
-                        if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                            var shell_size = s;
-                            if (!alt_screen.active) {
-                                shell_size.rows = sb.effectiveRows();
-                                var w2: std.Io.Writer = .fixed(&out_buf);
-                                sb.activate(&w2) catch {};
-                                if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
-                                sb.last_valid = false;
-                            }
-                            _ = pty.setSize(shell_size) catch {};
-                        } else |_| {}
-                    }
-                } else {
-                    _ = alt_screen.takeTransition();
-                }
+                //
+                // Capture the edge now, but DEFER the side effects
+                // (sb.activate writes + slave resize) until AFTER
+                // `output` has been forwarded to STDOUT. The
+                // `?1049l` exit byte is IN `output`; emitting
+                // sb.activate bytes before forwarding `output`
+                // would land them on the alt screen one last time,
+                // clobbering the TUI's final frame and reintroducing
+                // bleed. Same for the resize on enter — sending
+                // SIGWINCH to the app before it even sees its own
+                // `?1049h` would be a redraw against a state the
+                // app hasn't entered yet.
+                const alt_transitioned = alt_screen.takeTransition();
+                const alt_now_active = alt_screen.active;
 
                 // Continuous line_state sync while the tracker is in
                 // its input phase. Keystroke tracking models what the
@@ -703,6 +700,28 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
                 try writeAll(posix.STDOUT_FILENO, output);
+
+                // Deferred alt-screen side effects — see the captured
+                // `alt_transitioned` / `alt_now_active` above. Run AFTER
+                // forwarding `output` so the terminal has already
+                // honoured the enter/exit byte before we layer our own
+                // bytes (statusbar repaint) or signal the slave (resize
+                // + SIGWINCH).
+                if (alt_transitioned) {
+                    if (statusbar) |*sb| {
+                        if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                            var shell_size = s;
+                            if (!alt_now_active) {
+                                shell_size.rows = sb.effectiveRows();
+                                var w2: std.Io.Writer = .fixed(&out_buf);
+                                sb.activate(&w2) catch {};
+                                if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+                                sb.last_valid = false;
+                            }
+                            _ = pty.setSize(shell_size) catch {};
+                        } else |_| {}
+                    }
+                }
 
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
