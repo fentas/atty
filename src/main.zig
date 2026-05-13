@@ -117,21 +117,36 @@ fn emitInitSnippet(shell: []const u8) void {
     // the shell name in so the re-exec lands the same shell the
     // user named in `atty init <shell>` (not just $SHELL, which
     // may not match the rc file we're being eval'd from).
+    //
+    // SECURITY: the shell name comes from argv and ends up
+    // unquoted inside a shell snippet the user will `eval`. An
+    // attacker who can make the user run something like
+    // `eval "$(atty init '; rm -rf ~; echo bash')"` would get
+    // arbitrary code execution. We don't quote — we VALIDATE.
+    // Only an alphanumeric/`_`/`-` token (with a sane length cap)
+    // passes through; anything else falls back to the bare form
+    // (no shell argument), which is harmless. The well-known
+    // values `bash` and `zsh` are obviously fine; users who
+    // genuinely need a path-laden shell can `atty init` (no arg)
+    // and the snippet uses `exec atty` which falls back to
+    // `$SHELL` at atty's end.
+    const shell_safe = args_mod.isSafeShellName(shell);
     var buf: [256]u8 = undefined;
-    const exec_line = if (shell.len > 0)
+    const exec_line = if (shell_safe)
         std.fmt.bufPrint(&buf, "\n    exec atty {s}\nfi\n", .{shell}) catch "\n    exec atty\nfi\n"
     else
         "\n    exec atty\nfi\n";
     writeStdout(exec_line);
 
-    if (std.mem.eql(u8, shell, "bash")) {
+    if (shell_safe and std.mem.eql(u8, shell, "bash")) {
         writeStdout(shell_init_osc133_bash);
-    } else if (std.mem.eql(u8, shell, "zsh")) {
+    } else if (shell_safe and std.mem.eql(u8, shell, "zsh")) {
         writeStdout(shell_init_osc133_zsh);
     } else {
-        // No shell or unknown shell — dual-branch fallback. Bash
-        // and zsh covered inline; other shells (fish, nu, …) need
-        // their own integration which we don't ship yet.
+        // No shell, unknown shell, OR unsafe shell name → fall back
+        // to the dual-branch detection that picks at runtime. Bash
+        // and zsh are covered inline; other shells (fish, nu, …)
+        // need their own integration which we don't ship yet.
         writeStdout(shell_init_osc133_generic);
     }
 }

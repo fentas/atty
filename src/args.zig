@@ -93,6 +93,25 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
     return .{ .ok = .{ .positional = try positional.toOwnedSlice(allocator) } };
 }
 
+/// Restrict the shell argument from `atty init <shell>` to a small
+/// allowlist character set before main.zig pastes it into the
+/// emitted `eval`'d snippet. Lower-case ASCII, digits, `_`, `-`
+/// only; max 32 bytes. Anything else (spaces, semicolons, quotes,
+/// backticks, `$`, …) flunks and the caller falls back to the
+/// no-shell form. Shell-injection defence in depth — the typical
+/// caller passes "bash" / "zsh", which both pass.
+pub fn isSafeShellName(s: []const u8) bool {
+    if (s.len == 0 or s.len > 32) return false;
+    for (s) |b| {
+        const ok = (b >= 'a' and b <= 'z') or
+            (b >= 'A' and b <= 'Z') or
+            (b >= '0' and b <= '9') or
+            b == '_' or b == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -176,6 +195,43 @@ test "parseArgv: `--` escape lets a user reach a real shell named `init`" {
     try testing.expectEqual(@as(usize, 1), got.ok.positional.len);
     try testing.expectEqualStrings("init", got.ok.positional[0]);
     freeOk(testing.allocator, got.ok);
+}
+
+test "isSafeShellName accepts the well-known shells" {
+    try testing.expect(isSafeShellName("bash"));
+    try testing.expect(isSafeShellName("zsh"));
+    try testing.expect(isSafeShellName("dash"));
+    try testing.expect(isSafeShellName("sh"));
+    try testing.expect(isSafeShellName("fish"));
+    try testing.expect(isSafeShellName("nu"));
+    // Hyphens and digits in the middle are fine — `bash-5.2-fork`
+    // and `zsh5` are realistic shell binary names; the latter
+    // is allowed (only specific chars are blocked).
+    try testing.expect(isSafeShellName("bash-fork"));
+    try testing.expect(isSafeShellName("zsh5"));
+}
+
+test "isSafeShellName rejects shell-injection primitives (security)" {
+    // The shell name from argv ends up unquoted inside an eval'd
+    // snippet. Any character with a special meaning in /bin/sh
+    // must be rejected so an attacker can't escape the
+    // `exec atty <token>` context.
+    try testing.expect(!isSafeShellName(""));
+    try testing.expect(!isSafeShellName("; rm -rf /"));
+    try testing.expect(!isSafeShellName("bash; echo pwned"));
+    try testing.expect(!isSafeShellName("$(rm -rf ~)"));
+    try testing.expect(!isSafeShellName("`whoami`"));
+    try testing.expect(!isSafeShellName("'; evil; '"));
+    try testing.expect(!isSafeShellName("bash space"));
+    // Path-laden shell names also flunk — the test below pins
+    // that. Users who genuinely need `/usr/bin/zsh` should use
+    // `atty init` (no arg), which emits `exec atty` and falls
+    // back to `$SHELL` at atty's end.
+    try testing.expect(!isSafeShellName("/bin/bash"));
+    try testing.expect(!isSafeShellName("./shell"));
+    // Length cap — keep the allowlist tight.
+    var long_buf: [33]u8 = .{'a'} ** 33;
+    try testing.expect(!isSafeShellName(&long_buf));
 }
 
 test "parseArgv: a known atty flag in the spawned-command tail is preserved, not consumed" {

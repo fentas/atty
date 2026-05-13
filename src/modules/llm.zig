@@ -142,6 +142,16 @@ pub fn configure(comptime cfg: Config) type {
         else
             "You are an expert shell user. Given a natural-language description, return EXACTLY ONE shell command that performs the task. Output ONLY the command on a single line. No markdown code fences. No explanation. No prefix or suffix text.";
 
+        /// Comptime-built notification for inert mode. Mentions the
+        /// configured env-var names (`cfg.api_base_env` /
+        /// `api_base_fallback_env`) so users who renamed them see
+        /// THEIR names rather than the upstream defaults, plus a
+        /// hint to use the static `Config.api_base` if they'd
+        /// rather skip env-var resolution entirely.
+        const inert_error_msg: []const u8 = "no endpoint set — export $" ++
+            cfg.api_base_env ++ " / $" ++ cfg.api_base_fallback_env ++
+            ", or set Config.api_base in config.zig";
+
         const Shared = struct {
             mutex: std.Io.Mutex = .init,
             cv: std.Io.Condition = .init,
@@ -397,16 +407,20 @@ pub fn configure(comptime cfg: Config) type {
             if (body.len == 0 or body.len > cfg.max_prompt_bytes) return .forward;
             if (rt.api_base.len == 0) {
                 // Inert mode — the user has the module configured but
-                // neither `$LLM_API_BASE` nor `$OLLAMA_HOST` was set
-                // when atty attached. Silently forwarding looks like
-                // a broken feature ("nothing happens"), so latch an
-                // error notification that the next `provideErrorText`
-                // tick will surface above the status bar (muted red
-                // + ⚠ so it pops). We still .forward so the typed
-                // `#: …` reaches the shell — bash/zsh treat it as a
-                // comment, no harm done, and the user doesn't lose
-                // what they typed.
-                latchErr(rt, "no endpoint set — export $LLM_API_BASE or $OLLAMA_HOST");
+                // no endpoint resolved at attach time. Silently
+                // forwarding looks like a broken feature ("nothing
+                // happens"), so latch an error notification that the
+                // next `provideErrorText` tick will surface above
+                // the status bar (muted red + ⚠ so it pops). We
+                // still .forward so the typed `#: …` reaches the
+                // shell — bash/zsh treat it as a comment, no harm
+                // done, and the user doesn't lose what they typed.
+                //
+                // Message is comptime-built from the configured env
+                // var names + a hint about `Config.api_base` so
+                // users who renamed `api_base_env` see THEIR names,
+                // not the literal `$LLM_API_BASE`.
+                latchErr(rt, inert_error_msg);
                 return .forward;
             }
 
@@ -974,26 +988,101 @@ pub fn configure(comptime cfg: Config) type {
         /// the user gets the gist.
         pub fn sanitizeExplanation(raw: []const u8, out: []u8) usize {
             const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-            var n: usize = 0;
+            // Two-pass: first collapse whitespace + drop C0/DEL into
+            // a scratch buffer, then run the C1-aware UTF-8 stripper
+            // over that. We can't merge the passes because the
+            // whitespace collapsing needs to see the trimmed bytes
+            // before any sequence-boundary scanning, and the C1
+            // stripper needs to see all bytes (including legitimate
+            // UTF-8 continuations) to track sequence length.
+            // Splitting keeps each step simple and reuses the same
+            // C1 logic the command path is hardened with.
+            var scratch: [1024]u8 = undefined;
+            const scratch_cap = @min(scratch.len, out.len);
+            var s_n: usize = 0;
             var last_was_space = false;
             for (trimmed) |b| {
                 if (b == '\n' or b == '\r' or b == '\t' or b == ' ') {
                     if (last_was_space) continue;
-                    if (n >= out.len) break;
-                    out[n] = ' ';
-                    n += 1;
+                    if (s_n >= scratch_cap) break;
+                    scratch[s_n] = ' ';
+                    s_n += 1;
                     last_was_space = true;
                     continue;
                 }
-                // Drop remaining control bytes (NUL, BEL, BS, …, DEL).
+                // Drop C0 controls + DEL early. C1 stripping is
+                // delegated to `stripControlBytes` below so the
+                // logic stays in one place (defence in depth — a
+                // raw 0x9B byte would otherwise reach the terminal
+                // as CSI).
                 if (b < 0x20 or b == 0x7F) continue;
-                if (n >= out.len) break;
-                out[n] = b;
-                n += 1;
+                if (s_n >= scratch_cap) break;
+                scratch[s_n] = b;
+                s_n += 1;
                 last_was_space = false;
             }
             // Trim a trailing whitespace introduced by the join above.
-            while (n > 0 and out[n - 1] == ' ') n -= 1;
+            while (s_n > 0 and scratch[s_n - 1] == ' ') s_n -= 1;
+
+            return stripControlBytes(scratch[0..s_n], out);
+        }
+
+        /// UTF-8-aware filter that drops:
+        ///   - C0 controls (< 0x20) and DEL (0x7F)
+        ///   - C1 controls U+0080..U+009F as raw bytes (Latin-1 /
+        ///     invalid-UTF-8 interpretation) AND as UTF-8 (`0xC2`
+        ///     followed by `0x80..0x9F`).
+        /// Legitimate UTF-8 multi-byte sequences pass through whole;
+        /// continuation bytes in `0x80..0xBF` that aren't standalone
+        /// are preserved (e.g. "ƒ" = `0xC6 0x92`, where 0x92 is a
+        /// continuation, not a C1 codepoint). Malformed / truncated
+        /// sequences drop just the bad lead byte and continue.
+        ///
+        /// Used by both `sanitizeCommand` (PTY-bound bytes) and
+        /// `sanitizeExplanation` (terminal-bound bytes) — both
+        /// destinations honour C1 controls, so both need the strip.
+        pub fn stripControlBytes(s: []const u8, out: []u8) usize {
+            var n: usize = 0;
+            var i: usize = 0;
+            while (i < s.len) {
+                const b = s[i];
+                if (b < 0x80) {
+                    if (b < 0x20 or b == 0x7F) {
+                        i += 1;
+                        continue;
+                    }
+                    if (n >= out.len) break;
+                    out[n] = b;
+                    n += 1;
+                    i += 1;
+                    continue;
+                }
+                const seq_len: usize = if (b >= 0xC2 and b <= 0xDF) 2 else if (b >= 0xE0 and b <= 0xEF) 3 else if (b >= 0xF0 and b <= 0xF4) 4 else 0;
+                if (seq_len == 0 or i + seq_len > s.len) {
+                    i += 1;
+                    continue;
+                }
+                if (seq_len == 2 and b == 0xC2 and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F) {
+                    i += 2;
+                    continue;
+                }
+                var ok = true;
+                var k: usize = 1;
+                while (k < seq_len) : (k += 1) {
+                    if (s[i + k] < 0x80 or s[i + k] > 0xBF) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    i += 1;
+                    continue;
+                }
+                if (n + seq_len > out.len) break;
+                @memcpy(out[n .. n + seq_len], s[i .. i + seq_len]);
+                n += seq_len;
+                i += seq_len;
+            }
             return n;
         }
 
@@ -1026,66 +1115,10 @@ pub fn configure(comptime cfg: Config) type {
             // First line only.
             if (std.mem.indexOfScalar(u8, s, '\n')) |nl| s = s[0..nl];
             s = std.mem.trim(u8, s, " \t\r");
-            // Strip dangerous bytes:
-            //   - C0 controls (< 0x20) and DEL (0x7F)
-            //   - C1 controls U+0080..U+009F, both as raw 0x80..0x9F
-            //     (Latin-1 / 8-bit terminal interpretation) AND as
-            //     UTF-8 (0xC2 0x80..0x9F encodes U+0080..U+009F).
-            //     C1 includes CSI/DCS/OSC, so passing them through
-            //     would let an LLM response start a terminal escape
-            //     sequence the user never typed.
-            // Legitimate UTF-8 multi-byte characters pass through —
-            // we walk by sequence length to avoid mis-dropping
-            // continuation bytes (e.g. "ƒ" = 0xC6 0x92, where 0x92
-            // is a valid continuation, not a standalone C1).
-            var n: usize = 0;
-            var i: usize = 0;
-            while (i < s.len) {
-                const b = s[i];
-                if (b < 0x80) {
-                    if (b < 0x20 or b == 0x7F) {
-                        i += 1;
-                        continue;
-                    }
-                    if (n >= out.len) break;
-                    out[n] = b;
-                    n += 1;
-                    i += 1;
-                    continue;
-                }
-                // Multi-byte lead. Determine sequence length; 0xC2 +
-                // 0x80..0x9F is the UTF-8 encoding of a C1 control —
-                // drop the whole pair.
-                const seq_len: usize = if (b >= 0xC2 and b <= 0xDF) 2 else if (b >= 0xE0 and b <= 0xEF) 3 else if (b >= 0xF0 and b <= 0xF4) 4 else 0;
-                if (seq_len == 0 or i + seq_len > s.len) {
-                    // Invalid lead or truncated sequence — drop the
-                    // standalone byte rather than emit malformed UTF-8.
-                    i += 1;
-                    continue;
-                }
-                if (seq_len == 2 and b == 0xC2 and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F) {
-                    i += 2;
-                    continue;
-                }
-                // Validate continuation bytes.
-                var ok = true;
-                var k: usize = 1;
-                while (k < seq_len) : (k += 1) {
-                    if (s[i + k] < 0x80 or s[i + k] > 0xBF) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (!ok) {
-                    i += 1;
-                    continue;
-                }
-                if (n + seq_len > out.len) break;
-                @memcpy(out[n .. n + seq_len], s[i .. i + seq_len]);
-                n += seq_len;
-                i += seq_len;
-            }
-            return n;
+            // Same C0/C1/DEL-stripping byte walker that `sanitizeExplanation`
+            // uses — factored into `stripControlBytes` so the security
+            // logic lives in one place.
+            return stripControlBytes(s, out);
         }
     };
 }
@@ -1387,6 +1420,31 @@ test "sanitizeExplanation flattens newlines + strips control bytes" {
     // Adjacent whitespace coalesces into a single space.
     const n3 = L.sanitizeExplanation("a   b\t\tc\n\nd", &out);
     try testing.expectEqualStrings("a b c d", out[0..n3]);
+}
+
+test "sanitizeExplanation strips C1 codepoints — terminal-escape injection (security)" {
+    // The explanation is written to the statusbar's hint row,
+    // which goes straight to the user's terminal. A model that
+    // returns U+009B (CSI) — `0xC2 0x9B` in UTF-8 — followed by
+    // an SGR-style payload would otherwise inject a terminal
+    // escape sequence the user never typed. Same defence as
+    // `sanitizeCommand` (now shared via `stripControlBytes`).
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+
+    // UTF-8-encoded C1 (U+009B = 0xC2 0x9B) — both bytes vanish.
+    const n = L.sanitizeExplanation("hello\xC2\x9B31mworld", &out);
+    try testing.expectEqualStrings("hello31mworld", out[0..n]);
+
+    // Standalone 0x9B (Latin-1 / invalid-UTF-8 path) also dropped.
+    const n2 = L.sanitizeExplanation("foo\x9Bbar", &out);
+    try testing.expectEqualStrings("foobar", out[0..n2]);
+
+    // Legitimate UTF-8 with a continuation byte in the C1 range
+    // (e.g. "ƒ" = 0xC6 0x92) must survive — 0x92 is a UTF-8
+    // continuation, not a standalone C1 codepoint.
+    const n3 = L.sanitizeExplanation("ƒoo", &out);
+    try testing.expectEqualStrings("ƒoo", out[0..n3]);
 }
 
 test "effective_system_prompt picks the with-explanation default" {
@@ -1822,7 +1880,12 @@ test "inert mode (no endpoint env) surfaces a 'no endpoint' hint" {
     const err = try L.provideErrorText(&rt, &ctx);
     try testing.expect(err != null);
     try testing.expect(std.mem.indexOf(u8, err.?, "no endpoint") != null);
-    try testing.expect(std.mem.indexOf(u8, err.?, "LLM_API_BASE") != null);
+    // Message must mention the configured env-var names, not the
+    // upstream defaults — pin that the comptime-built string respects
+    // `Config.api_base_env` / `Config.api_base_fallback_env`.
+    try testing.expect(std.mem.indexOf(u8, err.?, "ATTY_TEST_INERT_BASE") != null);
+    try testing.expect(std.mem.indexOf(u8, err.?, "ATTY_TEST_INERT_FALLBACK") != null);
+    try testing.expect(std.mem.indexOf(u8, err.?, "Config.api_base") != null);
 
     // One-shot — second call returns null.
     try testing.expectEqual(@as(?[]const u8, null), try L.provideErrorText(&rt, &ctx));

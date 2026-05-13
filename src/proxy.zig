@@ -289,9 +289,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // OSC sequences (cursor colour transitions, title
             // updates, …) to the user's stdout. NOT routed through
             // pty.master because these are user-terminal concerns
-            // the child shell shouldn't see.
-            if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
-                if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+            // the child shell shouldn't see. Gated on `is_tty` so
+            // a non-TTY invocation (CI, piped/redirected stdout,
+            // capture-the-binary integration tests) doesn't bleed
+            // escape sequences into the captured stream.
+            if (args.is_tty) {
+                if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                    if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+                }
             }
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};

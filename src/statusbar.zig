@@ -63,12 +63,14 @@ pub const StatusBar = struct {
     transient_len: usize = 0,
     transient_until_ms: i64 = 0,
 
-    /// Hint row content — painted into row `rows - 1` (the blank
-    /// padding row above the status text, when `reserve_rows >= 2`).
-    /// Used by the LLM module to surface a one-line explanation
-    /// for the command it just injected. TTL-based, auto-clears.
-    /// When `reserve_rows < 2`, hint is silently dropped (nowhere
-    /// to draw it).
+    /// Hint row content — painted into the TOP of the reserved
+    /// region (`rows - reserve_rows + 1`), leaving the rows
+    /// between it and the status text as blank padding. With the
+    /// default `reserve_rows = 3` that's `rows - 2`. Used by the
+    /// LLM module to surface a one-line explanation for the
+    /// command it just injected. TTL-based, auto-clears. When
+    /// `reserve_rows < 2`, the hint is silently dropped (nowhere
+    /// to draw it without overlapping the status row).
     hint_buf: [512]u8 = undefined,
     hint_len: usize = 0,
     hint_until_ms: i64 = 0,
@@ -168,7 +170,8 @@ pub const StatusBar = struct {
         return self.transient_len > 0 and nowMs() < self.transient_until_ms;
     }
 
-    /// Show `text` in the hint row (one above the status text) for
+    /// Show `text` in the hint row (top of the reserved region —
+    /// `rows - reserve_rows + 1`, defaulting to `rows - 2`) for
     /// `ttl_ms` milliseconds. Auto-clears once the TTL expires.
     /// Truncated to the buffer length; longer explanations get
     /// clipped rather than wrapping.
@@ -322,23 +325,29 @@ pub const StatusBar = struct {
         // rows-2, blank at rows-1, status at rows — gives a clear
         // visual gap so the hint reads as a separate element. With
         // reserve_rows=2 (legacy): hint and status are adjacent.
-        // With reserve_rows<2 there's no room → skip.
-        if (!hint_unchanged and self.reserve_rows >= 2) {
-            const hint_row = self.rows - self.reserve_rows + 1;
-            try w.print("\x1B[{d};1H\x1B[K", .{hint_row});
-            switch (hint_kind) {
-                .err => {
-                    try w.print("{f}", .{self.error_style});
-                    try w.writeAll("\u{26A0} "); // warning sign + space
-                    try w.writeAll(active_hint);
-                    try w.writeAll(ansi.sgr_reset);
-                },
-                .hint => {
-                    try w.print("{f}", .{self.hint_style});
-                    try w.writeAll(active_hint);
-                    try w.writeAll(ansi.sgr_reset);
-                },
-                .blank => {},
+        // With reserve_rows<2 there's no room → skip the paint but
+        // still update the "last hint" tracking state so subsequent
+        // `render` calls become true no-ops (otherwise
+        // `hint_unchanged` stays false forever and every tick emits
+        // a save/restore-cursor pair pointlessly).
+        if (!hint_unchanged) {
+            if (self.reserve_rows >= 2) {
+                const hint_row = self.rows - self.reserve_rows + 1;
+                try w.print("\x1B[{d};1H\x1B[K", .{hint_row});
+                switch (hint_kind) {
+                    .err => {
+                        try w.print("{f}", .{self.error_style});
+                        try w.writeAll("\u{26A0} "); // warning sign + space
+                        try w.writeAll(active_hint);
+                        try w.writeAll(ansi.sgr_reset);
+                    },
+                    .hint => {
+                        try w.print("{f}", .{self.hint_style});
+                        try w.writeAll(active_hint);
+                        try w.writeAll(ansi.sgr_reset);
+                    },
+                    .blank => {},
+                }
             }
             @memcpy(self.last_hint_buf[0..active_hint.len], active_hint);
             self.last_hint_len = active_hint.len;
@@ -475,6 +484,27 @@ test "hint paints at TOP of the reserved region (gap above status when reserve_r
     // Hint uses hint_style (italic), not bar style (dim).
     try testing.expect(std.mem.indexOf(u8, out, ansi.sgr_italic) != null);
     try testing.expect(std.mem.indexOf(u8, out, "explanation") != null);
+}
+
+test "render is idempotent even when reserve_rows < 2 (hint silently dropped)" {
+    // When there's no room for the hint row, painting must still
+    // be skipped — but the "last hint" tracking state has to
+    // advance so subsequent `render` calls become true no-ops.
+    // Otherwise every tick re-emits the save/restore-cursor pair
+    // for nothing visible.
+    var b = StatusBar.init(24, 80, 1, .{}); // reserve_rows=1
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const first_end = w.end;
+
+    // Second call with same state → zero new bytes written.
+    // (idempotence even though the hint row is silently dropped.)
+    try b.render(&w);
+    try testing.expectEqual(first_end, w.end);
 }
 
 test "hint row is skipped when reserve_rows < 2 (no row above status)" {
