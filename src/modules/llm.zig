@@ -62,8 +62,9 @@ pub const Config = struct {
     /// Override to tune for your model's idiosyncrasies.
     system_prompt: []const u8 =
         "You are an expert shell user. Given a natural-language description, return EXACTLY ONE shell command that performs the task. Output ONLY the command on a single line. No markdown code fences. No explanation. No prefix or suffix text.",
-    /// Per-request timeout in ms (worker thread enforces this via
-    /// the HTTP client's read timeout).
+    /// Per-request timeout in ms. Stored for future use; not yet wired
+    /// to the HTTP client — requests may block indefinitely on a slow
+    /// or unreachable endpoint until the OS TCP timeout fires.
     timeout_ms: u32 = 30_000,
     /// Maximum response size we'll store. The model may emit more;
     /// we truncate.
@@ -109,10 +110,8 @@ pub fn configure(comptime cfg: Config) type {
             /// Owned by the runtime; valid until the next poll.
             inject_buf: [cfg.max_response_bytes]u8 = undefined,
             inject_len: usize = 0,
-            /// True while a prompt is in flight. Used to set the
-            /// statusbar transient `🧠 thinking…` once.
+            /// True while a prompt is in flight.
             in_flight: bool = false,
-            in_flight_notified: bool = false,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -222,7 +221,6 @@ pub fn configure(comptime cfg: Config) type {
             rt.shared.req_pending = true;
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
-            rt.in_flight_notified = false;
 
             // `.replace = "\x15"` swaps the Enter for Ctrl+U
             // (unix-line-discard). readline kills the typed
@@ -414,7 +412,16 @@ pub fn configure(comptime cfg: Config) type {
                         'n' => '\n',
                         't' => '\t',
                         'r' => '\r',
-                        else => continue, // skip uncommon escapes (\u…, \b, \f)
+                        // Uncommon escapes (\b, \f, \uXXXX, …): skip both
+                        // the backslash and the escape code so neither
+                        // appears as a literal character in the output.
+                        // \u needs 4 more hex digits skipped — handled
+                        // below after the switch.
+                        else => {
+                            i += 1; // skip the escape code char
+                            if (e == 'u') i += 4; // skip 4 hex digits
+                            continue;
+                        },
                     };
                     if (cmd_len < cmd_buf.len) {
                         cmd_buf[cmd_len] = decoded;
@@ -528,6 +535,26 @@ test "extractCommand decodes the common JSON escapes" {
     const sample = "{\"choices\":[{\"message\":{\"content\":\"echo \\\"hi\\\"\"}}]}";
     const n = L.extractCommand(sample, &out);
     try testing.expectEqualStrings("echo \"hi\"", out[0..n]);
+}
+
+test "extractCommand skips uncommon escapes (\\b, \\f) without leaking the escape code char" {
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+    // `\b` (backspace) between two words: the output must be "ab", not "ab" with a literal 'b'.
+    const sample = "{\"choices\":[{\"message\":{\"content\":\"a\\bb\"}}]}";
+    const n = L.extractCommand(sample, &out);
+    // After fix: `\b` is fully skipped → "ab". Before fix: literal 'b' leaks → "abb".
+    try testing.expectEqualStrings("ab", out[0..n]);
+}
+
+test "extractCommand skips \\uXXXX unicode escapes cleanly" {
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+    // `\u0020` is a space. We don't decode it but we must not leak "u0020".
+    const sample = "{\"choices\":[{\"message\":{\"content\":\"ls\\u0020-la\"}}]}";
+    const n = L.extractCommand(sample, &out);
+    // After fix: \u0020 is fully skipped → "ls-la". Before fix: "lsu0020-la".
+    try testing.expectEqualStrings("ls-la", out[0..n]);
 }
 
 test "extractCommand only takes the first non-empty line (multi-line replies)" {
