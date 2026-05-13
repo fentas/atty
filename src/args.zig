@@ -95,11 +95,11 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
 
 /// Restrict the shell argument from `atty init <shell>` to a small
 /// allowlist character set before main.zig pastes it into the
-/// emitted `eval`'d snippet. Lower-case ASCII, digits, `_`, `-`
-/// only; max 32 bytes. Anything else (spaces, semicolons, quotes,
-/// backticks, `$`, …) flunks and the caller falls back to the
-/// no-shell form. Shell-injection defence in depth — the typical
-/// caller passes "bash" / "zsh", which both pass.
+/// emitted `eval`'d snippet. ASCII letters (both cases), digits,
+/// `_`, `-` only; max 32 bytes. Anything else (spaces, semicolons,
+/// quotes, backticks, `$`, …) flunks and the caller falls back to
+/// the no-shell form. Shell-injection defence in depth — the
+/// typical caller passes "bash" / "zsh", which both pass.
 pub fn isSafeShellName(s: []const u8) bool {
     if (s.len == 0 or s.len > 32) return false;
     for (s) |b| {

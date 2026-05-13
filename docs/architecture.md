@@ -472,10 +472,10 @@ Bumping `reserve_rows` to 4+ adds more blank padding above the
 hint; dropping to 2 collapses hint and status onto adjacent rows
 (legacy behaviour); 1 disables the hint surface entirely.
 
-Modules participate via the optional `statusText` hook (see
-[Writing a module](/modules/#statustext--contributing-to-the-status-bar))
-or via `provideHintText` / `provideErrorText`
-([notifications above the status bar](/modules/#providehinttext--provideerrortext--notifications-above-the-status-bar)).
+Modules participate via the optional `statusText` hook — see
+[Writing a module](/modules/#statustext--contributing-to-the-status-bar) —
+or via `provideHintText` / `provideErrorText`, the
+[notifications-above-the-status-bar surface](/modules/#providehinttext--provideerrortext--notifications-above-the-status-bar).
 The keymap action `incognito_toggle` flips a proxy-local boolean
 that becomes `ctx.incognito`; the proxy then prepends a 🔒 segment
 and gates `dispatchLineCommit` (no records written while on).

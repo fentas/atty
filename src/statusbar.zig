@@ -331,7 +331,14 @@ pub const StatusBar = struct {
         // `hint_unchanged` stays false forever and every tick emits
         // a save/restore-cursor pair pointlessly).
         if (!hint_unchanged) {
-            if (self.reserve_rows >= 2) {
+            // Guard against u16 underflow on tiny terminals or a
+            // misconfigured `reserve_rows > rows`. Without this the
+            // subtraction wraps and we'd emit a CUP escape for a
+            // nonsense row in the 6×10⁴ range — terminal-dependent
+            // mojibake. The `>= 2 + (reserve_rows - 2)` check is
+            // just `rows >= reserve_rows` written so the arithmetic
+            // happens in u16 without underflowing.
+            if (self.reserve_rows >= 2 and self.rows >= self.reserve_rows) {
                 const hint_row = self.rows - self.reserve_rows + 1;
                 try w.print("\x1B[{d};1H\x1B[K", .{hint_row});
                 switch (hint_kind) {
@@ -437,7 +444,7 @@ test "setTransient overrides text_buf for the TTL window" {
     try testing.expect(std.mem.indexOf(u8, out, "atty") == null);
 }
 
-test "setHint paints text into rows - 1 with the bar's style" {
+test "setHint paints into the hint row with hint_style (dim by default)" {
     var b = StatusBar.init(24, 80, 2, .{ .dim = true });
     b.setText("atty");
     b.setHint("lists files in long format", 5_000);
@@ -505,6 +512,28 @@ test "render is idempotent even when reserve_rows < 2 (hint silently dropped)" {
     // (idempotence even though the hint row is silently dropped.)
     try b.render(&w);
     try testing.expectEqual(first_end, w.end);
+}
+
+test "render guards against u16 underflow when rows < reserve_rows" {
+    // Pathological config: rows smaller than reserve_rows. Without
+    // the guard, `rows - reserve_rows + 1` would underflow in u16
+    // and emit `\x1B[<garbage>;1H`, which different terminals
+    // interpret differently — at best a no-op, at worst a cursor
+    // jump to row 65000+ that smears later output.
+    var b = StatusBar.init(2, 80, 5, .{}); // rows=2 < reserve_rows=5
+    b.setText("status");
+    b.setHint("explanation", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    // None of the wraparound row values should appear.
+    try testing.expect(std.mem.indexOf(u8, out, "65532") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "65533") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "65534") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "65535") == null);
 }
 
 test "hint row is skipped when reserve_rows < 2 (no row above status)" {
