@@ -1,0 +1,8 @@
+$ echo SHOULD-NOT-RUN^C
+$ echo after-abort
+after-abort
+$
+
+
+
+

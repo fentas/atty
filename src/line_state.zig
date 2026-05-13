@@ -328,6 +328,34 @@ test "buffer overflow marks uncertain instead of writing past end" {
     try std.testing.expect(l.uncertain);
 }
 
+test "Ctrl+C resets the buffer cleanly without marking uncertain" {
+    // Ctrl+C is a legacy control byte the shell expects verbatim
+    // (it gets translated to SIGINT or to bash's line-abort under
+    // readline). atty's line_state must drop the partial input and
+    // return to a clean state so the next keystroke gets a fresh
+    // ghost suggestion — not "uncertain" mode (which would suppress
+    // suggestions until the next Enter).
+    var l = LineState{};
+    _ = l.applyInput("rm -rf /home/user");
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("\x03"); // Ctrl+C
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expect(!l.uncertain);
+    // No commit was produced — Ctrl+C is an abort, not a submission.
+    try std.testing.expectEqual(@as(?[]const u8, null), l.lastCommitted());
+}
+
+test "Ctrl+D on an empty line is a no-op for the buffer (the shell handles EOF)" {
+    // Ctrl+D is the shell's EOF signal when the line is empty —
+    // line_state treats it the same as Ctrl+C (reset, no commit).
+    // We rely on the proxy forwarding the byte; line_state just
+    // doesn't get confused by it.
+    var l = LineState{};
+    _ = l.applyInput("\x04");
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expect(!l.uncertain);
+}
+
 test "multiple CSI sequences in one read each mark uncertain" {
     var l = LineState{};
     _ = l.applyInput("\x1B[A\x1B[B");

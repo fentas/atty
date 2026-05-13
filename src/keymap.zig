@@ -247,6 +247,41 @@ test "match resolves a real binding by exact byte sequence" {
     try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b[A"));
 }
 
+test "match does not bind Ctrl+C against the shipped default bindings" {
+    // Regression guard: Ctrl+C (0x03) is a legacy control code we
+    // MUST pass through to the shell so SIGINT-style line-abort
+    // still works. None of the default bindings shall accidentally
+    // shadow it. We replicate the default list verbatim here rather
+    // than @import("defaults.zig") to avoid the multi-module file
+    // rule (defaults.zig lives in the `config` module, keymap in
+    // `atty`). If the upstream defaults ever change, e2e + the
+    // ctrl_c_aborts_line scenario will catch behavioural regressions;
+    // this test specifically forbids any binding for these bytes.
+    const defaults_bindings = [_]Binding{
+        .{ .bytes = key("Right"), .action = .ghost_accept },
+        .{ .bytes = key("End"), .action = .ghost_accept },
+        .{ .bytes = key("Ctrl+F"), .action = .ghost_accept },
+        .{ .bytes = key("Ctrl+Shift+I"), .action = .incognito_toggle },
+        .{ .bytes = key("Alt+i"), .action = .incognito_toggle },
+        .{ .bytes = key("Ctrl+Shift+D"), .action = .delete_history_match },
+    };
+    try std.testing.expectEqual(@as(?Action, null), match(&defaults_bindings, "\x03"));
+    // Same for Ctrl+D (0x04), Ctrl+Z (0x1A), Ctrl+\ (0x1C) — the
+    // other control codes a shell wants to see verbatim.
+    try std.testing.expectEqual(@as(?Action, null), match(&defaults_bindings, "\x04"));
+    try std.testing.expectEqual(@as(?Action, null), match(&defaults_bindings, "\x1A"));
+    try std.testing.expectEqual(@as(?Action, null), match(&defaults_bindings, "\x1C"));
+}
+
+test "isCsiU lets bare Ctrl+C through (not a CSI-u sequence)" {
+    // The CSI-u drop is the second gate after match — if a key
+    // doesn't match any binding AND looks like CSI-u, we drop it.
+    // Bare \x03 isn't CSI-u shaped, so isCsiU returns false and
+    // the byte falls through to the pty.master write.
+    try std.testing.expect(!isCsiU("\x03"));
+    try std.testing.expect(!isCsiU("\x04"));
+}
+
 test "match requires byte-exact equality (chunked reads don't trigger)" {
     const bs = [_]Binding{.{ .bytes = "\x1b[C", .action = .ghost_accept }};
     // partial match

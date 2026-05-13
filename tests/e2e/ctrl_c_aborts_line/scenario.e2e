@@ -1,0 +1,46 @@
+# ctrl_c_aborts_line — Ctrl+C must reach the shell as a bare 0x03
+# byte (not bound by any keymap action, not dropped by the kitty
+# kbd CSI-u intercept). Bash's readline turns that into a line
+# abort: prints "^C" + a fresh prompt, drops the partial input.
+#
+# Flow:
+#   1. Type a partial command ("echo SHOULD-NOT-RUN") with NO Enter.
+#   2. Send Ctrl+C — proxy forwards the 0x03 byte to pty.master.
+#   3. The shell prints "^C\n" + "$ " on a new line.
+#   4. Type "echo after-abort" + Enter.
+#   5. Snapshot — the visible output MUST show "after-abort" but
+#      MUST NOT show "SHOULD-NOT-RUN" (the partial line was killed,
+#      not deferred to the next prompt).
+#
+# This catches: any keymap binding that accidentally shadows \x03,
+# a CSI-u false positive that classifies \x03 as droppable, a
+# line_state confusion that keeps the partial line around so the
+# next keystroke continues building "echo SHOULD-NOT-RUNecho ...".
+
+cols 60
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 200
+
+# Type the command we want aborted — no Enter yet.
+type "echo SHOULD-NOT-RUN"
+sleep 300
+
+# Ctrl+C — should land in pty.master verbatim, bash echoes "^C"
+# and emits a fresh prompt.
+key ^C
+sleep 400
+
+# Run a follow-up so we can wait_for a unique marker.
+type "echo after-abort\r"
+wait_for "after-abort"
+sleep 200
+
+snapshot post_abort
+
+# Clean exit.
+type "exit\r"
+exit_code 0
