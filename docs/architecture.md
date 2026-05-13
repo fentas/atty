@@ -236,6 +236,41 @@ principle: when the buffer is empty we can't be wrong about its
 content, so we lift the gate. Arrow-key history navigation does *not*
 self-recover — the user has to explicitly clear the line.
 
+## OSC 133 prompt markers (auto-detect)
+
+The keystroke model above is blind to anything the *shell* puts on
+the prompt line — history recall (Up-arrow), tab completion, paste
+expansion, `!!` substitution. For those, atty needs the shell to
+tell us where its input region is. The standard wire protocol is
+OSC 133:
+
+    \x1b]133;A\x07       — prompt drawing starts
+    \x1b]133;B\x07       — input region begins (user can type)
+    \x1b]133;C\x07       — command execution starts (Enter pressed)
+    \x1b]133;D[;<code>]\x07 — command finished
+
+`src/osc133.zig` watches master output for these (both BEL `\x07`
+and ST `ESC \\` terminators are accepted), captures the printable
+bytes between `;B` and `;C` as `currentInput()`. CSI/OSC bodies are
+absorbed without polluting the buffer; CR clears it (line redraw);
+BS pops the last byte.
+
+**Auto-detect.** `tracker.active` flips on only after the first
+well-formed 133 marker arrives. Until then, the tracker is inert
+and the proxy uses keystroke tracking only. When markers ARE
+emitted, on every Enter the proxy overrides
+`line_state.committed` with the tracker's captured input — so
+guardrail and other modules see what the shell actually has on
+the prompt, not just what atty observed in keystrokes.
+
+**Enabling shell-side.** Markers come from shell-integration
+scripts. Ghostty's built-in integration emits them when its
+`shell-integration-features` includes `osc-133`. ble.sh, zsh4humans,
+VS Code's shell-integration, fig — all the modern frameworks emit
+133 by default or via a flag. Vanilla bash/zsh without integration
+don't; in that case atty stays on keystroke tracking, no
+regression.
+
 ## Config resolution
 
 Same shape as dwm's `config.def.h` / `config.h` split, plus a tiny
