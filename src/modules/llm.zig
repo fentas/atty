@@ -174,8 +174,23 @@ pub fn configure(comptime cfg: Config) type {
                     rt.shared.shutdown = true;
                     rt.shared.cv.signal(io);
                 }
-                t.join();
+                // Detach instead of join. The worker may be blocked
+                // inside a slow HTTP request (unreachable endpoint
+                // / OS TCP timeout) and won't observe `shutdown`
+                // until the request returns — joining would hang
+                // atty's exit for tens of seconds. The OS reaps
+                // the thread when the process exits; we deliberately
+                // leak the heap allocations the worker still
+                // references (shared / api_base / api_key / shell)
+                // because freeing them here is a use-after-free
+                // race. detach() is the documented escape hatch for
+                // exactly this "fire-and-forget at process exit"
+                // case.
+                t.detach();
+                return;
             }
+            // Inert mode (no worker spawned): safe to clean up
+            // synchronously.
             rt.allocator.destroy(rt.shared);
             rt.allocator.free(rt.api_base);
             rt.allocator.free(rt.api_key);
@@ -187,8 +202,15 @@ pub fn configure(comptime cfg: Config) type {
         fn resolveApiBase(allocator: std.mem.Allocator) ![]u8 {
             if (envValue(cfg.api_base_env)) |s| return allocator.dupe(u8, s);
             if (envValue(cfg.api_base_fallback_env)) |s| {
-                if (std.mem.endsWith(u8, s, "/v1")) return allocator.dupe(u8, s);
-                return std.fmt.allocPrint(allocator, "{s}/v1", .{s});
+                // Trim a single trailing slash before testing for
+                // / appending `/v1` — `OLLAMA_HOST="http://h:11434/"`
+                // would otherwise produce `http://h:11434//v1`,
+                // which some proxies / routers reject or normalize
+                // inconsistently. Strip exactly one slash; we don't
+                // want to collapse intentional multi-segment paths.
+                const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
+                if (std.mem.endsWith(u8, trimmed, "/v1")) return allocator.dupe(u8, trimmed);
+                return std.fmt.allocPrint(allocator, "{s}/v1", .{trimmed});
             }
             return allocator.dupe(u8, "");
         }
