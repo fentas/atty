@@ -15,6 +15,7 @@
 //!     pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub fn   provideGhostList(rt: *Runtime, ctx: *Context) !?[]const []const u8
 //!     pub fn   pollShellInput(rt: *Runtime, ctx: *Context) !?[]const u8
+//!     pub fn   provideHintText(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub const name: []const u8                          // optional, for logs
 //!

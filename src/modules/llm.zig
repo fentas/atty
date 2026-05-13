@@ -57,10 +57,21 @@ pub const Config = struct {
     /// no `Authorization` header (local servers usually accept
     /// unauthenticated requests).
     api_key_env: []const u8 = "LLM_API_KEY",
-    /// System-role message. Aims at "one command, no explanation."
-    /// Override to tune for your model's idiosyncrasies.
-    system_prompt: []const u8 =
-        "You are an expert shell user. Given a natural-language description, return EXACTLY ONE shell command that performs the task. Output ONLY the command on a single line. No markdown code fences. No explanation. No prefix or suffix text.",
+    /// When true, ask the model for a one-line explanation followed
+    /// by the command in a fenced block. atty surfaces the
+    /// explanation in the statusbar's hint row while the command
+    /// is injected for review. Drives `system_prompt`'s default.
+    /// Disable for terse single-command responses (matches the
+    /// pre-explanation behaviour).
+    with_explanation: bool = true,
+    /// System-role message. The default depends on
+    /// `with_explanation`: with → "one-line explanation + fenced
+    /// command"; without → "exactly one command, no extras."
+    /// Override to tune for your model's idiosyncrasies. When you
+    /// override AND set `with_explanation = false`, also drop the
+    /// fence/explanation guidance from your prompt or atty will
+    /// happily render whatever prose it sees in the hint row.
+    system_prompt: []const u8 = "",
     /// Per-request timeout in ms. Stored for future use; not yet wired
     /// to the HTTP client — requests may block indefinitely on a slow
     /// or unreachable endpoint until the OS TCP timeout fires.
@@ -78,6 +89,16 @@ pub fn configure(comptime cfg: Config) type {
     return struct {
         pub const name = "llm";
         pub const config = cfg;
+
+        /// Comptime-resolved system prompt. Honours an explicit
+        /// `Config.system_prompt` override; otherwise picks the
+        /// appropriate canned prompt for the with_explanation flag.
+        const effective_system_prompt: []const u8 = if (cfg.system_prompt.len > 0)
+            cfg.system_prompt
+        else if (cfg.with_explanation)
+            "You are an expert shell user. Given a natural-language description, reply with: (1) a SINGLE short sentence explaining what the command does, then a newline, then (2) a fenced block (```) containing EXACTLY ONE shell command on one line. Nothing else. No language tag on the fence. No prose after the closing fence."
+        else
+            "You are an expert shell user. Given a natural-language description, return EXACTLY ONE shell command that performs the task. Output ONLY the command on a single line. No markdown code fences. No explanation. No prefix or suffix text.";
 
         const Shared = struct {
             mutex: std.Io.Mutex = .init,
@@ -100,6 +121,14 @@ pub fn configure(comptime cfg: Config) type {
             /// `in_flight` in both cases.
             res_buf: [cfg.max_response_bytes]u8 = undefined,
             res_len: usize = 0,
+            /// Explanation text parsed from the response when
+            /// `with_explanation` is set. Surfaced via
+            /// `provideHintText` after pollShellInput consumes the
+            /// command. `explanation_len == 0` means "no
+            /// explanation parsed" (model didn't follow the format
+            /// or `with_explanation` is off).
+            explanation_buf: [512]u8 = undefined,
+            explanation_len: usize = 0,
             /// Generation of the prompt this response is for.
             res_gen: u64 = 0,
             /// True when the worker has finished serving the
@@ -128,6 +157,12 @@ pub fn configure(comptime cfg: Config) type {
             /// Owned by the runtime; valid until the next poll.
             inject_buf: [cfg.max_response_bytes]u8 = undefined,
             inject_len: usize = 0,
+            /// Latched explanation waiting to be surfaced via the
+            /// next `provideHintText` call. One-shot: cleared on
+            /// read so the hint row isn't re-painted forever.
+            hint_buf: [512]u8 = undefined,
+            hint_len: usize = 0,
+            hint_pending: bool = false,
             /// True while a prompt is in flight.
             in_flight: bool = false,
         };
@@ -305,19 +340,46 @@ pub fn configure(comptime cfg: Config) type {
             if (rt.shared.res_gen != rt.shared.req_gen) {
                 rt.shared.res_done = false;
                 rt.shared.res_len = 0;
+                rt.shared.explanation_len = 0;
                 return null;
             }
             const n = rt.shared.res_len;
             @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
             rt.inject_len = n;
+
+            // Latch the explanation for provideHintText to surface
+            // on the next tick. Only do so when there's actually a
+            // command to inject — a failed request shouldn't paint
+            // a stale or partial hint.
+            const exp_n = rt.shared.explanation_len;
+            if (n > 0 and exp_n > 0) {
+                @memcpy(rt.hint_buf[0..exp_n], rt.shared.explanation_buf[0..exp_n]);
+                rt.hint_len = exp_n;
+                rt.hint_pending = true;
+            }
+
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
+            rt.shared.explanation_len = 0;
             rt.in_flight = false;
             // n == 0 → worker signalled failure (network error,
             // non-2xx, parse failure). Nothing to inject; the
             // statusbar already cleared via `in_flight = false`.
             if (n == 0) return null;
             return rt.inject_buf[0..rt.inject_len];
+        }
+
+        /// One-shot hint surface: returns the latched explanation
+        /// the first time it's called after a fresh response, then
+        /// returns null until the next response arrives. Cleared
+        /// on read so the hint row's TTL governs how long the
+        /// text stays visible — the module doesn't keep
+        /// re-painting.
+        pub fn provideHintText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            _ = ctx;
+            if (!rt.hint_pending) return null;
+            rt.hint_pending = false;
+            return rt.hint_buf[0..rt.hint_len];
         }
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -357,7 +419,8 @@ pub fn configure(comptime cfg: Config) type {
                 // Fire the HTTP request OUTSIDE the lock — it may
                 // block for many seconds.
                 var response_buf: [cfg.max_response_bytes]u8 = undefined;
-                const response_len = doRequest(
+                var explanation_local: [512]u8 = undefined;
+                const result = doRequest(
                     gpa,
                     io,
                     api_base,
@@ -365,7 +428,8 @@ pub fn configure(comptime cfg: Config) type {
                     shell_name,
                     prompt_local[0..prompt_len],
                     &response_buf,
-                ) catch 0;
+                    &explanation_local,
+                ) catch RequestResult{ .cmd_len = 0, .exp_len = 0 };
 
                 // Signal completion regardless of outcome — proxy
                 // needs to clear `in_flight` so the 🧠 thinking…
@@ -373,11 +437,18 @@ pub fn configure(comptime cfg: Config) type {
                 // The proxy filters stale-generation responses
                 // separately.
                 shared.mutex.lockUncancelable(io);
-                if (response_len > 0) {
-                    @memcpy(shared.res_buf[0..response_len], response_buf[0..response_len]);
-                    shared.res_len = response_len;
+                if (result.cmd_len > 0) {
+                    @memcpy(shared.res_buf[0..result.cmd_len], response_buf[0..result.cmd_len]);
+                    shared.res_len = result.cmd_len;
+                    if (result.exp_len > 0) {
+                        @memcpy(shared.explanation_buf[0..result.exp_len], explanation_local[0..result.exp_len]);
+                        shared.explanation_len = result.exp_len;
+                    } else {
+                        shared.explanation_len = 0;
+                    }
                 } else {
                     shared.res_len = 0;
+                    shared.explanation_len = 0;
                 }
                 shared.res_gen = serving_gen;
                 shared.res_done = true;
@@ -385,11 +456,13 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
-        /// One HTTP round-trip. Returns the trimmed command from
-        /// `choices[0].message.content`, or 0 on any failure
-        /// (network error, parse error, HTTP non-2xx, empty body).
-        /// Failure mode is "user's typed line stays cleared, no
-        /// new command injected" — visible as nothing happening.
+        const RequestResult = struct { cmd_len: usize, exp_len: usize };
+
+        /// One HTTP round-trip. Returns the trimmed command and
+        /// (when present) the parsed explanation. `cmd_len == 0`
+        /// signals any failure (network error, parse error, HTTP
+        /// non-2xx, empty body); the user's typed line stays
+        /// cleared and nothing is injected.
         fn doRequest(
             gpa: std.mem.Allocator,
             io: std.Io,
@@ -398,11 +471,12 @@ pub fn configure(comptime cfg: Config) type {
             shell_name: []const u8,
             prompt: []const u8,
             out: []u8,
-        ) !usize {
+            explanation_out: []u8,
+        ) !RequestResult {
             const url = try std.fmt.allocPrint(gpa, "{s}/chat/completions", .{api_base});
             defer gpa.free(url);
 
-            const body = try buildRequestBody(gpa, cfg.model, cfg.system_prompt, shell_name, prompt);
+            const body = try buildRequestBody(gpa, cfg.model, effective_system_prompt, shell_name, prompt);
             defer gpa.free(body);
 
             var auth_buf: [256]u8 = undefined;
@@ -437,17 +511,19 @@ pub fn configure(comptime cfg: Config) type {
             var response_buf: [response_cap]u8 = undefined;
             var response_writer: std.Io.Writer = .fixed(&response_buf);
 
-            const result = client.fetch(.{
+            const fetched = client.fetch(.{
                 .location = .{ .url = url },
                 .method = .POST,
                 .payload = body,
                 .extra_headers = headers_buf[0..headers_len],
                 .response_writer = &response_writer,
-            }) catch return 0;
+            }) catch return RequestResult{ .cmd_len = 0, .exp_len = 0 };
 
-            if (@intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300) return 0;
+            if (@intFromEnum(fetched.status) < 200 or @intFromEnum(fetched.status) >= 300)
+                return RequestResult{ .cmd_len = 0, .exp_len = 0 };
 
-            return extractCommand(response_buf[0..response_writer.end], out);
+            const extracted = extractResponse(response_buf[0..response_writer.end], out, explanation_out);
+            return RequestResult{ .cmd_len = extracted.cmd_len, .exp_len = extracted.explanation_len };
         }
 
         // ---- pure helpers (testable) -------------------------------------
@@ -488,12 +564,85 @@ pub fn configure(comptime cfg: Config) type {
             return allocating.toOwnedSlice();
         }
 
+        /// Result of `extractResponse` — both halves of the model's
+        /// reply when configured to emit an explanation + command.
+        pub const ExtractedResponse = struct {
+            cmd_len: usize,
+            explanation_len: usize,
+        };
+
         /// Extract the assistant's command text from an OpenAI-style
         /// chat-completion JSON response. Strips surrounding markdown
         /// fences + leading/trailing whitespace, takes the first
         /// non-empty line. Returns bytes written to `out`, or 0 on
         /// parse failure / empty result.
         pub fn extractCommand(body: []const u8, out: []u8) usize {
+            var decoded_buf: [cfg.max_response_bytes]u8 = undefined;
+            const decoded_len = decodeContent(body, &decoded_buf);
+            if (decoded_len == 0) return 0;
+            return sanitizeCommand(decoded_buf[0..decoded_len], out);
+        }
+
+        /// Extract both the explanation (prose before the fence) and
+        /// the command (inside the fence) from a model reply that
+        /// uses the with-explanation format:
+        ///
+        ///     <one-line explanation>
+        ///     ```
+        ///     <command>
+        ///     ```
+        ///
+        /// When the model didn't follow the format (no fence), the
+        /// whole content is treated as the command and explanation
+        /// is empty. When the JSON content field is missing, both
+        /// lengths come back 0.
+        pub fn extractResponse(body: []const u8, cmd_out: []u8, explanation_out: []u8) ExtractedResponse {
+            var decoded_buf: [cfg.max_response_bytes]u8 = undefined;
+            const decoded_len = decodeContent(body, &decoded_buf);
+            if (decoded_len == 0) return .{ .cmd_len = 0, .explanation_len = 0 };
+            const decoded = decoded_buf[0..decoded_len];
+
+            // Look for an opening fence. The model may or may not
+            // prefix prose; if there's no fence we keep the old
+            // single-string behaviour.
+            const fence_open_idx = std.mem.indexOf(u8, decoded, "```") orelse {
+                return .{
+                    .cmd_len = sanitizeCommand(decoded, cmd_out),
+                    .explanation_len = 0,
+                };
+            };
+
+            // Inner content of the fence — skip the optional
+            // language tag (everything up to the first newline
+            // after the opening backticks). Bail to legacy mode
+            // if the fence isn't terminated.
+            const after_open = fence_open_idx + 3;
+            const inner_start = if (std.mem.indexOfScalar(u8, decoded[after_open..], '\n')) |nl|
+                after_open + nl + 1
+            else
+                after_open;
+            const fence_close_idx = std.mem.indexOfPos(u8, decoded, inner_start, "```") orelse {
+                return .{
+                    .cmd_len = sanitizeCommand(decoded, cmd_out),
+                    .explanation_len = 0,
+                };
+            };
+
+            const explanation_raw = std.mem.trim(u8, decoded[0..fence_open_idx], " \t\r\n");
+            const fence_body = decoded[inner_start..fence_close_idx];
+            return .{
+                .cmd_len = sanitizeCommand(fence_body, cmd_out),
+                .explanation_len = sanitizeExplanation(explanation_raw, explanation_out),
+            };
+        }
+
+        /// Decode the JSON `"content"` field of an OpenAI-style
+        /// chat-completion response into a flat byte buffer. Same
+        /// JSON-escape handling as the original extractCommand —
+        /// drops `\r` for security, decodes `\n` / `\t` / `\"` /
+        /// `\\` / `\/`, skips `\uXXXX` and other escapes. Returns 0
+        /// when the field is missing or the body is malformed.
+        fn decodeContent(body: []const u8, out: []u8) usize {
             // Minimal extraction: find the `"content"` key, then
             // hop over JSON whitespace + `:` + whitespace + `"`.
             // Robust JSON parsing would be nicer but std.json's
@@ -510,18 +659,13 @@ pub fn configure(comptime cfg: Config) type {
             while (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r')) i += 1;
             if (i >= body.len or body[i] != '"') return 0;
             i += 1;
-            var cmd_buf: [cfg.max_response_bytes]u8 = undefined;
-            var cmd_len: usize = 0;
+            var n: usize = 0;
             while (i < body.len) : (i += 1) {
                 const c = body[i];
                 if (c == '\\' and i + 1 < body.len) {
                     const e = body[i + 1];
                     switch (e) {
                         '"', '\\', '/', 'n', 't' => {
-                            // Decode common JSON escapes. \n stays
-                            // because the first-line-only sanitiser
-                            // below relies on the newline to find
-                            // the boundary.
                             const decoded: u8 = switch (e) {
                                 '"' => '"',
                                 '\\' => '\\',
@@ -530,9 +674,9 @@ pub fn configure(comptime cfg: Config) type {
                                 't' => '\t',
                                 else => unreachable,
                             };
-                            if (cmd_len < cmd_buf.len) {
-                                cmd_buf[cmd_len] = decoded;
-                                cmd_len += 1;
+                            if (n < out.len) {
+                                out[n] = decoded;
+                                n += 1;
                             }
                             i += 1;
                         },
@@ -551,7 +695,7 @@ pub fn configure(comptime cfg: Config) type {
                             // digits) cannot cause us to skip past
                             // the content boundary into the next
                             // field.
-                            i += 1; // consume the 'u'
+                            i += 1;
                             var k: usize = 0;
                             while (k < 4 and i + 1 < body.len) : (k += 1) {
                                 const h = body[i + 1];
@@ -559,18 +703,47 @@ pub fn configure(comptime cfg: Config) type {
                                 i += 1;
                             }
                         },
-                        // Other escapes (\b, \f, …): drop entirely.
                         else => i += 1,
                     }
                     continue;
                 }
                 if (c == '"') break;
-                if (cmd_len < cmd_buf.len) {
-                    cmd_buf[cmd_len] = c;
-                    cmd_len += 1;
+                if (n < out.len) {
+                    out[n] = c;
+                    n += 1;
                 }
             }
-            return sanitizeCommand(cmd_buf[0..cmd_len], out);
+            return n;
+        }
+
+        /// Flatten prose to a single line, strip control bytes,
+        /// truncate to `out.len`. Multi-line explanations get
+        /// joined with a single space rather than dropping the
+        /// trailing lines — the hint row only fits one line but
+        /// the user gets the gist.
+        pub fn sanitizeExplanation(raw: []const u8, out: []u8) usize {
+            const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+            var n: usize = 0;
+            var last_was_space = false;
+            for (trimmed) |b| {
+                if (b == '\n' or b == '\r' or b == '\t' or b == ' ') {
+                    if (last_was_space) continue;
+                    if (n >= out.len) break;
+                    out[n] = ' ';
+                    n += 1;
+                    last_was_space = true;
+                    continue;
+                }
+                // Drop remaining control bytes (NUL, BEL, BS, …, DEL).
+                if (b < 0x20 or b == 0x7F) continue;
+                if (n >= out.len) break;
+                out[n] = b;
+                n += 1;
+                last_was_space = false;
+            }
+            // Trim a trailing whitespace introduced by the join above.
+            while (n > 0 and out[n - 1] == ' ') n -= 1;
+            return n;
         }
 
         /// Trim markdown fences (```bash … ```) + whitespace + take
@@ -881,4 +1054,68 @@ test "sanitizeCommand strips C1 control codepoints — terminal-escape injection
     // UTF-8 walker.
     const n5 = L.sanitizeCommand("café", &out);
     try testing.expectEqualStrings("café", out[0..n5]);
+}
+
+test "extractResponse splits explanation + fenced command" {
+    const L = configure(.{});
+    var cmd_out: [128]u8 = undefined;
+    var exp_out: [256]u8 = undefined;
+    // Compact JSON body with the explanation+fence format.
+    const body = "{\"choices\":[{\"message\":{\"content\":\"Lists files in long format.\\n```\\nls -la\\n```\"}}]}";
+    const r = L.extractResponse(body, &cmd_out, &exp_out);
+    try testing.expectEqualStrings("ls -la", cmd_out[0..r.cmd_len]);
+    try testing.expectEqualStrings("Lists files in long format.", exp_out[0..r.explanation_len]);
+}
+
+test "extractResponse — no fence falls back to command-only (legacy model)" {
+    const L = configure(.{});
+    var cmd_out: [128]u8 = undefined;
+    var exp_out: [256]u8 = undefined;
+    const body = "{\"choices\":[{\"message\":{\"content\":\"ls -la\"}}]}";
+    const r = L.extractResponse(body, &cmd_out, &exp_out);
+    try testing.expectEqualStrings("ls -la", cmd_out[0..r.cmd_len]);
+    try testing.expectEqual(@as(usize, 0), r.explanation_len);
+}
+
+test "extractResponse — missing content field returns zero lengths" {
+    const L = configure(.{});
+    var cmd_out: [128]u8 = undefined;
+    var exp_out: [256]u8 = undefined;
+    const r = L.extractResponse("{\"error\":\"bad\"}", &cmd_out, &exp_out);
+    try testing.expectEqual(@as(usize, 0), r.cmd_len);
+    try testing.expectEqual(@as(usize, 0), r.explanation_len);
+}
+
+test "sanitizeExplanation flattens newlines + strips control bytes" {
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+
+    // Multi-line prose collapses to a single space-separated line.
+    const n = L.sanitizeExplanation("Line one.\nLine two.\nLine three.", &out);
+    try testing.expectEqualStrings("Line one. Line two. Line three.", out[0..n]);
+
+    // Embedded NUL / BEL / DEL — dropped silently.
+    const n2 = L.sanitizeExplanation("hello\x00\x07world\x7F", &out);
+    try testing.expectEqualStrings("helloworld", out[0..n2]);
+
+    // Adjacent whitespace coalesces into a single space.
+    const n3 = L.sanitizeExplanation("a   b\t\tc\n\nd", &out);
+    try testing.expectEqualStrings("a b c d", out[0..n3]);
+}
+
+test "effective_system_prompt picks the with-explanation default" {
+    const L_on = configure(.{ .with_explanation = true });
+    const L_off = configure(.{ .with_explanation = false });
+    // The two defaults differ in their guidance about fences /
+    // explanations; pin that they don't collapse to the same string.
+    try testing.expect(!std.mem.eql(u8, L_on.effective_system_prompt, L_off.effective_system_prompt));
+    // The with-explanation prompt should reference the fence /
+    // explanation guidance.
+    try testing.expect(std.mem.indexOf(u8, L_on.effective_system_prompt, "fenced") != null);
+    try testing.expect(std.mem.indexOf(u8, L_off.effective_system_prompt, "No markdown") != null);
+}
+
+test "effective_system_prompt honours an explicit override" {
+    const L = configure(.{ .with_explanation = true, .system_prompt = "be terse" });
+    try testing.expectEqualStrings("be terse", L.effective_system_prompt);
 }

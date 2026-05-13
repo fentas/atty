@@ -142,6 +142,23 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return null;
         }
 
+        /// First non-null hint wins. One-shot semantics — modules
+        /// implementing `provideHintText` are expected to return the
+        /// text once and `null` thereafter (no re-painting). The
+        /// proxy hands the result to the statusbar's hint row,
+        /// which manages TTL/clearance from there.
+        pub fn gatherHintText(
+            rts: *Runtimes,
+            ctx: *Context,
+        ) Error!?[]const u8 {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "provideHintText")) {
+                    if (try M.provideHintText(rts[i], ctx)) |text| return text;
+                }
+            }
+            return null;
+        }
+
         /// First non-null list wins, same precedence model as
         /// gatherGhostText. Used by the multi-suggestion overlay
         /// rendered below the prompt (see `Config.ghost.list_count`).
@@ -575,6 +592,60 @@ test "pollShellInput returns null when no module has bytes ready" {
     var ctx = makeContext(&line, &scratch);
 
     try testing.expectEqual(@as(?[]const u8, null), try D.pollShellInput(&rts, &ctx));
+}
+
+// ─── gatherHintText walker ───────────────────────────────────────────────
+
+const HintEmpty = struct {
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn provideHintText(_: *Runtime, _: *Context) Error!?[]const u8 {
+        return null;
+    }
+};
+
+const HintWithResult = struct {
+    pub const Runtime = struct {
+        result: ?[]const u8 = null,
+    };
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn provideHintText(rt: *Runtime, _: *Context) Error!?[]const u8 {
+        return rt.result;
+    }
+};
+
+test "gatherHintText returns first non-null, skipping null providers" {
+    const D = Dispatcher(.{ HintEmpty, HintWithResult });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+    rts[1].result = "lists files in long format";
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    const got = try D.gatherHintText(&rts, &ctx);
+    try testing.expectEqualStrings("lists files in long format", got.?);
+}
+
+test "gatherHintText returns null when no module has a hint" {
+    const D = Dispatcher(.{HintEmpty});
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    try testing.expectEqual(@as(?[]const u8, null), try D.gatherHintText(&rts, &ctx));
 }
 
 // ─── coverage for the newer walkers ──────────────────────────────────────

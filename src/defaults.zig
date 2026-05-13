@@ -144,5 +144,10 @@ pub const StatusBar = struct {
     /// Style for the 🔒 incognito segment specifically. Defaults to
     /// muted red (dim + red) so it pops against the rest of the bar.
     incognito_style: atty.Style = .{ .dim = true, .fg = 1 },
+    /// How long a one-shot hint (from a module's `provideHintText`)
+    /// stays visible above the status text. The LLM module uses
+    /// this to flash an explanation of the command it just
+    /// injected. Drop to 0 to disable hint rendering.
+    hint_ttl_ms: u32 = 30_000,
 };
 pub const statusbar: StatusBar = .{};

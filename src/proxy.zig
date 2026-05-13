@@ -259,6 +259,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     writeAll(pty.master, bytes) catch {};
                 }
             }
+            // One-shot hint surface — a module just produced an
+            // explanation it wants the user to see (e.g. LLM
+            // module after injecting a command). Hand it to the
+            // statusbar's hint row; TTL governs how long it stays.
+            // hint_ttl_ms = 0 disables the surface entirely.
+            if (statusbar) |*sb| {
+                if (config.statusbar.hint_ttl_ms > 0) {
+                    if (D.gatherHintText(&runtimes, &ctx) catch null) |hint_text| {
+                        sb.setHint(hint_text, config.statusbar.hint_ttl_ms);
+                    }
+                }
+            }
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
