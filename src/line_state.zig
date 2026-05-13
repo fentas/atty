@@ -81,6 +81,31 @@ pub const LineState = struct {
         self.committed_was_uncertain = false;
     }
 
+    /// Replace the live input buffer from an externally-observed
+    /// source — used by the proxy when the OSC 133 tracker is in
+    /// its `in_input` phase. Bytes the shell has actually drawn on
+    /// the prompt are the ground truth for what the user is editing
+    /// right now, including content that didn't come from keystrokes:
+    /// Arrow-Up history recall, completion expansion, paste, and
+    /// any other shell-side redraw.
+    ///
+    /// Different from `applyInput` (which models keystrokes one at
+    /// a time) and `setCommitted` (which only writes the commit
+    /// snapshot, never the live buffer). Sets `uncertain = false`
+    /// because the marker stream IS the truth; bumps `generation`
+    /// so ghost-text providers know to recompute.
+    pub fn syncFromCapture(self: *LineState, content: []const u8) void {
+        const n = @min(content.len, max_line);
+        // Skip the write when the buffer is already in sync — avoids
+        // unnecessary generation bumps that would force ghost-text
+        // providers to redo their work each tick.
+        if (self.len == n and std.mem.eql(u8, self.buffer[0..self.len], content[0..n]) and !self.uncertain) return;
+        @memcpy(self.buffer[0..n], content[0..n]);
+        self.len = n;
+        self.uncertain = false;
+        self.generation +%= 1;
+    }
+
     /// Apply a byte slice as input. Returns true if the line buffer
     /// actually changed (callers may use this to gate ghost-text
     /// recomputation).
@@ -389,4 +414,56 @@ test "multiple CSI sequences in one read each mark uncertain" {
     var l = LineState{};
     _ = l.applyInput("\x1B[A\x1B[B");
     try std.testing.expect(l.uncertain);
+}
+
+test "syncFromCapture replaces buffer + clears uncertain (Arrow Up recall path)" {
+    var l = LineState{};
+    // User types "ls", then presses Up — applyInput marks uncertain.
+    _ = l.applyInput("ls\x1B[A");
+    try std.testing.expect(l.uncertain);
+
+    // Shell redraws prompt with the recalled command. proxy.zig
+    // calls syncFromCapture with the OSC 133 tracker's view of
+    // the current input region.
+    l.syncFromCapture("git status");
+    try std.testing.expectEqualSlices(u8, "git status", l.current());
+    try std.testing.expect(!l.uncertain);
+}
+
+test "syncFromCapture is a no-op when buffer is already in sync" {
+    var l = LineState{};
+    _ = l.applyInput("ls");
+    const gen_before = l.generation;
+    l.syncFromCapture("ls");
+    // No generation bump → providers can skip recomputation.
+    try std.testing.expectEqual(gen_before, l.generation);
+}
+
+test "syncFromCapture still bumps generation when uncertain was true" {
+    var l = LineState{};
+    _ = l.applyInput("ls\x1B[A");
+    // Buffer is "ls" + uncertain=true. Sync with the same bytes —
+    // content matches but uncertainty doesn't, so we must repaint
+    // and recompute.
+    const gen_before = l.generation;
+    l.syncFromCapture("ls");
+    try std.testing.expect(l.generation != gen_before);
+    try std.testing.expect(!l.uncertain);
+}
+
+test "syncFromCapture with empty content clears the buffer" {
+    var l = LineState{};
+    _ = l.applyInput("ls -la");
+    l.syncFromCapture("");
+    try std.testing.expectEqualSlices(u8, "", l.current());
+    try std.testing.expect(!l.uncertain);
+}
+
+test "syncFromCapture truncates oversized content to max_line" {
+    var l = LineState{};
+    // Build a slice longer than max_line.
+    var oversized: [max_line + 64]u8 = undefined;
+    @memset(&oversized, 'x');
+    l.syncFromCapture(&oversized);
+    try std.testing.expectEqual(@as(usize, max_line), l.len);
 }

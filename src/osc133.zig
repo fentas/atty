@@ -66,6 +66,17 @@ pub const Osc133 = struct {
         return self.input.items;
     }
 
+    /// True iff the tracker is currently between a `;B` and a `;C`
+    /// marker — i.e. the user is editing a prompt and `currentInput()`
+    /// is the live, ground-truth contents of that prompt. The proxy
+    /// uses this to gate the continuous `line_state` sync: outside
+    /// `in_input` (during command execution, between commands, or
+    /// before any markers arrive), `currentInput()` is either stale
+    /// or empty and must not overwrite the keystroke-derived buffer.
+    pub fn inInputPhase(self: *const Osc133) bool {
+        return self.phase == .in_input;
+    }
+
     /// Feed master-output bytes. Idempotent + safe across partial
     /// sequences (state survives feed calls).
     pub fn feed(self: *Osc133, bytes: []const u8) void {
@@ -218,6 +229,42 @@ test "Osc133: 133;C transitions to in_command — subsequent bytes don't update 
     // Command output bytes flow but we stop capturing.
     o.feed("file1 file2 file3");
     try testing.expectEqualStrings("ls", o.currentInput());
+}
+
+test "Osc133.inInputPhase reflects the B → C transition" {
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    // No marker yet: tracker is idle, not in input.
+    try testing.expect(!o.inInputPhase());
+    o.feed("\x1b]133;A\x07$ ");
+    // After A: still not in input (B hasn't fired).
+    try testing.expect(!o.inInputPhase());
+    o.feed("\x1b]133;B\x07");
+    try testing.expect(o.inInputPhase());
+    o.feed("ls");
+    try testing.expect(o.inInputPhase());
+    o.feed("\x1b]133;C\x07");
+    // After C: in_command, not in input — proxy must NOT sync
+    // line_state from currentInput while we're in this phase,
+    // because the password prompts of sudo/ssh/passwd live here.
+    try testing.expect(!o.inInputPhase());
+    o.feed("\x1b]133;D\x07");
+    try testing.expect(!o.inInputPhase());
+}
+
+test "Osc133: CR-then-redraw captures the recalled line (Arrow Up shape)" {
+    // Simulates what bash does on Arrow Up: emit CR (which the
+    // tracker treats as a line clear), then the recalled command.
+    // The tracker should end up with the recalled string as
+    // currentInput, ready for proxy.syncFromCapture to mirror.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07$ \x1b]133;B\x07ls");
+    try testing.expectEqualStrings("ls", o.currentInput());
+    // User presses Up — shell rewrites the line.
+    o.feed("\r\x1b[Kgit status");
+    try testing.expectEqualStrings("git status", o.currentInput());
+    try testing.expect(o.inInputPhase());
 }
 
 test "Osc133: subsequent 133;B clears the buffer (fresh prompt)" {
