@@ -5,6 +5,9 @@ title: Built-in modules
 
 # Built-in modules
 
+* TOC
+{:toc}
+
 ## Atuin (`src/modules/atuin.zig`)
 
 Fish/zsh-autosuggestion-style ghost text driven by your [Atuin]
