@@ -1,0 +1,70 @@
+# delete_history_fanout — Ctrl+Shift+D must reach BOTH history modules.
+#
+# Two `atty.modules.history.configure(...)` instances are wired in
+# parallel, each pointing at a private /tmp path (see config.zig).
+# Both record commands committed via Enter; both expose
+# `deleteHistoryMatch`. The dispatcher's inline-for walker fires the
+# hook on each module in order.
+#
+# Pre-PR-#8 the walker used `try`, so if module A returned an error
+# (or simply succeeded but the comptime expansion happened to short-
+# circuit on a subsequent iteration's check) downstream modules
+# never ran — the ghost the user was trying to delete kept
+# reappearing from the surviving store. Post-fix the per-iteration
+# error is swallowed; this scenario asserts the side effects of
+# both deletions land on disk.
+#
+# Flow:
+#   1. Clean any prior run's files.
+#   2. Type `echo FANOUT-TARGET<Enter>` — both modules record it.
+#   3. Type the prefix, accept the ghost so the full line is in the
+#      buffer (proves at least module A has it; B is verified later).
+#   4. Fire Ctrl+Shift+D (kitty-kbd CSI-u `\x1b[100;6u`). The proxy
+#      action calls `dispatchDeleteHistoryMatch` which walks every
+#      module with the hook.
+#   5. From inside the shell, grep both backing files. Each prints
+#      a unique sentinel if its file is clean. `wait_for` on both
+#      sentinels asserts the deletion landed everywhere.
+
+cols 80
+rows 8
+timeout_ms 8000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Defensive cleanup — prior runs may have left content.
+type "rm -f /tmp/atty-e2e-fanout-A /tmp/atty-e2e-fanout-B && echo READY\r"
+wait_for "READY"
+
+# Record. The history modules' onLineCommit fires after Enter for both.
+type "echo FANOUT-TARGET\r"
+wait_for "FANOUT-TARGET"
+sleep 300
+
+# Ghost-suggest probe. Module A is first in the tuple so its
+# `provideGhostText` returns the trailing portion of the recorded
+# line — the user sees a dim continuation after the cursor.
+type "echo FANOU"
+sleep 400
+
+# Accept the ghost: line is now the full `echo FANOUT-TARGET`.
+key Right
+sleep 200
+
+# Ctrl+Shift+D — keycode 'd'=100, modifier Ctrl+Shift=6.
+type "\x1b[100;6u"
+sleep 500
+
+# Verify file A is clean. `! grep -q` returns 0 when no match.
+type "! grep -q FANOUT-TARGET /tmp/atty-e2e-fanout-A && echo CLEAN_A\r"
+wait_for "CLEAN_A"
+
+# Verify file B is clean. Pre-fix this would FAIL — module A handled
+# the delete and the walker short-circuited before reaching B.
+type "! grep -q FANOUT-TARGET /tmp/atty-e2e-fanout-B && echo CLEAN_B\r"
+wait_for "CLEAN_B"
+
+# Clean exit.
+type "exit\r"
+exit_code 0
