@@ -180,8 +180,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // DSR (cursor-position query) state machine. `expecting_prompt`
     // = "a fresh prompt is imminent or just appeared; once master
     // output goes idle send a DSR to learn where input starts."
+    // `user_typed_since_prompt` is the race-guard — if the user
+    // started typing before DSR fired, the cursor has already moved
+    // past the input-start column and we'd capture a wrong value.
+    // In that case skip the DSR for this prompt; line_state's
+    // keystroke-tracking handles it (history recall fix is lost for
+    // this round but no off-by-N corruption).
     var expecting_prompt: bool = args.is_tty;
     var dsr_sent: bool = false;
+    var user_typed_since_prompt: bool = false;
     var last_master_byte_ms: i64 = nowMs();
 
     var ctx = module.Context{
@@ -255,8 +262,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // Send a DSR cursor-position query when a prompt is
             // expected and master output has been quiet long enough
             // that the prompt should have finished painting. Reply
-            // arrives via stdin (intercepted there).
-            if (expecting_prompt and !dsr_sent and (now - last_master_byte_ms) > 50) {
+            // arrives via stdin (intercepted there). 200ms idle is
+            // a conservative threshold — short enough to feel
+            // instant, long enough to ride out chunked / slow
+            // prompts (PROMPT_COMMAND running `git status` etc.).
+            // Skip if the user already typed since the last prompt
+            // event — DSR would capture a column past the input
+            // start in that case.
+            if (expecting_prompt and
+                !dsr_sent and
+                !user_typed_since_prompt and
+                (now - last_master_byte_ms) > 200)
+            {
                 _ = std.c.write(posix.STDOUT_FILENO, dsr.query_bytes.ptr, dsr.query_bytes.len);
                 dsr_sent = true;
             }
@@ -279,6 +296,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
                 var input: []const u8 = dsr_res.cleaned;
                 if (input.len == 0) continue; // chunk was nothing but a DSR reply
+                // Mark that the user has typed since the last prompt
+                // event. Suppresses DSR firing past this point (would
+                // capture wrong cursor column).
+                user_typed_since_prompt = true;
 
                 // Accept-ghost keystroke: if the user's accept key
                 // arrives while a ghost is visible and the line is
@@ -463,6 +484,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (shell_saw_enter) {
                     expecting_prompt = true;
                     dsr_sent = false;
+                    user_typed_since_prompt = false;
+                    // Drop the stale input_start — the new prompt
+                    // will set a fresh one. Until then, currentInput
+                    // returns empty and updateFromGrid is skipped.
+                    input_grid.setInputStart(0);
                 }
 
                 // Deliberately NO renderGhost here. The shell hasn't
@@ -543,6 +569,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         input_grid.resize(s.cols) catch {};
                         expecting_prompt = true;
                         dsr_sent = false;
+                        user_typed_since_prompt = false;
                     } else |_| {}
                 } else if (sig == posix.SIG.CHLD) {
                     var status: u32 = 0;
