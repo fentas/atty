@@ -212,8 +212,9 @@ The worker thread is `t.detach()`'d on atty exit rather than
 joined. If the worker is mid-request (slow endpoint, OS TCP
 timeout), joining would hang atty's exit for tens of seconds.
 The OS reaps the thread at process exit; the heap allocations
-the worker references (Shared / api_base / api_key / shell) are
-deliberately leaked. Inert-mode runtimes (no worker spawned)
+the worker references (Shared / api_base / api_key / shell /
+context_blob) are deliberately leaked. Inert-mode runtimes (no
+worker spawned)
 clean up synchronously since there's nothing to race against.
 A proper timeout on `client.fetch` is the long-term fix; see
 `timeout_ms` in the config table.

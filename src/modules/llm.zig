@@ -184,9 +184,11 @@ pub fn configure(comptime cfg: Config) type {
             /// Diagnostic message written by the worker when the
             /// request fails (connect error, HTTP non-2xx,
             /// unparseable response, or sanitiser stripped
-            /// everything). Surfaced via `provideHintText` so the
-            /// user sees *why* the prompt produced no command.
-            /// `error_len == 0` means "no error to report".
+            /// everything). Surfaced via `provideErrorText` (the
+            /// muted-red + ⚠ notification slot, distinct from the
+            /// hint slot used for explanations) so the user sees
+            /// *why* the prompt produced no command. `error_len ==
+            /// 0` means "no error to report".
             error_buf: [256]u8 = undefined,
             error_len: usize = 0,
             /// Generation of the prompt this response is for.
@@ -298,11 +300,11 @@ pub fn configure(comptime cfg: Config) type {
                 // atty's exit for tens of seconds. The OS reaps
                 // the thread when the process exits; we deliberately
                 // leak the heap allocations the worker still
-                // references (shared / api_base / api_key / shell)
-                // because freeing them here is a use-after-free
-                // race. detach() is the documented escape hatch for
-                // exactly this "fire-and-forget at process exit"
-                // case.
+                // references (shared / api_base / api_key / shell /
+                // context_blob) because freeing them here is a
+                // use-after-free race. detach() is the documented
+                // escape hatch for exactly this "fire-and-forget at
+                // process exit" case.
                 t.detach();
                 return;
             }

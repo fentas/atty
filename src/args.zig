@@ -96,12 +96,20 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
 /// Restrict the shell argument from `atty init <shell>` to a small
 /// allowlist character set before main.zig pastes it into the
 /// emitted `eval`'d snippet. ASCII letters (both cases), digits,
-/// `_`, `-` only; max 32 bytes. Anything else (spaces, semicolons,
-/// quotes, backticks, `$`, …) flunks and the caller falls back to
-/// the no-shell form. Shell-injection defence in depth — the
-/// typical caller passes "bash" / "zsh", which both pass.
+/// `_`, `-` only; max 32 bytes; MUST NOT start with `-`. Anything
+/// else (spaces, semicolons, quotes, backticks, `$`, …) flunks
+/// and the caller falls back to the no-shell form. Shell-
+/// injection defence in depth — the typical caller passes
+/// "bash" / "zsh", which both pass.
+///
+/// The no-leading-`-` rule matters because the token ends up
+/// pasted into `exec atty <shell>` unquoted. A leading-dash value
+/// like `-h` would otherwise turn into an atty flag rather than
+/// a shell name and atty's argv parser would print --help and
+/// exit, breaking the interactive shell.
 pub fn isSafeShellName(s: []const u8) bool {
     if (s.len == 0 or s.len > 32) return false;
+    if (s[0] == '-') return false;
     for (s) |b| {
         const ok = (b >= 'a' and b <= 'z') or
             (b >= 'A' and b <= 'Z') or
@@ -232,6 +240,20 @@ test "isSafeShellName rejects shell-injection primitives (security)" {
     // Length cap — keep the allowlist tight.
     var long_buf: [33]u8 = .{'a'} ** 33;
     try testing.expect(!isSafeShellName(&long_buf));
+}
+
+test "isSafeShellName rejects leading dash — would parse as an atty flag" {
+    // `atty init -h` would otherwise emit `exec atty -h`, which
+    // atty's argv parser interprets as --help → atty prints usage
+    // and exits, breaking the interactive shell that ran the
+    // snippet. The leading-`-` rule blocks this even though all
+    // the characters individually pass the allowlist.
+    try testing.expect(!isSafeShellName("-h"));
+    try testing.expect(!isSafeShellName("-V"));
+    try testing.expect(!isSafeShellName("--help"));
+    try testing.expect(!isSafeShellName("-bash"));
+    // Mid-name `-` still allowed — e.g. `bash-fork`.
+    try testing.expect(isSafeShellName("bash-fork"));
 }
 
 test "parseArgv: a known atty flag in the spawned-command tail is preserved, not consumed" {

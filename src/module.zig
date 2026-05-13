@@ -5,8 +5,8 @@
 //! subset of:
 //!
 //!     pub const Runtime  : type
-//!     pub fn   attach    (allocator) !Runtime
-//!     pub fn   detach    (rt: *Runtime) void
+//!     pub fn   attach    (allocator: std.mem.Allocator, io: std.Io) !Runtime
+//!     pub fn   detach    (rt: *Runtime, io: std.Io) void
 //!     pub fn   onInput   (rt: *Runtime, ctx: *Context, input: []const u8) !Action
 //!     pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 //!     pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
