@@ -39,9 +39,10 @@ src/
 ├── config.def.zig        committed template (atty maintains)
 ├── config.zig            user's overrides — GITIGNORED, seeded by build.zig
 ├── modules/
-│   ├── atuin.zig         async worker; ghost + record + sync
+│   ├── _lib.zig          shared helpers for built-in modules (nowMs, ListBuilder)
+│   ├── atuin.zig         async worker; ghost + record + sync + pick list
 │   ├── guardrail.zig     dangerous-command confirmation
-│   └── history.zig       shell-native ~/.bash_history fallback
+│   └── history.zig       shell-native ~/.bash_history fallback + pick list
 └── test/
     ├── integration.zig   real-PTY tests (zig build itest)
     └── e2e/              .e2e DSL scenarios + VT-grid diff harness

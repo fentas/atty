@@ -25,15 +25,8 @@
 
 const std = @import("std");
 const m = @import("../module.zig");
-
-extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
-const CLOCK_MONOTONIC: c_int = 1;
-
-fn nowMs() i64 {
-    var ts: std.posix.timespec = undefined;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
-    return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
-}
+const lib = @import("_lib.zig");
+const nowMs = lib.nowMs;
 
 pub const SearchMode = enum { prefix, full_text, fuzzy };
 pub const FilterMode = enum { global, host, session, directory };
@@ -80,7 +73,15 @@ pub const Config = struct {
     /// value if you specifically want stale offers to fade.
     suggestion_ttl_ms: u64 = 0,
     max_query: comptime_int = 256,
-    max_result: comptime_int = 512,
+    /// Bytes of one `atuin search` invocation's stdout we keep.
+    /// Sized to hold ~9 newline-separated entries each up to
+    /// max_query bytes; bump if list_count_max is raised.
+    max_result: comptime_int = 4096,
+    /// Worker fetches up to this many matches per query (newest-
+    /// first). The inline ghost uses entry 0; the multi-row pick
+    /// list (`provideGhostList`) consumes the rest via `_lib.ListBuilder`.
+    /// 1 keeps the legacy behavior (single-entry response).
+    list_count_max: comptime_int = 9,
 
     /// Record committed commands via `atuin history start <cmd>`.
     /// Set false to disable recording (suggestions still work).
@@ -136,6 +137,15 @@ pub fn configure(comptime cfg: Config) type {
             shared: *Shared,
             thread: std.Thread,
             last_keystroke_ms: i64 = 0,
+            /// Copy of the worker's response, taken under a brief lock
+            /// before `provideGhostList` parses it. Decouples our
+            /// returned slice-of-slices from the worker's next write
+            /// to `Shared.res_buf`.
+            list_copy: [cfg.max_result]u8 = undefined,
+            /// Slice-of-slices into `list_copy`, populated by
+            /// `provideGhostList` via `_lib.ListBuilder`.
+            list_slices: [cfg.list_count_max][]const u8 = undefined,
+            list_slices_len: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -262,10 +272,17 @@ pub fn configure(comptime cfg: Config) type {
                 .session => "session",
                 .directory => "directory",
             };
+            const limit_arg = std.fmt.comptimePrint("{d}", .{cfg.list_count_max});
 
             // No --reverse: atuin's default order is newest-first, which
-            // is what a "fish-style autosuggest" wants. With --reverse +
-            // --limit 1 we'd pin the OLDEST matching entry instead.
+            // is what a "fish-style autosuggest" wants. With --reverse
+            // we'd pin the oldest matches at the front.
+            //
+            // We fetch up to `list_count_max` rows on one round-trip so
+            // a single keystroke produces enough data for both the
+            // inline ghost (first row) and the multi-row pick list
+            // (remaining rows). The proxy reads `cfg.ghost.list_count`
+            // from these — bounded above by `list_count_max`.
             const argv = [_][]const u8{
                 cfg.atuin_binary,
                 "search",
@@ -274,7 +291,7 @@ pub fn configure(comptime cfg: Config) type {
                 "--filter-mode",
                 filter_arg,
                 "--limit",
-                "1",
+                limit_arg,
                 "--cmd-only",
                 query,
             };
@@ -288,8 +305,13 @@ pub fn configure(comptime cfg: Config) type {
 
             if (result.stdout.len == 0) return null;
 
-            var end: usize = 0;
-            while (end < result.stdout.len and result.stdout[end] != '\n' and result.stdout[end] != '\r') : (end += 1) {}
+            // Trim trailing whitespace (atuin terminates with a final
+            // newline). The body — including intermediate newlines —
+            // is stored verbatim in `out` so consumers can either:
+            //   1. Read up to the first newline (inline ghost)
+            //   2. Split on '\n' (multi-entry list)
+            var end: usize = result.stdout.len;
+            while (end > 0 and (result.stdout[end - 1] == '\n' or result.stdout[end - 1] == '\r')) end -= 1;
             if (end == 0) return null;
             if (end > out.len) end = out.len;
             @memcpy(out[0..end], result.stdout[0..end]);
@@ -379,7 +401,13 @@ pub fn configure(comptime cfg: Config) type {
             defer rt.shared.mutex.unlock(ctx.io);
 
             if (rt.shared.res_len == 0) return null;
-            const suggestion = rt.shared.res_buf[0..rt.shared.res_len];
+            const all = rt.shared.res_buf[0..rt.shared.res_len];
+            // res_buf may hold multiple newline-separated entries (the
+            // worker fetches up to `list_count_max` per query). The
+            // inline ghost is the FIRST line.
+            const nl = std.mem.indexOfScalar(u8, all, '\n') orelse all.len;
+            const suggestion = all[0..nl];
+            if (suggestion.len == 0) return null;
             if (!std.mem.startsWith(u8, suggestion, line)) return null;
 
             const trailing = suggestion[line.len..];
@@ -388,6 +416,57 @@ pub fn configure(comptime cfg: Config) type {
             ctx.scratch.clearRetainingCapacity();
             ctx.scratch.appendSlice(ctx.allocator, trailing) catch return m.Error.OutOfMemory;
             return ctx.scratch.items;
+        }
+
+        /// Multi-row pick list. Copies the worker's response under a
+        /// brief lock so the slice-of-slices we return is stable past
+        /// the next worker write. Skips the entry the inline ghost
+        /// would have shown (line 0 of res_buf) and dedupes via the
+        /// shared `_lib.ListBuilder`.
+        ///
+        /// Storage: `rt.list_copy` is sized at `max_result`; `rt.list_slices`
+        /// is sized at `list_count_max`. Both per-runtime so concurrent
+        /// dispatch calls (none today, but the proxy might gain that
+        /// later) wouldn't race.
+        pub fn provideGhostList(rt: *Runtime, ctx: *m.Context) m.Error!?[]const []const u8 {
+            if (ctx.line.uncertain) return null;
+            const line = ctx.line.current();
+            if (line.len == 0) return null;
+
+            // Brief critical section: copy out the response. The slice
+            // we return must outlive the lock; copying decouples us
+            // from the worker's next write to `res_buf`.
+            const copy_len = blk: {
+                rt.shared.mutex.lockUncancelable(ctx.io);
+                defer rt.shared.mutex.unlock(ctx.io);
+                if (rt.shared.res_len == 0) break :blk 0;
+                const n = rt.shared.res_len;
+                @memcpy(rt.list_copy[0..n], rt.shared.res_buf[0..n]);
+                break :blk n;
+            };
+            if (copy_len == 0) return null;
+
+            const all = rt.list_copy[0..copy_len];
+            // Inline ghost = first line of res_buf; skip it in the list.
+            const inline_nl = std.mem.indexOfScalar(u8, all, '\n') orelse all.len;
+            const inline_match = all[0..inline_nl];
+
+            var builder = lib.ListBuilder(cfg.list_count_max){};
+            var it = std.mem.splitScalar(u8, all, '\n');
+            while (it.next()) |entry| {
+                if (builder.full()) break;
+                if (entry.len == 0) continue;
+                if (entry.len <= line.len) continue;
+                if (!std.mem.startsWith(u8, entry, line)) continue;
+                _ = builder.tryAdd(entry, inline_match);
+            }
+            if (builder.len == 0) return null;
+
+            // Spill into rt's persistent slice array so the returned
+            // slice survives past the builder's stack frame.
+            @memcpy(rt.list_slices[0..builder.len], builder.items());
+            rt.list_slices_len = builder.len;
+            return rt.list_slices[0..rt.list_slices_len];
         }
 
         pub fn onTick(rt: *Runtime, ctx: *m.Context, elapsed_ms: u64) m.Error!void {
@@ -532,6 +611,18 @@ test "configure carries delete_scope through to A.config (default exact)" {
     try testing.expectEqual(DeleteScope.full_text, A3.config.delete_scope);
     const A4 = configure(.{ .delete_scope = .fuzzy });
     try testing.expectEqual(DeleteScope.fuzzy, A4.config.delete_scope);
+}
+
+test "configure exposes provideGhostList hook (multi-row pick list)" {
+    // The hook is required for the multi-suggestion feature to read
+    // atuin entries. Without it the dispatcher's gatherGhostList
+    // skips atuin and falls through to history — which means users
+    // running `modules = .{ atuin, history }` (or atuin-only) would
+    // see no pick list. Pin the surface so a future refactor that
+    // removes the hook breaks `zig build test` instead of silently
+    // breaking the feature.
+    const A = configure(.{});
+    try testing.expect(@hasDecl(A, "provideGhostList"));
 }
 
 test "configure exposes deleteHistoryMatch hook (regression: atuin-side delete must be wired)" {

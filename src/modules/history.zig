@@ -78,13 +78,9 @@ pub const Config = struct {
 };
 
 extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
-const CLOCK_MONOTONIC: c_int = 1;
 
-fn nowMs() i64 {
-    var ts: std.posix.timespec = undefined;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
-    return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
-}
+const lib = @import("_lib.zig");
+const nowMs = lib.nowMs;
 
 fn unixTs() i64 {
     var ts: std.posix.timespec = undefined;
@@ -405,32 +401,22 @@ pub fn configure(comptime cfg: Config) type {
             if (query.len == 0) return null;
             if (query.len > cfg.max_line) return null;
 
-            rt.ghost_list_len = 0;
             const inline_match = findSuggestion(rt, query); // already shown inline
 
+            var builder = lib.ListBuilder(rt.ghost_list_buf.len){};
             var i: usize = rt.entries.items.len;
-            while (i > 0 and rt.ghost_list_len < rt.ghost_list_buf.len) {
-                i -= 1;
-                const e = rt.entries.items[i];
+            while (i > 0 and !builder.full()) : (i -= 1) {
+                const e = rt.entries.items[i - 1];
                 if (!std.mem.startsWith(u8, e, query)) continue;
                 if (e.len <= query.len) continue;
-                // Skip the inline ghost's entry — it's already painted
-                // after the cursor; no point listing it as pick #1.
-                if (inline_match) |im| if (std.mem.eql(u8, im, e)) continue;
-                // Dedupe within the list.
-                var dup = false;
-                for (rt.ghost_list_buf[0..rt.ghost_list_len]) |existing| {
-                    if (std.mem.eql(u8, existing, e)) {
-                        dup = true;
-                        break;
-                    }
-                }
-                if (dup) continue;
-
-                rt.ghost_list_buf[rt.ghost_list_len] = e;
-                rt.ghost_list_len += 1;
+                _ = builder.tryAdd(e, inline_match);
             }
-            if (rt.ghost_list_len == 0) return null;
+            if (builder.len == 0) return null;
+            // Spill into rt's persistent storage so the slice survives
+            // past the local builder. The builder's items() slice
+            // borrows from `buf` which lives on the stack frame.
+            @memcpy(rt.ghost_list_buf[0..builder.len], builder.items());
+            rt.ghost_list_len = builder.len;
             return rt.ghost_list_buf[0..rt.ghost_list_len];
         }
 

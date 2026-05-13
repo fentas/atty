@@ -19,6 +19,7 @@ test {
     _ = @import("statusbar.zig");
     _ = @import("status_text.zig");
     _ = @import("args.zig");
+    _ = @import("modules/_lib.zig");
     _ = @import("modules/atuin.zig");
     _ = @import("modules/guardrail.zig");
     _ = @import("modules/history.zig");
