@@ -264,12 +264,14 @@ guardrail and other modules see what the shell actually has on
 the prompt, not just what atty observed in keystrokes.
 
 **Enabling shell-side.** Markers come from shell-integration
-scripts. Ghostty's built-in integration emits them when its
-`shell-integration-features` includes `osc-133`. ble.sh, zsh4humans,
-VS Code's shell-integration, fig — all the modern frameworks emit
-133 by default or via a flag. Vanilla bash/zsh without integration
-don't; in that case atty stays on keystroke tracking, no
-regression.
+scripts. The shortest path is `eval "$(atty init bash)"` (or
+`zsh`) in your `.bashrc` / `.zshrc` — the snippet wires
+PROMPT_COMMAND + PS1 (bash) or `add-zsh-hook` precmd/preexec
+(zsh) to emit A/B/C/D. Ghostty's built-in integration also emits
+them when `shell-integration-features` includes `osc-133`;
+ble.sh, zsh4humans, VS Code's shell-integration, fig all emit by
+default or via a flag. Vanilla bash/zsh without any integration
+don't — atty stays on keystroke tracking, no regression.
 
 ## Config resolution
 
@@ -434,9 +436,10 @@ normal text.
 Off by default (`config.statusbar.enabled = false`); opt in if you
 want a persistent indicator. When enabled:
 
-1. **Startup**: emit DECSTBM `\x1b[1;<rows-2>r` to confine shell
-   scrolling to rows 1..N-2. Set the slave PTY size to `rows-2` via
-   `TIOCSWINSZ` so the shell wraps inside the visible region.
+1. **Startup**: emit DECSTBM `\x1b[1;<rows-N>r` (N = `reserve_rows`,
+   default 3) to confine shell scrolling to rows 1..(rows-N). Set
+   the slave PTY size accordingly via `TIOCSWINSZ` so the shell
+   wraps inside the visible region.
 2. **Each render cycle** (tick, keystroke, shell-output flush): the
    proxy assembles a status line — `incognito` prefix if on, then
    `config.statusbar.base_text`, then every module's `statusText`
@@ -447,8 +450,32 @@ want a persistent indicator. When enabled:
    slave winsize.
 4. **Exit / detach**: clear the reserved rows and reset DECSTBM.
 
+The default `reserve_rows = 3` layout (top → bottom):
+
+    rows - 2 :  hint / error notification
+    rows - 1 :  blank padding (visual breathing room)
+    rows     :  status text
+
+The notification row is shared between two surfaces:
+
+- **Hint** (`provideHintText` → `setHint`) — informational text in
+  `hint_style` (dim italic by default). Used for LLM explanations
+  of injected commands and similar annotations. 30s TTL.
+- **Error** (`provideErrorText` → `setError`) — diagnostic text in
+  `error_style` (muted red + leading ⚠ glyph). Takes precedence
+  over hints on the same row; once the error's 60s TTL expires
+  a still-active hint resurfaces. The LLM module uses this for
+  "no endpoint configured", "HTTP 500", "couldn't parse response"
+  — transparent failure instead of silent no-op.
+
+Bumping `reserve_rows` to 4+ adds more blank padding above the
+hint; dropping to 2 collapses hint and status onto adjacent rows
+(legacy behaviour); 1 disables the hint surface entirely.
+
 Modules participate via the optional `statusText` hook (see
-[Writing a module](/modules/#statustext--contributing-to-the-status-bar)).
+[Writing a module](/modules/#statustext--contributing-to-the-status-bar))
+or via `provideHintText` / `provideErrorText`
+([notifications above the status bar](/modules/#providehinttext--provideerrortext--notifications-above-the-status-bar)).
 The keymap action `incognito_toggle` flips a proxy-local boolean
 that becomes `ctx.incognito`; the proxy then prepends a 🔒 segment
 and gates `dispatchLineCommit` (no records written while on).

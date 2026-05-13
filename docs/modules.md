@@ -4,6 +4,10 @@ title: Writing a module
 ---
 
 # Writing a module
+{:.no_toc}
+
+* TOC
+{:toc}
 
 A module is a Zig type — typically produced by a
 `configure(comptime cfg: Config) type` factory — that exposes some
@@ -12,8 +16,8 @@ subset of:
 ```zig
 pub const name: []const u8                          // optional, for logs
 pub const Runtime  : type
-pub fn   attach    (allocator) !Runtime
-pub fn   detach    (rt: *Runtime) void
+pub fn   attach    (allocator, io) !Runtime
+pub fn   detach    (rt: *Runtime, io) void
 pub fn   onInput   (rt: *Runtime, ctx: *Context, input: []const u8) !Action
 pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
@@ -21,6 +25,10 @@ pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   deleteHistoryMatch(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   provideGhostList(rt: *Runtime, ctx: *Context) !?[]const []const u8
+pub fn   pollShellInput(rt: *Runtime, ctx: *Context) !?[]const u8
+pub fn   provideHintText(rt: *Runtime, ctx: *Context) !?[]const u8
+pub fn   provideErrorText(rt: *Runtime, ctx: *Context) !?[]const u8
+pub fn   provideTermBytes(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
 ```
 
@@ -138,16 +146,30 @@ or detach a thread if your work involves I/O.
 
 ## Action semantics
 
-| Returned action | What happens                                          |
-|-----------------|-------------------------------------------------------|
-| `.forward`      | Bytes flow on to the next module.                     |
-| `.swallow`      | Chain stops, nothing is written to the PTY.           |
-| `.replace`      | Next modules see the new bytes; PTY writes those.     |
+| Returned action    | What happens                                                                                                          |
+|--------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `.forward`         | Bytes flow on to the next module.                                                                                     |
+| `.swallow`         | Chain stops, nothing is written to the PTY.                                                                           |
+| `.replace`         | Next modules see the new bytes; PTY writes those.                                                                     |
+| `.replace_commit`  | Same as `.replace` but ALSO fires `onLineCommit` on the pre-replace typed line — even if the replacement has no Enter.|
 
 If a module returns `.replace`, downstream modules see the *replaced*
 bytes, not the original. This composes guardrail with autosuggestion:
 guardrail can swallow Enter, and Atuin never sees the keystroke that
 would have submitted a dangerous command.
+
+`.replace_commit` exists for modules that intercept Enter to do
+something custom but still want the typed line to land in history.
+The LLM module uses it: typing `#: list files` + Enter returns
+`.replace_commit = "\x15"` — Ctrl+U kills the readline buffer so
+the shell doesn't run the prompt, but the proxy fires
+`dispatchLineCommit` on `#: list files` so atuin / history record
+it. The next time the user starts typing `#: l…` their prior
+prompts surface as ghost suggestions.
+
+The dispatcher preserves `.replace_commit` across later modules'
+plain `.replace` substitutions — once a module asks for the commit
+to fire, the decision sticks (only the bytes get overwritten).
 
 ## statusText — contributing to the status bar
 
@@ -176,6 +198,117 @@ your own segment with a cap.
 
 Don't allocate in `statusText` — it runs every render cycle. Cache
 the formatted string in your `Runtime`.
+
+## provideHintText / provideErrorText — notifications above the status bar
+
+When the statusbar is enabled with `reserve_rows >= 2`, the row
+above the status text is a transient notification slot. Two
+parallel hooks fill it, each with its own visual treatment and
+TTL:
+
+```zig
+pub fn provideHintText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8;
+pub fn provideErrorText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8;
+```
+
+- **Hints** (`provideHintText`) render in `config.statusbar.hint_style`
+  — dim italic by default. Used for informational annotations the
+  user should see briefly (LLM explanation of the injected command,
+  guardrail "blocked: …" rationale, …).
+- **Errors** (`provideErrorText`) render in `config.statusbar.error_style`
+  — dim red by default, with a leading `⚠ ` glyph so the row reads
+  as a notification rather than info text. Take precedence over
+  hints on the same row.
+
+Both are **one-shot**: return the text once on an edge change,
+return `null` thereafter. The proxy hands the result to
+`StatusBar.setHint` / `setError` which manage TTL from there
+(`config.statusbar.hint_ttl_ms` defaults to 30s; `error_ttl_ms`
+defaults to 60s). After expiry the slot reverts — a still-active
+suppressed hint resurfaces once its error sibling expires.
+
+Typical pattern:
+
+```zig
+pub const Runtime = struct {
+    pending_hint_buf: [256]u8 = undefined,
+    pending_hint_len: usize = 0,
+    pending_hint: bool = false,
+};
+
+// Set the pending flag from wherever your data arrives — worker
+// thread, onLineCommit, an external callback.
+fn latchHint(rt: *Runtime, msg: []const u8) void {
+    const n = @min(msg.len, rt.pending_hint_buf.len);
+    @memcpy(rt.pending_hint_buf[0..n], msg[0..n]);
+    rt.pending_hint_len = n;
+    rt.pending_hint = true;
+}
+
+pub fn provideHintText(rt: *Runtime, _: *m.Context) m.Error!?[]const u8 {
+    if (!rt.pending_hint) return null;
+    rt.pending_hint = false;
+    return rt.pending_hint_buf[0..rt.pending_hint_len];
+}
+```
+
+## provideTermBytes — write to the user's outer terminal
+
+`pollShellInput` writes to the pty.master (the shell sees the
+bytes); `provideTermBytes` writes to the user's *outer* stdout
+(only the user's terminal sees the bytes — the shell is unaware).
+Used for OSC sequences that affect the terminal as a whole:
+cursor colour transitions, title updates, palette hints.
+
+```zig
+pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8;
+```
+
+Same one-shot contract as `provideHintText`. The proxy calls per
+tick; if non-null, the returned bytes are written to
+`STDOUT_FILENO`. The bytes should be edge-triggered — a module
+that returns the same OSC sequence on every tick will flood the
+terminal with redundant escapes.
+
+Example — emit OSC 12 (set cursor colour) on a state transition:
+
+```zig
+pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+    const matches = std.mem.startsWith(u8, ctx.line.current(), "#: ");
+    if (matches and !rt.cursor_signal_active) {
+        rt.cursor_signal_active = true;
+        return "\x1B]12;cyan\x07";
+    }
+    if (!matches and rt.cursor_signal_active) {
+        rt.cursor_signal_active = false;
+        return "\x1B]112\x07"; // reset to default
+    }
+    return null;
+}
+```
+
+Don't allocate here — it runs every tick. Static literals or
+fixed buffers on the Runtime only.
+
+## pollShellInput — inject bytes into the shell asynchronously
+
+Sibling of `provideTermBytes` for the *shell-input* direction.
+Returned bytes go to `pty.master` as if the user had typed them —
+the shell echoes them back, readline lets the user edit or
+submit. Used by the LLM module to inject a generated command for
+review after the worker thread returns a response.
+
+```zig
+pub fn pollShellInput(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8;
+```
+
+The proxy also runs `line_state.applyInput` on the injected
+bytes, so downstream `onInput` / `onLineCommit` see the injected
+command as if the user had typed it.
+
+Same one-shot pattern — return bytes once when ready, return
+`null` thereafter. First non-null wins across modules (order =
+declaration order in `config.modules`).
 
 ## provideGhostList — contributing to the multi-row pick list
 
