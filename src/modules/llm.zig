@@ -415,11 +415,20 @@ pub fn configure(comptime cfg: Config) type {
                         // Uncommon escapes (\b, \f, \uXXXX, …): skip both
                         // the backslash and the escape code so neither
                         // appears as a literal character in the output.
-                        // \u needs 4 more hex digits skipped — handled
-                        // below after the switch.
                         else => {
                             i += 1; // skip the escape code char
-                            if (e == 'u') i += 4; // skip 4 hex digits
+                            if (e == 'u') {
+                                // Skip up to 4 hex digits, but stop at a
+                                // closing quote or backslash so malformed
+                                // JSON (fewer than 4 hex digits) cannot
+                                // cause us to skip past the content boundary.
+                                var k: u3 = 0;
+                                while (k < 4 and i + 1 < body.len) : (k += 1) {
+                                    const h = body[i + 1];
+                                    if (h == '"' or h == '\\') break;
+                                    i += 1;
+                                }
+                            }
                             continue;
                         },
                     };
@@ -540,21 +549,24 @@ test "extractCommand decodes the common JSON escapes" {
 test "extractCommand skips uncommon escapes (\\b, \\f) without leaking the escape code char" {
     const L = configure(.{});
     var out: [128]u8 = undefined;
-    // `\b` (backspace) between two words: the output must be "ab", not "ab" with a literal 'b'.
-    const sample = "{\"choices\":[{\"message\":{\"content\":\"a\\bb\"}}]}";
-    const n = L.extractCommand(sample, &out);
-    // After fix: `\b` is fully skipped → "ab". Before fix: literal 'b' leaks → "abb".
-    try testing.expectEqualStrings("ab", out[0..n]);
+    // `\b` (backspace): both \ and b must be skipped, output is "ab" not "abb".
+    const sample_b = "{\"choices\":[{\"message\":{\"content\":\"a\\bb\"}}]}";
+    try testing.expectEqualStrings("ab", out[0..L.extractCommand(sample_b, &out)]);
+    // `\f` (form feed): both \ and f must be skipped.
+    const sample_f = "{\"choices\":[{\"message\":{\"content\":\"a\\fb\"}}]}";
+    try testing.expectEqualStrings("ab", out[0..L.extractCommand(sample_f, &out)]);
 }
 
 test "extractCommand skips \\uXXXX unicode escapes cleanly" {
     const L = configure(.{});
     var out: [128]u8 = undefined;
-    // `\u0020` is a space. We don't decode it but we must not leak "u0020".
-    const sample = "{\"choices\":[{\"message\":{\"content\":\"ls\\u0020-la\"}}]}";
-    const n = L.extractCommand(sample, &out);
-    // After fix: \u0020 is fully skipped → "ls-la". Before fix: "lsu0020-la".
-    try testing.expectEqualStrings("ls-la", out[0..n]);
+    // Valid \u0020 (space): all 6 chars skipped, "ls-la" not "lsu0020-la".
+    const sample_valid = "{\"choices\":[{\"message\":{\"content\":\"ls\\u0020-la\"}}]}";
+    try testing.expectEqualStrings("ls-la", out[0..L.extractCommand(sample_valid, &out)]);
+    // Malformed \u with only 2 hex digits before the closing quote: must not
+    // skip past the closing " and extract garbage from the surrounding JSON.
+    const sample_malformed = "{\"choices\":[{\"message\":{\"content\":\"ls\\u01\"}}]}";
+    try testing.expectEqualStrings("ls", out[0..L.extractCommand(sample_malformed, &out)]);
 }
 
 test "extractCommand only takes the first non-empty line (multi-line replies)" {
