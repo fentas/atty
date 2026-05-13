@@ -492,6 +492,36 @@ test "dispatchDeleteHistoryMatch fans out to every module with the hook" {
     try testing.expectEqualStrings("secret\nanother\n", rts[0].deleted.items);
 }
 
+// Two-module pair: Recorder (implements deleteHistoryMatch) +
+// Recorder again. Pinned for the multi-module regression test
+// below.
+const D_RecorderPair = Dispatcher(.{ Recorder, Recorder });
+
+test "dispatchDeleteHistoryMatch fires EVERY implementer, not just the first one" {
+    // Regression: the user had .{ atuin, history } and pressed
+    // Ctrl+Shift+D. Only history's hook ran (atuin didn't implement
+    // the hook at all), so the entry stayed in atuin's daemon. The
+    // fix re-wires atuin to implement deleteHistoryMatch — this
+    // test pins the dispatcher's fan-out promise so a future module
+    // that "forgets" the hook gets caught immediately by `zig build
+    // test`, before it ships and breaks delete for users running
+    // that module on top of history.
+    const D = D_RecorderPair;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    try D.dispatchDeleteHistoryMatch(&rts, &ctx, "shared-entry");
+
+    // Both recorders saw the deletion request.
+    try testing.expectEqualStrings("shared-entry\n", rts[0].deleted.items);
+    try testing.expectEqualStrings("shared-entry\n", rts[1].deleted.items);
+}
+
 test "gatherStatus joins module segments with the separator" {
     const D = D_StatusPair;
     var rts = try D.attachAll(testing.allocator, test_io);

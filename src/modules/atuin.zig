@@ -392,6 +392,49 @@ pub fn configure(comptime cfg: Config) type {
             rt.shared.cv.signal(ctx.io);
         }
 
+        /// Fired by Ctrl+Shift+D (default binding for
+        /// `delete_history_match`). Shells out to:
+        ///
+        ///   atuin search --search-mode prefix --filter-mode global \
+        ///                --delete <line>
+        ///
+        /// Atuin's CLI v18+ supports `--delete` (deletes everything the
+        /// search query would have returned) but has **no exact-match
+        /// search mode**. We use prefix mode + the typed line as query
+        /// — so the deletion is prefix-scoped: pressing Ctrl+Shift+D
+        /// on "echo asd" also removes "echo asdf". This is wider than
+        /// `history.zig`'s exact-equality semantics; if you want
+        /// strict equality you can either rely on history-only
+        /// (remove atuin from the modules tuple) or accept the
+        /// over-match here.
+        ///
+        /// Runs synchronously on the proxy thread — a single
+        /// std.process.run call, typically <200ms. Deliberate trade
+        /// vs. routing through the worker mailbox: the user just
+        /// pressed a deliberate key, and they're already staring at
+        /// a cleared prompt (the proxy sent Ctrl+U before calling us).
+        /// A brief blocking window is acceptable; the alternative is
+        /// growing a third worker-mailbox slot.
+        pub fn deleteHistoryMatch(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
+            if (line.len == 0 or line.len > cfg.max_query) return;
+            const argv = [_][]const u8{
+                cfg.atuin_binary,
+                "search",
+                "--search-mode",
+                "prefix",
+                "--filter-mode",
+                "global",
+                "--delete",
+                line,
+            };
+            const result = std.process.run(rt.allocator, ctx.io, .{
+                .argv = &argv,
+                .stdout_limit = .limited(1024),
+            }) catch return;
+            rt.allocator.free(result.stdout);
+            rt.allocator.free(result.stderr);
+        }
+
         /// Status-bar segment. The runtime caches the rendered string
         /// so we don't reformat per render cycle.
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -424,4 +467,19 @@ test "configure exposes Runtime + hooks" {
 test "configure with socket backend swaps the lookup arm" {
     const A = configure(.{ .backend = .socket, .socket_path = "/tmp/nope" });
     try testing.expect(A.config.backend == .socket);
+}
+
+test "configure exposes deleteHistoryMatch hook (regression: atuin-side delete must be wired)" {
+    // Regression: the user had `modules = .{ guardrail, atuin, history }`
+    // in their config and pressed Ctrl+Shift+D. The proxy walked the
+    // dispatcher and only history's deleteHistoryMatch fired (atuin
+    // didn't implement the hook at all), so the entry stayed in
+    // atuin's daemon and re-suggested on the next prefix.
+    //
+    // After the fix, atuin advertises the hook → dispatcher fans the
+    // call out to it. If this @hasDecl ever flips back to false the
+    // delete is silently broken for everyone running atuin — fail
+    // loudly here instead.
+    const A = configure(.{});
+    try testing.expect(@hasDecl(A, "deleteHistoryMatch"));
 }
