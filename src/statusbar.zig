@@ -84,12 +84,16 @@ pub const StatusBar = struct {
     error_len: usize = 0,
     error_until_ms: i64 = 0,
 
-    /// Style for the error notification. Defaults are populated
-    /// from `config.statusbar.error_style` via init().
+    /// Style for the error notification. Falls back to the struct
+    /// default (dim red) unless the caller threads `config.statusbar.error_style`
+    /// through via `initWithError` / `initFull`. The plain `init`
+    /// constructor leaves it at the struct default.
     error_style: Style = .{ .dim = true, .fg = 1 },
     /// Style for the regular (info) hint — LLM explanations etc.
-    /// Defaults to dim+italic so the hint row reads visually
-    /// distinct from the status text below it.
+    /// Falls back to the struct default (dim italic) unless the
+    /// caller threads `config.statusbar.hint_style` through via
+    /// `initFull`. Distinguishes the hint row from the status
+    /// text below it.
     hint_style: Style = .{ .dim = true, .italic = true },
 
     /// Tracks what was last painted on the hint row — text + the
@@ -111,9 +115,11 @@ pub const StatusBar = struct {
         };
     }
 
-    /// Variant that lets the caller override `error_style`. Used by
-    /// `proxy.zig` to thread the user's `config.statusbar.error_style`
-    /// through.
+    /// Variant that lets the caller override `error_style` while
+    /// leaving `hint_style` at the struct default. Kept for
+    /// callers that don't care about the hint slot (and for
+    /// tests that want to isolate error rendering); `proxy.zig`
+    /// itself uses `initFull` to thread both styles through.
     pub fn initWithError(rows: u16, cols: u16, reserve_rows: u16, style: Style, error_style: Style) StatusBar {
         return .{
             .rows = rows,
