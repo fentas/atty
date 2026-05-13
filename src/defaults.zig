@@ -131,9 +131,17 @@ pub const StatusBar = struct {
     /// (via DECSTBM). Off by default — costs `reserve_rows` of vertical
     /// screen real estate.
     enabled: bool = false,
-    /// How many bottom rows to reserve. The last row holds the text;
-    /// rows above are blank visual padding above the shell's content.
-    reserve_rows: u16 = 2,
+    /// How many bottom rows to reserve. The last row holds the status
+    /// text; the topmost reserved row holds the hint / error
+    /// notification (when active); rows in between are blank visual
+    /// padding. Default of 3 gives:
+    ///   rows-2: hint / error notification
+    ///   rows-1: blank padding (visual breathing room)
+    ///   rows  : status bar
+    /// Bumping to 4+ adds more padding above the hint; dropping to
+    /// 2 collapses hint and status onto adjacent rows; 1 disables
+    /// the hint surface entirely (no room above status).
+    reserve_rows: u16 = 3,
     /// Style for the bar's default segments (base text + module
     /// contributions). Per-segment overrides (like incognito_style)
     /// take precedence inside their own segment.
@@ -144,6 +152,12 @@ pub const StatusBar = struct {
     /// Style for the 🔒 incognito segment specifically. Defaults to
     /// muted red (dim + red) so it pops against the rest of the bar.
     incognito_style: atty.Style = .{ .dim = true, .fg = 1 },
+    /// Style for one-shot hints (LLM explanations and similar
+    /// informational content). Defaults to muted italic so the hint
+    /// row reads as a distinct annotation, not just more status
+    /// text. Override per taste — `.italic = true, .fg = 39` for a
+    /// cool cyan slant, etc.
+    hint_style: atty.Style = atty.style.presets.muted_italic,
     /// How long a one-shot hint (from a module's `provideHintText`)
     /// stays visible above the status text. The LLM module uses
     /// this to flash an explanation of the command it just

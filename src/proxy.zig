@@ -117,7 +117,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var statusbar: ?StatusBar = null;
     if (args.is_tty and config.statusbar.enabled) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            statusbar = StatusBar.initWithError(s.rows, s.cols, config.statusbar.reserve_rows, config.statusbar.style, config.statusbar.error_style);
+            statusbar = StatusBar.initFull(
+                s.rows,
+                s.cols,
+                config.statusbar.reserve_rows,
+                config.statusbar.style,
+                config.statusbar.error_style,
+                config.statusbar.hint_style,
+            );
         } else |_| {}
     }
 

@@ -85,6 +85,10 @@ pub const StatusBar = struct {
     /// Style for the error notification. Defaults are populated
     /// from `config.statusbar.error_style` via init().
     error_style: Style = .{ .dim = true, .fg = 1 },
+    /// Style for the regular (info) hint — LLM explanations etc.
+    /// Defaults to dim+italic so the hint row reads visually
+    /// distinct from the status text below it.
+    hint_style: Style = .{ .dim = true, .italic = true },
 
     /// Tracks what was last painted on the hint row — text + the
     /// "kind" (hint vs. error vs. blank) so the renderer no-ops
@@ -115,6 +119,20 @@ pub const StatusBar = struct {
             .reserve_rows = reserve_rows,
             .style = style,
             .error_style = error_style,
+        };
+    }
+
+    /// Full constructor — caller threads in every style override
+    /// (status, error, hint). Used by `proxy.zig` when wiring the
+    /// user's config through.
+    pub fn initFull(rows: u16, cols: u16, reserve_rows: u16, style: Style, error_style: Style, hint_style: Style) StatusBar {
+        return .{
+            .rows = rows,
+            .cols = cols,
+            .reserve_rows = reserve_rows,
+            .style = style,
+            .error_style = error_style,
+            .hint_style = hint_style,
         };
     }
 
@@ -298,13 +316,16 @@ pub const StatusBar = struct {
             self.last_valid = true;
         }
 
-        // Hint row lives one row above the status text. Skip when
-        // we don't have a row to paint into (reserve_rows < 2 means
-        // the row above status belongs to the shell). Errors use
-        // `error_style` + a leading "⚠ " glyph to read as a
-        // notification instead of an explanation.
+        // Hint / error notification paints at the TOP of the reserved
+        // region, leaving the rows in between as blank padding before
+        // the status text. With reserve_rows=3 (default): hint at
+        // rows-2, blank at rows-1, status at rows — gives a clear
+        // visual gap so the hint reads as a separate element. With
+        // reserve_rows=2 (legacy): hint and status are adjacent.
+        // With reserve_rows<2 there's no room → skip.
         if (!hint_unchanged and self.reserve_rows >= 2) {
-            try w.print("\x1B[{d};1H\x1B[K", .{self.rows - 1});
+            const hint_row = self.rows - self.reserve_rows + 1;
+            try w.print("\x1B[{d};1H\x1B[K", .{hint_row});
             switch (hint_kind) {
                 .err => {
                     try w.print("{f}", .{self.error_style});
@@ -313,7 +334,7 @@ pub const StatusBar = struct {
                     try w.writeAll(ansi.sgr_reset);
                 },
                 .hint => {
-                    try w.print("{f}", .{self.style});
+                    try w.print("{f}", .{self.hint_style});
                     try w.writeAll(active_hint);
                     try w.writeAll(ansi.sgr_reset);
                 },
@@ -421,6 +442,39 @@ test "setHint paints text into rows - 1 with the bar's style" {
     try testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H") != null); // hint row
     try testing.expect(std.mem.indexOf(u8, out, "lists files in long format") != null);
     try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
+}
+
+test "hint paints at TOP of the reserved region (gap above status when reserve_rows >= 3)" {
+    // Default reserve_rows=3 layout:
+    //   rows-2 = hint, rows-1 = blank padding, rows = status.
+    var b = StatusBar.initFull(
+        24,
+        80,
+        3,
+        .{ .dim = true }, // bar style
+        .{ .dim = true, .fg = 1 }, // error style
+        .{ .italic = true }, // hint style (distinct from bar)
+    );
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    // Status at row 24.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[24;1H") != null);
+    // Hint at row 22 (rows - reserve_rows + 1 = 24 - 3 + 1).
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1H") != null);
+    // Hint must NOT paint into row 23 (the blank padding row).
+    // We only verify the explicit CUP escape isn't present —
+    // it's fine for the cursor to traverse rows in between
+    // implicitly.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H") == null);
+    // Hint uses hint_style (italic), not bar style (dim).
+    try testing.expect(std.mem.indexOf(u8, out, ansi.sgr_italic) != null);
+    try testing.expect(std.mem.indexOf(u8, out, "explanation") != null);
 }
 
 test "hint row is skipped when reserve_rows < 2 (no row above status)" {
