@@ -374,28 +374,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (slaveIsHiddenInput(pty.master)) {
                     // CSI-u translation still applies here even though
                     // the rest of the pipeline is skipped. With kitty
-                    // kbd pushed (default), Enter / Backspace / Ctrl+C
-                    // arrive as `\x1b[13u` / `\x1b[127u` / `\x1b[99;5u`
-                    // — the password reader (sudo / ssh / passwd /
-                    // getpass) doesn't speak the protocol and would
-                    // see mojibake instead of the line terminator or
-                    // cancel byte. Translate to legacy bytes before
-                    // forwarding; drop CSI-u sequences with no legacy
-                    // form (Ctrl+Shift+digit, F-keys, …) rather than
-                    // leaking the raw bytes into the password reader.
-                    var legacy_buf: [8]u8 = undefined;
-                    var to_send: []const u8 = input;
-                    if (config.terminal.enable_kitty_keyboard and keymap.isCsiU(input)) {
-                        if (keymap.csiUToLegacy(input, &legacy_buf)) |legacy| {
-                            to_send = legacy;
-                        } else {
-                            line_state.reset();
-                            line_state.clearLastCommitted();
-                            if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
-                            continue;
-                        }
-                    }
-                    try writeAll(pty.master, to_send);
+                    // kbd pushed (default), Ctrl+C / Ctrl+U / Ctrl+H
+                    // arrive as `\x1b[99;5u` / `\x1b[117;5u` /
+                    // `\x1b[104;5u` — the password reader (sudo /
+                    // ssh / passwd / getpass / `read -s`) doesn't
+                    // speak the protocol and would see mojibake
+                    // instead of the cancel / line-kill byte.
+                    //
+                    // We use the byte-stream variant so a single
+                    // `read()` that batched a password char + an
+                    // embedded CSI-u (paste, burst typing across the
+                    // read boundary) still has each CSI-u translated
+                    // in place. Sequences with no legacy form
+                    // (Ctrl+9, F-keys, …) are dropped rather than
+                    // leaking raw protocol bytes into getpass.
+                    const ptm_writer = PtmWriter{ .fd = pty.master };
+                    try keymap.translateCsiUStream(input, config.terminal.enable_kitty_keyboard, ptm_writer);
                     line_state.reset();
                     line_state.clearLastCommitted();
                     if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
@@ -711,6 +705,25 @@ fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
         i += @intCast(rc);
     }
 }
+
+/// Thin Writer adapter so `keymap.translateCsiUStream` (which speaks
+/// the generic Writer interface) can target the PTY master directly,
+/// without an intermediate buffer. Inlined here rather than calling
+/// out to `proxy.writeAll` because Zig 0.16's name resolution treats
+/// the outer `writeAll` and the struct method `writeAll` as
+/// ambiguous when one references the other.
+const PtmWriter = struct {
+    fd: posix.fd_t,
+    pub fn writeAll(self: PtmWriter, bytes: []const u8) !void {
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const rc = std.c.write(self.fd, bytes[i..].ptr, bytes.len - i);
+            if (rc < 0) continue;
+            if (rc == 0) return error.EndOfFile;
+            i += @intCast(rc);
+        }
+    }
+};
 
 /// Render the current best suggestion (or clear the overlay if no
 /// module wants one). Idempotent.
