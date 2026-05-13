@@ -20,6 +20,7 @@ pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
 pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   deleteHistoryMatch(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
+pub fn   provideGhostList(rt: *Runtime, ctx: *Context) !?[]const []const u8
 pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
 ```
 
@@ -175,6 +176,54 @@ your own segment with a cap.
 
 Don't allocate in `statusText` — it runs every render cycle. Cache
 the formatted string in your `Runtime`.
+
+## provideGhostList — contributing to the multi-row pick list
+
+Companion to `provideGhostText`. Where `provideGhostText` returns one
+suggestion (painted after the cursor), `provideGhostList` returns up
+to N alternatives painted in dim rows below the prompt as a numbered
+list:
+
+    $ git status              ← inline ghost (newest match)
+     1: git push origin master
+     2: git commit -m foo
+     3: git log
+
+The proxy paints this list dynamically when `config.ghost.list_count > 0`
+and the user is typing a non-empty, non-uncertain line. Key bindings
+`Ctrl+1..Ctrl+9` (kitty kbd) and `Esc+1..Esc+9` (legacy fallback)
+pick the Nth entry — same substitution semantics as `ghost_accept`.
+
+```zig
+pub fn provideGhostList(rt: *Runtime, ctx: *m.Context) m.Error!?[]const []const u8 {
+    if (ctx.line.uncertain) return null;
+    const query = ctx.line.current();
+    if (query.len == 0) return null;
+
+    // Build up to N matches via the shared `_lib.ListBuilder` —
+    // dedupes by content + skips the inline-ghost entry so the list
+    // complements rather than duplicates the inline ghost.
+    var builder = lib.ListBuilder(9){};
+    const inline_match = findInlineSuggestion(rt, query); // your own
+    for (yourCandidates(rt, query)) |entry| {
+        if (builder.full()) break;
+        _ = builder.tryAdd(entry, inline_match);
+    }
+    if (builder.len == 0) return null;
+    // Spill into your Runtime's persistent storage — the slice we
+    // return must outlive the local builder frame.
+    @memcpy(rt.list_slices[0..builder.len], builder.items());
+    rt.list_slices_len = builder.len;
+    return rt.list_slices[0..rt.list_slices_len];
+}
+```
+
+The same "first non-null wins" precedence model as `provideGhostText`
+applies — order modules in your config to express priority.
+
+`src/modules/_lib.zig` provides `nowMs()` + `ListBuilder(cap)` —
+shared helpers with the dedup-on-add pattern both built-in modules
+use. Reach for them rather than re-rolling.
 
 ## deleteHistoryMatch — react to the user's "delete this line" key
 

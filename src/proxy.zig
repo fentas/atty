@@ -159,11 +159,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     defer ghost.deinit();
 
     // Multi-row pick-list overlay. Disabled until config.ghost.list_count > 0.
-    const list_mode: @import("ghost_list.zig").RenderMode = switch (config.ghost.list_render) {
-        .inline_rows => .inline_rows,
-        .reserved_region => .reserved_region,
-    };
-    var ghost_list = GhostList.init(allocator, config.ghost.list_style, list_mode);
+    var ghost_list = GhostList.init(allocator, config.ghost.list_style);
     defer ghost_list.deinit();
 
     var ctx = module.Context{
@@ -216,11 +212,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         sb.deactivate(&w) catch {};
         _ = writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]) catch {};
     };
-
-    // Anchor the pick-list to a fixed absolute row band at the bottom
-    // of the screen, just above the statusbar (if any). Absolute CUP
-    // paints never scroll, so the list stays put as the user types.
-    setGhostListTopRow(&ghost_list, args.is_tty, statusbar);
 
     var exit_code: u8 = 0;
     var child_alive = true;
@@ -382,11 +373,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
-                // No clearGhostList here: the list paints at fixed
-                // absolute rows below the prompt and the typed
-                // character lands on the prompt row — they don't
-                // overlap. renderGhostList in the master path
-                // handles refresh when the content actually changes.
+                // The pick list (if active) owns rows below the
+                // prompt — the typed character lands on the prompt
+                // row, no overlap. renderGhostList in the master
+                // path handles repaint/deactivate when content
+                // changes.
                 _ = line_state.applyInput(input);
 
                 const action = D.dispatchInput(&runtimes, &ctx, input) catch .forward;
@@ -437,10 +428,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const output = read_buf[0..read_n];
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
-                // List is at fixed absolute rows — shell echo on the
-                // prompt row doesn't touch it. renderGhostList below
-                // refreshes the list iff content changed; no need to
-                // clear here.
+                // List sits below the prompt — shell echo lands on
+                // the prompt row, no overlap. renderGhostList below
+                // handles repaint/deactivate when content changes.
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
                 try writeAll(posix.STDOUT_FILENO, output);
 
@@ -478,8 +468,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             shell_size.rows = sb.effectiveRows();
                         }
                         _ = pty.setSize(shell_size) catch {};
-                        // Re-anchor the pick list to the new geometry.
-                        setGhostListTopRow(&ghost_list, args.is_tty, statusbar);
                     } else |_| {}
                 } else if (sig == posix.SIG.CHLD) {
                     var status: u32 = 0;
@@ -639,14 +627,4 @@ fn deactivateGhostList(list: *GhostList, out_buf: []u8) !void {
     var w: std.Io.Writer = .fixed(out_buf);
     list.deactivate(&w) catch return;
     if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
-}
-
-/// Compat shim — the dynamic dance doesn't use a fixed anchor row,
-/// but the SIGWINCH path still calls this. Kept as a no-op so the
-/// resize path doesn't need surgery; if we ever switch back to an
-/// absolute-CUP renderer this is where the geometry would go.
-fn setGhostListTopRow(list: *GhostList, is_tty: bool, sb: ?StatusBar) void {
-    _ = list;
-    _ = is_tty;
-    _ = sb;
 }

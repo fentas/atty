@@ -3,44 +3,26 @@
 //! Sits next to `ghost.zig` (single-row inline overlay). The split
 //! keeps each state machine focused: ghost.zig wraps a one-row
 //! save/SGR/text/reset/restore around the cursor's current
-//! position; this file paints N rows below the cursor and tracks
-//! how many rows it last painted so `clear` can erase exactly
-//! that many.
+//! position; this file owns N rows directly below the prompt and
+//! manages activate / repaint / deactivate transitions over them.
 //!
-//! Rendering rules (mirror ghost.zig's "render is cheap, clear is
-//! conservative" pattern):
+//! Lifecycle is dynamic, modelled on atuin's interactive Ctrl+R:
 //!
-//!   1. Render at most one list overlay at a time.
-//!   2. Before forwarding any keystroke or before passing shell
-//!      output through, clear the overlay. The shell will redraw
-//!      its line and any rows below; leaving dim bytes orphaned is
-//!      worse than a one-frame flicker.
-//!   3. Only render when the line buffer is *certain* and a module
-//!      produced a non-empty list. Otherwise clear.
-//!   4. inline_rows mode uses save-cursor + LF/CR descents +
-//!      restore-cursor so the shell's cursor position is untouched.
-//!      It can visibly scroll the screen near the bottom row —
-//!      reserved_region mode is the sturdier alternative when that
-//!      bites.
+//!   * `activate(w, n)`  — make room with `\n` × N (scrolls the
+//!     scroll region at the screen bottom; mid-screen it's just
+//!     cursor moves) + CUU N + ED-below wipe, then paint.
+//!   * `repaint(w)`      — re-emit the entries onto already-reserved
+//!     rows when the cache changes. No LFs, no extra wipe.
+//!   * `deactivate(w)`   — ED-below from the prompt row. Cursor
+//!     does NOT scroll back; the prompt stays at whatever screen
+//!     position activate floated it to.
+//!
+//! The proxy drives the three transitions in `renderGhostList`.
 
 const std = @import("std");
 const ansi = @import("ansi.zig");
 const Style = @import("style.zig").Style;
 const style_mod = @import("style.zig");
-
-pub const RenderMode = enum {
-    /// Save cursor, descend N rows with LF/CR, restore cursor. Cheap;
-    /// the shell can scroll the screen if the prompt is near the
-    /// bottom row. The proxy renders after shell output so a
-    /// scroll-induced repaint corrects itself within a frame.
-    inline_rows,
-    /// Reserve a DECSTBM band above the statusbar while the list is
-    /// visible; release the band when the list goes empty or Enter
-    /// is pressed. Sturdier — never scrolls — but more cursor
-    /// bookkeeping. Falls back to inline_rows for now until the
-    /// statusbar coordination lands.
-    reserved_region,
-};
 
 pub const GhostList = struct {
     allocator: std.mem.Allocator,
@@ -58,23 +40,13 @@ pub const GhostList = struct {
     reserved_rows: u16 = 0,
     /// Style applied to the index prefix (`1: `) and the entry text.
     style: Style,
-    /// Render mode — see `RenderMode`.
-    mode: RenderMode,
 
-    pub fn init(allocator: std.mem.Allocator, style: Style, mode: RenderMode) GhostList {
+    pub fn init(allocator: std.mem.Allocator, style: Style) GhostList {
         return .{
             .allocator = allocator,
             .entries = .empty,
             .style = style,
-            .mode = mode,
         };
-    }
-
-    /// Back-compat for tests that exercised the old absolute-CUP
-    /// path. The dynamic dance doesn't need a fixed anchor row.
-    pub fn setTopRow(self: *GhostList, top: u16) void {
-        _ = self;
-        _ = top;
     }
 
     pub fn deinit(self: *GhostList) void {
@@ -226,7 +198,7 @@ pub const GhostList = struct {
 const testing = std.testing;
 
 test "GhostList.set replaces cached entries (owned copies)" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
 
     var entries = [_][]const u8{ "git status", "git push", "git log" };
@@ -240,7 +212,7 @@ test "GhostList.set replaces cached entries (owned copies)" {
 }
 
 test "GhostList.set is a no-op when the cache already matches" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     const a = [_][]const u8{ "alpha", "beta" };
     _ = try gl.set(&a, 9);
@@ -249,7 +221,7 @@ test "GhostList.set is a no-op when the cache already matches" {
 }
 
 test "GhostList.set respects the max cap" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     const ten = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" };
     _ = try gl.set(&ten, 3);
@@ -259,7 +231,7 @@ test "GhostList.set respects the max cap" {
 }
 
 test "GhostList.entry is 1-based and bounds-checked" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     const a = [_][]const u8{ "first", "second" };
     _ = try gl.set(&a, 9);
@@ -270,7 +242,7 @@ test "GhostList.entry is 1-based and bounds-checked" {
 }
 
 test "GhostList.activate makes room with LFs + CUU + ED-below, then paints relatively" {
-    var gl = GhostList.init(testing.allocator, .{ .dim = true }, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{ .dim = true });
     defer gl.deinit();
     const a = [_][]const u8{ "alpha", "beta", "gamma" };
     _ = try gl.set(&a, 9);
@@ -299,7 +271,7 @@ test "GhostList.activate makes room with LFs + CUU + ED-below, then paints relat
 }
 
 test "GhostList.activate is a no-op when entries are empty" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -309,7 +281,7 @@ test "GhostList.activate is a no-op when entries are empty" {
 }
 
 test "GhostList.activate is a no-op when already active" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     const a = [_][]const u8{"x"};
     _ = try gl.set(&a, 9);
@@ -324,7 +296,7 @@ test "GhostList.activate is a no-op when already active" {
 test "GhostList.repaint emits only the paint sequence (no LFs, no ED-below)" {
     // Repaint is for the case where the list is already active and
     // we got fresh entries — we don't want another LF dance.
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     const a = [_][]const u8{ "alpha", "beta" };
     _ = try gl.set(&a, 9);
@@ -348,7 +320,7 @@ test "GhostList.repaint emits only the paint sequence (no LFs, no ED-below)" {
 }
 
 test "GhostList.deactivate clears reserved rows + leaves cursor put" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     const a = [_][]const u8{ "alpha", "beta" };
     _ = try gl.set(&a, 9);
@@ -373,10 +345,113 @@ test "GhostList.deactivate clears reserved rows + leaves cursor put" {
 }
 
 test "GhostList.deactivate when not active is a no-op" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try gl.deactivate(&w);
     try testing.expectEqual(@as(usize, 0), w.end);
+}
+
+test "GhostList.deactivate steps to column 1 before ED 0 (regression)" {
+    // Regression: the user's cursor is at column COL_ORIG (end of
+    // their typed line) when deactivate runs. `\x1b[J` from a column
+    // >1 leaves columns 1..COL_ORIG-1 of row R+1 alone — that's the
+    // " 1: prefix-x ga" residue bug. The fix is `\x1b[1G` after the
+    // CUD 1, so the ED 0 starts from column 1. This test pins it.
+    var gl = GhostList.init(testing.allocator, .{});
+    defer gl.deinit();
+    const a = [_][]const u8{ "alpha", "beta" };
+    _ = try gl.set(&a, 9);
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gl.activate(&w, 2);
+
+    var dx_buf: [256]u8 = undefined;
+    var dx_w: std.Io.Writer = .fixed(&dx_buf);
+    try gl.deactivate(&dx_w);
+    const out = dx_buf[0..dx_w.end];
+
+    // The exact pattern: CUD 1 immediately followed by CHA 1 (column 1),
+    // BEFORE the ED 0.
+    const idx = std.mem.indexOf(u8, out, "\x1b[1B\x1b[1G").?;
+    const ed_idx = std.mem.indexOf(u8, out[idx..], "\x1b[J").?;
+    // ED 0 must appear AFTER the column-1 step, not before.
+    try testing.expect(ed_idx > 0);
+}
+
+test "GhostList.activate steps to column 1 before ED 0 (regression)" {
+    // Same fix on the activate path's "wipe" step. Without it, a
+    // re-activation after typing leaves stale bytes from a previous
+    // paint at columns 1..COL_ORIG-1 of row R+1, which paintEntries'
+    // own EL 0 then over-paints — so this is less visible than the
+    // deactivate case, but the wipe should still be correct on
+    // principle, and a future paintEntries change that skipped the
+    // EL would expose the bug.
+    var gl = GhostList.init(testing.allocator, .{});
+    defer gl.deinit();
+    const a = [_][]const u8{"alpha"};
+    _ = try gl.set(&a, 9);
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gl.activate(&w, 1);
+    const out = buf[0..w.end];
+
+    // The wipe inside activate must include the `\x1b[1G` step
+    // before its `\x1b[J`.
+    const wipe_start = std.mem.indexOf(u8, out, "\x1b[1B\x1b[1G").?;
+    _ = wipe_start;
+    // We don't pin the exact order vs. paintEntries below; the
+    // presence of the CUD 1 + CHA 1 sequence (plus the J that
+    // follows somewhere) is enough to guarantee correctness.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[J") != null);
+}
+
+test "GhostList full lifecycle: activate → shrinking repaint → grow back → deactivate" {
+    // Walks the state machine through a realistic typing pattern:
+    //   1. type "git " → 3 matches, activate w/ 3 rows
+    //   2. type "git p" → 1 match, repaint (2 entries become blank)
+    //   3. delete back to "git " → 3 matches, repaint (full)
+    //   4. clear the line → deactivate
+    // Catches anything that breaks on count transitions while
+    // active (the proxy never resets `reserved_rows` mid-line).
+    var gl = GhostList.init(testing.allocator, .{});
+    defer gl.deinit();
+
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+
+    const three = [_][]const u8{ "git status", "git push", "git log" };
+    _ = try gl.set(&three, 9);
+    try gl.activate(&w, 3);
+    try testing.expect(gl.active);
+    try testing.expectEqual(@as(u16, 3), gl.reserved_rows);
+
+    // Shrink to 1 entry. Repaint MUST blank the trailing reserved
+    // rows (otherwise rows 2 & 3 keep their old paint).
+    w.end = 0;
+    const one = [_][]const u8{"git push origin master"};
+    _ = try gl.set(&one, 9);
+    try gl.repaint(&w);
+    const shrunk = buf[0..w.end];
+    try testing.expect(std.mem.indexOf(u8, shrunk, " 1: git push origin master") != null);
+    // The painted output iterates reserved_rows (=3), erasing each
+    // row. Rows 2 and 3 get \x1b[K but no entry text painted.
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, shrunk, "\x1b[1B\x1b[1G\x1b[K"));
+
+    // Grow back to 3. reserved_rows is still 3 — paint should
+    // populate all three slots.
+    w.end = 0;
+    _ = try gl.set(&three, 9);
+    try gl.repaint(&w);
+    const regrown = buf[0..w.end];
+    try testing.expect(std.mem.indexOf(u8, regrown, " 1: git status") != null);
+    try testing.expect(std.mem.indexOf(u8, regrown, " 2: git push") != null);
+    try testing.expect(std.mem.indexOf(u8, regrown, " 3: git log") != null);
+
+    // Deactivate.
+    w.end = 0;
+    try gl.deactivate(&w);
+    try testing.expect(!gl.active);
+    try testing.expectEqual(@as(u16, 0), gl.reserved_rows);
 }

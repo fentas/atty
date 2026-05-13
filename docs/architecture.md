@@ -437,9 +437,59 @@ disambiguated (Ctrl+9, Ctrl+Shift+Right, Shift+Tab, …). The shell
 doesn't speak the protocol — if those bytes reached it, you'd see
 mojibake echoed back. The proxy's stdin handler runs `keymap.isCsiU`
 on every read: if the input is a CSI-u sequence that didn't match a
-binding, atty drops it instead of forwarding. Legacy keys (Ctrl+D,
-Ctrl+C, plain typing, arrows, …) are *not* CSI-u shaped and pass
-through unchanged.
+binding, atty translates it back to its legacy byte form via
+`keymap.csiUToLegacy` (so Ctrl+letter, Esc, Tab, Enter, Backspace
+all still reach the shell as their classic single-byte encodings)
+or drops it if there's no legacy form (Ctrl+9, etc.).
+
+## Pick list (multi-row ghost suggestions)
+
+The inline ghost shows the single best match after the cursor. The
+**pick list** shows up to 9 alternative matches in dim rows directly
+below the prompt — fish/zsh-autosuggestions don't have an equivalent,
+but atuin's interactive Ctrl+R does, and the visual + UX model is
+borrowed from there. Opt in with `ghost.list_count = N` (default 0 =
+off). Default key bindings: `Ctrl+1..Ctrl+9` (kitty kbd) and
+`Esc+1..Esc+9` (legacy ESC+digit, doubles as Alt+digit fallback) pick
+the Nth entry — its trailing portion (past what the user has typed)
+is substituted into the input, same as `ghost_accept` for the inline
+ghost.
+
+**Activation / deactivation** is dynamic — no permanent dead space:
+
+1. On every input event the proxy asks `dispatchGhostList` for
+   matches (first non-null wins; history walks its ring newest-first,
+   atuin parses the worker's multi-line response).
+2. **Want list & not active** → activate: emit `\n` × N (each LF
+   scrolls the scroll region up if the prompt is near the bottom row;
+   mid-screen they're just cursor moves), CUU N (cursor returns to
+   the prompt row), then `\x1b[1B\x1b[1G\x1b[J` inside a save/restore
+   wrap (the `\x1b[1G` step before the ED 0 is critical — without it,
+   the user's typed prefix on column 1..COL_ORIG-1 of row R+1 is left
+   alone and stale paint leaks through). Then `paintEntries` lays the
+   list at relative descents.
+3. **Want list & active & cache changed** → repaint: same descent
+   loop, no LFs. Iterates `reserved_rows`, paints + EL-erases each
+   slot so a shrinking list blanks its trailing rows.
+4. **No matches / line cleared / line uncertain & active** →
+   deactivate: same wipe sequence as the activate "make-room" tail
+   (`\x1b[1B\x1b[1G\x1b[J`) inside save/restore. The cursor does NOT
+   scroll back — the prompt stays at the screen position activate
+   floated it to, matching atuin Ctrl+R's UX.
+
+**Why dynamic, not DECSTBM-reserved.** An earlier attempt inflated
+`statusbar.reserve_rows` by `list_count` so DECSTBM permanently
+constrained the shell. It worked but felt "constantly spaced" at the
+bottom even when nothing was shown. The LF + CUU dance gives the
+same room-making behavior on demand, releases the rows when the
+list goes empty, and doesn't require DECSTBM coordination with the
+statusbar's existing reservation.
+
+**Known limitation.** When the shell scrolls output past the prompt
+(Enter + multi-line command output), the painted list rows scroll up
+with the rest of the content. They reappear on the next user
+keystroke — at the new prompt's row. There's no DECSTBM constraining
+shell scrolling away from the list rows in this mode.
 
 ## Concurrency
 

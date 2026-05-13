@@ -56,6 +56,20 @@ sleep 400
 # bytes, and forwarded them to the shell which echoed them.
 snapshot post_pick
 
+# Clear the line with Ctrl+U. The list MUST deactivate cleanly —
+# no stale "1: ..." residue anywhere on screen. This is the path
+# that surfaced the column-1 / ED 0 bug.
+key ^U
+sleep 300
+snapshot after_clear
+
+# Re-type the prefix — list should activate again, showing the
+# same 3 matches (history hasn't changed). Proves the activate
+# path works repeatedly within a session.
+type "prefix-x "
+sleep 400
+snapshot reactivated
+
 key Enter
 sleep 200
 

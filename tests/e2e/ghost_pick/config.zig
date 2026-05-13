@@ -14,5 +14,4 @@ pub const modules = .{
 
 pub const ghost: atty.Ghost = .{
     .list_count = 3,
-    .list_render = .inline_rows,
 };

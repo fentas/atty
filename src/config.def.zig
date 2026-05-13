@@ -57,10 +57,11 @@ const atty = @import("atty");
 // pub const ghost: atty.Ghost = .{
 //     .style = atty.style.presets.muted_italic,
 //     // Multi-row pick list below the prompt. 0 disables (default);
-//     // 3 shows the next three matches after the inline ghost.
-//     // Bound to Ctrl+1..Ctrl+9 (kitty kbd) and Esc+1..Esc+9 (legacy).
+//     // 3 shows the next three matches after the inline ghost. Bound
+//     // to Ctrl+1..Ctrl+9 (kitty kbd) and Esc+1..Esc+9 (legacy /
+//     // Alt+digit fallback). Dynamic — scrolls the prompt up to make
+//     // room when needed, releases on line clear.
 //     // .list_count = 3,
-//     // .list_render = .inline_rows,  // .inline_rows / .reserved_region
 //     // .list_style = atty.style.presets.muted,
 // };
 
