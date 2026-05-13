@@ -694,20 +694,20 @@ fn containsEnter(bytes: []const u8) bool {
 }
 
 /// Shared write loop used by every fd-target write in the proxy.
-/// On a negative `write()` return, only `INTR` / `AGAIN` are
-/// retried — every other errno propagates as `error.WriteFailed`
-/// so an unrecoverable failure (e.g. `EBADF` / `EIO` after PTY
-/// teardown) can't hang the loop at 100% CPU. EAGAIN on a
-/// blocking PTY master is effectively unreachable (the kernel
-/// blocks instead of returning the errno), but we accept it
-/// defensively in case the fd ever gets flipped to non-blocking.
+/// `INTR` is retried (signal arrived mid-syscall); every other
+/// errno propagates as `error.WriteFailed`. Notably `EAGAIN` is
+/// **not** retried — every fd we write to is blocking by design
+/// (pty.master, stdout for ghost overlays), so `EAGAIN` indicates
+/// the caller flipped the fd to non-blocking and we should surface
+/// it explicitly rather than tight-loop until a future POLLOUT.
+/// `EBADF` / `EIO` from PTY teardown is the other path this gate
+/// guards against — those used to spin at 100% CPU.
 fn writeFully(fd: posix.fd_t, bytes: []const u8) !void {
     var i: usize = 0;
     while (i < bytes.len) {
         const rc = std.c.write(fd, bytes[i..].ptr, bytes.len - i);
         if (rc < 0) {
-            const err = posix.errno(rc);
-            if (err == .INTR or err == .AGAIN) continue;
+            if (posix.errno(rc) == .INTR) continue;
             return error.WriteFailed;
         }
         if (rc == 0) return error.EndOfFile;
