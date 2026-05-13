@@ -576,15 +576,64 @@ pub fn configure(comptime cfg: Config) type {
             // First line only.
             if (std.mem.indexOfScalar(u8, s, '\n')) |nl| s = s[0..nl];
             s = std.mem.trim(u8, s, " \t\r");
-            // Strip any remaining control bytes — what reaches the
-            // PTY must be inert printable ASCII / UTF-8 continuation.
-            // Drop NUL, BEL, BS, HT, CR, LF, …, DEL.
+            // Strip dangerous bytes:
+            //   - C0 controls (< 0x20) and DEL (0x7F)
+            //   - C1 controls U+0080..U+009F, both as raw 0x80..0x9F
+            //     (Latin-1 / 8-bit terminal interpretation) AND as
+            //     UTF-8 (0xC2 0x80..0x9F encodes U+0080..U+009F).
+            //     C1 includes CSI/DCS/OSC, so passing them through
+            //     would let an LLM response start a terminal escape
+            //     sequence the user never typed.
+            // Legitimate UTF-8 multi-byte characters pass through —
+            // we walk by sequence length to avoid mis-dropping
+            // continuation bytes (e.g. "ƒ" = 0xC6 0x92, where 0x92
+            // is a valid continuation, not a standalone C1).
             var n: usize = 0;
-            for (s) |b| {
-                if (b < 0x20 or b == 0x7F) continue;
-                if (n >= out.len) break;
-                out[n] = b;
-                n += 1;
+            var i: usize = 0;
+            while (i < s.len) {
+                const b = s[i];
+                if (b < 0x80) {
+                    if (b < 0x20 or b == 0x7F) {
+                        i += 1;
+                        continue;
+                    }
+                    if (n >= out.len) break;
+                    out[n] = b;
+                    n += 1;
+                    i += 1;
+                    continue;
+                }
+                // Multi-byte lead. Determine sequence length; 0xC2 +
+                // 0x80..0x9F is the UTF-8 encoding of a C1 control —
+                // drop the whole pair.
+                const seq_len: usize = if (b >= 0xC2 and b <= 0xDF) 2 else if (b >= 0xE0 and b <= 0xEF) 3 else if (b >= 0xF0 and b <= 0xF4) 4 else 0;
+                if (seq_len == 0 or i + seq_len > s.len) {
+                    // Invalid lead or truncated sequence — drop the
+                    // standalone byte rather than emit malformed UTF-8.
+                    i += 1;
+                    continue;
+                }
+                if (seq_len == 2 and b == 0xC2 and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F) {
+                    i += 2;
+                    continue;
+                }
+                // Validate continuation bytes.
+                var ok = true;
+                var k: usize = 1;
+                while (k < seq_len) : (k += 1) {
+                    if (s[i + k] < 0x80 or s[i + k] > 0xBF) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    i += 1;
+                    continue;
+                }
+                if (n + seq_len > out.len) break;
+                @memcpy(out[n .. n + seq_len], s[i .. i + seq_len]);
+                n += seq_len;
+                i += seq_len;
             }
             return n;
         }
@@ -764,4 +813,46 @@ test "sanitizeCommand strips raw control bytes — defence in depth (security)" 
     // NUL / BS / DEL — also dropped.
     const n2 = L.sanitizeCommand("ls\x00 -la\x08\x7Fextra", &out);
     try testing.expectEqualStrings("ls -laextra", out[0..n2]);
+}
+
+test "sanitizeCommand strips C1 control codepoints — terminal-escape injection (security)" {
+    // Attack: a model emits U+009B (CSI) — `0xC2 0x9B` in UTF-8 —
+    // followed by a control-sequence parameter. A terminal that
+    // honours C1 controls (most do, in UTF-8 mode) would treat
+    // the bytes that follow as the start of a CSI escape sequence
+    // the user never typed.
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+
+    // U+009B (UTF-8 0xC2 0x9B) followed by an SGR-style payload.
+    // Both bytes of the C1 pair must vanish, leaving the literal
+    // command intact.
+    const n = L.sanitizeCommand("ls\xC2\x9B31mred", &out);
+    try testing.expectEqualStrings("ls31mred", out[0..n]);
+
+    // Standalone 0x9B (Latin-1 / invalid-UTF-8 path) also dropped.
+    const n2 = L.sanitizeCommand("rm\x9B -rf /tmp", &out);
+    try testing.expectEqualStrings("rm -rf /tmp", out[0..n2]);
+
+    // Sweep across the whole C1 block (U+0080..U+009F).
+    var cp: u8 = 0x80;
+    while (cp <= 0x9F) : (cp += 1) {
+        const input = [_]u8{ 'a', 0xC2, cp, 'b' };
+        const m_n = L.sanitizeCommand(&input, &out);
+        try testing.expectEqualStrings("ab", out[0..m_n]);
+    }
+
+    // Legitimate UTF-8 with continuation bytes in 0x80..0x9F
+    // (which are NOT C1 controls — they're continuation bytes of
+    // a multi-byte sequence) must NOT be dropped. "ƒ" is U+0192,
+    // UTF-8 = 0xC6 0x92; the 0x92 is a continuation byte, not a
+    // standalone C1 — the character must survive intact.
+    const n4 = L.sanitizeCommand("ƒoo", &out);
+    try testing.expectEqualStrings("ƒoo", out[0..n4]);
+
+    // "café" (UTF-8: 63 61 66 C3 A9) — the 0xA9 isn't in the
+    // C1 range anyway, but pin it to catch regressions in the
+    // UTF-8 walker.
+    const n5 = L.sanitizeCommand("café", &out);
+    try testing.expectEqualStrings("café", out[0..n5]);
 }
