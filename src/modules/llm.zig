@@ -422,7 +422,7 @@ pub fn configure(comptime cfg: Config) type {
                                 // closing quote or backslash so malformed
                                 // JSON (fewer than 4 hex digits) cannot
                                 // cause us to skip past the content boundary.
-                                var k: u3 = 0;
+                                var k: usize = 0;
                                 while (k < 4 and i + 1 < body.len) : (k += 1) {
                                     const h = body[i + 1];
                                     if (h == '"' or h == '\\') break;
@@ -560,7 +560,7 @@ test "extractCommand skips uncommon escapes (\\b, \\f) without leaking the escap
 test "extractCommand skips \\uXXXX unicode escapes cleanly" {
     const L = configure(.{});
     var out: [128]u8 = undefined;
-    // Valid \u0020 (space): all 6 chars skipped, "ls-la" not "lsu0020-la".
+    // Valid \u0020: skipped entirely (not decoded to a space), "ls-la" not "lsu0020-la".
     const sample_valid = "{\"choices\":[{\"message\":{\"content\":\"ls\\u0020-la\"}}]}";
     try testing.expectEqualStrings("ls-la", out[0..L.extractCommand(sample_valid, &out)]);
     // Malformed \u with only 2 hex digits before the closing quote: must not
