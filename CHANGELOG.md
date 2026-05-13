@@ -6,6 +6,65 @@ that point are merged into the relevant release on the next run.
 
 [release-please]: https://github.com/googleapis/release-please
 
+## [0.4.0](https://github.com/fentas/atty/compare/v0.3.0...v0.4.0) (2026-05-13)
+
+
+### Features
+
+* **cli:** `atty init [shell]` prints shell-integration snippet for eval ([044c6e5](https://github.com/fentas/atty/commit/044c6e5218d712bd2bb1b14566cb94807539799d))
+* **llm:** #: prompt → LLM command generation, async via worker thread ([9446414](https://github.com/fentas/atty/commit/9446414eccddd42df0fe1e13dee5325d925b03c0))
+* **llm:** inject configurable env vars as model context ([79308c7](https://github.com/fentas/atty/commit/79308c7c70de9b5d5dbf331f6a5d2ff791bd0888))
+* **llm:** live signals while typing `#: …` prefix (cursor + statusbar) + push prompts to history ([a62631b](https://github.com/fentas/atty/commit/a62631b0aff7858f513d0a3e6a335be0ca3416dd))
+* **llm:** one-line explanation alongside the injected command ([3b2418b](https://github.com/fentas/atty/commit/3b2418bd434a22eb1691cb1f90fa3c721c200777))
+* **llm:** support a static `api_base` in config — no env required ([47bc039](https://github.com/fentas/atty/commit/47bc039e485506b495bffea187497fa881a53c45))
+* **llm:** transparent failure — surface every "nothing happened" reason as a hint ([56d9eab](https://github.com/fentas/atty/commit/56d9eab7051297fc64de09e2f3c1939ba519bd1d))
+* phase 2 — LLM module + statusbar hint/error slots + atty init ([7ddd8f2](https://github.com/fentas/atty/commit/7ddd8f23d009980da31522bfdf6c7d5fe26e8f19))
+* **proxy:** sync line_state with OSC 133 capture (Arrow Up + completion + paste) ([e8095c5](https://github.com/fentas/atty/commit/e8095c510b4583f63c39c12352520946581039f2))
+* **statusbar:** add hint row above status text ([78398ae](https://github.com/fentas/atty/commit/78398aeef255f68c1a6dcbb471cb5592d350f32d))
+* **statusbar:** blank padding row between hint and status + dedicated hint_style ([a029acb](https://github.com/fentas/atty/commit/a029acb6653889815e791aa89c1ad015545c41d6))
+* **statusbar:** errors render as muted-red notifications in their own slot ([4c80c9b](https://github.com/fentas/atty/commit/4c80c9b0355d16b7ea55bc8eab6d10f6d7f14da2))
+
+
+### Bug Fixes
+
+* address copilot review round 1 on PR [#5](https://github.com/fentas/atty/issues/5) ([0816613](https://github.com/fentas/atty/commit/0816613a02d481a9f882ad1987ce2b2b6f3e18c6))
+* address copilot review round 2 on PR [#5](https://github.com/fentas/atty/issues/5) ([aaa9e12](https://github.com/fentas/atty/commit/aaa9e12bf41ed80496fac82e0999921391d2cbe4))
+* address copilot review round 2 on PR [#7](https://github.com/fentas/atty/issues/7) — capture UTF-8 bytes in OSC 133 input ([3f51566](https://github.com/fentas/atty/commit/3f515660877c31acd4b1fb9953af4314b47c5ea8))
+* address copilot review round 3 on PR [#5](https://github.com/fentas/atty/issues/5) ([9a85d09](https://github.com/fentas/atty/commit/9a85d096cce08f09b8bfb7d6f3c7ffa0a36c3961))
+* address copilot review round 4 on PR [#5](https://github.com/fentas/atty/issues/5) — stale comments on statusbar constructors ([591b801](https://github.com/fentas/atty/commit/591b801cc525f0f0cb9b8a8ae5de915f7be73d6d))
+* address copilot review round 5 on PR [#5](https://github.com/fentas/atty/issues/5) ([159fb8d](https://github.com/fentas/atty/commit/159fb8df582f099b3cd5d72b61b7bd845f0725f6))
+* address copilot review round 6 on PR [#5](https://github.com/fentas/atty/issues/5) ([f358726](https://github.com/fentas/atty/commit/f3587265cd475048d2688424b5a9f4b3bed1ff25))
+* address copilot review round 7 on PR [#5](https://github.com/fentas/atty/issues/5) — stale comments after earlier rounds ([56144e5](https://github.com/fentas/atty/commit/56144e55dded9a528a68c74633ff905807ddfafc))
+* **build:** make test / itest / e2e forward TARGET; Linux defaults to musl ([b607d5c](https://github.com/fentas/atty/commit/b607d5cf559bbd3fe3442a65d2d9177117445750))
+* **cli:** `atty init` — drop ATTY export, pass shell through, add OSC 133 ([f8853e1](https://github.com/fentas/atty/commit/f8853e179b34756f8bdd583b6b68a8ea93a8360a))
+* **dispatch:** isolate per-module errors in delete-history fan-out ([ea61e59](https://github.com/fentas/atty/commit/ea61e59b078963e90b19938ab54a03186d553b04))
+* **dispatch:** isolate per-module errors in delete-history fan-out ([954c791](https://github.com/fentas/atty/commit/954c7910e1d0a6c7548e14d5f2ab6ad2a4b7ac22))
+* **llm:** address copilot review round 2 ([09110dc](https://github.com/fentas/atty/commit/09110dc044cf1dc2accb11147ca61ae332958819))
+* **llm:** address copilot review round 3 — tolerate whitespace in `"content":` key ([688a557](https://github.com/fentas/atty/commit/688a557a760543b95a8cc5f4ec76cdce97a6d419))
+* **llm:** address copilot review round 4 — strip C1 control codepoints (security) ([58a0708](https://github.com/fentas/atty/commit/58a07085d97d66d5621b4fe52c5fceec14b15ff7))
+* **llm:** address copilot review round 5 — non-blocking shutdown + URL slash normalisation ([da9b120](https://github.com/fentas/atty/commit/da9b120c713dd48d96b7720b94b9ed5f24a951b8))
+* **llm:** address copilot review round 6 — normalise LLM_API_BASE trailing slash too ([7141c30](https://github.com/fentas/atty/commit/7141c30185f8ac643745b504432a9228d727bdd6))
+* **llm:** bound \uXXXX skip in extractCommand; expand escape tests to cover \\f and malformed \\u ([99094b9](https://github.com/fentas/atty/commit/99094b9fcfce8d325c4c283eb811aaa00d4ac2e8))
+* **llm:** copilot review round 1 — stale-response guard + security strip + body cap ([d63fb0d](https://github.com/fentas/atty/commit/d63fb0d4c66e873ccad0a03771d7b599e02f6425))
+* **llm:** dead in_flight_notified field, misleading timeout_ms doc, escape-handler bug in extractCommand ([48007dd](https://github.com/fentas/atty/commit/48007dd1de65d419e6738e1b539df5742a346ce0))
+* **llm:** drop io arg from std.http.Client.deinit (zig 0.16 API drift) ([1da54a2](https://github.com/fentas/atty/commit/1da54a206897ec7ce7e8b7f15190cb951412f070))
+* **llm:** use usize for hex-skip counter; clarify \u test comment ([9ef15c5](https://github.com/fentas/atty/commit/9ef15c5258addbd98562ef56d3f1af73310b52c8))
+* **proxy:** byte-stream CSI-u translation in hidden-input fast path ([abdeda1](https://github.com/fentas/atty/commit/abdeda1aff8a5d1c97ced584e8e6430d53d20db4))
+* **proxy:** errno-gated write retry — don't spin on unrecoverable errors ([45471ac](https://github.com/fentas/atty/commit/45471ac3a7a9b54f514465e53e7e3036e602ac5d))
+* **proxy:** redact hidden input — short-circuit input pipeline while ECHO is off ([a984322](https://github.com/fentas/atty/commit/a984322d8221c605e861b6a18e853ae616f31aa8))
+* **proxy:** redact password input — don't track keystrokes while ECHO is off ([ea412d2](https://github.com/fentas/atty/commit/ea412d284ae3745482ccea60a95be9b3fc2b45e9))
+* **proxy:** refine hidden-input gate so interactive shells stop tripping CSI-u redaction ([a7b387b](https://github.com/fentas/atty/commit/a7b387b6345aa47ba934cc3fd0c93eee34f94d91))
+* **proxy:** refine hidden-input gate to ICANON && !ECHO — restore CSI-u translation in interactive shells ([08e8fe2](https://github.com/fentas/atty/commit/08e8fe2e59a9ab58f5c4510d00c7f856118424e4))
+* **proxy:** translate CSI-u inside the hidden-input fast path ([99f5f93](https://github.com/fentas/atty/commit/99f5f93ffad44eedab05775f62af3ed34a1f627a))
+* **proxy:** treat EAGAIN as error.WriteFailed in writeFully ([6281c62](https://github.com/fentas/atty/commit/6281c626204ea86f49c09d2e4e057b82ccd11c3c))
+
+
+### Documentation
+
+* phase-2 surface (LLM module, new hooks, statusbar slots, floating TOC) ([bb8090a](https://github.com/fentas/atty/commit/bb8090a2bdfb44abc34212c70a8f7bd6c322a613))
+* sidebar TOC with scroll-spy — keep 78ch content width ([996f938](https://github.com/fentas/atty/commit/996f938a6b1729684502b2fd4879acf6530185fe))
+* sidebar TOC with scroll-spy — keep 78ch content width, add TOC to architecture + providers ([c8439d1](https://github.com/fentas/atty/commit/c8439d1869eb5be6c3c4472acd8c2c5e98cc27f2))
+
 ## [0.3.0](https://github.com/fentas/atty/compare/v0.2.0...v0.3.0) (2026-05-13)
 
 
