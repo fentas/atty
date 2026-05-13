@@ -385,9 +385,17 @@ fn parseInto(
         // `su - username`. We just grab the last non-flag argument
         // as the target user (or empty).
         const target_user = lastNonFlagToken(rest) orelse "";
-        var buf: [128]u8 = undefined;
-        const formatted = std.fmt.bufPrint(&buf, "su:{s}", .{target_user}) catch "su";
-        out.setName(formatted);
+        // Emit just `su` (no trailing colon) when the user wasn't
+        // specified. The `.su` encoding path later appends
+        // `:<local-cwd>` to `name`, so a `"su:"` name would
+        // produce `"su::?"` in atuin's `--cwd` — visibly malformed.
+        if (target_user.len == 0) {
+            out.setName("su");
+        } else {
+            var buf: [128]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&buf, "su:{s}", .{target_user}) catch "su";
+            out.setName(formatted);
+        }
         return;
     }
 
@@ -537,12 +545,30 @@ fn sudoFlagTakesValue(flag: []const u8) bool {
             else => false,
         };
     }
-    // Long --flag=value is self-contained. Long --flag without `=`
-    // typically takes the next token; we conservatively assume yes
-    // for unknown long flags whose first char is `-`.
-    if (std.mem.startsWith(u8, flag, "--") and std.mem.indexOfScalar(u8, flag, '=') == null) {
-        return true;
+    // Long flags `--name=value` are self-contained — the value is
+    // baked into the token, no next-token consumption.
+    if (std.mem.startsWith(u8, flag, "--") and std.mem.indexOfScalar(u8, flag, '=') != null) {
+        return false;
     }
+    // Allowlist of known long flags that take a SEPARATE value
+    // token. Default-true for unknown long flags was wrong — sudo
+    // has many boolean long flags (`--preserve-env`,
+    // `--non-interactive`, `--reset-timestamp`, `--list`, …) and
+    // skipping the next token after one of those would gobble the
+    // user's actual shell argument (`sudo --preserve-env bash`
+    // would skip `bash` and miss the elevation classification).
+    if (std.mem.eql(u8, flag, "--askpass")) return true;
+    if (std.mem.eql(u8, flag, "--close-from")) return true;
+    if (std.mem.eql(u8, flag, "--chdir")) return true;
+    if (std.mem.eql(u8, flag, "--group")) return true;
+    if (std.mem.eql(u8, flag, "--host")) return true;
+    if (std.mem.eql(u8, flag, "--prompt")) return true;
+    if (std.mem.eql(u8, flag, "--chroot")) return true;
+    if (std.mem.eql(u8, flag, "--role")) return true;
+    if (std.mem.eql(u8, flag, "--type")) return true;
+    if (std.mem.eql(u8, flag, "--command-timeout")) return true;
+    if (std.mem.eql(u8, flag, "--user")) return true;
+    if (std.mem.eql(u8, flag, "--other-user")) return true;
     return false;
 }
 
@@ -835,6 +861,19 @@ test "looksLikeSudoShell: sudo <non-shell-cmd> is NOT elevation" {
     try testing.expect(!looksLikeSudoShell("-u www-data cat /etc/passwd"));
 }
 
+test "looksLikeSudoShell: boolean long flags don't eat the trailing shell name" {
+    // `sudo --preserve-env bash` should be elevation. Pre-fix the
+    // parser treated `--preserve-env` as value-taking and skipped
+    // `bash`, missing the classification.
+    try testing.expect(looksLikeSudoShell("--preserve-env bash"));
+    try testing.expect(looksLikeSudoShell("--non-interactive zsh"));
+    try testing.expect(looksLikeSudoShell("--reset-timestamp -i"));
+    // Value-taking long flags still consume the next token. The
+    // resulting target is the shell after that.
+    try testing.expect(looksLikeSudoShell("--user root bash"));
+    try testing.expect(looksLikeSudoShell("--chdir /tmp bash"));
+}
+
 test "Tracker: push/pop balance" {
     var t = Tracker.init();
     try testing.expectEqual(@as(usize, 0), t.depth);
@@ -1019,6 +1058,30 @@ test "Tracker: su classification" {
     t.onCommandStart("su - postgres", testing.allocator, null);
     try testing.expectEqual(Kind.su, t.currentKind());
     try testing.expectEqualStrings("su:postgres", t.current().?.name());
+}
+
+test "Tracker: bare su produces `su` (no trailing colon)" {
+    // `su` with no target user → formatCwd would build `su::?`
+    // with a trailing-colon name. Now emit just `su` so the encoded
+    // cwd lands as `su:?` instead.
+    var t = Tracker.init();
+    t.onCommandStart("su", testing.allocator, null);
+    try testing.expectEqual(Kind.su, t.currentKind());
+    try testing.expectEqualStrings("su", t.current().?.name());
+
+    // `su -` with no user also emits bare `su`.
+    var t2 = Tracker.init();
+    t2.onCommandStart("su -", testing.allocator, null);
+    try testing.expectEqualStrings("su", t2.current().?.name());
+}
+
+test "formatCwd: bare su encoding doesn't produce double-colon" {
+    var f = Frame{ .kind = .su };
+    f.setName("su");
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("su:/home/me", formatCwd(&f, &buf, "/home/me"));
+    // With empty fallback the `?` placeholder applies.
+    try testing.expectEqualStrings("su:?", formatCwd(&f, &buf, ""));
 }
 
 test "Tracker: kubectl exec classification + namespace/context" {

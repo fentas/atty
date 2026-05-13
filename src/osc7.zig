@@ -100,11 +100,17 @@ pub const Osc7 = struct {
 
     fn dispatchOsc(self: *Osc7) void {
         const payload = self.body[0..self.body_len];
-        // We accept `7;file://...` (the standard form). Reject
-        // anything else — other OSC numbers (0/1/2 title, 8 hyperlink,
-        // 133 prompt markers, …) flow through the local proxy
-        // unmodified; they're handled elsewhere or just forwarded.
-        if (payload.len < 4) return;
+        // We accept `7;file://...` (the standard form) and the
+        // bare-path variant `7;/some/path` some emitters use.
+        // Reject anything else — other OSC numbers (0/1/2 title,
+        // 8 hyperlink, 133 prompt markers, …) flow through the
+        // local proxy unmodified; they're handled elsewhere or
+        // just forwarded.
+        //
+        // Minimum valid payload is `7;/` (3 bytes, root cwd in
+        // bare form) — the earlier `payload.len < 4` guard
+        // rejected that valid case. Now: just require the `7;`
+        // prefix and a non-empty path after parsing.
         if (!std.mem.startsWith(u8, payload, "7;")) return;
         const after = payload[2..];
         // Some emitters (rare) omit the file:// prefix and just send
@@ -175,6 +181,16 @@ test "Osc7: bare path without file:// prefix is captured" {
     var o = Osc7.init();
     o.feed("\x1b]7;/opt/work\x07");
     try testing.expectEqualStrings("/opt/work", o.takeCwd());
+}
+
+test "Osc7: minimal bare-path `7;/` (root cwd) is accepted" {
+    // Regression: an earlier `payload.len < 4` guard rejected the
+    // 3-byte minimal valid bare-path payload `7;/`. Sessions
+    // currently at root (common on containers / service images)
+    // would silently never have their cwd captured.
+    var o = Osc7.init();
+    o.feed("\x1b]7;/\x07");
+    try testing.expectEqualStrings("/", o.takeCwd());
 }
 
 test "Osc7: non-7 OSC sequences are ignored" {

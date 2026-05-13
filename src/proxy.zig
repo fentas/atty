@@ -756,23 +756,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 alt_screen.feed(output);
                 osc7_tracker.feed(output);
 
-                // Promote any pending OSC 7 cwd capture into the top
-                // subprocess frame. Order matters: this runs AFTER
-                // we've fed OSC 133, so if a `;C` transition arrives
-                // in the SAME chunk we push first and the OSC 7
-                // capture (if any) lands on the freshly-pushed frame.
-                const remote_cwd = osc7_tracker.takeCwd();
-                if (remote_cwd.len > 0) subprocess_tracker.onRemoteCwd(remote_cwd);
-
                 // Edge-detect OSC 133 phase transitions to drive the
-                // subprocess stack. ;C (in_input → in_command) means
-                // a command just started running — peek at the line
-                // the user committed and decide whether to push a
-                // recognised launcher frame. ;D (in_command → idle)
-                // means the command finished and we pop.
+                // subprocess stack FIRST, then apply any pending
+                // OSC 7 capture afterwards. The order matters: a
+                // single read chunk can contain `;C` + OSC 7 (a
+                // shell that emits both as part of one preexec
+                // hook) or OSC 7 + `;D` (a shell that reports cwd
+                // right before signalling command end). If we
+                // promote OSC 7 first we'd land it on the wrong
+                // frame — the about-to-be-popped one on `;D`, or
+                // the parent of the about-to-be-pushed one on `;C`.
                 //
-                // We watch `phase` rather than relying on a custom
-                // edge flag from Osc133 because the existing
+                // We watch `phase` rather than a custom edge flag
+                // from Osc133 because the existing
                 // line_state.lastCommitted is only valid for one
                 // dispatch cycle; doing the parse synchronously
                 // here, immediately after feed, lets us grab it
@@ -802,6 +798,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                     prev_osc_phase = curr_osc_phase;
                 }
+
+                // Now promote any pending OSC 7 cwd capture. It
+                // lands on whatever is at the top after the OSC 133
+                // edge handling above — which is the correct frame
+                // by construction: if the chunk contained `;C`+OSC7
+                // it lands on the newly-pushed frame; if it
+                // contained OSC7+`;D` the popped frame is gone and
+                // a no-op or update on the prior top is correct;
+                // if it contained OSC7 alone it lands on the
+                // existing top.
+                const remote_cwd = osc7_tracker.takeCwd();
+                if (remote_cwd.len > 0) subprocess_tracker.onRemoteCwd(remote_cwd);
 
                 // Alt-screen transition: an interactive full-screen
                 // TUI just entered (?1049h, ?47h, ?1047h) or exited
