@@ -63,14 +63,18 @@ pub const StatusBar = struct {
     transient_len: usize = 0,
     transient_until_ms: i64 = 0,
 
-    /// Hint row content — painted into the TOP of the reserved
-    /// region (`rows - reserve_rows + 1`), leaving the rows
-    /// between it and the status text as blank padding. With the
-    /// default `reserve_rows = 3` that's `rows - 2`. Used by the
-    /// LLM module to surface a one-line explanation for the
-    /// command it just injected. TTL-based, auto-clears. When
-    /// `reserve_rows < 2`, the hint is silently dropped (nowhere
-    /// to draw it without overlapping the status row).
+    /// Hint row content — painted at `effectiveRows() + 1` (the
+    /// TOP of the reserved region), leaving the rows between it
+    /// and the status text as blank padding. In the common case
+    /// `rows > reserve_rows` this equals `rows - reserve_rows + 1`
+    /// (so with the default `reserve_rows = 3`, the hint paints
+    /// on `rows - 2`). The `effectiveRows()` form keeps the row
+    /// math sound even when `reserve_rows >= rows` (tiny terminal
+    /// or misconfig) — see `render` for the underflow guard.
+    /// Used by the LLM module to surface a one-line explanation
+    /// for the command it just injected. TTL-based, auto-clears.
+    /// When `reserve_rows < 2` (or there's no room above status),
+    /// the hint is silently dropped.
     hint_buf: [512]u8 = undefined,
     hint_len: usize = 0,
     hint_until_ms: i64 = 0,
@@ -176,9 +180,17 @@ pub const StatusBar = struct {
         return self.transient_len > 0 and nowMs() < self.transient_until_ms;
     }
 
-    /// Show `text` in the hint row (top of the reserved region —
-    /// `rows - reserve_rows + 1`, defaulting to `rows - 2`) for
-    /// `ttl_ms` milliseconds. Auto-clears once the TTL expires.
+    /// Show `text` in the hint row for `ttl_ms` milliseconds.
+    /// Auto-clears once the TTL expires.
+    ///
+    /// Hint row math: `effectiveRows() + 1`. In the common case
+    /// `rows > reserve_rows` this is identical to
+    /// `rows - reserve_rows + 1` (so with the default
+    /// `reserve_rows = 3`, the hint paints two rows above the
+    /// status row). When `reserve_rows >= rows` the `effectiveRows`
+    /// clamp keeps the math correct without underflowing u16 —
+    /// notifications still surface on tiny terminals.
+    ///
     /// Truncated to the buffer length; longer explanations get
     /// clipped rather than wrapping.
     pub fn setHint(self: *StatusBar, text: []const u8, ttl_ms: u32) void {

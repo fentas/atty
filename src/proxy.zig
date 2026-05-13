@@ -268,11 +268,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             }
             // One-shot hint / error surfaces — a module just
             // produced text it wants the user to see (LLM module
-            // after injecting a command, or after a failure). Errors
-            // win precedence on the same row (muted-red + ⚠);
-            // explanations render in the bar's regular style. TTLs
-            // are independent — setting either to 0 disables that
-            // surface.
+            // after injecting a command, or after a failure). Both
+            // paint into the same row above the status text but
+            // use distinct styles: errors render in `error_style`
+            // (muted-red + ⚠) and take precedence; hints render in
+            // `hint_style` (dim italic by default) and resurface
+            // once any active error expires. TTLs are independent
+            // — setting either to 0 disables that surface.
             if (statusbar) |*sb| {
                 if (config.statusbar.hint_ttl_ms > 0) {
                     if (D.gatherHintText(&runtimes, &ctx) catch null) |hint_text| {

@@ -146,12 +146,12 @@ or detach a thread if your work involves I/O.
 
 ## Action semantics
 
-| Returned action    | What happens                                                                                                          |
-|--------------------|-----------------------------------------------------------------------------------------------------------------------|
-| `.forward`         | Bytes flow on to the next module.                                                                                     |
-| `.swallow`         | Chain stops, nothing is written to the PTY.                                                                           |
-| `.replace`         | Next modules see the new bytes; PTY writes those.                                                                     |
-| `.replace_commit`  | Same as `.replace` but ALSO fires `onLineCommit` on the pre-replace typed line — even if the replacement has no Enter.|
+| Returned action    | What happens                                                                                                                 |
+|--------------------|------------------------------------------------------------------------------------------------------------------------------|
+| `.forward`         | Bytes flow on to the next module.                                                                                            |
+| `.swallow`         | Chain stops, nothing is written to the PTY.                                                                                  |
+| `.replace`         | Next modules see the new bytes; PTY writes those.                                                                            |
+| `.replace_commit`  | Same as `.replace`, AND fires `onLineCommit` on the pre-replace line **when the original input contained Enter** (see below).|
 
 If a module returns `.replace`, downstream modules see the *replaced*
 bytes, not the original. This composes guardrail with autosuggestion:
@@ -166,6 +166,16 @@ the shell doesn't run the prompt, but the proxy fires
 `dispatchLineCommit` on `#: list files` so atuin / history record
 it. The next time the user starts typing `#: l…` their prior
 prompts surface as ghost suggestions.
+
+**Important caveat**: `.replace_commit` does NOT unconditionally
+fire `onLineCommit`. The proxy still requires the *original* input
+chunk (the bytes the user just typed, pre-replace) to contain
+Enter — and the usual gating around incognito mode, leading-space
+HISTCONTROL convention, and `committed_was_uncertain` still
+applies. Returning `.replace_commit` on a non-Enter keystroke is a
+no-op as far as history is concerned; the only thing it changes
+vs. plain `.replace` is that the Enter test looks at the original
+bytes instead of the replacement.
 
 The dispatcher preserves `.replace_commit` across later modules'
 plain `.replace` substitutions — once a module asks for the commit
