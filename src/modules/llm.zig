@@ -87,11 +87,26 @@ pub fn configure(comptime cfg: Config) type {
             req_buf: [cfg.max_prompt_bytes]u8 = undefined,
             req_len: usize = 0,
             req_pending: bool = false,
-            /// Latest LLM response. `ready=true` and the proxy
-            /// consumes it on the next pollShellInput.
+            /// Monotonic counter — bumped on every prompt the proxy
+            /// hands to the worker. The worker stamps each
+            /// response with the generation it was serving; the
+            /// proxy drops responses whose generation doesn't match
+            /// the current `req_gen` (stale-response guard for the
+            /// "user typed a new prompt while the previous one was
+            /// still in flight" case).
+            req_gen: u64 = 0,
+            /// Latest LLM response. Worker writes both on success
+            /// (res_len > 0) AND on failure (res_len = 0 with
+            /// res_done = true) so pollShellInput can clear
+            /// `in_flight` in both cases.
             res_buf: [cfg.max_response_bytes]u8 = undefined,
             res_len: usize = 0,
-            res_ready: bool = false,
+            /// Generation of the prompt this response is for.
+            res_gen: u64 = 0,
+            /// True when the worker has finished serving the
+            /// current request — success OR failure. Proxy
+            /// consumes via pollShellInput and clears.
+            res_done: bool = false,
             shutdown: bool = false,
         };
 
@@ -211,14 +226,23 @@ pub fn configure(comptime cfg: Config) type {
             if (body.len == 0 or body.len > cfg.max_prompt_bytes) return .forward;
             if (rt.api_base.len == 0) return .forward; // inert without endpoint
 
-            // Hand the prompt to the worker. Drop any in-flight
-            // request (latest-wins) — pressing Enter twice
-            // shouldn't queue two LLM calls.
+            // Hand the prompt to the worker. Bump `req_gen` so a
+            // late-arriving response from a previous in-flight
+            // request gets discarded by pollShellInput (the
+            // stale-response guard — pressing Enter twice in
+            // quick succession shouldn't surface the first
+            // request's command in place of the second's). Also
+            // clear any cached response right here so the proxy
+            // can't see stale data while the new worker call is
+            // in flight.
             rt.shared.mutex.lockUncancelable(ctx.io);
             defer rt.shared.mutex.unlock(ctx.io);
             @memcpy(rt.shared.req_buf[0..body.len], body);
             rt.shared.req_len = body.len;
             rt.shared.req_pending = true;
+            rt.shared.req_gen +%= 1;
+            rt.shared.res_done = false;
+            rt.shared.res_len = 0;
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
 
@@ -233,13 +257,26 @@ pub fn configure(comptime cfg: Config) type {
         pub fn pollShellInput(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             rt.shared.mutex.lockUncancelable(ctx.io);
             defer rt.shared.mutex.unlock(ctx.io);
-            if (!rt.shared.res_ready) return null;
+            if (!rt.shared.res_done) return null;
+            // Drop responses from a stale generation — a newer
+            // prompt has already been submitted; the worker's
+            // reply for THAT one will arrive shortly.
+            if (rt.shared.res_gen != rt.shared.req_gen) {
+                rt.shared.res_done = false;
+                rt.shared.res_len = 0;
+                rt.in_flight = false;
+                return null;
+            }
             const n = rt.shared.res_len;
             @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
             rt.inject_len = n;
-            rt.shared.res_ready = false;
+            rt.shared.res_done = false;
             rt.shared.res_len = 0;
             rt.in_flight = false;
+            // n == 0 → worker signalled failure (network error,
+            // non-2xx, parse failure). Nothing to inject; the
+            // statusbar already cleared via `in_flight = false`.
+            if (n == 0) return null;
             return rt.inject_buf[0..rt.inject_len];
         }
 
@@ -261,6 +298,7 @@ pub fn configure(comptime cfg: Config) type {
         ) void {
             var prompt_local: [cfg.max_prompt_bytes]u8 = undefined;
             var prompt_len: usize = 0;
+            var serving_gen: u64 = 0;
             while (true) {
                 shared.mutex.lockUncancelable(io);
                 while (!shared.shutdown and !shared.req_pending) {
@@ -273,6 +311,7 @@ pub fn configure(comptime cfg: Config) type {
                 prompt_len = shared.req_len;
                 @memcpy(prompt_local[0..prompt_len], shared.req_buf[0..prompt_len]);
                 shared.req_pending = false;
+                serving_gen = shared.req_gen;
                 shared.mutex.unlock(io);
 
                 // Fire the HTTP request OUTSIDE the lock — it may
@@ -288,12 +327,20 @@ pub fn configure(comptime cfg: Config) type {
                     &response_buf,
                 ) catch 0;
 
+                // Signal completion regardless of outcome — proxy
+                // needs to clear `in_flight` so the 🧠 thinking…
+                // statusbar doesn't stick when a request fails.
+                // The proxy filters stale-generation responses
+                // separately.
                 shared.mutex.lockUncancelable(io);
                 if (response_len > 0) {
                     @memcpy(shared.res_buf[0..response_len], response_buf[0..response_len]);
                     shared.res_len = response_len;
-                    shared.res_ready = true;
+                } else {
+                    shared.res_len = 0;
                 }
+                shared.res_gen = serving_gen;
+                shared.res_done = true;
                 shared.mutex.unlock(io);
             }
         }
@@ -337,21 +384,28 @@ pub fn configure(comptime cfg: Config) type {
             var client: std.http.Client = .{ .allocator = gpa, .io = io };
             defer client.deinit(io);
 
-            var response_storage: std.ArrayList(u8) = .empty;
-            defer response_storage.deinit(gpa);
-            var writer = response_storage.writer(gpa);
+            // Cap the response body at `max_response_bytes * 16`.
+            // The JSON envelope around the message content is
+            // larger than the content itself; 16× is a comfortable
+            // ceiling for typical chat-completion shapes. A
+            // misbehaving endpoint streaming gigabytes can no
+            // longer OOM the worker — std.Io.Writer.fixed errors
+            // on overflow, we catch and parse whatever we have.
+            const response_cap = cfg.max_response_bytes * 16;
+            var response_buf: [response_cap]u8 = undefined;
+            var response_writer: std.Io.Writer = .fixed(&response_buf);
 
             const result = client.fetch(.{
                 .location = .{ .url = url },
                 .method = .POST,
                 .payload = body,
                 .extra_headers = headers_buf[0..headers_len],
-                .response_writer = &writer,
+                .response_writer = &response_writer,
             }) catch return 0;
 
             if (@intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300) return 0;
 
-            return extractCommand(response_storage.items, out);
+            return extractCommand(response_buf[0..response_writer.end], out);
         }
 
         // ---- pure helpers (testable) -------------------------------------
@@ -405,38 +459,52 @@ pub fn configure(comptime cfg: Config) type {
                 const c = body[i];
                 if (c == '\\' and i + 1 < body.len) {
                     const e = body[i + 1];
-                    const decoded: u8 = switch (e) {
-                        '"' => '"',
-                        '\\' => '\\',
-                        '/' => '/',
-                        'n' => '\n',
-                        't' => '\t',
-                        'r' => '\r',
-                        // Uncommon escapes (\b, \f, \uXXXX, …): skip both
-                        // the backslash and the escape code so neither
-                        // appears as a literal character in the output.
-                        else => {
-                            i += 1; // skip the escape code char
-                            if (e == 'u') {
-                                // Skip up to 4 hex digits, but stop at a
-                                // closing quote or backslash so malformed
-                                // JSON (fewer than 4 hex digits) cannot
-                                // cause us to skip past the content boundary.
-                                var k: usize = 0;
-                                while (k < 4 and i + 1 < body.len) : (k += 1) {
-                                    const h = body[i + 1];
-                                    if (h == '"' or h == '\\') break;
-                                    i += 1;
-                                }
+                    switch (e) {
+                        '"', '\\', '/', 'n', 't' => {
+                            // Decode common JSON escapes. \n stays
+                            // because the first-line-only sanitiser
+                            // below relies on the newline to find
+                            // the boundary.
+                            const decoded: u8 = switch (e) {
+                                '"' => '"',
+                                '\\' => '\\',
+                                '/' => '/',
+                                'n' => '\n',
+                                't' => '\t',
+                                else => unreachable,
+                            };
+                            if (cmd_len < cmd_buf.len) {
+                                cmd_buf[cmd_len] = decoded;
+                                cmd_len += 1;
                             }
-                            continue;
+                            i += 1;
                         },
-                    };
-                    if (cmd_len < cmd_buf.len) {
-                        cmd_buf[cmd_len] = decoded;
-                        cmd_len += 1;
+                        // Drop \r — never inject a carriage return
+                        // into the shell. Writing CR to the PTY
+                        // acts as Enter so it'd auto-execute a
+                        // partial command without user review.
+                        // Security-critical; see sanitizeCommand
+                        // for the defence-in-depth strip too.
+                        'r' => i += 1,
+                        'u' => {
+                            // `\uXXXX` — skip up to 4 hex digits
+                            // after the `u`, but bail early at a
+                            // closing quote or backslash so
+                            // malformed JSON (fewer than 4 hex
+                            // digits) cannot cause us to skip past
+                            // the content boundary into the next
+                            // field.
+                            i += 1; // consume the 'u'
+                            var k: usize = 0;
+                            while (k < 4 and i + 1 < body.len) : (k += 1) {
+                                const h = body[i + 1];
+                                if (h == '"' or h == '\\') break;
+                                i += 1;
+                            }
+                        },
+                        // Other escapes (\b, \f, …): drop entirely.
+                        else => i += 1,
                     }
-                    i += 1;
                     continue;
                 }
                 if (c == '"') break;
@@ -450,6 +518,16 @@ pub fn configure(comptime cfg: Config) type {
 
         /// Trim markdown fences (```bash … ```) + whitespace + take
         /// the first non-empty line. Some models stubbornly wrap.
+        /// Trim markdown fences (```bash … ```) + whitespace + take
+        /// the first non-empty line + strip remaining control bytes.
+        ///
+        /// **Security note**: writing a `\r` (CR) or `\n` (LF) byte
+        /// to the PTY acts as Enter — the shell would immediately
+        /// execute whatever's in its readline buffer. We must NEVER
+        /// inject those into the shell. extractCommand already
+        /// drops `\r` at decode time; this is defence in depth for
+        /// any control byte that survives (incl. embedded NUL/BEL/
+        /// BS/HT/CR/LF/0x01..0x1F/0x7F).
         pub fn sanitizeCommand(raw: []const u8, out: []u8) usize {
             var s = std.mem.trim(u8, raw, " \t\r\n");
             // Strip a leading code fence if present.
@@ -468,8 +546,16 @@ pub fn configure(comptime cfg: Config) type {
             // First line only.
             if (std.mem.indexOfScalar(u8, s, '\n')) |nl| s = s[0..nl];
             s = std.mem.trim(u8, s, " \t\r");
-            const n = @min(s.len, out.len);
-            @memcpy(out[0..n], s[0..n]);
+            // Strip any remaining control bytes — what reaches the
+            // PTY must be inert printable ASCII / UTF-8 continuation.
+            // Drop NUL, BEL, BS, HT, CR, LF, …, DEL.
+            var n: usize = 0;
+            for (s) |b| {
+                if (b < 0x20 or b == 0x7F) continue;
+                if (n >= out.len) break;
+                out[n] = b;
+                n += 1;
+            }
             return n;
         }
     };
@@ -594,4 +680,34 @@ test "sanitizeCommand handles fence + whitespace combinations" {
     // "```bash\nls -la\n```" → strip fences + trim.
     try testing.expectEqual(@as(usize, 6), L.sanitizeCommand("```bash\nls -la\n```", &out));
     try testing.expectEqualStrings("ls -la", out[0..6]);
+}
+
+test "extractCommand drops decoded \\r — never inject a CR that would auto-execute (security)" {
+    // Attack scenario: model returns `cmd1\\r cmd2` in JSON. A
+    // naive decoder would convert `\\r` to a literal CR; writing
+    // that to the PTY acts as Enter, so cmd1 runs without user
+    // review and `cmd2` lands on the next prompt. With the
+    // 'r' arm dropping the byte entirely, the user sees the full
+    // string and decides whether to run it.
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+    const sample = "{\"choices\":[{\"message\":{\"content\":\"echo hi\\r && rm -rf /\"}}]}";
+    const n = L.extractCommand(sample, &out);
+    try testing.expectEqualStrings("echo hi && rm -rf /", out[0..n]);
+    // And no raw \r anywhere in the output.
+    for (out[0..n]) |b| try testing.expect(b != '\r');
+}
+
+test "sanitizeCommand strips raw control bytes — defence in depth (security)" {
+    // Even if a CR slips past extractCommand somehow, the
+    // sanitiser strips it before the bytes can reach the PTY.
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+    const n = L.sanitizeCommand("ls -la\r ; rm -rf /", &out);
+    try testing.expectEqualStrings("ls -la ; rm -rf /", out[0..n]);
+    for (out[0..n]) |b| try testing.expect(b != '\r');
+
+    // NUL / BS / DEL — also dropped.
+    const n2 = L.sanitizeCommand("ls\x00 -la\x08\x7Fextra", &out);
+    try testing.expectEqualStrings("ls -laextra", out[0..n2]);
 }
