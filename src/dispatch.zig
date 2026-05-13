@@ -256,9 +256,22 @@ pub fn Dispatcher(comptime modules: anytype) type {
             ctx: *Context,
             line: []const u8,
         ) Error!void {
+            // Each module owns its own backing store (atuin's DB,
+            // ~/.bash_history, …). A failure in one (missing CLI,
+            // locked file, network error, schema mismatch) MUST NOT
+            // block the others from also deleting — otherwise the
+            // ghost the user is trying to erase keeps reappearing
+            // from the module further down the chain. We swallow
+            // per-iteration errors instead of `try`-ing them and
+            // short-circuiting the fan-out.
+            //
+            // The function still returns `Error!void` for symmetry
+            // with the other dispatch walkers, but at runtime no
+            // module's error escapes — best-effort delete across
+            // every store the user has enabled.
             inline for (modules, 0..) |M, i| {
                 if (comptime @hasDecl(M, "deleteHistoryMatch")) {
-                    try M.deleteHistoryMatch(rts[i], ctx, line);
+                    M.deleteHistoryMatch(rts[i], ctx, line) catch {};
                 }
             }
         }
@@ -809,6 +822,45 @@ test "dispatchDeleteHistoryMatch fans out to every module with the hook" {
 // Recorder again. Pinned for the multi-module regression test
 // below.
 const D_RecorderPair = Dispatcher(.{ Recorder, Recorder });
+
+const FailingDeleter = struct {
+    pub const name = "failing-deleter";
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn deleteHistoryMatch(_: *Runtime, _: *Context, _: []const u8) Error!void {
+        return Error.ModuleFailed;
+    }
+};
+
+test "dispatchDeleteHistoryMatch isolates per-module errors (later modules still fire)" {
+    // Regression scenario: user has `.{ atuin, history }`. They
+    // see a ghost from history, press Ctrl+Shift+D. atuin's
+    // delete hook errors (CLI not found, daemon down, DB locked,
+    // …). Pre-fix, `try` propagated the error out of the inline
+    // fan-out and history's hook never ran, so the entry stayed
+    // in ~/.bash_history and the ghost reappeared on the next
+    // typed keystroke. Post-fix, each module's failure is caught
+    // per-iteration; later modules still get a chance to delete
+    // from their own store.
+    const D = Dispatcher(.{ FailingDeleter, Recorder });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    // The walker must not propagate FailingDeleter's error.
+    try D.dispatchDeleteHistoryMatch(&rts, &ctx, "secret-cmd");
+
+    // Recorder (second module) still got the request — that's
+    // the whole point of the fix.
+    try testing.expectEqualStrings("secret-cmd\n", rts[1].deleted.items);
+}
 
 test "dispatchDeleteHistoryMatch fires EVERY implementer, not just the first one" {
     // Regression: the user had .{ atuin, history } and pressed
