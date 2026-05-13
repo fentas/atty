@@ -63,12 +63,88 @@ pub const StatusBar = struct {
     transient_len: usize = 0,
     transient_until_ms: i64 = 0,
 
+    /// Hint row content — painted at `effectiveRows() + 1` (the
+    /// TOP of the reserved region), leaving the rows between it
+    /// and the status text as blank padding. In the common case
+    /// `rows > reserve_rows` this equals `rows - reserve_rows + 1`
+    /// (so with the default `reserve_rows = 3`, the hint paints
+    /// on `rows - 2`). The `effectiveRows()` form keeps the row
+    /// math sound even when `reserve_rows >= rows` (tiny terminal
+    /// or misconfig) — see `render` for the underflow guard.
+    /// Used by the LLM module to surface a one-line explanation
+    /// for the command it just injected. TTL-based, auto-clears.
+    /// When `reserve_rows < 2` (or there's no room above status),
+    /// the hint is silently dropped.
+    hint_buf: [512]u8 = undefined,
+    hint_len: usize = 0,
+    hint_until_ms: i64 = 0,
+
+    /// Error notification — sibling slot to `hint_buf`, painted in
+    /// `error_style` (muted red by default) with a leading "⚠ "
+    /// glyph so it reads as a notification rather than info text.
+    /// Shares the hint row with `hint_buf` but takes precedence:
+    /// while an error is active, the hint is suppressed.
+    error_buf: [512]u8 = undefined,
+    error_len: usize = 0,
+    error_until_ms: i64 = 0,
+
+    /// Style for the error notification. Falls back to the struct
+    /// default (dim red) unless the caller threads `config.statusbar.error_style`
+    /// through via `initWithError` / `initFull`. The plain `init`
+    /// constructor leaves it at the struct default.
+    error_style: Style = .{ .dim = true, .fg = 1 },
+    /// Style for the regular (info) hint — LLM explanations etc.
+    /// Falls back to the struct default (dim italic) unless the
+    /// caller threads `config.statusbar.hint_style` through via
+    /// `initFull`. Distinguishes the hint row from the status
+    /// text below it.
+    hint_style: Style = .{ .dim = true, .italic = true },
+
+    /// Tracks what was last painted on the hint row — text + the
+    /// "kind" (hint vs. error vs. blank) so the renderer no-ops
+    /// when nothing changed and repaints when severity flips.
+    last_hint_buf: [512]u8 = undefined,
+    last_hint_len: usize = 0,
+    last_hint_kind: HintKind = .blank,
+    last_hint_valid: bool = false,
+
+    const HintKind = enum { blank, hint, err };
+
     pub fn init(rows: u16, cols: u16, reserve_rows: u16, style: Style) StatusBar {
         return .{
             .rows = rows,
             .cols = cols,
             .reserve_rows = reserve_rows,
             .style = style,
+        };
+    }
+
+    /// Variant that lets the caller override `error_style` while
+    /// leaving `hint_style` at the struct default. Kept for
+    /// callers that don't care about the hint slot (and for
+    /// tests that want to isolate error rendering); `proxy.zig`
+    /// itself uses `initFull` to thread both styles through.
+    pub fn initWithError(rows: u16, cols: u16, reserve_rows: u16, style: Style, error_style: Style) StatusBar {
+        return .{
+            .rows = rows,
+            .cols = cols,
+            .reserve_rows = reserve_rows,
+            .style = style,
+            .error_style = error_style,
+        };
+    }
+
+    /// Full constructor — caller threads in every style override
+    /// (status, error, hint). Used by `proxy.zig` when wiring the
+    /// user's config through.
+    pub fn initFull(rows: u16, cols: u16, reserve_rows: u16, style: Style, error_style: Style, hint_style: Style) StatusBar {
+        return .{
+            .rows = rows,
+            .cols = cols,
+            .reserve_rows = reserve_rows,
+            .style = style,
+            .error_style = error_style,
+            .hint_style = hint_style,
         };
     }
 
@@ -102,6 +178,62 @@ pub const StatusBar = struct {
     /// True if a transient message is currently active.
     fn transientActive(self: *const StatusBar) bool {
         return self.transient_len > 0 and nowMs() < self.transient_until_ms;
+    }
+
+    /// Show `text` in the hint row for `ttl_ms` milliseconds.
+    /// Auto-clears once the TTL expires.
+    ///
+    /// Hint row math: `effectiveRows() + 1`. In the common case
+    /// `rows > reserve_rows` this is identical to
+    /// `rows - reserve_rows + 1` (so with the default
+    /// `reserve_rows = 3`, the hint paints two rows above the
+    /// status row). When `reserve_rows >= rows` the `effectiveRows`
+    /// clamp keeps the math correct without underflowing u16 —
+    /// notifications still surface on tiny terminals.
+    ///
+    /// Truncated to the buffer length; longer explanations get
+    /// clipped rather than wrapping.
+    pub fn setHint(self: *StatusBar, text: []const u8, ttl_ms: u32) void {
+        const n = @min(text.len, self.hint_buf.len);
+        @memcpy(self.hint_buf[0..n], text[0..n]);
+        self.hint_len = n;
+        self.hint_until_ms = nowMs() + @as(i64, @intCast(ttl_ms));
+        self.last_hint_valid = false;
+    }
+
+    /// Clear the hint row immediately. Forces a repaint to erase
+    /// whatever was visible.
+    pub fn clearHint(self: *StatusBar) void {
+        self.hint_len = 0;
+        self.hint_until_ms = 0;
+        self.last_hint_valid = false;
+    }
+
+    /// Show an error notification in the hint row for `ttl_ms`
+    /// milliseconds. Painted in `error_style` (muted red by
+    /// default) with a leading "⚠ " glyph so it reads as a
+    /// notification, not an explanation. Takes precedence over
+    /// `setHint` while active.
+    pub fn setError(self: *StatusBar, text: []const u8, ttl_ms: u32) void {
+        const n = @min(text.len, self.error_buf.len);
+        @memcpy(self.error_buf[0..n], text[0..n]);
+        self.error_len = n;
+        self.error_until_ms = nowMs() + @as(i64, @intCast(ttl_ms));
+        self.last_hint_valid = false;
+    }
+
+    pub fn clearError(self: *StatusBar) void {
+        self.error_len = 0;
+        self.error_until_ms = 0;
+        self.last_hint_valid = false;
+    }
+
+    fn hintActive(self: *const StatusBar) bool {
+        return self.hint_len > 0 and nowMs() < self.hint_until_ms;
+    }
+
+    fn errorActive(self: *const StatusBar) bool {
+        return self.error_len > 0 and nowMs() < self.error_until_ms;
     }
 
     /// Set up the bar's reserved region:
@@ -159,20 +291,100 @@ pub const StatusBar = struct {
             break :blk self.text_buf[0..self.text_len];
         };
 
-        if (self.last_valid and self.last_len == active_text.len and
-            std.mem.eql(u8, self.last_buf[0..self.last_len], active_text))
-            return;
+        // Errors take precedence over hints on the same row — both
+        // are transient + TTL'd; reaping the expired one forces a
+        // repaint so it doesn't linger.
+        if (self.error_len > 0 and !self.errorActive()) {
+            self.error_len = 0;
+            self.last_hint_valid = false;
+        }
+        if (self.hint_len > 0 and !self.hintActive()) {
+            self.hint_len = 0;
+            self.last_hint_valid = false;
+        }
+
+        const hint_kind: HintKind = if (self.errorActive())
+            .err
+        else if (self.hintActive())
+            .hint
+        else
+            .blank;
+        const active_hint: []const u8 = switch (hint_kind) {
+            .err => self.error_buf[0..self.error_len],
+            .hint => self.hint_buf[0..self.hint_len],
+            .blank => &[_]u8{},
+        };
+
+        const text_unchanged = self.last_valid and
+            self.last_len == active_text.len and
+            std.mem.eql(u8, self.last_buf[0..self.last_len], active_text);
+        const hint_unchanged = self.last_hint_valid and
+            self.last_hint_kind == hint_kind and
+            self.last_hint_len == active_hint.len and
+            std.mem.eql(u8, self.last_hint_buf[0..self.last_hint_len], active_hint);
+        if (text_unchanged and hint_unchanged) return;
 
         try w.writeAll(ansi.save_cursor);
-        try w.print("\x1B[{d};1H\x1B[K", .{self.rows}); // CUP last row, erase
-        try w.print("{f}", .{self.style});
-        try w.writeAll(active_text);
-        try w.writeAll(ansi.sgr_reset);
-        try w.writeAll(ansi.restore_cursor);
 
-        @memcpy(self.last_buf[0..active_text.len], active_text);
-        self.last_len = active_text.len;
-        self.last_valid = true;
+        if (!text_unchanged) {
+            try w.print("\x1B[{d};1H\x1B[K", .{self.rows});
+            try w.print("{f}", .{self.style});
+            try w.writeAll(active_text);
+            try w.writeAll(ansi.sgr_reset);
+
+            @memcpy(self.last_buf[0..active_text.len], active_text);
+            self.last_len = active_text.len;
+            self.last_valid = true;
+        }
+
+        // Hint / error notification paints at the TOP of the reserved
+        // region, leaving the rows in between as blank padding before
+        // the status text. With reserve_rows=3 (default): hint at
+        // rows-2, blank at rows-1, status at rows — gives a clear
+        // visual gap so the hint reads as a separate element. With
+        // reserve_rows=2 (legacy): hint and status are adjacent.
+        // With reserve_rows<2 there's no room → skip the paint but
+        // still update the "last hint" tracking state so subsequent
+        // `render` calls become true no-ops (otherwise
+        // `hint_unchanged` stays false forever and every tick emits
+        // a save/restore-cursor pair pointlessly).
+        if (!hint_unchanged) {
+            // Derive the hint row from `effectiveRows()`, which
+            // already clamps to at least 1 when `reserve_rows >
+            // rows`. That makes the hint surface keep working in
+            // pathological geometry (e.g. rows=3 + reserve_rows=5
+            // → effectiveRows=1, hint_row=2, status at rows=3)
+            // instead of silently disappearing. Two conditions
+            // must hold for the paint:
+            //   • `reserve_rows >= 2` so the bar is asking for
+            //     more than just the status row,
+            //   • `effectiveRows + 1 < rows` so the hint row
+            //     sits ABOVE the status row, never overlapping.
+            const hint_row: u16 = self.effectiveRows() + 1;
+            if (self.reserve_rows >= 2 and hint_row < self.rows) {
+                try w.print("\x1B[{d};1H\x1B[K", .{hint_row});
+                switch (hint_kind) {
+                    .err => {
+                        try w.print("{f}", .{self.error_style});
+                        try w.writeAll("\u{26A0} "); // warning sign + space
+                        try w.writeAll(active_hint);
+                        try w.writeAll(ansi.sgr_reset);
+                    },
+                    .hint => {
+                        try w.print("{f}", .{self.hint_style});
+                        try w.writeAll(active_hint);
+                        try w.writeAll(ansi.sgr_reset);
+                    },
+                    .blank => {},
+                }
+            }
+            @memcpy(self.last_hint_buf[0..active_hint.len], active_hint);
+            self.last_hint_len = active_hint.len;
+            self.last_hint_kind = hint_kind;
+            self.last_hint_valid = true;
+        }
+
+        try w.writeAll(ansi.restore_cursor);
     }
 
     /// Update tracked dimensions. Caller is responsible for calling
@@ -252,6 +464,208 @@ test "setTransient overrides text_buf for the TTL window" {
     const out = buf[0..w.end];
     try testing.expect(std.mem.indexOf(u8, out, "deleted: foo") != null);
     try testing.expect(std.mem.indexOf(u8, out, "atty") == null);
+}
+
+test "setHint paints into the hint row with hint_style (dim by default)" {
+    var b = StatusBar.init(24, 80, 2, .{ .dim = true });
+    b.setText("atty");
+    b.setHint("lists files in long format", 5_000);
+
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[24;1H") != null); // status row
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H") != null); // hint row
+    try testing.expect(std.mem.indexOf(u8, out, "lists files in long format") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
+}
+
+test "hint paints at TOP of the reserved region (gap above status when reserve_rows >= 3)" {
+    // Default reserve_rows=3 layout:
+    //   rows-2 = hint, rows-1 = blank padding, rows = status.
+    var b = StatusBar.initFull(
+        24,
+        80,
+        3,
+        .{ .dim = true }, // bar style
+        .{ .dim = true, .fg = 1 }, // error style
+        .{ .italic = true }, // hint style (distinct from bar)
+    );
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    // Status at row 24.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[24;1H") != null);
+    // Hint at row 22 (rows - reserve_rows + 1 = 24 - 3 + 1).
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1H") != null);
+    // Hint must NOT paint into row 23 (the blank padding row).
+    // We only verify the explicit CUP escape isn't present —
+    // it's fine for the cursor to traverse rows in between
+    // implicitly.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H") == null);
+    // Hint uses hint_style (italic), not bar style (dim).
+    try testing.expect(std.mem.indexOf(u8, out, ansi.sgr_italic) != null);
+    try testing.expect(std.mem.indexOf(u8, out, "explanation") != null);
+}
+
+test "render is idempotent even when reserve_rows < 2 (hint silently dropped)" {
+    // When there's no room for the hint row, painting must still
+    // be skipped — but the "last hint" tracking state has to
+    // advance so subsequent `render` calls become true no-ops.
+    // Otherwise every tick re-emits the save/restore-cursor pair
+    // for nothing visible.
+    var b = StatusBar.init(24, 80, 1, .{}); // reserve_rows=1
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const first_end = w.end;
+
+    // Second call with same state → zero new bytes written.
+    // (idempotence even though the hint row is silently dropped.)
+    try b.render(&w);
+    try testing.expectEqual(first_end, w.end);
+}
+
+test "render guards against u16 underflow when rows < reserve_rows" {
+    // Pathological config: rows smaller than reserve_rows. The
+    // computation has to use `effectiveRows()` (which clamps) so
+    // the row math never underflows in u16 — without that guard,
+    // `rows - reserve_rows + 1` wraps to ~65000 and the emitted
+    // CUP escape lands on a nonsense row.
+    var b = StatusBar.init(2, 80, 5, .{}); // rows=2 < reserve_rows=5
+    b.setText("status");
+    b.setHint("explanation", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    // None of the wraparound row values should appear.
+    try testing.expect(std.mem.indexOf(u8, out, "65532") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "65533") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "65534") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "65535") == null);
+}
+
+test "render still paints hint when reserve_rows > rows (effectiveRows clamps)" {
+    // rows=3, reserve_rows=5 → effectiveRows=1, hint_row=2,
+    // status at rows=3. There IS room for the hint above the
+    // status row even though `rows < reserve_rows`; the previous
+    // `self.rows >= self.reserve_rows` guard would have dropped
+    // it. Pin that the new effectiveRows-based math actually
+    // paints something.
+    var b = StatusBar.init(3, 80, 5, .{});
+    b.setText("status");
+    b.setHint("hint here", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    // Status painted on row 3, hint painted on row 2.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[3;1H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[2;1H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "hint here") != null);
+}
+
+test "hint row is skipped when reserve_rows < 2 (no row above status)" {
+    var b = StatusBar.init(24, 80, 1, .{});
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "explanation") == null);
+}
+
+test "clearHint forces a repaint that erases the hint row" {
+    var b = StatusBar.init(24, 80, 2, .{});
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const first_end = w.end;
+    b.clearHint();
+    try b.render(&w);
+    const second = buf[first_end..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, second, "\x1B[23;1H") != null); // erase hint row
+    try testing.expect(std.mem.indexOf(u8, second, "explanation") == null);
+}
+
+test "expired hint is dropped on the next render" {
+    var b = StatusBar.init(24, 80, 2, .{});
+    b.setText("atty");
+    b.setHint("flash", 5_000);
+    b.hint_until_ms = 0;
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+
+    try testing.expectEqual(@as(usize, 0), b.hint_len);
+}
+
+test "setError paints with error_style + warning glyph, hint suppressed" {
+    var b = StatusBar.initWithError(24, 80, 2, .{ .dim = true }, .{ .dim = true, .fg = 1 });
+    b.setText("atty");
+    b.setHint("an explanation", 5_000);
+    b.setError("HTTP 500", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    // Warning glyph (U+26A0) UTF-8 = 0xE2 0x9A 0xA0.
+    try testing.expect(std.mem.indexOf(u8, out, "\xE2\x9A\xA0") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "HTTP 500") != null);
+    // Error wins precedence; hint text must NOT be on screen while
+    // the error is active.
+    try testing.expect(std.mem.indexOf(u8, out, "an explanation") == null);
+    // Style emits `\x1B[38;5;<n>m` for fg=1 (256-color form).
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[38;5;1m") != null);
+}
+
+test "error expiry falls back to hint if hint is still active" {
+    var b = StatusBar.init(24, 80, 2, .{});
+    b.setText("atty");
+    b.setHint("the explanation", 60_000);
+    b.setError("HTTP 500", 5_000);
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const first_end = w.end;
+
+    // Force the error to expire without touching the hint.
+    b.error_until_ms = 0;
+    try b.render(&w);
+    const second = buf[first_end..w.end];
+
+    // After error expiry, render must paint the hint that was being
+    // suppressed.
+    try testing.expect(std.mem.indexOf(u8, second, "the explanation") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "HTTP 500") == null);
+    try testing.expectEqual(@as(usize, 0), b.error_len);
 }
 
 test "expired transient is dropped on the next render" {

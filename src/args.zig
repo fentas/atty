@@ -27,7 +27,29 @@ pub const ParseOutcome = union(enum) {
     help,
     version,
     unknown_flag: []const u8,
+    /// `atty init [shell]` — print the shell-integration snippet
+    /// to stdout and exit. Used as `eval "$(atty init bash)"` from
+    /// the user's `.bashrc` / `.zshrc`. The optional shell argument
+    /// is preserved in the snippet's `exec atty <shell>` so the
+    /// re-exec runs the same shell the user named — important when
+    /// `$SHELL` doesn't match the .{bash,zsh}rc that's evaluating
+    /// us. Empty string = no shell given, snippet emits bare `exec
+    /// atty` (which falls back to $SHELL at atty's end).
+    ///
+    /// **Ownership**: the payload is allocator-owned (duped from
+    /// the caller's argv to match the contract of `.ok.positional`).
+    /// Free with `freePrintInit(allocator, shell)` when you're
+    /// done. `main.zig` skips the free because it exits immediately
+    /// after emitting the snippet; tests must free explicitly.
+    print_init: []const u8,
 };
+
+/// Free the allocator-owned shell string carried by `.print_init`.
+/// Safe to call with the empty default (no-op when the slice is
+/// zero-length and `&.{}`-backed; otherwise frees normally).
+pub fn freePrintInit(allocator: std.mem.Allocator, shell: []const u8) void {
+    if (shell.len > 0) allocator.free(shell);
+}
 
 pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutcome {
     var positional: std.ArrayList([]const u8) = .empty;
@@ -38,7 +60,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
 
     var done_with_flags = false;
 
-    for (args) |a| {
+    for (args, 0..) |a, i| {
         if (done_with_flags) {
             // Once we've started collecting the spawned command, every
             // subsequent token is part of it — flags included
@@ -59,12 +81,59 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
         if (a.len > 0 and a[0] == '-') {
             return .{ .unknown_flag = a };
         }
+        // Special-case the `init` subcommand: `atty init [shell]`
+        // prints the shell-integration snippet to stdout. Has to
+        // come *before* we treat the first positional as a shell
+        // name — otherwise it'd be interpreted as "spawn `init` as
+        // the shell." A user who genuinely has a shell binary
+        // named `init` can still reach it via `atty -- init`.
+        // The next token (if any) names the shell so the emitted
+        // snippet can do `exec atty <shell>` and match the rc file
+        // it's being eval'd from. Duped from the caller's argv so
+        // ownership is consistent with `.ok.positional` and
+        // independent of argv lifetime; see `freePrintInit`.
+        if (std.mem.eql(u8, a, "init") and positional.items.len == 0) {
+            for (positional.items) |s| allocator.free(s);
+            positional.deinit(allocator);
+            const shell_name: []const u8 = if (i + 1 < args.len)
+                try allocator.dupe(u8, args[i + 1])
+            else
+                "";
+            return .{ .print_init = shell_name };
+        }
         // First positional ends flag parsing.
         try positional.append(allocator, try allocator.dupe(u8, a));
         done_with_flags = true;
     }
 
     return .{ .ok = .{ .positional = try positional.toOwnedSlice(allocator) } };
+}
+
+/// Restrict the shell argument from `atty init <shell>` to a small
+/// allowlist character set before main.zig pastes it into the
+/// emitted `eval`'d snippet. ASCII letters (both cases), digits,
+/// `_`, `-` only; max 32 bytes; MUST NOT start with `-`. Anything
+/// else (spaces, semicolons, quotes, backticks, `$`, …) flunks
+/// and the caller falls back to the no-shell form. Shell-
+/// injection defence in depth — the typical caller passes
+/// "bash" / "zsh", which both pass.
+///
+/// The no-leading-`-` rule matters because the token ends up
+/// pasted into `exec atty <shell>` unquoted. A leading-dash value
+/// like `-h` would otherwise turn into an atty flag rather than
+/// a shell name and atty's argv parser would print --help and
+/// exit, breaking the interactive shell.
+pub fn isSafeShellName(s: []const u8) bool {
+    if (s.len == 0 or s.len > 32) return false;
+    if (s[0] == '-') return false;
+    for (s) |b| {
+        const ok = (b >= 'a' and b <= 'z') or
+            (b >= 'A' and b <= 'Z') or
+            (b >= '0' and b <= '9') or
+            b == '_' or b == '-';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 // ===========================================================================
@@ -123,6 +192,89 @@ test "parseArgv surfaces unknown flags before parsing positionals" {
         .unknown_flag => |f| try testing.expectEqualStrings("-x", f),
         else => return error.TestFailed,
     }
+}
+
+test "parseArgv: `init` is a subcommand that prints integration snippet" {
+    // `atty init` yields .print_init with empty shell. `atty init
+    // bash` carries the shell name through so the snippet's
+    // `exec atty <shell>` matches the rc that's eval'ing it. The
+    // payload is allocator-owned (duped) so tests must call
+    // `freePrintInit` to keep the leak detector happy.
+    const got1 = try parseArgv(testing.allocator, &.{"init"});
+    defer freePrintInit(testing.allocator, got1.print_init);
+    try testing.expect(got1 == .print_init);
+    try testing.expectEqualStrings("", got1.print_init);
+
+    const got2 = try parseArgv(testing.allocator, &.{ "init", "bash" });
+    defer freePrintInit(testing.allocator, got2.print_init);
+    try testing.expect(got2 == .print_init);
+    try testing.expectEqualStrings("bash", got2.print_init);
+
+    const got3 = try parseArgv(testing.allocator, &.{ "init", "zsh" });
+    defer freePrintInit(testing.allocator, got3.print_init);
+    try testing.expect(got3 == .print_init);
+    try testing.expectEqualStrings("zsh", got3.print_init);
+}
+
+test "parseArgv: `--` escape lets a user reach a real shell named `init`" {
+    // Edge case — if someone genuinely has a shell binary called
+    // `init`, `atty -- init` must spawn it instead of printing
+    // the snippet.
+    const got = try parseArgv(testing.allocator, &.{ "--", "init" });
+    try testing.expectEqual(@as(usize, 1), got.ok.positional.len);
+    try testing.expectEqualStrings("init", got.ok.positional[0]);
+    freeOk(testing.allocator, got.ok);
+}
+
+test "isSafeShellName accepts the well-known shells" {
+    try testing.expect(isSafeShellName("bash"));
+    try testing.expect(isSafeShellName("zsh"));
+    try testing.expect(isSafeShellName("dash"));
+    try testing.expect(isSafeShellName("sh"));
+    try testing.expect(isSafeShellName("fish"));
+    try testing.expect(isSafeShellName("nu"));
+    // Hyphens and digits in the middle are fine — `bash-5.2-fork`
+    // and `zsh5` are realistic shell binary names; the latter
+    // is allowed (only specific chars are blocked).
+    try testing.expect(isSafeShellName("bash-fork"));
+    try testing.expect(isSafeShellName("zsh5"));
+}
+
+test "isSafeShellName rejects shell-injection primitives (security)" {
+    // The shell name from argv ends up unquoted inside an eval'd
+    // snippet. Any character with a special meaning in /bin/sh
+    // must be rejected so an attacker can't escape the
+    // `exec atty <token>` context.
+    try testing.expect(!isSafeShellName(""));
+    try testing.expect(!isSafeShellName("; rm -rf /"));
+    try testing.expect(!isSafeShellName("bash; echo pwned"));
+    try testing.expect(!isSafeShellName("$(rm -rf ~)"));
+    try testing.expect(!isSafeShellName("`whoami`"));
+    try testing.expect(!isSafeShellName("'; evil; '"));
+    try testing.expect(!isSafeShellName("bash space"));
+    // Path-laden shell names also flunk — the test below pins
+    // that. Users who genuinely need `/usr/bin/zsh` should use
+    // `atty init` (no arg), which emits `exec atty` and falls
+    // back to `$SHELL` at atty's end.
+    try testing.expect(!isSafeShellName("/bin/bash"));
+    try testing.expect(!isSafeShellName("./shell"));
+    // Length cap — keep the allowlist tight.
+    var long_buf: [33]u8 = .{'a'} ** 33;
+    try testing.expect(!isSafeShellName(&long_buf));
+}
+
+test "isSafeShellName rejects leading dash — would parse as an atty flag" {
+    // `atty init -h` would otherwise emit `exec atty -h`, which
+    // atty's argv parser interprets as --help → atty prints usage
+    // and exits, breaking the interactive shell that ran the
+    // snippet. The leading-`-` rule blocks this even though all
+    // the characters individually pass the allowlist.
+    try testing.expect(!isSafeShellName("-h"));
+    try testing.expect(!isSafeShellName("-V"));
+    try testing.expect(!isSafeShellName("--help"));
+    try testing.expect(!isSafeShellName("-bash"));
+    // Mid-name `-` still allowed — e.g. `bash-fork`.
+    try testing.expect(isSafeShellName("bash-fork"));
 }
 
 test "parseArgv: a known atty flag in the spawned-command tail is preserved, not consumed" {

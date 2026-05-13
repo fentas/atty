@@ -5,8 +5,8 @@
 //! subset of:
 //!
 //!     pub const Runtime  : type
-//!     pub fn   attach    (allocator) !Runtime
-//!     pub fn   detach    (rt: *Runtime) void
+//!     pub fn   attach    (allocator: std.mem.Allocator, io: std.Io) !Runtime
+//!     pub fn   detach    (rt: *Runtime, io: std.Io) void
 //!     pub fn   onInput   (rt: *Runtime, ctx: *Context, input: []const u8) !Action
 //!     pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 //!     pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
@@ -15,6 +15,9 @@
 //!     pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub fn   provideGhostList(rt: *Runtime, ctx: *Context) !?[]const []const u8
 //!     pub fn   pollShellInput(rt: *Runtime, ctx: *Context) !?[]const u8
+//!     pub fn   provideHintText(rt: *Runtime, ctx: *Context) !?[]const u8
+//!     pub fn   provideErrorText(rt: *Runtime, ctx: *Context) !?[]const u8
+//!     pub fn   provideTermBytes(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub const name: []const u8                          // optional, for logs
 //!
@@ -44,6 +47,15 @@ pub const Action = union(enum) {
     /// must live until the proxy has written it to the PTY (typically:
     /// owned by the module itself, or by `ctx.scratch`).
     replace: []const u8,
+    /// Like `replace`, but ALSO commits the original (pre-replace)
+    /// line to history. Used by modules that intercept Enter to do
+    /// something custom but still want atuin / history etc. to
+    /// record what the user typed — e.g. the LLM module replaces
+    /// `#: list files\n` with Ctrl+U (kills the readline buffer)
+    /// while telling the proxy to fire `dispatchLineCommit` on the
+    /// pre-Ctrl+U typed line so the prompt lands in history and
+    /// becomes a ghost suggestion next time.
+    replace_commit: []const u8,
 };
 
 /// Context passed to every hook. Pointers, not copies — the dispatcher

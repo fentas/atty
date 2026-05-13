@@ -117,7 +117,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var statusbar: ?StatusBar = null;
     if (args.is_tty and config.statusbar.enabled) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            statusbar = StatusBar.init(s.rows, s.cols, config.statusbar.reserve_rows, config.statusbar.style);
+            statusbar = StatusBar.initFull(
+                s.rows,
+                s.cols,
+                config.statusbar.reserve_rows,
+                config.statusbar.style,
+                config.statusbar.error_style,
+                config.statusbar.hint_style,
+            );
         } else |_| {}
     }
 
@@ -257,6 +264,40 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     // perspective.
                     _ = line_state.applyInput(bytes);
                     writeAll(pty.master, bytes) catch {};
+                }
+            }
+            // One-shot hint / error surfaces — a module just
+            // produced text it wants the user to see (LLM module
+            // after injecting a command, or after a failure). Both
+            // paint into the same row above the status text but
+            // use distinct styles: errors render in `error_style`
+            // (muted-red + ⚠) and take precedence; hints render in
+            // `hint_style` (dim italic by default) and resurface
+            // once any active error expires. TTLs are independent
+            // — setting either to 0 disables that surface.
+            if (statusbar) |*sb| {
+                if (config.statusbar.hint_ttl_ms > 0) {
+                    if (D.gatherHintText(&runtimes, &ctx) catch null) |hint_text| {
+                        sb.setHint(hint_text, config.statusbar.hint_ttl_ms);
+                    }
+                }
+                if (config.statusbar.error_ttl_ms > 0) {
+                    if (D.gatherErrorText(&runtimes, &ctx) catch null) |err_text| {
+                        sb.setError(err_text, config.statusbar.error_ttl_ms);
+                    }
+                }
+            }
+            // Outer-terminal byte stream — modules can push raw
+            // OSC sequences (cursor colour transitions, title
+            // updates, …) to the user's stdout. NOT routed through
+            // pty.master because these are user-terminal concerns
+            // the child shell shouldn't see. Gated on `is_tty` so
+            // a non-TTY invocation (CI, piped/redirected stdout,
+            // capture-the-binary integration tests) doesn't bleed
+            // escape sequences into the captured stream.
+            if (args.is_tty) {
+                if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                    if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
                 }
             }
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
@@ -428,6 +469,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     .forward => try writeAll(pty.master, input),
                     .swallow => {},
                     .replace => |bytes| try writeAll(pty.master, bytes),
+                    .replace_commit => |bytes| try writeAll(pty.master, bytes),
                 }
 
                 // Fire onLineCommit if Enter was pressed during this read
@@ -440,10 +482,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // (guardrail's `.block` swaps the Enter for `\x15`).
                 // Recording a commit the shell didn't run would be a
                 // lie + would feed history the dangerous line.
+                //
+                // `.replace_commit` opts back in to the commit even
+                // when the replacement doesn't contain Enter — used
+                // by the LLM module so `#: <prompt>` lines land in
+                // atuin / history despite Ctrl+U eating the line.
+                // Still keyed on the ORIGINAL input containing Enter,
+                // not unconditionally true: a misbehaving module
+                // returning `.replace_commit` on a non-Enter
+                // keystroke must not be able to force a spurious
+                // commit. The behaviour difference vs. plain
+                // `.replace` is only that we look at the original
+                // bytes (not the replacement) for the Enter test.
                 const shell_saw_enter = switch (action) {
                     .forward => containsEnter(input),
                     .swallow => false,
                     .replace => |bytes| containsEnter(bytes),
+                    .replace_commit => containsEnter(input),
                 };
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';

@@ -48,19 +48,72 @@ pub const Config = struct {
     /// Shell name for the user-prompt template. `null` → derive
     /// from `$SHELL` basename at attach time.
     shell: ?[]const u8 = null,
-    /// Env-var name holding the API base URL. Read at attach.
+    /// Hardcoded API base URL — wins over both env vars when
+    /// non-empty. Use this when you want a stable endpoint baked
+    /// into your config and don't want to depend on shell env
+    /// state (atty inherits env at fork time, so a misconfigured
+    /// `.bashrc` can leave the module inert even though the
+    /// endpoint is reachable). The string is used verbatim except
+    /// for the trailing-slash normalisation `doRequest` applies
+    /// before appending `/chat/completions`. Empty default = "use
+    /// env vars below".
+    api_base: []const u8 = "",
+    /// Env-var name holding the API base URL. Read at attach,
+    /// consulted only when `api_base` is empty.
     api_base_env: []const u8 = "LLM_API_BASE",
     /// Fallback env-var (typical Ollama setup). When this is read
-    /// AND it doesn't already end in `/v1`, we append it.
+    /// AND it doesn't already end in `/v1`, we append it. Only
+    /// consulted when both `api_base` and `$api_base_env` are
+    /// empty.
     api_base_fallback_env: []const u8 = "OLLAMA_HOST",
     /// Env-var holding the API key. Optional — when unset we send
     /// no `Authorization` header (local servers usually accept
     /// unauthenticated requests).
     api_key_env: []const u8 = "LLM_API_KEY",
-    /// System-role message. Aims at "one command, no explanation."
-    /// Override to tune for your model's idiosyncrasies.
-    system_prompt: []const u8 =
-        "You are an expert shell user. Given a natural-language description, return EXACTLY ONE shell command that performs the task. Output ONLY the command on a single line. No markdown code fences. No explanation. No prefix or suffix text.",
+    /// When true, ask the model for a one-line explanation followed
+    /// by the command in a fenced block. atty surfaces the
+    /// explanation in the statusbar's hint row while the command
+    /// is injected for review. Drives `system_prompt`'s default.
+    /// Disable for terse single-command responses (matches the
+    /// pre-explanation behaviour).
+    with_explanation: bool = true,
+    /// System-role message. The default depends on
+    /// `with_explanation`: with → "one-line explanation + fenced
+    /// command"; without → "exactly one command, no extras."
+    /// Override to tune for your model's idiosyncrasies. When you
+    /// override AND set `with_explanation = false`, also drop the
+    /// fence/explanation guidance from your prompt or atty will
+    /// happily render whatever prose it sees in the hint row.
+    system_prompt: []const u8 = "",
+    /// Environment variables exposed to the model alongside the
+    /// user's prompt. Each named var is read at attach time and
+    /// (if set, non-empty) joined into a one-line `KEY=value`
+    /// context block appended to the user message. Empty default
+    /// = no context. `PATH_BASE` is the canonical example — a
+    /// project's "what does this user mean by 'here'" anchor.
+    context_env_vars: []const []const u8 = &.{},
+    /// When true, change the terminal cursor's colour while the
+    /// user is typing a prompt that starts with `prefix`. atty
+    /// emits OSC 12 (set cursor colour) on transition into match,
+    /// OSC 112 (reset to default) on transition out. Reliable
+    /// signal that doesn't depend on knowing the prompt's column.
+    /// All modern terminals honour OSC 12 (Ghostty, kitty, iTerm,
+    /// VS Code's terminal, WezTerm).
+    prefix_signal_cursor: bool = true,
+    /// Cursor colour to set while the prefix is matched. Accepted
+    /// formats follow OSC 12: a named colour (`cyan`, `lightblue`,
+    /// …) or `#RRGGBB` / `rgb:RR/GG/BB`. Whatever your terminal
+    /// understands.
+    prefix_signal_cursor_color: []const u8 = "cyan",
+    /// When true, the LLM module's `statusText` returns
+    /// `prefix_signal_status_text` while the prefix is matched
+    /// (in addition to the existing `🧠 thinking…` indicator
+    /// during in-flight requests). Visible in the bottom status
+    /// bar — secondary signal alongside the cursor colour.
+    prefix_signal_status: bool = true,
+    /// Status-bar text shown while the prefix is matched. Defaults
+    /// to a sparkle so it pops against the bar's other segments.
+    prefix_signal_status_text: []const u8 = "\u{2728} prompt",
     /// Per-request timeout in ms. Stored for future use; not yet wired
     /// to the HTTP client — requests may block indefinitely on a slow
     /// or unreachable endpoint until the OS TCP timeout fires.
@@ -78,6 +131,26 @@ pub fn configure(comptime cfg: Config) type {
     return struct {
         pub const name = "llm";
         pub const config = cfg;
+
+        /// Comptime-resolved system prompt. Honours an explicit
+        /// `Config.system_prompt` override; otherwise picks the
+        /// appropriate canned prompt for the with_explanation flag.
+        const effective_system_prompt: []const u8 = if (cfg.system_prompt.len > 0)
+            cfg.system_prompt
+        else if (cfg.with_explanation)
+            "You are an expert shell user. Given a natural-language description, reply with: (1) a SINGLE short sentence explaining what the command does, then a newline, then (2) a fenced block (```) containing EXACTLY ONE shell command on one line. Nothing else. No language tag on the fence. No prose after the closing fence."
+        else
+            "You are an expert shell user. Given a natural-language description, return EXACTLY ONE shell command that performs the task. Output ONLY the command on a single line. No markdown code fences. No explanation. No prefix or suffix text.";
+
+        /// Comptime-built notification for inert mode. Mentions the
+        /// configured env-var names (`cfg.api_base_env` /
+        /// `api_base_fallback_env`) so users who renamed them see
+        /// THEIR names rather than the upstream defaults, plus a
+        /// hint to use the static `Config.api_base` if they'd
+        /// rather skip env-var resolution entirely.
+        const inert_error_msg: []const u8 = "no endpoint set — export $" ++
+            cfg.api_base_env ++ " / $" ++ cfg.api_base_fallback_env ++
+            ", or set Config.api_base in config.zig";
 
         const Shared = struct {
             mutex: std.Io.Mutex = .init,
@@ -100,6 +173,24 @@ pub fn configure(comptime cfg: Config) type {
             /// `in_flight` in both cases.
             res_buf: [cfg.max_response_bytes]u8 = undefined,
             res_len: usize = 0,
+            /// Explanation text parsed from the response when
+            /// `with_explanation` is set. Surfaced via
+            /// `provideHintText` after pollShellInput consumes the
+            /// command. `explanation_len == 0` means "no
+            /// explanation parsed" (model didn't follow the format
+            /// or `with_explanation` is off).
+            explanation_buf: [512]u8 = undefined,
+            explanation_len: usize = 0,
+            /// Diagnostic message written by the worker when the
+            /// request fails (connect error, HTTP non-2xx,
+            /// unparseable response, or sanitiser stripped
+            /// everything). Surfaced via `provideErrorText` (the
+            /// muted-red + ⚠ notification slot, distinct from the
+            /// hint slot used for explanations) so the user sees
+            /// *why* the prompt produced no command. `error_len ==
+            /// 0` means "no error to report".
+            error_buf: [256]u8 = undefined,
+            error_len: usize = 0,
             /// Generation of the prompt this response is for.
             res_gen: u64 = 0,
             /// True when the worker has finished serving the
@@ -124,10 +215,35 @@ pub fn configure(comptime cfg: Config) type {
             api_key: []u8 = &.{},
             /// Resolved shell name (basename of $SHELL or cfg.shell).
             shell: []u8 = &.{},
+            /// Pre-built context line ("KEY=value, KEY2=value2") to
+            /// append to the user message. Empty when no
+            /// `context_env_vars` are configured or none of them
+            /// are set in the environment. Owned by the runtime.
+            context_blob: []u8 = &.{},
             /// Copy of the response surfaced via pollShellInput.
             /// Owned by the runtime; valid until the next poll.
             inject_buf: [cfg.max_response_bytes]u8 = undefined,
             inject_len: usize = 0,
+            /// Latched explanation waiting to be surfaced via the
+            /// next `provideHintText` call. One-shot: cleared on
+            /// read so the hint row isn't re-painted forever.
+            hint_buf: [512]u8 = undefined,
+            hint_len: usize = 0,
+            hint_pending: bool = false,
+            /// Latched error-style notification waiting to be
+            /// surfaced via the next `provideErrorText` call.
+            /// Separate from `hint_buf` because the two slots have
+            /// different styles + different precedence in the
+            /// statusbar (errors win when both are active).
+            err_buf: [512]u8 = undefined,
+            err_len: usize = 0,
+            err_pending: bool = false,
+            /// Tracks whether we've already pushed the OSC 12
+            /// cursor-colour change for the current prefix-typing
+            /// session. Transition-driven (only emit on edge changes)
+            /// so the terminal doesn't see redundant OSC traffic on
+            /// every tick.
+            cursor_signal_active: bool = false,
             /// True while a prompt is in flight.
             in_flight: bool = false,
         };
@@ -145,6 +261,8 @@ pub fn configure(comptime cfg: Config) type {
             errdefer allocator.free(api_key);
             const shell_name = try resolveShell(allocator);
             errdefer allocator.free(shell_name);
+            const context_blob = try resolveContextEnv(allocator);
+            errdefer allocator.free(context_blob);
 
             // Skip the worker thread entirely in inert mode. With
             // no endpoint we'll never call the worker, and onInput
@@ -153,7 +271,7 @@ pub fn configure(comptime cfg: Config) type {
             const thread: ?std.Thread = if (api_base.len == 0)
                 null
             else
-                try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name });
+                try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name, context_blob });
 
             return .{
                 .allocator = allocator,
@@ -163,6 +281,7 @@ pub fn configure(comptime cfg: Config) type {
                 .api_base = api_base,
                 .api_key = api_key,
                 .shell = shell_name,
+                .context_blob = context_blob,
             };
         }
 
@@ -181,11 +300,11 @@ pub fn configure(comptime cfg: Config) type {
                 // atty's exit for tens of seconds. The OS reaps
                 // the thread when the process exits; we deliberately
                 // leak the heap allocations the worker still
-                // references (shared / api_base / api_key / shell)
-                // because freeing them here is a use-after-free
-                // race. detach() is the documented escape hatch for
-                // exactly this "fire-and-forget at process exit"
-                // case.
+                // references (shared / api_base / api_key / shell /
+                // context_blob) because freeing them here is a
+                // use-after-free race. detach() is the documented
+                // escape hatch for exactly this "fire-and-forget at
+                // process exit" case.
                 t.detach();
                 return;
             }
@@ -195,18 +314,25 @@ pub fn configure(comptime cfg: Config) type {
             rt.allocator.free(rt.api_base);
             rt.allocator.free(rt.api_key);
             rt.allocator.free(rt.shell);
+            rt.allocator.free(rt.context_blob);
         }
 
         // ---- env / config helpers ----------------------------------------
 
         fn resolveApiBase(allocator: std.mem.Allocator) ![]u8 {
-            // Normalize a single trailing slash on either env path
-            // — `doRequest` appends `/chat/completions`, so a base
-            // ending in `/` would produce `…//chat/completions`,
-            // which some proxies/routers reject or normalize
-            // inconsistently. Strip exactly one slash; we don't
-            // want to collapse intentional multi-segment paths
-            // (e.g. `https://api.example.com/v1/proxy//routed`).
+            // Priority order: static cfg → primary env → fallback env
+            // (with /v1 suffixing for the Ollama path). Normalize a
+            // single trailing slash on each — `doRequest` appends
+            // `/chat/completions`, so a base ending in `/` would
+            // produce `…//chat/completions`, which some
+            // proxies/routers reject or normalize inconsistently.
+            // Strip exactly one slash; we don't want to collapse
+            // intentional multi-segment paths.
+            if (cfg.api_base.len > 0) {
+                const s = cfg.api_base;
+                const trimmed = if (s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
+                return allocator.dupe(u8, trimmed);
+            }
             if (envValue(cfg.api_base_env)) |s| {
                 const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
                 return allocator.dupe(u8, trimmed);
@@ -222,6 +348,55 @@ pub fn configure(comptime cfg: Config) type {
         fn resolveEnv(allocator: std.mem.Allocator, env_name: []const u8) ![]u8 {
             if (envValue(env_name)) |s| return allocator.dupe(u8, s);
             return allocator.dupe(u8, "");
+        }
+
+        /// Build the env-var context blob from `cfg.context_env_vars`.
+        /// Format: `KEY=value, KEY2=value2` — single line, comma-
+        /// separated, only entries whose env var is set and non-
+        /// empty are included. Returns an empty slice when no
+        /// matches are found so the worker can append-and-no-op.
+        fn resolveContextEnv(allocator: std.mem.Allocator) ![]u8 {
+            if (cfg.context_env_vars.len == 0) return allocator.dupe(u8, "");
+            var allocating: std.Io.Writer.Allocating = .init(allocator);
+            errdefer allocating.deinit();
+            var first = true;
+            for (cfg.context_env_vars) |env_name| {
+                const v = envValue(env_name) orelse continue;
+                if (!first) try allocating.writer.writeAll(", ");
+                first = false;
+                try allocating.writer.print("{s}=", .{env_name});
+                try writeSanitizedEnvValue(&allocating.writer, v);
+            }
+            return allocating.toOwnedSlice();
+        }
+
+        /// Write an env-var value into the context blob writer with
+        /// any whitespace / control bytes collapsed to a single
+        /// space. Env values can legally contain newlines, carriage
+        /// returns, tabs, NUL — without sanitisation a value with
+        /// `\n` would split the "one-line" context across multiple
+        /// lines in the JSON-encoded prompt body, confusing the
+        /// model and risking prompt-injection-shaped behaviours.
+        /// Per-value cap of 256 bytes after sanitisation; longer
+        /// values truncate with no ellipsis (the context is a
+        /// hint, not authoritative).
+        fn writeSanitizedEnvValue(w: *std.Io.Writer, v: []const u8) !void {
+            const max_per_value = 256;
+            var written: usize = 0;
+            var last_was_space = false;
+            for (v) |b| {
+                if (written >= max_per_value) break;
+                if (b < 0x20 or b == 0x7F or b == ' ' or b == '\t' or b == '\r' or b == '\n') {
+                    if (last_was_space) continue;
+                    try w.writeByte(' ');
+                    written += 1;
+                    last_was_space = true;
+                    continue;
+                }
+                try w.writeByte(b);
+                written += 1;
+                last_was_space = false;
+            }
         }
 
         fn resolveShell(allocator: std.mem.Allocator) ![]u8 {
@@ -262,7 +437,24 @@ pub fn configure(comptime cfg: Config) type {
 
             const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
             if (body.len == 0 or body.len > cfg.max_prompt_bytes) return .forward;
-            if (rt.api_base.len == 0) return .forward; // inert without endpoint
+            if (rt.api_base.len == 0) {
+                // Inert mode — the user has the module configured but
+                // no endpoint resolved at attach time. Silently
+                // forwarding looks like a broken feature ("nothing
+                // happens"), so latch an error notification that the
+                // next `provideErrorText` tick will surface above
+                // the status bar (muted red + ⚠ so it pops). We
+                // still .forward so the typed `#: …` reaches the
+                // shell — bash/zsh treat it as a comment, no harm
+                // done, and the user doesn't lose what they typed.
+                //
+                // Message is comptime-built from the configured env
+                // var names + a hint about `Config.api_base` so
+                // users who renamed `api_base_env` see THEIR names,
+                // not the literal `$LLM_API_BASE`.
+                latchErr(rt, inert_error_msg);
+                return .forward;
+            }
 
             // Hand the prompt to the worker. Bump `req_gen` so a
             // late-arriving response from a previous in-flight
@@ -284,12 +476,18 @@ pub fn configure(comptime cfg: Config) type {
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
 
-            // `.replace = "\x15"` swaps the Enter for Ctrl+U
+            // `.replace_commit = "\x15"` swaps the Enter for Ctrl+U
             // (unix-line-discard). readline kills the typed
             // `#: …` immediately — the user sees the line vanish
             // while we wait. The LLM response will be injected
             // via pollShellInput once it arrives.
-            return .{ .replace = "\x15" };
+            //
+            // `_commit` (vs plain `.replace`) tells the proxy to
+            // ALSO fire onLineCommit on the typed `#: <prompt>` so
+            // atuin / history record it. That gives ghost-suggest
+            // the prompt next time the user starts typing `#: l…`
+            // — same recall power as any normal command.
+            return .{ .replace_commit = "\x15" };
         }
 
         pub fn pollShellInput(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -305,24 +503,134 @@ pub fn configure(comptime cfg: Config) type {
             if (rt.shared.res_gen != rt.shared.req_gen) {
                 rt.shared.res_done = false;
                 rt.shared.res_len = 0;
+                rt.shared.explanation_len = 0;
+                rt.shared.error_len = 0;
                 return null;
             }
             const n = rt.shared.res_len;
             @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
             rt.inject_len = n;
+
+            // Latch the explanation for provideHintText to surface
+            // on the next tick. Only do so when there's actually a
+            // command to inject — a failed request shouldn't paint
+            // a stale or partial hint.
+            const exp_n = rt.shared.explanation_len;
+            if (n > 0 and exp_n > 0) {
+                @memcpy(rt.hint_buf[0..exp_n], rt.shared.explanation_buf[0..exp_n]);
+                rt.hint_len = exp_n;
+                rt.hint_pending = true;
+            }
+
+            // Failure path: nothing to inject, but the worker may
+            // have latched a diagnostic. Surface it via the *error*
+            // slot (not the hint slot) so it renders in muted red
+            // with the ⚠ glyph — visually distinct from successful
+            // explanations so the user reads it as a notification.
+            const err_n = rt.shared.error_len;
+            if (n == 0 and err_n > 0) {
+                const copy_n = @min(err_n, rt.err_buf.len);
+                @memcpy(rt.err_buf[0..copy_n], rt.shared.error_buf[0..copy_n]);
+                rt.err_len = copy_n;
+                rt.err_pending = true;
+            }
+
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
+            rt.shared.explanation_len = 0;
+            rt.shared.error_len = 0;
             rt.in_flight = false;
             // n == 0 → worker signalled failure (network error,
             // non-2xx, parse failure). Nothing to inject; the
             // statusbar already cleared via `in_flight = false`.
+            // The error hint above is what the user will see.
             if (n == 0) return null;
             return rt.inject_buf[0..rt.inject_len];
         }
 
-        pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+        /// Synchronously latch a hint string on the Runtime so the
+        /// next `provideHintText` tick surfaces it. For informational
+        /// content (LLM explanation of the injected command).
+        fn latchHint(rt: *Runtime, msg: []const u8) void {
+            const n = @min(msg.len, rt.hint_buf.len);
+            @memcpy(rt.hint_buf[0..n], msg[0..n]);
+            rt.hint_len = n;
+            rt.hint_pending = true;
+        }
+
+        /// Synchronously latch an error string on the Runtime so the
+        /// next `provideErrorText` tick surfaces it (muted red + ⚠
+        /// in the statusbar). Used by the onInput inert path (no
+        /// worker involved) and by the test scaffolding.
+        fn latchErr(rt: *Runtime, msg: []const u8) void {
+            const n = @min(msg.len, rt.err_buf.len);
+            @memcpy(rt.err_buf[0..n], msg[0..n]);
+            rt.err_len = n;
+            rt.err_pending = true;
+        }
+
+        /// One-shot hint surface: returns the latched explanation
+        /// the first time it's called after a fresh response, then
+        /// returns null until the next response arrives. Cleared
+        /// on read so the hint row's TTL governs how long the
+        /// text stays visible — the module doesn't keep
+        /// re-painting.
+        pub fn provideHintText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             _ = ctx;
+            if (!rt.hint_pending) return null;
+            rt.hint_pending = false;
+            return rt.hint_buf[0..rt.hint_len];
+        }
+
+        /// Sibling of `provideHintText` — surfaces a latched error
+        /// notification (muted-red row above the status bar). Same
+        /// one-shot semantics as `provideHintText`.
+        pub fn provideErrorText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            _ = ctx;
+            if (!rt.err_pending) return null;
+            rt.err_pending = false;
+            return rt.err_buf[0..rt.err_len];
+        }
+
+        pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             if (rt.in_flight) return "\u{1F9E0} thinking…";
+            // Show a signal while the user is mid-typing a prompt
+            // whose first bytes match the configured prefix. Helps
+            // confirm "atty saw this is for the LLM" before the
+            // user even hits Enter. Suppressed during in-flight so
+            // we don't fight the thinking… spinner for real estate.
+            if (cfg.prefix_signal_status) {
+                const line = ctx.line.current();
+                if (std.mem.startsWith(u8, line, cfg.prefix)) {
+                    return cfg.prefix_signal_status_text;
+                }
+            }
+            return null;
+        }
+
+        // Pre-built OSC escape strings; comptime-baked from the
+        // configured colour so we don't allocate per tick.
+        const cursor_set_seq = "\x1B]12;" ++ cfg.prefix_signal_cursor_color ++ "\x07";
+        const cursor_reset_seq = "\x1B]112\x07";
+
+        /// Bytes to write to the user's outer terminal (NOT the
+        /// pty.master, which goes to the shell). Used here for OSC
+        /// 12 / 112 cursor-colour transitions while the user is
+        /// typing a prefix-matched prompt. One-shot per transition
+        /// — we only emit on edges so the terminal doesn't see
+        /// redundant OSC traffic on every tick.
+        pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            if (!cfg.prefix_signal_cursor) return null;
+            const line = ctx.line.current();
+            const matches = std.mem.startsWith(u8, line, cfg.prefix);
+            if (matches and !rt.cursor_signal_active) {
+                rt.cursor_signal_active = true;
+                return cursor_set_seq;
+            }
+            if (!matches and rt.cursor_signal_active) {
+                rt.cursor_signal_active = false;
+                return cursor_reset_seq;
+            }
             return null;
         }
 
@@ -335,6 +643,7 @@ pub fn configure(comptime cfg: Config) type {
             api_base: []const u8,
             api_key: []const u8,
             shell_name: []const u8,
+            context_blob: []const u8,
         ) void {
             var prompt_local: [cfg.max_prompt_bytes]u8 = undefined;
             var prompt_len: usize = 0;
@@ -357,15 +666,24 @@ pub fn configure(comptime cfg: Config) type {
                 // Fire the HTTP request OUTSIDE the lock — it may
                 // block for many seconds.
                 var response_buf: [cfg.max_response_bytes]u8 = undefined;
-                const response_len = doRequest(
+                var explanation_local: [512]u8 = undefined;
+                var error_local: [256]u8 = undefined;
+                const result = doRequest(
                     gpa,
                     io,
                     api_base,
                     api_key,
                     shell_name,
+                    context_blob,
                     prompt_local[0..prompt_len],
                     &response_buf,
-                ) catch 0;
+                    &explanation_local,
+                    &error_local,
+                ) catch RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(&error_local, "internal error in worker"),
+                };
 
                 // Signal completion regardless of outcome — proxy
                 // needs to clear `in_flight` so the 🧠 thinking…
@@ -373,11 +691,26 @@ pub fn configure(comptime cfg: Config) type {
                 // The proxy filters stale-generation responses
                 // separately.
                 shared.mutex.lockUncancelable(io);
-                if (response_len > 0) {
-                    @memcpy(shared.res_buf[0..response_len], response_buf[0..response_len]);
-                    shared.res_len = response_len;
+                if (result.cmd_len > 0) {
+                    @memcpy(shared.res_buf[0..result.cmd_len], response_buf[0..result.cmd_len]);
+                    shared.res_len = result.cmd_len;
+                    if (result.exp_len > 0) {
+                        @memcpy(shared.explanation_buf[0..result.exp_len], explanation_local[0..result.exp_len]);
+                        shared.explanation_len = result.exp_len;
+                    } else {
+                        shared.explanation_len = 0;
+                    }
+                    shared.error_len = 0;
                 } else {
                     shared.res_len = 0;
+                    shared.explanation_len = 0;
+                    if (result.err_len > 0) {
+                        const en = @min(result.err_len, shared.error_buf.len);
+                        @memcpy(shared.error_buf[0..en], error_local[0..en]);
+                        shared.error_len = en;
+                    } else {
+                        shared.error_len = 0;
+                    }
                 }
                 shared.res_gen = serving_gen;
                 shared.res_done = true;
@@ -385,24 +718,39 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
-        /// One HTTP round-trip. Returns the trimmed command from
-        /// `choices[0].message.content`, or 0 on any failure
-        /// (network error, parse error, HTTP non-2xx, empty body).
-        /// Failure mode is "user's typed line stays cleared, no
-        /// new command injected" — visible as nothing happening.
+        const RequestResult = struct { cmd_len: usize, exp_len: usize, err_len: usize = 0 };
+
+        /// Write a static string into `dst` and return how many
+        /// bytes were written (truncated to fit). Used to populate
+        /// error messages with stable literals.
+        fn writeStatic(dst: []u8, src: []const u8) usize {
+            const n = @min(src.len, dst.len);
+            @memcpy(dst[0..n], src[0..n]);
+            return n;
+        }
+
+        /// One HTTP round-trip. On success returns `cmd_len > 0`
+        /// and (when the model emitted one) `exp_len > 0`. On any
+        /// failure `cmd_len == 0` and `err_len > 0` with a
+        /// human-readable explanation written into `error_out`
+        /// (network error, HTTP non-2xx with status code,
+        /// unparseable response, sanitiser stripped everything).
         fn doRequest(
             gpa: std.mem.Allocator,
             io: std.Io,
             api_base: []const u8,
             api_key: []const u8,
             shell_name: []const u8,
+            context_blob: []const u8,
             prompt: []const u8,
             out: []u8,
-        ) !usize {
+            explanation_out: []u8,
+            error_out: []u8,
+        ) !RequestResult {
             const url = try std.fmt.allocPrint(gpa, "{s}/chat/completions", .{api_base});
             defer gpa.free(url);
 
-            const body = try buildRequestBody(gpa, cfg.model, cfg.system_prompt, shell_name, prompt);
+            const body = try buildRequestBody(gpa, cfg.model, effective_system_prompt, shell_name, context_blob, prompt);
             defer gpa.free(body);
 
             var auth_buf: [256]u8 = undefined;
@@ -422,7 +770,7 @@ pub fn configure(comptime cfg: Config) type {
             }
 
             var client: std.http.Client = .{ .allocator = gpa, .io = io };
-            defer client.deinit(io);
+            defer client.deinit();
 
             // Cap the response body at `max_response_bytes * 16`.
             // The JSON envelope around the message content is
@@ -437,17 +785,34 @@ pub fn configure(comptime cfg: Config) type {
             var response_buf: [response_cap]u8 = undefined;
             var response_writer: std.Io.Writer = .fixed(&response_buf);
 
-            const result = client.fetch(.{
+            const fetched = client.fetch(.{
                 .location = .{ .url = url },
                 .method = .POST,
                 .payload = body,
                 .extra_headers = headers_buf[0..headers_len],
                 .response_writer = &response_writer,
-            }) catch return 0;
+            }) catch return RequestResult{
+                .cmd_len = 0,
+                .exp_len = 0,
+                .err_len = writeStatic(error_out, "request failed (endpoint unreachable?)"),
+            };
 
-            if (@intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300) return 0;
+            const status = @intFromEnum(fetched.status);
+            if (status < 200 or status >= 300) {
+                const err_msg = std.fmt.bufPrint(error_out, "HTTP {d}", .{status}) catch
+                    error_out[0..writeStatic(error_out, "HTTP error")];
+                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_msg.len };
+            }
 
-            return extractCommand(response_buf[0..response_writer.end], out);
+            const extracted = extractResponse(response_buf[0..response_writer.end], out, explanation_out);
+            if (extracted.cmd_len == 0) {
+                return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "couldn't extract a command from the response"),
+                };
+            }
+            return RequestResult{ .cmd_len = extracted.cmd_len, .exp_len = extracted.explanation_len };
         }
 
         // ---- pure helpers (testable) -------------------------------------
@@ -459,6 +824,7 @@ pub fn configure(comptime cfg: Config) type {
             model: []const u8,
             system_prompt: []const u8,
             shell_name: []const u8,
+            context_blob: []const u8,
             prompt: []const u8,
         ) ![]u8 {
             var allocating: std.Io.Writer.Allocating = .init(allocator);
@@ -472,21 +838,35 @@ pub fn configure(comptime cfg: Config) type {
             try writer.writeAll("},{\"role\":\"user\",\"content\":");
 
             // allocPrint instead of a fixed buffer — `shell_name`
-            // comes from $SHELL / config and is not length-bounded.
-            // A pathological override (or a very long binary path
-            // if we ever stop basename-stripping) would overflow a
-            // `cfg.max_prompt_bytes + 64` buffer. Heap is fine —
-            // this is a one-shot build per request, off the hot path.
-            const user_msg = try std.fmt.allocPrint(
-                allocator,
-                "Generate a {s} command to: {s}",
-                .{ shell_name, prompt },
-            );
+            // and `context_blob` come from $SHELL / env config and
+            // are not length-bounded. A pathological override (or
+            // an unusually long env value) would overflow a fixed
+            // buffer. Heap is fine — this is a one-shot build per
+            // request, off the hot path.
+            const user_msg = if (context_blob.len > 0)
+                try std.fmt.allocPrint(
+                    allocator,
+                    "Generate a {s} command to: {s}\n\nContext: {s}",
+                    .{ shell_name, prompt, context_blob },
+                )
+            else
+                try std.fmt.allocPrint(
+                    allocator,
+                    "Generate a {s} command to: {s}",
+                    .{ shell_name, prompt },
+                );
             defer allocator.free(user_msg);
             try std.json.Stringify.encodeJsonString(user_msg, .{}, writer);
             try writer.writeAll("}],\"stream\":false}");
             return allocating.toOwnedSlice();
         }
+
+        /// Result of `extractResponse` — both halves of the model's
+        /// reply when configured to emit an explanation + command.
+        pub const ExtractedResponse = struct {
+            cmd_len: usize,
+            explanation_len: usize,
+        };
 
         /// Extract the assistant's command text from an OpenAI-style
         /// chat-completion JSON response. Strips surrounding markdown
@@ -494,6 +874,72 @@ pub fn configure(comptime cfg: Config) type {
         /// non-empty line. Returns bytes written to `out`, or 0 on
         /// parse failure / empty result.
         pub fn extractCommand(body: []const u8, out: []u8) usize {
+            var decoded_buf: [cfg.max_response_bytes]u8 = undefined;
+            const decoded_len = decodeContent(body, &decoded_buf);
+            if (decoded_len == 0) return 0;
+            return sanitizeCommand(decoded_buf[0..decoded_len], out);
+        }
+
+        /// Extract both the explanation (prose before the fence) and
+        /// the command (inside the fence) from a model reply that
+        /// uses the with-explanation format:
+        ///
+        ///     <one-line explanation>
+        ///     ```
+        ///     <command>
+        ///     ```
+        ///
+        /// When the model didn't follow the format (no fence), the
+        /// whole content is treated as the command and explanation
+        /// is empty. When the JSON content field is missing, both
+        /// lengths come back 0.
+        pub fn extractResponse(body: []const u8, cmd_out: []u8, explanation_out: []u8) ExtractedResponse {
+            var decoded_buf: [cfg.max_response_bytes]u8 = undefined;
+            const decoded_len = decodeContent(body, &decoded_buf);
+            if (decoded_len == 0) return .{ .cmd_len = 0, .explanation_len = 0 };
+            const decoded = decoded_buf[0..decoded_len];
+
+            // Look for an opening fence. The model may or may not
+            // prefix prose; if there's no fence we keep the old
+            // single-string behaviour.
+            const fence_open_idx = std.mem.indexOf(u8, decoded, "```") orelse {
+                return .{
+                    .cmd_len = sanitizeCommand(decoded, cmd_out),
+                    .explanation_len = 0,
+                };
+            };
+
+            // Inner content of the fence — skip the optional
+            // language tag (everything up to the first newline
+            // after the opening backticks). Bail to legacy mode
+            // if the fence isn't terminated.
+            const after_open = fence_open_idx + 3;
+            const inner_start = if (std.mem.indexOfScalar(u8, decoded[after_open..], '\n')) |nl|
+                after_open + nl + 1
+            else
+                after_open;
+            const fence_close_idx = std.mem.indexOfPos(u8, decoded, inner_start, "```") orelse {
+                return .{
+                    .cmd_len = sanitizeCommand(decoded, cmd_out),
+                    .explanation_len = 0,
+                };
+            };
+
+            const explanation_raw = std.mem.trim(u8, decoded[0..fence_open_idx], " \t\r\n");
+            const fence_body = decoded[inner_start..fence_close_idx];
+            return .{
+                .cmd_len = sanitizeCommand(fence_body, cmd_out),
+                .explanation_len = sanitizeExplanation(explanation_raw, explanation_out),
+            };
+        }
+
+        /// Decode the JSON `"content"` field of an OpenAI-style
+        /// chat-completion response into a flat byte buffer. Same
+        /// JSON-escape handling as the original extractCommand —
+        /// drops `\r` for security, decodes `\n` / `\t` / `\"` /
+        /// `\\` / `\/`, skips `\uXXXX` and other escapes. Returns 0
+        /// when the field is missing or the body is malformed.
+        fn decodeContent(body: []const u8, out: []u8) usize {
             // Minimal extraction: find the `"content"` key, then
             // hop over JSON whitespace + `:` + whitespace + `"`.
             // Robust JSON parsing would be nicer but std.json's
@@ -510,18 +956,13 @@ pub fn configure(comptime cfg: Config) type {
             while (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r')) i += 1;
             if (i >= body.len or body[i] != '"') return 0;
             i += 1;
-            var cmd_buf: [cfg.max_response_bytes]u8 = undefined;
-            var cmd_len: usize = 0;
+            var n: usize = 0;
             while (i < body.len) : (i += 1) {
                 const c = body[i];
                 if (c == '\\' and i + 1 < body.len) {
                     const e = body[i + 1];
                     switch (e) {
                         '"', '\\', '/', 'n', 't' => {
-                            // Decode common JSON escapes. \n stays
-                            // because the first-line-only sanitiser
-                            // below relies on the newline to find
-                            // the boundary.
                             const decoded: u8 = switch (e) {
                                 '"' => '"',
                                 '\\' => '\\',
@@ -530,9 +971,9 @@ pub fn configure(comptime cfg: Config) type {
                                 't' => '\t',
                                 else => unreachable,
                             };
-                            if (cmd_len < cmd_buf.len) {
-                                cmd_buf[cmd_len] = decoded;
-                                cmd_len += 1;
+                            if (n < out.len) {
+                                out[n] = decoded;
+                                n += 1;
                             }
                             i += 1;
                         },
@@ -551,7 +992,7 @@ pub fn configure(comptime cfg: Config) type {
                             // digits) cannot cause us to skip past
                             // the content boundary into the next
                             // field.
-                            i += 1; // consume the 'u'
+                            i += 1;
                             var k: usize = 0;
                             while (k < 4 and i + 1 < body.len) : (k += 1) {
                                 const h = body[i + 1];
@@ -559,18 +1000,122 @@ pub fn configure(comptime cfg: Config) type {
                                 i += 1;
                             }
                         },
-                        // Other escapes (\b, \f, …): drop entirely.
                         else => i += 1,
                     }
                     continue;
                 }
                 if (c == '"') break;
-                if (cmd_len < cmd_buf.len) {
-                    cmd_buf[cmd_len] = c;
-                    cmd_len += 1;
+                if (n < out.len) {
+                    out[n] = c;
+                    n += 1;
                 }
             }
-            return sanitizeCommand(cmd_buf[0..cmd_len], out);
+            return n;
+        }
+
+        /// Flatten prose to a single line, strip control bytes,
+        /// truncate to `out.len`. Multi-line explanations get
+        /// joined with a single space rather than dropping the
+        /// trailing lines — the hint row only fits one line but
+        /// the user gets the gist.
+        pub fn sanitizeExplanation(raw: []const u8, out: []u8) usize {
+            const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+            // Two-pass: first collapse whitespace + drop C0/DEL into
+            // a scratch buffer, then run the C1-aware UTF-8 stripper
+            // over that. We can't merge the passes because the
+            // whitespace collapsing needs to see the trimmed bytes
+            // before any sequence-boundary scanning, and the C1
+            // stripper needs to see all bytes (including legitimate
+            // UTF-8 continuations) to track sequence length.
+            // Splitting keeps each step simple and reuses the same
+            // C1 logic the command path is hardened with.
+            var scratch: [1024]u8 = undefined;
+            const scratch_cap = @min(scratch.len, out.len);
+            var s_n: usize = 0;
+            var last_was_space = false;
+            for (trimmed) |b| {
+                if (b == '\n' or b == '\r' or b == '\t' or b == ' ') {
+                    if (last_was_space) continue;
+                    if (s_n >= scratch_cap) break;
+                    scratch[s_n] = ' ';
+                    s_n += 1;
+                    last_was_space = true;
+                    continue;
+                }
+                // Drop C0 controls + DEL early. C1 stripping is
+                // delegated to `stripControlBytes` below so the
+                // logic stays in one place (defence in depth — a
+                // raw 0x9B byte would otherwise reach the terminal
+                // as CSI).
+                if (b < 0x20 or b == 0x7F) continue;
+                if (s_n >= scratch_cap) break;
+                scratch[s_n] = b;
+                s_n += 1;
+                last_was_space = false;
+            }
+            // Trim a trailing whitespace introduced by the join above.
+            while (s_n > 0 and scratch[s_n - 1] == ' ') s_n -= 1;
+
+            return stripControlBytes(scratch[0..s_n], out);
+        }
+
+        /// UTF-8-aware filter that drops:
+        ///   - C0 controls (< 0x20) and DEL (0x7F)
+        ///   - C1 controls U+0080..U+009F as raw bytes (Latin-1 /
+        ///     invalid-UTF-8 interpretation) AND as UTF-8 (`0xC2`
+        ///     followed by `0x80..0x9F`).
+        /// Legitimate UTF-8 multi-byte sequences pass through whole;
+        /// continuation bytes in `0x80..0xBF` that aren't standalone
+        /// are preserved (e.g. "ƒ" = `0xC6 0x92`, where 0x92 is a
+        /// continuation, not a C1 codepoint). Malformed / truncated
+        /// sequences drop just the bad lead byte and continue.
+        ///
+        /// Used by both `sanitizeCommand` (PTY-bound bytes) and
+        /// `sanitizeExplanation` (terminal-bound bytes) — both
+        /// destinations honour C1 controls, so both need the strip.
+        pub fn stripControlBytes(s: []const u8, out: []u8) usize {
+            var n: usize = 0;
+            var i: usize = 0;
+            while (i < s.len) {
+                const b = s[i];
+                if (b < 0x80) {
+                    if (b < 0x20 or b == 0x7F) {
+                        i += 1;
+                        continue;
+                    }
+                    if (n >= out.len) break;
+                    out[n] = b;
+                    n += 1;
+                    i += 1;
+                    continue;
+                }
+                const seq_len: usize = if (b >= 0xC2 and b <= 0xDF) 2 else if (b >= 0xE0 and b <= 0xEF) 3 else if (b >= 0xF0 and b <= 0xF4) 4 else 0;
+                if (seq_len == 0 or i + seq_len > s.len) {
+                    i += 1;
+                    continue;
+                }
+                if (seq_len == 2 and b == 0xC2 and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F) {
+                    i += 2;
+                    continue;
+                }
+                var ok = true;
+                var k: usize = 1;
+                while (k < seq_len) : (k += 1) {
+                    if (s[i + k] < 0x80 or s[i + k] > 0xBF) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    i += 1;
+                    continue;
+                }
+                if (n + seq_len > out.len) break;
+                @memcpy(out[n .. n + seq_len], s[i .. i + seq_len]);
+                n += seq_len;
+                i += seq_len;
+            }
+            return n;
         }
 
         /// Trim markdown fences (```bash … ```) + whitespace + take
@@ -602,66 +1147,10 @@ pub fn configure(comptime cfg: Config) type {
             // First line only.
             if (std.mem.indexOfScalar(u8, s, '\n')) |nl| s = s[0..nl];
             s = std.mem.trim(u8, s, " \t\r");
-            // Strip dangerous bytes:
-            //   - C0 controls (< 0x20) and DEL (0x7F)
-            //   - C1 controls U+0080..U+009F, both as raw 0x80..0x9F
-            //     (Latin-1 / 8-bit terminal interpretation) AND as
-            //     UTF-8 (0xC2 0x80..0x9F encodes U+0080..U+009F).
-            //     C1 includes CSI/DCS/OSC, so passing them through
-            //     would let an LLM response start a terminal escape
-            //     sequence the user never typed.
-            // Legitimate UTF-8 multi-byte characters pass through —
-            // we walk by sequence length to avoid mis-dropping
-            // continuation bytes (e.g. "ƒ" = 0xC6 0x92, where 0x92
-            // is a valid continuation, not a standalone C1).
-            var n: usize = 0;
-            var i: usize = 0;
-            while (i < s.len) {
-                const b = s[i];
-                if (b < 0x80) {
-                    if (b < 0x20 or b == 0x7F) {
-                        i += 1;
-                        continue;
-                    }
-                    if (n >= out.len) break;
-                    out[n] = b;
-                    n += 1;
-                    i += 1;
-                    continue;
-                }
-                // Multi-byte lead. Determine sequence length; 0xC2 +
-                // 0x80..0x9F is the UTF-8 encoding of a C1 control —
-                // drop the whole pair.
-                const seq_len: usize = if (b >= 0xC2 and b <= 0xDF) 2 else if (b >= 0xE0 and b <= 0xEF) 3 else if (b >= 0xF0 and b <= 0xF4) 4 else 0;
-                if (seq_len == 0 or i + seq_len > s.len) {
-                    // Invalid lead or truncated sequence — drop the
-                    // standalone byte rather than emit malformed UTF-8.
-                    i += 1;
-                    continue;
-                }
-                if (seq_len == 2 and b == 0xC2 and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F) {
-                    i += 2;
-                    continue;
-                }
-                // Validate continuation bytes.
-                var ok = true;
-                var k: usize = 1;
-                while (k < seq_len) : (k += 1) {
-                    if (s[i + k] < 0x80 or s[i + k] > 0xBF) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (!ok) {
-                    i += 1;
-                    continue;
-                }
-                if (n + seq_len > out.len) break;
-                @memcpy(out[n .. n + seq_len], s[i .. i + seq_len]);
-                n += seq_len;
-                i += seq_len;
-            }
-            return n;
+            // Same C0/C1/DEL-stripping byte walker that `sanitizeExplanation`
+            // uses — factored into `stripControlBytes` so the security
+            // logic lives in one place.
+            return stripControlBytes(s, out);
         }
     };
 }
@@ -671,6 +1160,7 @@ pub fn configure(comptime cfg: Config) type {
 // ===========================================================================
 
 const testing = std.testing;
+const test_io: std.Io = std.Io.failing;
 
 test "configure exposes the expected hooks" {
     const L = configure(.{});
@@ -682,7 +1172,7 @@ test "configure exposes the expected hooks" {
 
 test "buildRequestBody produces well-formed OpenAI chat-completion JSON" {
     const L = configure(.{ .model = "test-model" });
-    const body = try L.buildRequestBody(testing.allocator, "test-model", "be terse", "bash", "list zig files");
+    const body = try L.buildRequestBody(testing.allocator, "test-model", "be terse", "bash", "", "list zig files");
     defer testing.allocator.free(body);
 
     try testing.expect(std.mem.indexOf(u8, body, "\"model\":\"test-model\"") != null);
@@ -703,11 +1193,45 @@ test "buildRequestBody escapes user content correctly (quotes + backslashes)" {
         "m",
         "sys",
         "bash",
+        "",
         "echo \"hello\\world\"",
     );
     defer testing.allocator.free(body);
     try testing.expect(std.mem.indexOf(u8, body, "\\\"hello") != null);
     try testing.expect(std.mem.indexOf(u8, body, "\\\\world") != null);
+}
+
+test "buildRequestBody appends a context blob when provided" {
+    const L = configure(.{});
+    const body = try L.buildRequestBody(
+        testing.allocator,
+        "m",
+        "sys",
+        "bash",
+        "PATH_BASE=/opt/foo, PROJECT=acme",
+        "list files",
+    );
+    defer testing.allocator.free(body);
+    // The user message should now include "Context: …" after the
+    // task; the literal commas + paths must survive JSON encoding
+    // (commas are not escaped — `/` may be encoded as `\/` but
+    // we expect it bare since we don't request slash escapes).
+    try testing.expect(std.mem.indexOf(u8, body, "Generate a bash command to: list files") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "Context: PATH_BASE=/opt/foo, PROJECT=acme") != null);
+}
+
+test "buildRequestBody omits the context section entirely when blob is empty" {
+    const L = configure(.{});
+    const body = try L.buildRequestBody(
+        testing.allocator,
+        "m",
+        "sys",
+        "bash",
+        "",
+        "list files",
+    );
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "Context:") == null);
 }
 
 test "extractCommand pulls choices[0].message.content out of a chat response" {
@@ -881,4 +1405,640 @@ test "sanitizeCommand strips C1 control codepoints — terminal-escape injection
     // UTF-8 walker.
     const n5 = L.sanitizeCommand("café", &out);
     try testing.expectEqualStrings("café", out[0..n5]);
+}
+
+test "extractResponse splits explanation + fenced command" {
+    const L = configure(.{});
+    var cmd_out: [128]u8 = undefined;
+    var exp_out: [256]u8 = undefined;
+    // Compact JSON body with the explanation+fence format.
+    const body = "{\"choices\":[{\"message\":{\"content\":\"Lists files in long format.\\n```\\nls -la\\n```\"}}]}";
+    const r = L.extractResponse(body, &cmd_out, &exp_out);
+    try testing.expectEqualStrings("ls -la", cmd_out[0..r.cmd_len]);
+    try testing.expectEqualStrings("Lists files in long format.", exp_out[0..r.explanation_len]);
+}
+
+test "extractResponse — no fence falls back to command-only (legacy model)" {
+    const L = configure(.{});
+    var cmd_out: [128]u8 = undefined;
+    var exp_out: [256]u8 = undefined;
+    const body = "{\"choices\":[{\"message\":{\"content\":\"ls -la\"}}]}";
+    const r = L.extractResponse(body, &cmd_out, &exp_out);
+    try testing.expectEqualStrings("ls -la", cmd_out[0..r.cmd_len]);
+    try testing.expectEqual(@as(usize, 0), r.explanation_len);
+}
+
+test "extractResponse — missing content field returns zero lengths" {
+    const L = configure(.{});
+    var cmd_out: [128]u8 = undefined;
+    var exp_out: [256]u8 = undefined;
+    const r = L.extractResponse("{\"error\":\"bad\"}", &cmd_out, &exp_out);
+    try testing.expectEqual(@as(usize, 0), r.cmd_len);
+    try testing.expectEqual(@as(usize, 0), r.explanation_len);
+}
+
+test "sanitizeExplanation flattens newlines + strips control bytes" {
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+
+    // Multi-line prose collapses to a single space-separated line.
+    const n = L.sanitizeExplanation("Line one.\nLine two.\nLine three.", &out);
+    try testing.expectEqualStrings("Line one. Line two. Line three.", out[0..n]);
+
+    // Embedded NUL / BEL / DEL — dropped silently.
+    const n2 = L.sanitizeExplanation("hello\x00\x07world\x7F", &out);
+    try testing.expectEqualStrings("helloworld", out[0..n2]);
+
+    // Adjacent whitespace coalesces into a single space.
+    const n3 = L.sanitizeExplanation("a   b\t\tc\n\nd", &out);
+    try testing.expectEqualStrings("a b c d", out[0..n3]);
+}
+
+test "sanitizeExplanation strips C1 codepoints — terminal-escape injection (security)" {
+    // The explanation is written to the statusbar's hint row,
+    // which goes straight to the user's terminal. A model that
+    // returns U+009B (CSI) — `0xC2 0x9B` in UTF-8 — followed by
+    // an SGR-style payload would otherwise inject a terminal
+    // escape sequence the user never typed. Same defence as
+    // `sanitizeCommand` (now shared via `stripControlBytes`).
+    const L = configure(.{});
+    var out: [128]u8 = undefined;
+
+    // UTF-8-encoded C1 (U+009B = 0xC2 0x9B) — both bytes vanish.
+    const n = L.sanitizeExplanation("hello\xC2\x9B31mworld", &out);
+    try testing.expectEqualStrings("hello31mworld", out[0..n]);
+
+    // Standalone 0x9B (Latin-1 / invalid-UTF-8 path) also dropped.
+    const n2 = L.sanitizeExplanation("foo\x9Bbar", &out);
+    try testing.expectEqualStrings("foobar", out[0..n2]);
+
+    // Legitimate UTF-8 with a continuation byte in the C1 range
+    // (e.g. "ƒ" = 0xC6 0x92) must survive — 0x92 is a UTF-8
+    // continuation, not a standalone C1 codepoint.
+    const n3 = L.sanitizeExplanation("ƒoo", &out);
+    try testing.expectEqualStrings("ƒoo", out[0..n3]);
+}
+
+test "effective_system_prompt picks the with-explanation default" {
+    const L_on = configure(.{ .with_explanation = true });
+    const L_off = configure(.{ .with_explanation = false });
+    // The two defaults differ in their guidance about fences /
+    // explanations; pin that they don't collapse to the same string.
+    try testing.expect(!std.mem.eql(u8, L_on.effective_system_prompt, L_off.effective_system_prompt));
+    // The with-explanation prompt should reference the fence /
+    // explanation guidance.
+    try testing.expect(std.mem.indexOf(u8, L_on.effective_system_prompt, "fenced") != null);
+    try testing.expect(std.mem.indexOf(u8, L_off.effective_system_prompt, "No markdown") != null);
+}
+
+test "effective_system_prompt honours an explicit override" {
+    const L = configure(.{ .with_explanation = true, .system_prompt = "be terse" });
+    try testing.expectEqualStrings("be terse", L.effective_system_prompt);
+}
+
+// Helper: attach the module and (eagerly) tear down the worker
+// thread synchronously so leak detection stays happy for tests
+// that only care about config resolution. Production `detach()`
+// uses `t.detach()` which intentionally leaks at process exit.
+fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
+    if (rt.thread) |t| {
+        {
+            rt.shared.mutex.lockUncancelable(io);
+            defer rt.shared.mutex.unlock(io);
+            rt.shared.shutdown = true;
+            rt.shared.cv.signal(io);
+        }
+        t.join();
+    }
+    rt.allocator.destroy(rt.shared);
+    rt.allocator.free(rt.api_base);
+    rt.allocator.free(rt.api_key);
+    rt.allocator.free(rt.shell);
+    rt.allocator.free(rt.context_blob);
+}
+
+test "resolveApiBase priority — static cfg.api_base beats both env vars" {
+    // With cfg.api_base set, the env vars must NOT be consulted.
+    _ = libc.setenv("ATTY_TEST_BASE_PRIMARY", "http://from-env-primary:1234/v1", 1);
+    _ = libc.setenv("ATTY_TEST_BASE_FALLBACK", "http://from-env-fallback:5678", 1);
+    defer _ = libc.unsetenv("ATTY_TEST_BASE_PRIMARY");
+    defer _ = libc.unsetenv("ATTY_TEST_BASE_FALLBACK");
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const L = configure(.{
+        .api_base = "http://static-config:9999/v1",
+        .api_base_env = "ATTY_TEST_BASE_PRIMARY",
+        .api_base_fallback_env = "ATTY_TEST_BASE_FALLBACK",
+        .api_key_env = "ATTY_TEST_BASE_NEVER",
+    });
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    try testing.expectEqualStrings("http://static-config:9999/v1", rt.api_base);
+}
+
+test "resolveApiBase priority — env wins when cfg.api_base is empty" {
+    _ = libc.setenv("ATTY_TEST_BASE_PRIMARY2", "http://from-env:1234/v1", 1);
+    defer _ = libc.unsetenv("ATTY_TEST_BASE_PRIMARY2");
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const L = configure(.{
+        // .api_base default = ""
+        .api_base_env = "ATTY_TEST_BASE_PRIMARY2",
+        .api_base_fallback_env = "ATTY_TEST_BASE_NEVER",
+        .api_key_env = "ATTY_TEST_BASE_NEVER",
+    });
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    try testing.expectEqualStrings("http://from-env:1234/v1", rt.api_base);
+}
+
+test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+        .prefix_signal_cursor_color = "cyan",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Empty line → no transition, returns null.
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideTermBytes(&rt, &ctx));
+
+    // User starts typing the prefix. After 3 keystrokes, the line
+    // matches `#: `. The next provideTermBytes call should emit
+    // OSC 12 with the configured colour.
+    _ = line.applyInput("#: ");
+    const out1 = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(out1 != null);
+    try testing.expect(std.mem.indexOf(u8, out1.?, "\x1B]12;cyan\x07") != null);
+    try testing.expect(rt.cursor_signal_active);
+
+    // Still matching → no edge, no re-emit.
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideTermBytes(&rt, &ctx));
+
+    // User backspaces past the prefix. Edge out → OSC 112 reset.
+    line = .{};
+    _ = line.applyInput("#");
+    const out2 = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(out2 != null);
+    try testing.expect(std.mem.indexOf(u8, out2.?, "\x1B]112\x07") != null);
+    try testing.expect(!rt.cursor_signal_active);
+}
+
+test "statusText flips to prefix_signal_status_text while prefix matches" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+        .prefix_signal_status_text = "TEST_SIGNAL",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Empty line, not in flight → no segment.
+    try testing.expectEqual(@as(?[]const u8, null), try L.statusText(&rt, &ctx));
+
+    // Prefix typed → custom segment text appears.
+    _ = line.applyInput("#: list files");
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    try testing.expectEqualStrings("TEST_SIGNAL", got.?);
+
+    // In-flight takes precedence over prefix-match (thinking…
+    // spinner wins for status real estate).
+    rt.in_flight = true;
+    const got2 = try L.statusText(&rt, &ctx);
+    try testing.expect(got2 != null);
+    try testing.expect(std.mem.indexOf(u8, got2.?, "thinking") != null);
+}
+
+test "resolveApiBase trims a single trailing slash on cfg.api_base" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const L = configure(.{
+        .api_base = "http://static:9999/v1/",
+        .api_base_env = "ATTY_TEST_BASE_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_BASE_NEVER",
+        .api_key_env = "ATTY_TEST_BASE_NEVER",
+    });
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    try testing.expectEqualStrings("http://static:9999/v1", rt.api_base);
+}
+
+// ===========================================================================
+// HTTP mock — drive the worker against a localhost server and assert that
+// it round-trips a canned ollama-shape response into the latched command +
+// hint surfaces. This is the only test that exercises `doRequest`,
+// `client.fetch`, the worker thread, and the latch path. Pure helpers test
+// the parsers; this catches integration drift (e.g. std API breaks).
+// ===========================================================================
+
+const libc = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
+    extern "c" fn bind(sockfd: c_int, addr: *const anyopaque, addrlen: u32) c_int;
+    extern "c" fn listen(sockfd: c_int, backlog: c_int) c_int;
+    extern "c" fn accept(sockfd: c_int, addr: ?*anyopaque, addrlen: ?*u32) c_int;
+    extern "c" fn getsockname(sockfd: c_int, addr: *anyopaque, addrlen: *u32) c_int;
+    extern "c" fn setsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *const anyopaque, optlen: u32) c_int;
+    extern "c" fn close(fd: c_int) c_int;
+    extern "c" fn read_(fd: c_int, buf: [*]u8, count: usize) isize;
+    extern "c" fn write_(fd: c_int, buf: [*]const u8, count: usize) isize;
+    extern "c" fn usleep(usec: c_uint) c_int;
+
+    // Linux values (this codebase pins x86_64-linux-{gnu,musl}).
+    const AF_INET: c_int = 2;
+    const SOCK_STREAM: c_int = 1;
+    const IPPROTO_TCP: c_int = 6;
+    const SOL_SOCKET: c_int = 1;
+    const SO_REUSEADDR: c_int = 2;
+
+    const sockaddr_in = extern struct {
+        family: u16,
+        port: u16, // network byte order
+        addr: u32, // network byte order
+        zero: [8]u8 = .{0} ** 8,
+    };
+};
+
+// Aliases so we can use the conventional names without shadowing
+// Zig's `read` / `write` builtins inside the mock handler.
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+
+const MockServerCtx = struct {
+    listen_fd: c_int,
+    response_body: []const u8,
+};
+
+fn mockServerHandler(ctx: *MockServerCtx) void {
+    const conn_fd = libc.accept(ctx.listen_fd, null, null);
+    if (conn_fd < 0) return;
+    defer _ = libc.close(conn_fd);
+
+    // Drain the request — read until we see `\r\n\r\n` (end of headers).
+    // The body follows but we don't parse it; we only need to consume
+    // enough bytes that the client's send() unblocks.
+    var read_buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    var iters: usize = 0;
+    while (iters < 32) : (iters += 1) {
+        const n = read(conn_fd, read_buf[total..].ptr, read_buf.len - total);
+        if (n <= 0) break;
+        total += @intCast(n);
+        if (std.mem.indexOf(u8, read_buf[0..total], "\r\n\r\n") != null) break;
+        if (total >= read_buf.len) break;
+    }
+
+    var resp_buf: [4096]u8 = undefined;
+    const resp = std.fmt.bufPrint(
+        &resp_buf,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+        .{ ctx.response_body.len, ctx.response_body },
+    ) catch return;
+    _ = write(conn_fd, resp.ptr, resp.len);
+}
+
+test "LLM worker round-trips a mock ollama response into the latch + hint surfaces" {
+    // Threaded io is needed so `client.fetch` (used by `doRequest`) has
+    // real I/O. The default test_io = std.Io.failing would panic on the
+    // first syscall.
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    // Bind on 127.0.0.1, OS-picked port via raw libc syscalls —
+    // std.Io.net's Server in 0.16 has no portable accessor for the
+    // assigned port, and std.posix dropped socket/bind/listen/accept
+    // into Io.net's vtable. Linux constants are inline-pinned;
+    // this codebase only targets x86_64-linux-{gnu,musl}.
+    const listen_fd = libc.socket(libc.AF_INET, libc.SOCK_STREAM, libc.IPPROTO_TCP);
+    if (listen_fd < 0) return error.SocketFailed;
+    defer _ = libc.close(listen_fd);
+
+    const one: c_int = 1;
+    _ = libc.setsockopt(listen_fd, libc.SOL_SOCKET, libc.SO_REUSEADDR, &one, @sizeOf(c_int));
+
+    var sa_in: libc.sockaddr_in = .{
+        .family = libc.AF_INET,
+        .port = 0, // OS picks
+        .addr = std.mem.nativeToBig(u32, 0x7f000001), // 127.0.0.1
+    };
+    if (libc.bind(listen_fd, &sa_in, @sizeOf(libc.sockaddr_in)) < 0) return error.BindFailed;
+    if (libc.listen(listen_fd, 1) < 0) return error.ListenFailed;
+
+    // Read the assigned port back out via getsockname.
+    var bound_addr: libc.sockaddr_in = undefined;
+    var bound_len: u32 = @sizeOf(libc.sockaddr_in);
+    if (libc.getsockname(listen_fd, &bound_addr, &bound_len) < 0) return error.GetSockNameFailed;
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    // Canned ollama-shape response. The content field is a JSON string
+    // containing the explanation, a newline, a fenced block with the
+    // command, and the closing fence. extractResponse will split on the
+    // fence into (explanation, command).
+    const body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Greets you.\\n```\\necho hi\\n```\"}}]}";
+
+    var mock_ctx: MockServerCtx = .{ .listen_fd = listen_fd, .response_body = body };
+    const mock_thread = try std.Thread.spawn(.{}, mockServerHandler, .{&mock_ctx});
+    defer mock_thread.join();
+
+    // Set the test env var to our mock URL. The module reads env vars
+    // at attach time only, so the test process's env mutation is
+    // observed by the worker exactly once.
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/v1", .{port});
+    _ = libc.setenv("ATTY_TEST_LLM_API_BASE", url.ptr, 1);
+    defer _ = libc.unsetenv("ATTY_TEST_LLM_API_BASE");
+
+    const L = configure(.{
+        .api_base_env = "ATTY_TEST_LLM_API_BASE",
+        // Use a name that's never set so the fallback doesn't fire and
+        // accidentally produce a non-empty api_base from $OLLAMA_HOST.
+        .api_base_fallback_env = "ATTY_TEST_LLM_NEVER",
+        .api_key_env = "ATTY_TEST_LLM_NEVER",
+        .model = "test-model",
+    });
+
+    var rt = try L.attach(testing.allocator, real_io);
+    // Don't call L.detach — it does t.detach() which leaks the heap
+    // allocations (intentional, see round-5 fix). For the test we do a
+    // sync join so the testing allocator's leak detector stays happy.
+    defer {
+        {
+            rt.shared.mutex.lockUncancelable(real_io);
+            defer rt.shared.mutex.unlock(real_io);
+            rt.shared.shutdown = true;
+            rt.shared.cv.signal(real_io);
+        }
+        if (rt.thread) |t| t.join();
+        testing.allocator.destroy(rt.shared);
+        testing.allocator.free(rt.api_base);
+        testing.allocator.free(rt.api_key);
+        testing.allocator.free(rt.shell);
+        testing.allocator.free(rt.context_blob);
+    }
+
+    // Prime line_state with `#: hello` followed by Enter — onInput
+    // expects lastCommitted to hold the prefixed line.
+    var line: @import("../line_state.zig").LineState = .{};
+    _ = line.applyInput("#: hello\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const act = try L.onInput(&rt, &ctx, "\r");
+    try testing.expect(act == .replace_commit);
+    try testing.expectEqualStrings("\x15", act.replace_commit);
+
+    // Poll the latch until the worker delivers. Generous 2s budget for
+    // CI variance — the mock responds immediately so locally this is
+    // ~50ms.
+    var deadline_iters: usize = 100;
+    while (deadline_iters > 0) : (deadline_iters -= 1) {
+        if (try L.pollShellInput(&rt, &ctx)) |bytes| {
+            try testing.expectEqualStrings("echo hi", bytes);
+            const hint = try L.provideHintText(&rt, &ctx);
+            try testing.expect(hint != null);
+            try testing.expectEqualStrings("Greets you.", hint.?);
+            return;
+        }
+        _ = libc.usleep(20_000); // 20ms
+    }
+    return error.WorkerTimedOut;
+}
+
+test "inert mode (no endpoint env) surfaces a 'no endpoint' hint" {
+    // Both env vars unset → api_base resolves to "" → module
+    // attaches inert (no worker thread). onInput should still
+    // latch a hint so the user sees *why* `#: …` produced no
+    // command rather than thinking the feature is broken.
+    _ = libc.unsetenv("ATTY_TEST_INERT_BASE");
+    _ = libc.unsetenv("ATTY_TEST_INERT_FALLBACK");
+
+    const L = configure(.{
+        .api_base_env = "ATTY_TEST_INERT_BASE",
+        .api_base_fallback_env = "ATTY_TEST_INERT_FALLBACK",
+        .api_key_env = "ATTY_TEST_INERT_KEY_NEVER",
+    });
+
+    var rt = try L.attach(testing.allocator, test_io);
+    defer {
+        // Inert mode: no worker spawned, detach can run cleanly.
+        L.detach(&rt, test_io);
+    }
+
+    try testing.expectEqual(@as(usize, 0), rt.api_base.len);
+    try testing.expect(rt.thread == null);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    _ = line.applyInput("#: hello\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const act = try L.onInput(&rt, &ctx, "\r");
+    // .forward — the typed `#: …` reaches the shell as a comment;
+    // no point killing the line when we never queried the LLM.
+    try testing.expect(act == .forward);
+
+    // The notification must mention the missing env var so the
+    // user knows what to fix. Surfaced via the *error* channel
+    // (muted red + ⚠ in the statusbar) — provideHintText returns
+    // null because hint and error are distinct slots now.
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideHintText(&rt, &ctx));
+    const err = try L.provideErrorText(&rt, &ctx);
+    try testing.expect(err != null);
+    try testing.expect(std.mem.indexOf(u8, err.?, "no endpoint") != null);
+    // Message must mention the configured env-var names, not the
+    // upstream defaults — pin that the comptime-built string respects
+    // `Config.api_base_env` / `Config.api_base_fallback_env`.
+    try testing.expect(std.mem.indexOf(u8, err.?, "ATTY_TEST_INERT_BASE") != null);
+    try testing.expect(std.mem.indexOf(u8, err.?, "ATTY_TEST_INERT_FALLBACK") != null);
+    try testing.expect(std.mem.indexOf(u8, err.?, "Config.api_base") != null);
+
+    // One-shot — second call returns null.
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideErrorText(&rt, &ctx));
+}
+
+fn mockServer500Handler(ctx: *MockServerCtx) void {
+    const conn_fd = libc.accept(ctx.listen_fd, null, null);
+    if (conn_fd < 0) return;
+    defer _ = libc.close(conn_fd);
+
+    var read_buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    var iters: usize = 0;
+    while (iters < 32) : (iters += 1) {
+        const n = read(conn_fd, read_buf[total..].ptr, read_buf.len - total);
+        if (n <= 0) break;
+        total += @intCast(n);
+        if (std.mem.indexOf(u8, read_buf[0..total], "\r\n\r\n") != null) break;
+        if (total >= read_buf.len) break;
+    }
+
+    const resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    _ = write(conn_fd, resp.ptr, resp.len);
+}
+
+test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const listen_fd = libc.socket(libc.AF_INET, libc.SOCK_STREAM, libc.IPPROTO_TCP);
+    if (listen_fd < 0) return error.SocketFailed;
+    defer _ = libc.close(listen_fd);
+    const one: c_int = 1;
+    _ = libc.setsockopt(listen_fd, libc.SOL_SOCKET, libc.SO_REUSEADDR, &one, @sizeOf(c_int));
+    var sa_in: libc.sockaddr_in = .{
+        .family = libc.AF_INET,
+        .port = 0,
+        .addr = std.mem.nativeToBig(u32, 0x7f000001),
+    };
+    if (libc.bind(listen_fd, &sa_in, @sizeOf(libc.sockaddr_in)) < 0) return error.BindFailed;
+    if (libc.listen(listen_fd, 1) < 0) return error.ListenFailed;
+    var bound_addr: libc.sockaddr_in = undefined;
+    var bound_len: u32 = @sizeOf(libc.sockaddr_in);
+    if (libc.getsockname(listen_fd, &bound_addr, &bound_len) < 0) return error.GetSockNameFailed;
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    var mock_ctx: MockServerCtx = .{ .listen_fd = listen_fd, .response_body = "" };
+    const mock_thread = try std.Thread.spawn(.{}, mockServer500Handler, .{&mock_ctx});
+    defer mock_thread.join();
+
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/v1", .{port});
+    _ = libc.setenv("ATTY_TEST_LLM_500_BASE", url.ptr, 1);
+    defer _ = libc.unsetenv("ATTY_TEST_LLM_500_BASE");
+
+    const L = configure(.{
+        .api_base_env = "ATTY_TEST_LLM_500_BASE",
+        .api_base_fallback_env = "ATTY_TEST_LLM_500_NEVER",
+        .api_key_env = "ATTY_TEST_LLM_500_NEVER",
+        .model = "test-model",
+    });
+
+    var rt = try L.attach(testing.allocator, real_io);
+    defer {
+        {
+            rt.shared.mutex.lockUncancelable(real_io);
+            defer rt.shared.mutex.unlock(real_io);
+            rt.shared.shutdown = true;
+            rt.shared.cv.signal(real_io);
+        }
+        if (rt.thread) |t| t.join();
+        testing.allocator.destroy(rt.shared);
+        testing.allocator.free(rt.api_base);
+        testing.allocator.free(rt.api_key);
+        testing.allocator.free(rt.shell);
+        testing.allocator.free(rt.context_blob);
+    }
+
+    var line: @import("../line_state.zig").LineState = .{};
+    _ = line.applyInput("#: hello\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const act = try L.onInput(&rt, &ctx, "\r");
+    try testing.expect(act == .replace_commit);
+
+    var deadline_iters: usize = 100;
+    while (deadline_iters > 0) : (deadline_iters -= 1) {
+        // Worker has fired; if it completed, pollShellInput returns
+        // null (no command on failure) but leaves a hint pending.
+        const inject = try L.pollShellInput(&rt, &ctx);
+        if (inject == null) {
+            // pollShellInput only consumes when res_done was set.
+            // If it returned null without consuming (still
+            // in-flight), keep polling.
+            if (rt.in_flight) {
+                _ = libc.usleep(20_000);
+                continue;
+            }
+            // Worker has signalled completion + we just consumed it.
+            // The error should now be pending with the HTTP code.
+            // provideHintText returns null — only the error channel
+            // is populated on failure paths.
+            try testing.expectEqual(@as(?[]const u8, null), try L.provideHintText(&rt, &ctx));
+            const err = try L.provideErrorText(&rt, &ctx);
+            try testing.expect(err != null);
+            try testing.expect(std.mem.indexOf(u8, err.?, "HTTP 500") != null);
+            return;
+        }
+        // Unexpectedly got bytes — the mock returns 500, so the
+        // worker should not have produced anything to inject.
+        return error.UnexpectedInjection;
+    }
+    return error.WorkerTimedOut;
 }

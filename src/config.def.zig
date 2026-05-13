@@ -67,6 +67,12 @@ const atty = @import("atty");
 //         // .model = "llama3:8b",     // model name
 //         // .shell = null,            // null → derive from $SHELL
 //         // .system_prompt = "...",   // override the system message
+//         // .with_explanation = true, // ask for + render one-line summary
+//         //                           //   above the status bar
+//         // .context_env_vars = &.{   // env vars exposed to the model
+//         //     "PATH_BASE",          //   alongside the prompt — one-line
+//         //     "PROJECT",            //   "KEY=value, …" appended to the
+//         // },                        //   user message
 //     }),
 // };
 

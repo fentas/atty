@@ -5,8 +5,24 @@
 
 ZIG ?= zig
 PREFIX ?= $(HOME)/.local
-TARGET ?= native
 OPT ?= ReleaseSafe
+
+# Default target picks the path that builds reliably on the host:
+#   • Linux  → x86_64-linux-musl. CI uses this too; it sidesteps the
+#     Arch gcc-16 crt1.o SFrame-reloc issue (R_X86_64_PC64) that
+#     Zig 0.16's linker can't handle when linking against the
+#     system libc. Musl ships its own crt, so the failure mode
+#     doesn't apply.
+#   • Anything else (Darwin, BSD, …) → native, since libutil-less
+#     PTY work compiles fine there and we don't have a canned
+#     cross-target that's strictly better.
+# Override with `make TARGET=… <goal>` (e.g. aarch64-linux-musl).
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+TARGET ?= x86_64-linux-musl
+else
+TARGET ?= native
+endif
 
 # `make CONFIG=path/to/mine.zig build` to use an out-of-tree config.
 ifdef CONFIG
@@ -42,19 +58,19 @@ debug:
 	$(ZIG) build -Doptimize=Debug -Dtarget=$(TARGET) $(ZIG_CONFIG_ARG)
 
 test:
-	$(ZIG) build test --summary all
+	$(ZIG) build test -Dtarget=$(TARGET) --summary all
 
 itest:
-	$(ZIG) build itest --summary all
+	$(ZIG) build itest -Dtarget=$(TARGET) --summary all
 
 # End-to-end: spawn atty under a controlled PTY, drive .e2e scripts,
 # diff a rendered terminal grid against goldens in tests/e2e/<name>/golden/.
 e2e:
-	$(ZIG) build e2e
+	$(ZIG) build e2e -Dtarget=$(TARGET)
 
 # Refresh goldens to match current output. Review the diff before committing.
 e2e-update:
-	$(ZIG) build e2e -- --update
+	$(ZIG) build e2e -Dtarget=$(TARGET) -- --update
 
 run: build
 	./zig-out/bin/atty
