@@ -1199,3 +1199,194 @@ test "effective_system_prompt honours an explicit override" {
     const L = configure(.{ .with_explanation = true, .system_prompt = "be terse" });
     try testing.expectEqualStrings("be terse", L.effective_system_prompt);
 }
+
+// ===========================================================================
+// HTTP mock — drive the worker against a localhost server and assert that
+// it round-trips a canned ollama-shape response into the latched command +
+// hint surfaces. This is the only test that exercises `doRequest`,
+// `client.fetch`, the worker thread, and the latch path. Pure helpers test
+// the parsers; this catches integration drift (e.g. std API breaks).
+// ===========================================================================
+
+const libc = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
+    extern "c" fn bind(sockfd: c_int, addr: *const anyopaque, addrlen: u32) c_int;
+    extern "c" fn listen(sockfd: c_int, backlog: c_int) c_int;
+    extern "c" fn accept(sockfd: c_int, addr: ?*anyopaque, addrlen: ?*u32) c_int;
+    extern "c" fn getsockname(sockfd: c_int, addr: *anyopaque, addrlen: *u32) c_int;
+    extern "c" fn setsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *const anyopaque, optlen: u32) c_int;
+    extern "c" fn close(fd: c_int) c_int;
+    extern "c" fn read_(fd: c_int, buf: [*]u8, count: usize) isize;
+    extern "c" fn write_(fd: c_int, buf: [*]const u8, count: usize) isize;
+    extern "c" fn usleep(usec: c_uint) c_int;
+
+    // Linux values (this codebase pins x86_64-linux-{gnu,musl}).
+    const AF_INET: c_int = 2;
+    const SOCK_STREAM: c_int = 1;
+    const IPPROTO_TCP: c_int = 6;
+    const SOL_SOCKET: c_int = 1;
+    const SO_REUSEADDR: c_int = 2;
+
+    const sockaddr_in = extern struct {
+        family: u16,
+        port: u16, // network byte order
+        addr: u32, // network byte order
+        zero: [8]u8 = .{0} ** 8,
+    };
+};
+
+// Aliases so we can use the conventional names without shadowing
+// Zig's `read` / `write` builtins inside the mock handler.
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+
+const MockServerCtx = struct {
+    listen_fd: c_int,
+    response_body: []const u8,
+};
+
+fn mockServerHandler(ctx: *MockServerCtx) void {
+    const conn_fd = libc.accept(ctx.listen_fd, null, null);
+    if (conn_fd < 0) return;
+    defer _ = libc.close(conn_fd);
+
+    // Drain the request — read until we see `\r\n\r\n` (end of headers).
+    // The body follows but we don't parse it; we only need to consume
+    // enough bytes that the client's send() unblocks.
+    var read_buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    var iters: usize = 0;
+    while (iters < 32) : (iters += 1) {
+        const n = read(conn_fd, read_buf[total..].ptr, read_buf.len - total);
+        if (n <= 0) break;
+        total += @intCast(n);
+        if (std.mem.indexOf(u8, read_buf[0..total], "\r\n\r\n") != null) break;
+        if (total >= read_buf.len) break;
+    }
+
+    var resp_buf: [4096]u8 = undefined;
+    const resp = std.fmt.bufPrint(
+        &resp_buf,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+        .{ ctx.response_body.len, ctx.response_body },
+    ) catch return;
+    _ = write(conn_fd, resp.ptr, resp.len);
+}
+
+test "LLM worker round-trips a mock ollama response into the latch + hint surfaces" {
+    // Threaded io is needed so `client.fetch` (used by `doRequest`) has
+    // real I/O. The default test_io = std.Io.failing would panic on the
+    // first syscall.
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    // Bind on 127.0.0.1, OS-picked port via raw libc syscalls —
+    // std.Io.net's Server in 0.16 has no portable accessor for the
+    // assigned port, and std.posix dropped socket/bind/listen/accept
+    // into Io.net's vtable. Linux constants are inline-pinned;
+    // this codebase only targets x86_64-linux-{gnu,musl}.
+    const listen_fd = libc.socket(libc.AF_INET, libc.SOCK_STREAM, libc.IPPROTO_TCP);
+    if (listen_fd < 0) return error.SocketFailed;
+    defer _ = libc.close(listen_fd);
+
+    const one: c_int = 1;
+    _ = libc.setsockopt(listen_fd, libc.SOL_SOCKET, libc.SO_REUSEADDR, &one, @sizeOf(c_int));
+
+    var sa_in: libc.sockaddr_in = .{
+        .family = libc.AF_INET,
+        .port = 0, // OS picks
+        .addr = std.mem.nativeToBig(u32, 0x7f000001), // 127.0.0.1
+    };
+    if (libc.bind(listen_fd, &sa_in, @sizeOf(libc.sockaddr_in)) < 0) return error.BindFailed;
+    if (libc.listen(listen_fd, 1) < 0) return error.ListenFailed;
+
+    // Read the assigned port back out via getsockname.
+    var bound_addr: libc.sockaddr_in = undefined;
+    var bound_len: u32 = @sizeOf(libc.sockaddr_in);
+    if (libc.getsockname(listen_fd, &bound_addr, &bound_len) < 0) return error.GetSockNameFailed;
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    // Canned ollama-shape response. The content field is a JSON string
+    // containing the explanation, a newline, a fenced block with the
+    // command, and the closing fence. extractResponse will split on the
+    // fence into (explanation, command).
+    const body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Greets you.\\n```\\necho hi\\n```\"}}]}";
+
+    var mock_ctx: MockServerCtx = .{ .listen_fd = listen_fd, .response_body = body };
+    const mock_thread = try std.Thread.spawn(.{}, mockServerHandler, .{&mock_ctx});
+    defer mock_thread.join();
+
+    // Set the test env var to our mock URL. The module reads env vars
+    // at attach time only, so the test process's env mutation is
+    // observed by the worker exactly once.
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/v1", .{port});
+    _ = libc.setenv("ATTY_TEST_LLM_API_BASE", url.ptr, 1);
+    defer _ = libc.unsetenv("ATTY_TEST_LLM_API_BASE");
+
+    const L = configure(.{
+        .api_base_env = "ATTY_TEST_LLM_API_BASE",
+        // Use a name that's never set so the fallback doesn't fire and
+        // accidentally produce a non-empty api_base from $OLLAMA_HOST.
+        .api_base_fallback_env = "ATTY_TEST_LLM_NEVER",
+        .api_key_env = "ATTY_TEST_LLM_NEVER",
+        .model = "test-model",
+    });
+
+    var rt = try L.attach(testing.allocator, real_io);
+    // Don't call L.detach — it does t.detach() which leaks the heap
+    // allocations (intentional, see round-5 fix). For the test we do a
+    // sync join so the testing allocator's leak detector stays happy.
+    defer {
+        {
+            rt.shared.mutex.lockUncancelable(real_io);
+            defer rt.shared.mutex.unlock(real_io);
+            rt.shared.shutdown = true;
+            rt.shared.cv.signal(real_io);
+        }
+        if (rt.thread) |t| t.join();
+        testing.allocator.destroy(rt.shared);
+        testing.allocator.free(rt.api_base);
+        testing.allocator.free(rt.api_key);
+        testing.allocator.free(rt.shell);
+        testing.allocator.free(rt.context_blob);
+    }
+
+    // Prime line_state with `#: hello` followed by Enter — onInput
+    // expects lastCommitted to hold the prefixed line.
+    var line: @import("../line_state.zig").LineState = .{};
+    _ = line.applyInput("#: hello\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const act = try L.onInput(&rt, &ctx, "\r");
+    try testing.expect(act == .replace);
+    try testing.expectEqualStrings("\x15", act.replace);
+
+    // Poll the latch until the worker delivers. Generous 2s budget for
+    // CI variance — the mock responds immediately so locally this is
+    // ~50ms.
+    var deadline_iters: usize = 100;
+    while (deadline_iters > 0) : (deadline_iters -= 1) {
+        if (try L.pollShellInput(&rt, &ctx)) |bytes| {
+            try testing.expectEqualStrings("echo hi", bytes);
+            const hint = try L.provideHintText(&rt, &ctx);
+            try testing.expect(hint != null);
+            try testing.expectEqualStrings("Greets you.", hint.?);
+            return;
+        }
+        _ = libc.usleep(20_000); // 20ms
+    }
+    return error.WorkerTimedOut;
+}
