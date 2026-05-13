@@ -41,6 +41,8 @@ const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
+const Osc7 = @import("osc7.zig").Osc7;
+const subprocess_mod = @import("subprocess.zig");
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -194,6 +196,36 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // slave PTY size + suspend / resume statusbar painting.
     var alt_screen = AltScreen.init();
 
+    // OSC 7 cwd reports — emitted by Ghostty's shell-integration,
+    // VS Code's snippet, ble.sh, zsh4humans, kitty's integration,
+    // many ad-hoc PROMPT_COMMAND snippets. When the user is in
+    // `ssh remote` and the remote shell sources any of them, the
+    // OSC 7 bytes flow back through atty's master stream — we
+    // capture the path and feed it into the subprocess tracker so
+    // recorded commits get the *real* remote cwd, not just a `?`.
+    var osc7_tracker = Osc7.init();
+
+    // Subprocess-context tracker — at every OSC 133 `;C` we peek
+    // at the line the user just committed and decide whether they
+    // launched a recognised shell-context wrapper (ssh / mosh /
+    // sudo bash / kubectl exec / docker exec / lxc exec / su).
+    // The resulting stack feeds `dispatchLineCommit` so atuin /
+    // history can encode the remote target into the recorded
+    // entry's `--cwd` (e.g. `ssh://user@host/path`). Sub-prompts
+    // inside the launched subprocess are still recorded (we drop
+    // the blanket-suppress that PR #15 introduced specifically for
+    // recognized launchers); typed text inside an unrecognised
+    // subprocess (vim, less, psql, …) continues to be dropped.
+    var subprocess_tracker = subprocess_mod.Tracker{
+        .ssh_binary = config.subprocess.ssh_binary,
+        .use_ssh_g = config.subprocess.use_ssh_g,
+    };
+    // Remember the previous OSC 133 phase so we can detect the
+    // edge transitions (`in_input → in_command` = `;C`,
+    // `in_command → idle` = `;D`) — Osc133 doesn't track edges
+    // itself.
+    var prev_osc_phase: Osc133.Phase = osc133_tracker.phase;
+
     var ctx = module.Context{
         .allocator = allocator,
         .io = io,
@@ -201,6 +233,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         .scratch = &scratch,
         .is_tty = args.is_tty,
         .incognito = false,
+        .subprocess = &subprocess_tracker,
     };
 
     var pfds = [_]posix.pollfd{
@@ -605,18 +638,53 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 };
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
-                    // Suppress when we're inside a subprocess. Catches
-                    // Enter pressed inside vim / nano / k9s / less /
-                    // psql / etc. (alt-screen TUIs) and inside ssh /
-                    // sudo / kubectl exec / etc. when shell integration
-                    // is sourced (OSC 133 in command phase). Without
-                    // this gate, every Enter inside any sub-app pollutes
-                    // the local shell's history + atuin index.
-                    const in_subproc = inSubprocess(&alt_screen, &osc133_tracker);
+                    // Decide whether to record this commit. Three
+                    // gating signals:
+                    //
+                    //  1. alt-screen TUI active (vim, k9s, less, …)
+                    //     — never record; we can't tell what's a
+                    //     command and the gate works without shell
+                    //     integration.
+                    //  2. OSC 133 says we're in command phase AND
+                    //     the top of the subprocess stack is `.none`
+                    //     — we're inside an unrecognised subprocess
+                    //     (psql, nano, mysql -p, …); same drop.
+                    //  3. OSC 133 says we're in command phase AND
+                    //     the top of the stack is a recognised
+                    //     launcher (ssh, sudo bash, kubectl exec, …)
+                    //     — RECORD. The atuin / history modules
+                    //     consult `ctx.subprocessCwd(…)` so the
+                    //     entry is tagged with the remote target
+                    //     (`ssh://user@host/…`, `k8s://…`, etc.)
+                    //     rather than masquerading as a local one.
+                    const drop_for_alt = alt_screen.active;
+                    const drop_for_unknown_subproc =
+                        osc133_tracker.active and
+                        !osc133_tracker.inInputPhase() and
+                        subprocess_tracker.currentKind() == .none;
+                    // Per-target incognito: when the current
+                    // subprocess frame's name matches a configured
+                    // target, treat it like the user pressed
+                    // Ctrl+Shift+I. Same drop, no statusbar surprise
+                    // (the segment still shows the target so the
+                    // user knows where they are; the 🔒 indicator
+                    // doesn't appear because this is config-driven,
+                    // not user-toggled).
+                    const drop_for_target_incognito = blk: {
+                        if (subprocess_tracker.current()) |f| {
+                            if (f.kind != .none) {
+                                for (config.subprocess.incognito_targets) |needle| {
+                                    if (std.mem.eql(u8, f.name(), needle)) break :blk true;
+                                }
+                            }
+                        }
+                        break :blk false;
+                    };
+                    const drop_recording = drop_for_alt or drop_for_unknown_subproc or drop_for_target_incognito;
                     if (!line_state.committed_was_uncertain and
                         !incognito_on and
                         !leading_space and
-                        !in_subproc and
+                        !drop_recording and
                         shell_saw_enter)
                     {
                         D.dispatchLineCommit(&runtimes, &ctx, committed) catch {};
@@ -654,6 +722,49 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // dormant otherwise.
                 osc133_tracker.feed(output);
                 alt_screen.feed(output);
+                osc7_tracker.feed(output);
+
+                // Promote any pending OSC 7 cwd capture into the top
+                // subprocess frame. Order matters: this runs AFTER
+                // we've fed OSC 133, so if a `;C` transition arrives
+                // in the SAME chunk we push first and the OSC 7
+                // capture (if any) lands on the freshly-pushed frame.
+                const remote_cwd = osc7_tracker.takeCwd();
+                if (remote_cwd.len > 0) subprocess_tracker.onRemoteCwd(remote_cwd);
+
+                // Edge-detect OSC 133 phase transitions to drive the
+                // subprocess stack. ;C (in_input → in_command) means
+                // a command just started running — peek at the line
+                // the user committed and decide whether to push a
+                // recognised launcher frame. ;D (in_command → idle)
+                // means the command finished and we pop.
+                //
+                // We watch `phase` rather than relying on a custom
+                // edge flag from Osc133 because the existing
+                // line_state.lastCommitted is only valid for one
+                // dispatch cycle; doing the parse synchronously
+                // here, immediately after feed, lets us grab it
+                // before clearLastCommitted runs (further below in
+                // the stdin path) or before the next read overwrites
+                // anything.
+                const curr_osc_phase = osc133_tracker.phase;
+                if (curr_osc_phase != prev_osc_phase) {
+                    if (prev_osc_phase != .in_command and curr_osc_phase == .in_command) {
+                        // ;C — push a frame parsed from the just-
+                        // committed line. `lastCommitted` was set by
+                        // the stdin path when the user pressed Enter
+                        // (or via the OSC 133 input override there).
+                        const launched = line_state.lastCommitted() orelse "";
+                        subprocess_tracker.onCommandStart(launched, allocator, io);
+                    } else if (prev_osc_phase == .in_command and curr_osc_phase != .in_command) {
+                        // ;D — pop. We do NOT care which kind we
+                        // popped; the Tracker handles the stack
+                        // invariant and resets the popped frame so
+                        // a stale name can't leak.
+                        subprocess_tracker.onCommandEnd();
+                    }
+                    prev_osc_phase = curr_osc_phase;
+                }
 
                 // Alt-screen transition: an interactive full-screen
                 // TUI just entered (?1049h, ?47h, ?1047h) or exited
@@ -939,16 +1050,43 @@ fn renderStatus(
     var mw: std.Io.Writer = .fixed(&mod_buf);
     D.gatherStatus(rts, ctx, &mw) catch {};
 
-    // Then ask the pure assembler to join incognito + base + modules
-    // with " │ " separators, skipping empty segments. Pure logic +
-    // own tests live in src/status_text.zig.
-    var text_buf: [256]u8 = undefined;
+    // Subprocess segment — only rendered when configured on AND a
+    // recognised launcher is on the top of the tracker stack. The
+    // segment text is short — kind prefix + frame name — so a small
+    // local buffer is sufficient.
+    var subp_buf: [192]u8 = undefined;
+    var subp_text: []const u8 = "";
+    if (config.subprocess.show_in_statusbar) {
+        if (ctx.subprocess) |tr| {
+            if (tr.current()) |frame| if (frame.kind != .none) {
+                const prefix: []const u8 = switch (frame.kind) {
+                    .ssh => "ssh:",
+                    .kubectl_exec => "k8s:",
+                    .docker_exec => "docker:",
+                    .container_exec => "container:",
+                    .elevation => "",
+                    .su => "",
+                    .none => unreachable,
+                };
+                var sw: std.Io.Writer = .fixed(&subp_buf);
+                sw.print("{s}{s}", .{ prefix, frame.name() }) catch {};
+                subp_text = subp_buf[0..sw.end];
+            };
+        }
+    }
+
+    // Then ask the pure assembler to join incognito + subprocess +
+    // base + modules with " │ " separators, skipping empty segments.
+    // Pure logic + own tests live in src/status_text.zig.
+    var text_buf: [512]u8 = undefined;
     var tw: std.Io.Writer = .fixed(&text_buf);
     status_text.assemble(.{
         .w = &tw,
         .incognito = incognito,
         .incognito_style = config.statusbar.incognito_style,
         .bar_style = config.statusbar.style,
+        .subprocess_text = subp_text,
+        .subprocess_style = config.subprocess.segment_style,
         .base_text = config.statusbar.base_text,
         .module_text = mod_buf[0..mw.end],
     }) catch {};

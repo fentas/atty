@@ -297,9 +297,20 @@ pub fn configure(comptime cfg: Config) type {
             return .forward;
         }
 
-        pub fn onLineCommit(rt: *Runtime, _: *m.Context, line: []const u8) m.Error!void {
+        pub fn onLineCommit(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
             if (!cfg.record) return;
             if (line.len == 0 or line.len > cfg.max_line) return;
+            // Skip commits typed inside a recognised subprocess
+            // (ssh / sudo bash / kubectl exec / docker exec / etc.)
+            // — those don't belong in the local shell's
+            // `~/.bash_history` / `~/.zsh_history`. atuin's record
+            // path captures them with an encoded `--cwd` so they
+            // remain searchable via `[ DIRECTORY ]`; the shell-
+            // native history file stays clean of unrunnable lines
+            // that would surface in the shell's own up-arrow recall.
+            if (ctx.subprocess) |tr| if (tr.current()) |frame| {
+                if (frame.kind != .none) return;
+            };
             // Best-effort: failure here must not propagate up. A
             // missing history file is normal on first run; permission
             // errors on a stranger's machine shouldn't crash atty.

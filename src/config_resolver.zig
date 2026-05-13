@@ -25,6 +25,7 @@ pub const Ghost = defaults.Ghost;
 pub const Terminal = defaults.Terminal;
 pub const Keymap = defaults.Keymap;
 pub const StatusBar = defaults.StatusBar;
+pub const Subprocess = defaults.Subprocess;
 
 // ───── Resolved values ─────────────────────────────────────────────────
 pub const modules = if (@hasDecl(user, "modules"))
@@ -56,3 +57,8 @@ pub const statusbar = if (@hasDecl(user, "statusbar"))
     user.statusbar
 else
     defaults.statusbar;
+
+pub const subprocess = if (@hasDecl(user, "subprocess"))
+    user.subprocess
+else
+    defaults.subprocess;

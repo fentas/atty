@@ -127,6 +127,13 @@ pub fn configure(comptime cfg: Config) type {
             rec_buf: [cfg.max_query]u8 = undefined,
             rec_len: usize = 0,
             rec_pending: bool = false,
+            // Resolved subprocess `--cwd` for the pending record, or
+            // empty when none. Captured from `ctx.subprocessCwd(…)` at
+            // onLineCommit time so the worker has a stable snapshot
+            // even if the user enters a new ssh/sudo/etc. before the
+            // worker drains.
+            rec_cwd_buf: [768]u8 = undefined,
+            rec_cwd_len: usize = 0,
 
             shutdown: bool = false,
         };
@@ -182,6 +189,8 @@ pub fn configure(comptime cfg: Config) type {
 
             var record_local: [cfg.max_query]u8 = undefined;
             var record_len: usize = 0;
+            var record_cwd_local: [768]u8 = undefined;
+            var record_cwd_len: usize = 0;
             var records_since_sync: u32 = 0;
             var last_sync_ms: i64 = 0;
             var total_records: u32 = 0;
@@ -214,6 +223,10 @@ pub fn configure(comptime cfg: Config) type {
                 if (has_record) {
                     record_len = shared.rec_len;
                     @memcpy(record_local[0..record_len], shared.rec_buf[0..record_len]);
+                    record_cwd_len = shared.rec_cwd_len;
+                    if (record_cwd_len > 0) {
+                        @memcpy(record_cwd_local[0..record_cwd_len], shared.rec_cwd_buf[0..record_cwd_len]);
+                    }
                     shared.rec_pending = false;
                 }
                 shared.mutex.unlock(io);
@@ -233,7 +246,7 @@ pub fn configure(comptime cfg: Config) type {
                 }
 
                 if (has_record and cfg.record) {
-                    runRecord(gpa, io, record_local[0..record_len]);
+                    runRecord(gpa, io, record_local[0..record_len], record_cwd_local[0..record_cwd_len]);
                     total_records += 1;
                     records_since_sync += 1;
                     const now = nowMs();
@@ -331,16 +344,33 @@ pub fn configure(comptime cfg: Config) type {
         /// We accept the imperfect record over the cost of two CLI
         /// invocations + ID tracking. atuin's own shell plugin sets
         /// exit code via PROMPT_COMMAND; we don't see that signal.
-        fn runRecord(gpa: std.mem.Allocator, io: std.Io, line: []const u8) void {
+        ///
+        /// When `cwd` is non-empty, it's passed to atuin as `--cwd`
+        /// — the proxy uses this to encode subprocess context (ssh
+        /// target, kubectl pod, sudo elevation, …) into the recorded
+        /// entry so atuin's `[ DIRECTORY ]` filter on Ctrl+R scopes
+        /// commands per remote/elevation target without needing
+        /// atuin patches.
+        fn runRecord(gpa: std.mem.Allocator, io: std.Io, line: []const u8, cwd: []const u8) void {
             if (line.len == 0) return;
-            const argv = [_][]const u8{
-                cfg.atuin_binary,
-                "history",
-                "start",
-                line,
-            };
+            var argv_buf: [6][]const u8 = undefined;
+            var argv_len: usize = 0;
+            argv_buf[argv_len] = cfg.atuin_binary;
+            argv_len += 1;
+            argv_buf[argv_len] = "history";
+            argv_len += 1;
+            argv_buf[argv_len] = "start";
+            argv_len += 1;
+            if (cwd.len > 0) {
+                argv_buf[argv_len] = "--cwd";
+                argv_len += 1;
+                argv_buf[argv_len] = cwd;
+                argv_len += 1;
+            }
+            argv_buf[argv_len] = line;
+            argv_len += 1;
             const result = std.process.run(gpa, io, .{
-                .argv = &argv,
+                .argv = argv_buf[0..argv_len],
                 .stdout_limit = .limited(256),
             }) catch return;
             gpa.free(result.stdout);
@@ -492,10 +522,24 @@ pub fn configure(comptime cfg: Config) type {
             if (!cfg.record) return;
             if (line.len == 0 or line.len > cfg.max_query) return;
 
+            // Capture the subprocess-aware cwd (or empty if at the
+            // local prompt). Empty cwd → atuin uses its default
+            // (process cwd). Non-empty → atuin records the entry with
+            // the encoded URI as `cwd`, so [DIRECTORY] mode on Ctrl+R
+            // naturally scopes per ssh/kubectl/etc. target.
+            var cwd_scratch: [768]u8 = undefined;
+            const resolved_cwd = ctx.subprocessCwd(&cwd_scratch, "");
+
             rt.shared.mutex.lockUncancelable(ctx.io);
             defer rt.shared.mutex.unlock(ctx.io);
             @memcpy(rt.shared.rec_buf[0..line.len], line);
             rt.shared.rec_len = line.len;
+            if (resolved_cwd.len > 0 and resolved_cwd.len <= rt.shared.rec_cwd_buf.len) {
+                @memcpy(rt.shared.rec_cwd_buf[0..resolved_cwd.len], resolved_cwd);
+                rt.shared.rec_cwd_len = resolved_cwd.len;
+            } else {
+                rt.shared.rec_cwd_len = 0;
+            }
             rt.shared.rec_pending = true;
             rt.shared.cv.signal(ctx.io);
         }

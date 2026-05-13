@@ -175,3 +175,44 @@ pub const StatusBar = struct {
     error_ttl_ms: u32 = 60_000,
 };
 pub const statusbar: StatusBar = .{};
+
+// ───── Subprocess-context tracking ────────────────────────────────────────
+
+pub const Subprocess = struct {
+    /// Path to the `ssh` binary used for `ssh -G <args>` resolution.
+    /// Override on NixOS, Guix, or anywhere `ssh` lives outside the
+    /// default `$PATH` lookup.
+    ssh_binary: []const u8 = "ssh",
+
+    /// When true (default), the subprocess parser forks `ssh -G <args>`
+    /// to resolve `~/.ssh/config` aliases, Match blocks, ProxyJump,
+    /// `-F` files, `-i` identity → CanonicalDomains transformations,
+    /// etc. — using ssh's OWN parser rather than re-implementing one
+    /// in Zig. Adds a short blocking call (~100ms) per `ssh` invocation
+    /// at `;C` time; the user is already waiting for ssh to connect
+    /// so it's not user-visible.
+    ///
+    /// Disable to fall back to a regex extraction of `user@host` from
+    /// the typed command line — loses alias resolution but doesn't
+    /// fork+exec. Useful when ssh is slow / unavailable / inside a
+    /// container without `ssh -G` support.
+    use_ssh_g: bool = true,
+
+    /// Surface a `→ ssh:host` (or `→ k8s:context/ns/pod`, etc.)
+    /// segment in the status bar while a recognised subprocess is
+    /// active. Adds at most one ANSI repaint per `;C` / `;D` edge.
+    show_in_statusbar: bool = true,
+
+    /// Style for the subprocess segment in the status bar. Defaults
+    /// to muted cyan to distinguish from the `🔒` incognito segment
+    /// (muted red) and the regular module contributions.
+    segment_style: atty.Style = .{ .dim = true, .fg = 6 },
+
+    /// Per-target incognito list. Matches against the resolved
+    /// `Frame.name` (e.g. `prod@bastion.example.com`, `prod/apps/db`,
+    /// `nginx`, `sudo`). Commands typed inside a matching target are
+    /// dropped — same effect as the user manually toggling
+    /// Ctrl+Shift+I before stepping in. Empty by default.
+    incognito_targets: []const []const u8 = &.{},
+};
+pub const subprocess: Subprocess = .{};

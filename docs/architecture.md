@@ -276,6 +276,85 @@ ble.sh, zsh4humans, VS Code's shell-integration, fig all emit by
 default or via a flag. Vanilla bash/zsh without any integration
 don't — atty stays on keystroke tracking, no regression.
 
+## Subprocess-context tracking (auto-detect)
+
+The keystroke model is also blind to *which* shell the user is
+actually typing into: at the local prompt, inside `ssh remote`,
+inside `sudo bash`, inside `kubectl exec -it pod -- bash`, inside
+`vim`, inside `psql>`. All of these produce the same Enter from
+atty's POV — bytes flow through the same PTY master and
+`dispatchLineCommit` fires for every one. Without further signal,
+atty's modules would either record every Enter (polluting the
+local history with vim edit-mode lines + remote SSH commands tagged
+as local) or drop them all (losing the cross-host history the user
+wants).
+
+`src/subprocess.zig` closes that gap. It maintains a fixed-size
+stack (depth ≤ 8) of `Frame` records, each describing one
+foreground subprocess. The stack is driven by OSC 133's `;C` /
+`;D` transition edges:
+
+  * **`;C` (entering command)** — peek at the line the user just
+    committed. The parser recognises `ssh` / `mosh` / `kubectl exec`
+    / `docker exec` / `lxc exec` / `incus exec` / `sudo bash|-s|-i`
+    / `su`. For `ssh` specifically, atty forks `ssh -G <args>` so
+    the *real* ssh client resolves aliases, Match blocks, ProxyJump,
+    `-F` files — using ssh's own parser rather than re-implementing
+    one in Zig. The resolved target (`user@host`, `ctx/ns/pod`,
+    `container`, `sudo`, …) is pushed onto the stack with `kind`
+    set accordingly. Unrecognised commands push a `.none` frame so
+    the matching `;D` always pops something — the stack invariant
+    is `depth(;C) == depth(;D) + 1`.
+  * **`;D` (command finished)** — pop. The popped frame is reset so
+    a stale name can't leak via `currentKind()`.
+
+`src/osc7.zig` parses OSC 7 `\x1b]7;file://host/path\x07` reports
+from any integration that emits them (Ghostty, VS Code, ble.sh,
+zsh4humans, kitty, …) and feeds the captured path into the top
+frame's `cwd`. When the remote shell is also integrated, atty
+records the *real* remote cwd; otherwise it falls back to `?`.
+
+**Encoding.** Modules call `ctx.subprocessCwd(out, fallback)` to
+get a URI-shaped scope string suitable for atuin's `--cwd` flag:
+
+| Frame kind | Encoded cwd |
+|---|---|
+| `.ssh` | `ssh://user@host/remote-cwd` |
+| `.kubectl_exec` | `k8s://context/ns/pod/cwd` |
+| `.docker_exec` | `docker://container/cwd` |
+| `.container_exec` | `container://name/cwd` |
+| `.elevation` | `sudo:local-cwd` |
+| `.su` | `su:user:local-cwd` |
+| `.none` | `fallback` (caller's value, typically the real local cwd) |
+
+atuin's `--cwd` is a free-form string, so `[ DIRECTORY ]` mode on
+Ctrl+R naturally scopes per remote target without atuin patches.
+Local commands keep their real cwd. The two namespaces don't
+collide.
+
+**Behaviour matrix.** With shell integration sourced:
+
+| Where the user is | atty records? | tagged as |
+|---|---|---|
+| Local prompt | yes | local cwd |
+| `ssh remote` prompt | yes | `ssh://user@host/…` |
+| `sudo bash` shell | yes | `sudo:local-cwd` |
+| `kubectl exec` shell | yes | `k8s://…` |
+| Inside `vim` / `less` / `psql` | no (kind=`.none`) | — |
+| Inside alt-screen TUI (k9s, htop) | no (alt-screen gate) | — |
+
+Without integration, the alt-screen gate from #14 still catches
+TUIs; OSC 7 + OSC 133 signals are silent so commands inside ssh
+remain unrecorded (the gate from #15 + the `kind=.none` drop in
+this layer compound). The user-actionable fix is shell-side: source
+any of the integrations listed above.
+
+**Statusbar segment.** When `Config.subprocess.show_in_statusbar`
+is true (default), the bar shows `→ ssh:user@host` (or
+`→ k8s:ctx/ns/pod`, etc.) while a recognised launcher is on the
+stack. The arrow + cyan styling distinguish it from the static
+base text and module contributions.
+
 ## Config resolution
 
 Same shape as dwm's `config.def.h` / `config.h` split, plus a tiny

@@ -136,3 +136,50 @@ const atty = @import("atty");
 //     .base_text = "atty",                            // proxy-level prefix
 //     .incognito_style = .{ .dim = true, .fg = 1 },   // muted red 🔒 segment
 // };
+
+// ───── Subprocess context ──────────────────────────────────────────────────
+//
+// At every OSC 133 `;C` transition (requires shell integration:
+// Ghostty's `shell-integration-features = osc-133`, ble.sh,
+// zsh4humans, or VS Code's snippet), atty inspects the line you
+// just committed. If it matches `ssh` / `mosh` / `kubectl exec` /
+// `docker exec` / `lxc exec` / `incus exec` / `sudo bash|-s|-i` /
+// `su`, atty pushes a frame onto an in-memory stack and tags
+// subsequent recorded commits with an encoded `--cwd`:
+//
+//   ssh://user@host/remote-cwd      kubectl: k8s://ctx/ns/pod/cwd
+//   docker://container/cwd          container://name/cwd
+//   sudo:local-cwd                  su:user:local-cwd
+//
+// atuin's Ctrl+R `[ DIRECTORY ]` filter then scopes searches per
+// remote target. Stack pops on `;D` so nested ssh chains work.
+// History module ignores subprocess-typed commits — your
+// `~/.bash_history` / `~/.zsh_history` stays free of unrunnable
+// lines.
+//
+// pub const subprocess: atty.Subprocess = .{
+//     // Fork `ssh -G <args>` to resolve aliases / Match blocks /
+//     // ProxyJump from ~/.ssh/config. Disable if ssh isn't on
+//     // $PATH, you don't want the (typically <100ms) latency, or
+//     // you don't use ssh aliases.
+//     // .use_ssh_g = true,
+//     //
+//     // Path to ssh used for -G resolution.
+//     // .ssh_binary = "ssh",
+//     //
+//     // `→ ssh:user@host` segment in the status bar while
+//     // a recognised subprocess is active.
+//     // .show_in_statusbar = true,
+//     //
+//     // Style of the subprocess statusbar segment.
+//     // .segment_style = .{ .dim = true, .fg = 6 },
+//     //
+//     // Per-target incognito list — commands typed at matching
+//     // targets are dropped (same as a manual Ctrl+Shift+I). Match
+//     // is on the resolved frame name (e.g. "prod@bastion",
+//     // "prod/apps/db", "nginx", "sudo").
+//     // .incognito_targets = &.{
+//     //     "prod@bastion.example.com",
+//     //     "prod/apps/db",
+//     // },
+// };

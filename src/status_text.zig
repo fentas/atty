@@ -28,9 +28,9 @@ pub fn writeSegment(w: *std.Io.Writer, any: *bool, text: []const u8) std.Io.Writ
     any.* = true;
 }
 
-/// Convenience: one-shot assembly with the three known segments. The
-/// incognito segment is formatted with its own SGR (caller passes
-/// the styles).
+/// Convenience: one-shot assembly with the known segments. The
+/// incognito + subprocess segments are formatted with their own SGRs
+/// (caller passes the styles).
 pub const AssembleArgs = struct {
     /// Output writer.
     w: *std.Io.Writer,
@@ -39,9 +39,16 @@ pub const AssembleArgs = struct {
     incognito: bool,
     /// Style applied to the 🔒 segment.
     incognito_style: Style,
-    /// Style of the surrounding bar — re-applied after the incognito
-    /// segment's reset so the next text picks up the bar style again.
+    /// Style of the surrounding bar — re-applied after the incognito /
+    /// subprocess segments' resets so the next text picks up the bar
+    /// style again.
     bar_style: Style,
+    /// Subprocess target — when non-empty, renders as
+    /// "→ <subprocess_text>" between the incognito segment and the
+    /// base text. Empty (default) omits the segment.
+    subprocess_text: []const u8 = "",
+    /// Style applied to the subprocess segment.
+    subprocess_style: Style = .{},
     /// Configured base text (may be empty).
     base_text: []const u8,
     /// Pre-gathered module contributions (may be empty).
@@ -62,6 +69,17 @@ pub fn assemble(args: AssembleArgs) std.Io.Writer.Error!void {
             style_mod.reset,
             args.bar_style,
         });
+        try writeSegment(args.w, &any, sw.buffered());
+    }
+    if (args.subprocess_text.len > 0) {
+        var seg_buf: [256]u8 = undefined;
+        var sw: std.Io.Writer = .fixed(&seg_buf);
+        sw.print("{f}\u{2192} {s}{s}{f}", .{
+            args.subprocess_style,
+            args.subprocess_text,
+            style_mod.reset,
+            args.bar_style,
+        }) catch {};
         try writeSegment(args.w, &any, sw.buffered());
     }
     try writeSegment(args.w, &any, args.base_text);

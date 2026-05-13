@@ -12,6 +12,9 @@ pub const ansi = @import("ansi.zig");
 pub const ghost = @import("ghost.zig");
 pub const ghost_list = @import("ghost_list.zig");
 pub const osc133 = @import("osc133.zig");
+pub const osc7 = @import("osc7.zig");
+pub const altscreen = @import("altscreen.zig");
+pub const subprocess = @import("subprocess.zig");
 pub const pty = @import("pty.zig");
 pub const terminal = @import("terminal.zig");
 pub const proxy = @import("proxy.zig");
@@ -31,6 +34,7 @@ pub const Ghost = config.Ghost;
 pub const Terminal = config.Terminal;
 pub const Keymap = config.Keymap;
 pub const StatusBar = config.StatusBar;
+pub const Subprocess = config.Subprocess;
 
 /// Built-in modules. User configs compose these via
 /// `atty.modules.atuin.configure(.{...})`.

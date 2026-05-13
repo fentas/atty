@@ -46,7 +46,7 @@ pub const Osc133 = struct {
         osc, // inside `\x1b]…`
         osc_esc, // saw 0x1B inside osc; awaiting '\' (ST)
     };
-    const Phase = enum {
+    pub const Phase = enum {
         idle, // outside any prompt/command zone
         in_input, // between ;B and ;C — capturing input
         in_command, // between ;C and ;D — command running, ignore output
