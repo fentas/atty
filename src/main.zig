@@ -37,20 +37,104 @@ const usage =
     \\
 ;
 
-const shell_init_snippet =
+const shell_init_header_prefix =
     \\# atty shell integration — drop this in your .bashrc / .zshrc:
     \\#   eval "$(atty init bash)"
     \\#
-    \\# Re-execs the current interactive shell under atty, with a
-    \\# guard so subshells (atty's own child + any nested invocation)
-    \\# don't recurse. Only fires for TTY-attached interactive shells
-    \\# — scripts run unchanged.
+    \\# Re-execs the current interactive shell under atty. atty
+    \\# injects ATTY=1 (and ATTY_PID / ATTY_VERSION) into the child
+    \\# shell's environment, so nested invocations — atty's own
+    \\# child, or any subshell it spawns — skip the exec and fall
+    \\# through to the OSC 133 setup. Only fires for TTY-attached
+    \\# interactive shells; scripts run unchanged.
     \\if [ -z "${ATTY:-}" ] && [ -t 0 ] && [ -t 1 ]; then
-    \\    export ATTY=1
-    \\    exec atty
+;
+
+const shell_init_osc133_bash =
+    \\
+    \\# OSC 133 prompt markers — tell atty (and Ghostty / VS Code /
+    \\# iTerm / …) where prompts start (A), where user input begins
+    \\# (B), and where commands finish (D + exit code). atty uses
+    \\# A/B to capture the user's typed line for accurate history
+    \\# recall; without these it falls back to keystroke tracking,
+    \\# which loses fidelity on completion and multi-line edits.
+    \\__atty_osc133_d() { local __code=$?; printf '\033]133;D;%s\007' "$__code"; }
+    \\PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-}"
+    \\PS1=$'\\[\033]133;A\007\\]'"${PS1}"$'\\[\033]133;B\007\\]'
+    \\
+;
+
+const shell_init_osc133_zsh =
+    \\
+    \\# OSC 133 prompt markers — tell atty (and Ghostty / VS Code /
+    \\# iTerm / …) where prompts start (A), where user input begins
+    \\# (B), where commands run (C), and where they finish (D + exit
+    \\# code). atty uses A/B to capture the user's typed line for
+    \\# accurate history recall; without these it falls back to
+    \\# keystroke tracking, which loses fidelity on completion and
+    \\# multi-line edits.
+    \\__atty_osc133_precmd() {
+    \\    local __code=$?
+    \\    printf '\e]133;D;%s\a' "$__code"
+    \\    printf '\e]133;A\a'
+    \\}
+    \\__atty_osc133_preexec() { printf '\e]133;C\a'; }
+    \\autoload -Uz add-zsh-hook
+    \\add-zsh-hook precmd __atty_osc133_precmd
+    \\add-zsh-hook preexec __atty_osc133_preexec
+    \\PS1+=$'%{\e]133;B\a%}'
+    \\
+;
+
+const shell_init_osc133_generic =
+    \\
+    \\# OSC 133 prompt markers — see `atty init bash` or `atty init zsh`
+    \\# for shell-specific hooks. atty falls back to keystroke
+    \\# tracking when these aren't emitted.
+    \\if [ -n "${BASH_VERSION:-}" ]; then
+    \\    __atty_osc133_d() { local __code=$?; printf '\033]133;D;%s\007' "$__code"; }
+    \\    PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-}"
+    \\    PS1=$'\\[\033]133;A\007\\]'"${PS1}"$'\\[\033]133;B\007\\]'
+    \\elif [ -n "${ZSH_VERSION:-}" ]; then
+    \\    __atty_osc133_precmd() {
+    \\        local __code=$?
+    \\        printf '\e]133;D;%s\a' "$__code"
+    \\        printf '\e]133;A\a'
+    \\    }
+    \\    __atty_osc133_preexec() { printf '\e]133;C\a'; }
+    \\    autoload -Uz add-zsh-hook
+    \\    add-zsh-hook precmd __atty_osc133_precmd
+    \\    add-zsh-hook preexec __atty_osc133_preexec
+    \\    PS1+=$'%{\e]133;B\a%}'
     \\fi
     \\
 ;
+
+fn emitInitSnippet(shell: []const u8) void {
+    writeStdout(shell_init_header_prefix);
+
+    // Header continues with `    exec atty <shell>\nfi\n` — bake
+    // the shell name in so the re-exec lands the same shell the
+    // user named in `atty init <shell>` (not just $SHELL, which
+    // may not match the rc file we're being eval'd from).
+    var buf: [256]u8 = undefined;
+    const exec_line = if (shell.len > 0)
+        std.fmt.bufPrint(&buf, "\n    exec atty {s}\nfi\n", .{shell}) catch "\n    exec atty\nfi\n"
+    else
+        "\n    exec atty\nfi\n";
+    writeStdout(exec_line);
+
+    if (std.mem.eql(u8, shell, "bash")) {
+        writeStdout(shell_init_osc133_bash);
+    } else if (std.mem.eql(u8, shell, "zsh")) {
+        writeStdout(shell_init_osc133_zsh);
+    } else {
+        // No shell or unknown shell — dual-branch fallback. Bash
+        // and zsh covered inline; other shells (fish, nu, …) need
+        // their own integration which we don't ship yet.
+        writeStdout(shell_init_osc133_generic);
+    }
+}
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn isatty(fd: c_int) c_int;
@@ -96,8 +180,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args) !CliOpts {
             writeStderr(usage);
             std.process.exit(2);
         },
-        .print_init => {
-            writeStdout(shell_init_snippet);
+        .print_init => |shell| {
+            emitInitSnippet(shell);
             std.process.exit(0);
         },
     }
