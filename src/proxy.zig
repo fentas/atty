@@ -304,13 +304,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         },
                     }
                 }
-                // Kitty keyboard protocol cleanup: when the terminal
-                // sends a CSI-u sequence we don't have a binding for
-                // (Ctrl+9, Ctrl+Shift+Right, etc.), drop it instead of
-                // forwarding to the shell. Shells don't speak the
-                // protocol — they'd echo the bytes as mojibake.
+                // Kitty keyboard protocol cleanup. With the
+                // disambiguate flag pushed, terminals like Ghostty
+                // emit CSI-u for keys that previously had a legacy
+                // encoding — including Ctrl+letter (Ctrl+C, Ctrl+R,
+                // …), Esc, Tab, Enter, Backspace. The shell doesn't
+                // speak the protocol; left alone those keys would
+                // either echo as mojibake or vanish. So:
+                //
+                //   1. If the sequence has a legacy form, translate
+                //      and forward the legacy bytes (e.g. Ctrl+C
+                //      becomes \x03 — bash's line-abort).
+                //   2. If it doesn't (Ctrl+9, Ctrl+Shift+Right, …),
+                //      drop to avoid mojibake.
+                var legacy_buf: [8]u8 = undefined;
                 if (!matched_binding and config.terminal.enable_kitty_keyboard and keymap.isCsiU(input)) {
-                    swallow_after_binding = true;
+                    if (keymap.csiUToLegacy(input, &legacy_buf)) |legacy| {
+                        input = legacy;
+                    } else {
+                        swallow_after_binding = true;
+                    }
                 }
 
                 if (swallow_after_binding) {

@@ -1,0 +1,47 @@
+# ctrl_c_via_kitty_kbd — regression for the bug that broke every
+# Ctrl+letter combo on real Ghostty / kitty / foot / WezTerm.
+#
+# The story:
+#   atty pushes the kitty-keyboard disambiguate flag (`\x1b[>1u`) at
+#   startup. With it on, modern terminals encode Ctrl+C as the CSI-u
+#   form `\x1b[99;5u` instead of the legacy single byte 0x03. The
+#   shell does NOT speak the kitty protocol — it expects 0x03. The
+#   first version of atty's CSI-u handling treated every unmapped
+#   CSI-u as droppable, so Ctrl+C (and Ctrl+R, Ctrl+D, Ctrl+A, …)
+#   vanished into the proxy and never reached bash.
+#
+# The fix:
+#   csiUToLegacy translates back. atty receives `\x1b[99;5u`, looks
+#   up the table, forwards `\x03` to pty.master, bash sees a normal
+#   line-abort.
+#
+# This scenario uses the exact byte sequence a Ghostty session would
+# send. ctrl_c_aborts_line covers the bare-0x03 path (terminals
+# without kitty kbd, or with the protocol opt-ed out); this one
+# covers the path the shipping binary actually runs through.
+
+cols 60
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 200
+
+# Type a partial line.
+type "echo SHOULD-NOT-RUN"
+sleep 300
+
+# Send Ctrl+C as kitty-kbd CSI-u (keycode 99 = 'c', modifier 5 = Ctrl).
+type "\x1b[99;5u"
+sleep 400
+
+# Prove the prompt is back and the partial line was killed.
+type "echo after-csi-u-abort\r"
+wait_for "after-csi-u-abort"
+sleep 200
+
+snapshot post_kitty_abort
+
+type "exit\r"
+exit_code 0

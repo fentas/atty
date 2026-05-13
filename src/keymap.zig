@@ -190,6 +190,111 @@ test "key resolves multi-modifier arrows" {
 pub const kitty_kbd_push = "\x1B[>1u";
 pub const kitty_kbd_pop = "\x1B[<u";
 
+/// Translate a kitty-keyboard CSI-u sequence back to its legacy
+/// single-byte encoding (or short escape sequence), if one exists.
+///
+/// **Why this is critical.** With the kitty kbd disambiguate flag
+/// (`\x1b[>1u`) pushed, terminals like Ghostty emit CSI-u for keys
+/// that previously had a single-byte encoding:
+///
+///     Ctrl+C           →  \x1b[99;5u    (legacy: \x03)
+///     Ctrl+R           →  \x1b[114;5u   (legacy: \x12)
+///     Esc              →  \x1b[27u      (legacy: \x1b)
+///     Tab              →  \x1b[9u       (legacy: \t)
+///     Enter            →  \x1b[13u      (legacy: \r)
+///     Backspace        →  \x1b[127u     (legacy: \x7f)
+///
+/// The shell (bash readline) expects the legacy form — it does NOT
+/// speak the kitty kbd protocol. So the proxy must translate before
+/// forwarding. Without translation, Ctrl+C in a Ghostty-on-atty
+/// session does nothing: atty drops the unmapped CSI-u, no bytes
+/// reach the shell.
+///
+/// Returns null when:
+///   - `input` isn't a CSI-u sequence at all (caller forwards as-is)
+///   - it's CSI-u but the key has no legacy form (Ctrl+9,
+///     Ctrl+Shift+Right, Shift+Tab, …) — caller drops to avoid
+///     mojibake echo
+///
+/// `out` is caller-owned scratch storage for the translated bytes.
+/// A 4-byte buffer is enough for every translation this function
+/// produces today.
+pub fn csiUToLegacy(input: []const u8, out: []u8) ?[]const u8 {
+    if (!isCsiU(input)) return null;
+
+    // Body = the digits/semicolons between `ESC [` and `u`.
+    const body = input[2 .. input.len - 1];
+
+    // Format: `<keycode>[ ; <modifier> [ : <text-as-codepoints> ] ]`.
+    // The `:` form appears under the "Report associated text" flag,
+    // which we don't push — but we tolerate it defensively.
+    var kc: u32 = 0;
+    var mod: u32 = 1;
+    if (std.mem.indexOfScalar(u8, body, ';')) |semi| {
+        kc = std.fmt.parseInt(u32, body[0..semi], 10) catch return null;
+        const after = body[semi + 1 ..];
+        const mod_end = std.mem.indexOfScalar(u8, after, ':') orelse after.len;
+        mod = std.fmt.parseInt(u32, after[0..mod_end], 10) catch return null;
+    } else {
+        kc = std.fmt.parseInt(u32, body, 10) catch return null;
+    }
+
+    // Modifier encoding (kitty kbd): 1=none, 2=shift, 3=alt, 4=alt+shift,
+    // 5=ctrl, 6=ctrl+shift, 7=ctrl+alt, 8=ctrl+alt+shift.
+    const has_ctrl = (mod == 5 or mod == 6 or mod == 7 or mod == 8);
+    const has_shift = (mod == 2 or mod == 4 or mod == 6 or mod == 8);
+    const has_alt = (mod == 3 or mod == 4 or mod == 7 or mod == 8);
+
+    // --- Unmodified named keys → their legacy single bytes ---------------
+    if (mod == 1 or mod == 0) switch (kc) {
+        9 => return writeOne(out, '\t'),
+        13 => return writeOne(out, '\r'),
+        27 => return writeOne(out, 0x1b),
+        127 => return writeOne(out, 0x7f),
+        else => {},
+    };
+
+    // --- Ctrl + lowercase letter → 0x01..0x1A control byte ---------------
+    // Bash readline's default key bindings live here:
+    //   Ctrl+A = beginning-of-line, Ctrl+C = abort,
+    //   Ctrl+D = EOF/exit, Ctrl+E = end-of-line,
+    //   Ctrl+R = reverse-i-search, Ctrl+U = unix-line-discard, …
+    if (has_ctrl and !has_alt and kc >= 'a' and kc <= 'z') {
+        return writeOne(out, @intCast(kc - 'a' + 1));
+    }
+
+    // --- Alt + ASCII char → ESC <char> (xterm metaSendsEscape) -----------
+    if (has_alt and !has_ctrl and !has_shift and kc < 128) {
+        if (out.len < 2) return null;
+        out[0] = 0x1b;
+        out[1] = @intCast(kc);
+        return out[0..2];
+    }
+
+    // Shift+Tab has a well-known legacy form. Other modifier-bearing
+    // keys (Ctrl+Shift+letter for example) intentionally fall through
+    // to null — those are atty's binding territory (Ctrl+Shift+I,
+    // Ctrl+Shift+D) and a matching binding handles them at the
+    // call-site before this translator runs.
+    if (kc == 9 and has_shift and !has_ctrl and !has_alt) {
+        return writeBytes(out, "\x1b[Z");
+    }
+
+    return null;
+}
+
+fn writeOne(out: []u8, b: u8) ?[]const u8 {
+    if (out.len < 1) return null;
+    out[0] = b;
+    return out[0..1];
+}
+
+fn writeBytes(out: []u8, s: []const u8) ?[]const u8 {
+    if (out.len < s.len) return null;
+    @memcpy(out[0..s.len], s);
+    return out[0..s.len];
+}
+
 /// True if `input` is a kitty-keyboard CSI-u sequence: `ESC [`
 /// followed by digit / `;` / `:` parameters, terminated by `u`.
 /// Used by the proxy to drop unmapped kitty-protocol keys so they
@@ -288,6 +393,78 @@ test "match requires byte-exact equality (chunked reads don't trigger)" {
     try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b["));
     // trailing junk
     try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b[Cx"));
+}
+
+test "csiUToLegacy: Ctrl+letter combos become their 0x01..0x1A control byte" {
+    var out: [4]u8 = undefined;
+    // Ctrl+A = 0x01
+    try std.testing.expectEqualSlices(u8, "\x01", csiUToLegacy("\x1b[97;5u", &out).?);
+    // Ctrl+C = 0x03 (the user's reported breakage)
+    try std.testing.expectEqualSlices(u8, "\x03", csiUToLegacy("\x1b[99;5u", &out).?);
+    // Ctrl+D = 0x04
+    try std.testing.expectEqualSlices(u8, "\x04", csiUToLegacy("\x1b[100;5u", &out).?);
+    // Ctrl+E = 0x05
+    try std.testing.expectEqualSlices(u8, "\x05", csiUToLegacy("\x1b[101;5u", &out).?);
+    // Ctrl+R = 0x12 (bash reverse-i-search)
+    try std.testing.expectEqualSlices(u8, "\x12", csiUToLegacy("\x1b[114;5u", &out).?);
+    // Ctrl+U = 0x15
+    try std.testing.expectEqualSlices(u8, "\x15", csiUToLegacy("\x1b[117;5u", &out).?);
+    // Ctrl+Z = 0x1A
+    try std.testing.expectEqualSlices(u8, "\x1a", csiUToLegacy("\x1b[122;5u", &out).?);
+}
+
+test "csiUToLegacy: named keys with legacy single-byte encodings" {
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "\t", csiUToLegacy("\x1b[9u", &out).?);
+    try std.testing.expectEqualSlices(u8, "\r", csiUToLegacy("\x1b[13u", &out).?);
+    try std.testing.expectEqualSlices(u8, "\x1b", csiUToLegacy("\x1b[27u", &out).?);
+    try std.testing.expectEqualSlices(u8, "\x7f", csiUToLegacy("\x1b[127u", &out).?);
+}
+
+test "csiUToLegacy: Shift+Tab → \\x1b[Z" {
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "\x1b[Z", csiUToLegacy("\x1b[9;2u", &out).?);
+}
+
+test "csiUToLegacy: Alt+letter → ESC + letter (xterm metaSendsEscape)" {
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "\x1bf", csiUToLegacy("\x1b[102;3u", &out).?);
+}
+
+test "csiUToLegacy: keys with no legacy form return null (caller drops)" {
+    var out: [4]u8 = undefined;
+    // Ctrl+9 — no legacy encoding (kitty kbd's whole reason for existing).
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[57;5u", &out));
+    // Ctrl+Alt+C — Alt-bearing combos fall outside our simple table.
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[99;7u", &out));
+}
+
+test "csiUToLegacy: Ctrl+Shift+letter folds to the same control byte as Ctrl+letter" {
+    // Rationale: in classic terminal mode, Ctrl+Shift+C and Ctrl+C
+    // both send 0x03 — the shift bit doesn't propagate through a
+    // control-byte encoding. Under kitty kbd they get distinct CSI-u
+    // sequences, but if a user's binding doesn't catch them the
+    // shell should still see the same bytes a non-kitty terminal
+    // would have produced. Note: the proxy's binding-match runs
+    // BEFORE this translator, so atty's own Ctrl+Shift+I /
+    // Ctrl+Shift+D bindings still take precedence — this case only
+    // triggers when no binding matched.
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "\x03", csiUToLegacy("\x1b[99;6u", &out).?); // Ctrl+Shift+C
+    try std.testing.expectEqualSlices(u8, "\x1a", csiUToLegacy("\x1b[122;6u", &out).?); // Ctrl+Shift+Z
+}
+
+test "csiUToLegacy: non-CSI-u input returns null without touching `out`" {
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x03", &out));
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[C", &out)); // arrow
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("abc", &out));
+}
+
+test "csiUToLegacy: malformed CSI-u (non-numeric) returns null safely" {
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[abc;5u", &out));
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[99;xyu", &out));
 }
 
 test "isCsiU recognises kitty-protocol CSI-u shapes" {

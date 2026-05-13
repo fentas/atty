@@ -1,0 +1,8 @@
+$ echo SHOULD-NOT-RUN^C
+$ echo after-csi-u-abort
+after-csi-u-abort
+$
+
+
+
+
