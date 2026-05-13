@@ -372,7 +372,30 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // closed on tcgetattr errors → an fd error is
                 // treated as "assume the worst, redact."
                 if (slaveIsHiddenInput(pty.master)) {
-                    try writeAll(pty.master, input);
+                    // CSI-u translation still applies here even though
+                    // the rest of the pipeline is skipped. With kitty
+                    // kbd pushed (default), Enter / Backspace / Ctrl+C
+                    // arrive as `\x1b[13u` / `\x1b[127u` / `\x1b[99;5u`
+                    // — the password reader (sudo / ssh / passwd /
+                    // getpass) doesn't speak the protocol and would
+                    // see mojibake instead of the line terminator or
+                    // cancel byte. Translate to legacy bytes before
+                    // forwarding; drop CSI-u sequences with no legacy
+                    // form (Ctrl+Shift+digit, F-keys, …) rather than
+                    // leaking the raw bytes into the password reader.
+                    var legacy_buf: [8]u8 = undefined;
+                    var to_send: []const u8 = input;
+                    if (config.terminal.enable_kitty_keyboard and keymap.isCsiU(input)) {
+                        if (keymap.csiUToLegacy(input, &legacy_buf)) |legacy| {
+                            to_send = legacy;
+                        } else {
+                            line_state.reset();
+                            line_state.clearLastCommitted();
+                            if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                            continue;
+                        }
+                    }
+                    try writeAll(pty.master, to_send);
                     line_state.reset();
                     line_state.clearLastCommitted();
                     if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
