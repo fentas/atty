@@ -330,13 +330,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
                 // Fire onLineCommit if Enter was pressed during this read
                 // and the pre-Enter line was non-empty and certain. Skip
-                // when incognito is on, or when the line starts with a
-                // space (bash HISTCONTROL=ignorespace convention).
+                // when incognito is on, when the line starts with a
+                // space (bash HISTCONTROL=ignorespace convention), or
+                // when the Enter itself was swallowed by a module — a
+                // .swallow means "this keystroke didn't reach the
+                // shell," so recording it as a committed command would
+                // be a lie (and would feed history the dangerous line
+                // guardrail was protecting against).
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
                     if (!line_state.committed_was_uncertain and
                         !incognito_on and
-                        !leading_space)
+                        !leading_space and
+                        action != .swallow)
                     {
                         D.dispatchLineCommit(&runtimes, &ctx, committed) catch {};
                     }

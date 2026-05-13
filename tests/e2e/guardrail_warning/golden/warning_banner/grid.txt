@@ -1,0 +1,8 @@
+$
+atty guardrail: rm -rf on a root-ish path
+        line: rm -rf /tmp/atty-nonexist
+        press Enter again to confirm, any other key to cancel.
+
+
+
+

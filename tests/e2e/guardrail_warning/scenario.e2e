@@ -1,0 +1,45 @@
+# guardrail_warning — Ctrl+R-style "are you sure?" before the user
+# can fire a dangerous command.
+#
+# Flow:
+#   1. Type a known-dangerous command ("rm -rf /tmp/atty-nonexist")
+#      and press Enter once.
+#   2. The guardrail module's onInput sees the Enter, runs `check`
+#      on the current line, finds a match, writes the warning banner
+#      to stderr (which is the same fd as our stdout proxy → it
+#      lands in the VT grid), and returns Action.swallow.
+#   3. Snapshot the screen — the banner text MUST be visible:
+#         "atty guardrail: rm -rf on a root-ish path"
+#      The shell prompt has NOT advanced, and `rm` has NOT run.
+#   4. Press Enter again — the module is "armed"; it forwards the
+#      second Enter so the user can confirm. But by then we've
+#      typed a NON-EXISTENT path on purpose so rm fails harmlessly.
+#   5. Exit cleanly.
+#
+# We deliberately target /tmp/atty-nonexist (which we don't create)
+# so even if the test harness is run with reduced permissions, the
+# worst that can happen is rm complains "No such file or directory".
+# The point of the scenario is the BANNER, not what rm does.
+
+cols 80
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 200
+
+# Type the dangerous command, then Enter.
+type "rm -rf /tmp/atty-nonexist\r"
+sleep 600
+
+# Banner must be on screen.
+snapshot warning_banner
+
+# Confirm. (rm against a non-existent path silently exits 0 with
+# `-rf`, which is exactly what we want — no host damage.)
+key Enter
+sleep 400
+
+type "exit\r"
+exit_code 0

@@ -138,7 +138,12 @@ pub fn configure(comptime cfg: Config) type {
                 return .forward;
             }
 
-            const line = ctx.line.current();
+            // applyInput ran before dispatchInput, so for an Enter
+            // keystroke `ctx.line.current()` is already empty — the
+            // line we want to check sits in `lastCommitted()` instead.
+            // Fall back to current() for the (rare) case where a hook
+            // pipeline upstream applied input differently.
+            const line = ctx.line.lastCommitted() orelse ctx.line.current();
 
             if (rt.armed) {
                 rt.armed = false;
@@ -198,7 +203,13 @@ test "check matches default rules" {
 // std.Io.failing — a no-op Io for tests that don't touch I/O.
 const test_io: std.Io = std.Io.failing;
 
-test "Enter on dangerous line swallows and arms" {
+test "Enter on dangerous line swallows and arms (proxy-flow: applyInput first, then dispatch)" {
+    // Regression: prior to a 2026-05 fix, guardrail.onInput read
+    // ctx.line.current(), but the proxy ran applyInput("rm -rf /...\r")
+    // BEFORE dispatchInput. submit() had already emptied current()
+    // and stashed the line in `committed`. The check silently passed,
+    // rm fired, and no banner ever printed. This test mirrors the
+    // exact proxy flow so the bug can't come back.
     const G = configure(.{});
     var rt = try G.attach(testing.allocator, test_io);
     defer G.detach(&rt, test_io);
@@ -208,7 +219,8 @@ test "Enter on dangerous line swallows and arms" {
     G.setSink(&rt, &sink, TestSink.write);
 
     var line = LineState{};
-    _ = line.applyInput("rm -rf /home/user");
+    // Single applyInput including the \r, as the proxy does.
+    _ = line.applyInput("rm -rf /home/user\r");
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx = m.Context{
@@ -218,12 +230,22 @@ test "Enter on dangerous line swallows and arms" {
         .scratch = &scratch,
         .is_tty = false,
     };
+    // Sanity: applyInput emptied current() and filled committed.
+    try testing.expectEqualSlices(u8, "", line.current());
+    try testing.expectEqualStrings("rm -rf /home/user", line.lastCommitted().?);
 
     const action = try G.onInput(&rt, &ctx, "\r");
     try testing.expectEqual(m.Action.swallow, action);
     try testing.expect(rt.armed);
     try testing.expect(std.mem.indexOf(u8, sink.buf.items, "guardrail") != null);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "rm -rf /home/user") != null);
 
+    // Second Enter forwards (user confirmed). Same proxy flow: typing
+    // \r calls applyInput first; current() is empty, lastCommitted
+    // is null (was cleared by the proxy after dispatchLineCommit),
+    // so the check sees an empty line and no rule matches anyway —
+    // but the `armed` short-circuit means we never reach the check.
+    _ = line.applyInput("\r");
     const second = try G.onInput(&rt, &ctx, "\r");
     try testing.expectEqual(m.Action.forward, second);
     try testing.expect(!rt.armed);
@@ -239,7 +261,7 @@ test "non-Enter keystroke disarms" {
     G.setSink(&rt, &sink, TestSink.write);
 
     var line = LineState{};
-    _ = line.applyInput("rm -rf /");
+    _ = line.applyInput("rm -rf /\r");
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx = m.Context{
@@ -262,7 +284,7 @@ test "Enter on safe line passes through" {
     defer G.detach(&rt, test_io);
 
     var line = LineState{};
-    _ = line.applyInput("ls -la");
+    _ = line.applyInput("ls -la\r");
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx = m.Context{
