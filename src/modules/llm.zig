@@ -534,7 +534,7 @@ pub fn configure(comptime cfg: Config) type {
             }
 
             var client: std.http.Client = .{ .allocator = gpa, .io = io };
-            defer client.deinit(io);
+            defer client.deinit();
 
             // Cap the response body at `max_response_bytes * 16`.
             // The JSON envelope around the message content is
