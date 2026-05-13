@@ -239,6 +239,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             const elapsed: u64 = @intCast(@max(0, now - last_tick_ms));
             last_tick_ms = now;
             D.dispatchTick(&runtimes, &ctx, elapsed) catch {};
+            // Modules that produce shell input asynchronously
+            // (LLM responses, future tools) surface their bytes
+            // here. We write them to pty.master as if the user
+            // had typed them — the shell echoes them back through
+            // the master path, the user sees the result, can edit
+            // / submit / cancel.
+            if (D.pollShellInput(&runtimes, &ctx) catch null) |bytes| {
+                if (bytes.len > 0) writeAll(pty.master, bytes) catch {};
+            }
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};

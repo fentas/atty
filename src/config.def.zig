@@ -50,6 +50,25 @@ const atty = @import("atty");
 //     }),
 //     atty.modules.history.configure(.{}),  // optional fallback after atuin
 // };
+//
+// LLM-powered command generation. Type `#: <prompt>` + Enter and the
+// module replaces the typed line with the model's response. Needs an
+// OpenAI-compatible chat endpoint at $LLM_API_BASE (falls back to
+// $OLLAMA_HOST + "/v1"). Optional $LLM_API_KEY for hosted services.
+// `#` is the shell's comment character so a missed dispatch is a
+// silent no-op, not an executed command.
+//
+// pub const modules = .{
+//     atty.modules.guardrail.configure(.{}),
+//     atty.modules.atuin.configure(.{}),
+//     atty.modules.history.configure(.{}),
+//     atty.modules.llm.configure(.{
+//         // .prefix = "#: ",          // trigger; default
+//         // .model = "llama3:8b",     // model name
+//         // .shell = null,            // null → derive from $SHELL
+//         // .system_prompt = "...",   // override the system message
+//     }),
+// };
 
 // ───── Proxy ────────────────────────────────────────────────────────────
 //
