@@ -68,6 +68,19 @@ pub const LineState = struct {
         self.generation +%= 1;
     }
 
+    /// Force-write the committed buffer from an externally-observed
+    /// source (OSC 133 marker stream, when the shell emits them).
+    /// The proxy calls this on Enter to override applyInput's own
+    /// keystroke-derived commit — closes the history-recall gap.
+    /// Sets `committed_was_uncertain = false` because the marker
+    /// stream is the truth.
+    pub fn setCommitted(self: *LineState, content: []const u8) void {
+        const n = @min(content.len, max_line);
+        @memcpy(self.committed[0..n], content[0..n]);
+        self.committed_len = n;
+        self.committed_was_uncertain = false;
+    }
+
     /// Apply a byte slice as input. Returns true if the line buffer
     /// actually changed (callers may use this to gate ghost-text
     /// recomputation).
@@ -354,6 +367,22 @@ test "Ctrl+D on an empty line is a no-op for the buffer (the shell handles EOF)"
     _ = l.applyInput("\x04");
     try std.testing.expectEqual(@as(usize, 0), l.len);
     try std.testing.expect(!l.uncertain);
+}
+
+test "setCommitted overrides the committed buffer + drops uncertain" {
+    var l = LineState{};
+    _ = l.applyInput("ls\r"); // applyInput-derived commit
+    try std.testing.expectEqualSlices(u8, "ls", l.lastCommitted().?);
+    l.setCommitted("rm -rf /tmp/recalled");
+    try std.testing.expectEqualSlices(u8, "rm -rf /tmp/recalled", l.lastCommitted().?);
+    try std.testing.expect(!l.committed_was_uncertain);
+}
+
+test "setCommitted with empty content yields no lastCommitted" {
+    var l = LineState{};
+    _ = l.applyInput("ls\r");
+    l.setCommitted("");
+    try std.testing.expectEqual(@as(?[]const u8, null), l.lastCommitted());
 }
 
 test "multiple CSI sequences in one read each mark uncertain" {

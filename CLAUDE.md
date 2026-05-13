@@ -105,7 +105,7 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 
 ## Things deliberately not yet built (don't propose without checking with user)
 
-- OSC 133 prompt-marker support (would clean up the line-state `uncertain` mess but needs shell-side cooperation).
+- OSC 133 prompt-marker support is **shipped** in `src/osc133.zig`. atty auto-detects: when the shell emits `\x1b]133;A/B/C/D` markers the proxy overrides line_state.committed with the marker stream's captured input region, closing the history-recall gap. Inert when no markers arrive. Enable shell-side via Ghostty's `shell-integration-features = osc-133`, or by sourcing your shell integration script (ble.sh / zsh4humans / VS Code's). Falls back to keystroke tracking automatically.
 - A persistent visual indicator other than the statusbar segment (cursor-color / cursor-shape were discussed and dropped).
 - Atuin `history end` with exit codes (needs ID capture + double CLI invocation; deferred).
 - atuin-side `deleteHistoryMatch` is shipped. Default scope is `.exact` — shells out to `atuin search --search-mode fuzzy --delete '^<line>$'` so only the typed line is removed (atuin v18 has no exact-match search mode, but its fuzzy mode honors fzf-style anchors). Scope is configurable via `Config.delete_scope`: `.prefix` / `.full_text` / `.fuzzy` widen the sweep if you want it.

@@ -184,12 +184,11 @@ pub fn configure(comptime cfg: Config) type {
             // applyInput ran before dispatchInput, so for an Enter
             // keystroke `ctx.line.current()` is already empty — the
             // line we want to check sits in `lastCommitted()` instead.
-            // Fall back to current() for the (rare) case where a hook
-            // pipeline upstream applied input differently. Note: if
-            // the user history-recalled the line via Up-arrow,
-            // lastCommitted is null (line_state can't observe a
-            // shell-side history recall) and we won't fire — known
-            // limitation, OSC 133 would fix it.
+            // When the shell emits OSC 133 prompt-zone markers,
+            // the proxy overrides lastCommitted with the marker
+            // stream's captured input (closing the history-recall
+            // gap). Without OSC 133, recalled lines bypass us; the
+            // user has to type the dangerous text directly.
             const line = ctx.line.lastCommitted() orelse ctx.line.current();
 
             // Armed = user previously hit Enter on a dangerous line

@@ -37,6 +37,7 @@ const ansi = @import("ansi.zig");
 const style_mod = @import("style.zig");
 const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
+const Osc133 = @import("osc133.zig").Osc133;
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -161,6 +162,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // Multi-row pick-list overlay. Disabled until config.ghost.list_count > 0.
     var ghost_list = GhostList.init(allocator, config.ghost.list_style);
     defer ghost_list.deinit();
+
+    // OSC 133 marker tracker — closes the history-recall gap when
+    // the shell emits prompt-zone markers (Ghostty's
+    // `shell-integration-features = osc-133`, ble.sh, zsh4humans,
+    // VS Code shell-integration, etc.). Stays inert otherwise:
+    // `active` flips on only after a well-formed 133 marker
+    // arrives, and the proxy gates the line-state override on
+    // that flag. Shells without integration fall through to the
+    // existing keystroke tracking with no behavior change.
+    var osc133_tracker = Osc133.init(allocator);
+    defer osc133_tracker.deinit();
 
     var ctx = module.Context{
         .allocator = allocator,
@@ -380,6 +392,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // changes.
                 _ = line_state.applyInput(input);
 
+                // If the user pressed Enter AND the OSC 133 tracker
+                // is active (shell emits prompt-zone markers), the
+                // marker stream's captured input is the ground truth
+                // for what's about to be committed — including any
+                // text the shell put there via history recall /
+                // completion / paste that line_state's keystroke
+                // tracking can't observe. Override.
+                if (osc133_tracker.active and containsEnter(input) and osc133_tracker.currentInput().len > 0) {
+                    line_state.setCommitted(osc133_tracker.currentInput());
+                }
+
                 const action = D.dispatchInput(&runtimes, &ctx, input) catch .forward;
                 switch (action) {
                     .forward => try writeAll(pty.master, input),
@@ -437,6 +460,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // List sits below the prompt — shell echo lands on
                 // the prompt row, no overlap. renderGhostList below
                 // handles repaint/deactivate when content changes.
+                // Feed OSC 133 tracker — captures the input region
+                // when the shell emits prompt-zone markers. Stays
+                // dormant otherwise.
+                osc133_tracker.feed(output);
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
                 try writeAll(posix.STDOUT_FILENO, output);
 
