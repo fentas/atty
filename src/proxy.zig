@@ -108,10 +108,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // When enabled, slim the slave PTY's reported size by N rows so the
     // shell wraps inside the visible region, and emit DECSTBM so its
     // scrolling stays out of our reserved rows.
+    //
+    // **Combined reservation**: the pick list (when active) reserves
+    // `list_count` rows directly above the statusbar via the same
+    // statusbar.reserve_rows machinery — we inflate the statusbar's
+    // reserve count by list_count so DECSTBM + TIOCSWINSZ together
+    // push the shell's prompt up to leave room for the list. The
+    // statusbar still paints text only on the very last row; the rows
+    // between (cfg.reserve_rows - 1 padding rows + list_count) make
+    // up the pick-list band.
+    const cfg_sb_reserve: u16 = if (config.statusbar.enabled) config.statusbar.reserve_rows else 0;
+    const list_reserve: u16 = if (config.ghost.list_count > 0) config.ghost.list_count else 0;
+    const total_reserve: u16 = cfg_sb_reserve + list_reserve;
+
     var statusbar: ?StatusBar = null;
-    if (args.is_tty and config.statusbar.enabled) {
+    if (args.is_tty and total_reserve > 0) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            statusbar = StatusBar.init(s.rows, s.cols, config.statusbar.reserve_rows, config.statusbar.style);
+            statusbar = StatusBar.init(s.rows, s.cols, total_reserve, config.statusbar.style);
         } else |_| {}
     }
 
@@ -554,6 +567,10 @@ fn renderStatus(
     incognito: bool,
 ) !void {
     if (!ctx.is_tty) return;
+    // The statusbar struct may exist purely to drive DECSTBM
+    // reservation for the pick list (when `list_count > 0` but
+    // `statusbar.enabled = false`). Skip text painting in that case.
+    if (!config.statusbar.enabled) return;
 
     // First gather the module contributions into a scratch buffer.
     var mod_buf: [192]u8 = undefined;
@@ -628,17 +645,15 @@ fn clearGhostList(list: *GhostList, out_buf: []u8) !void {
     try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
 }
 
-/// Compute and apply the pick list's absolute anchor row, based on
-/// the terminal size and the statusbar's reservation. Called at
-/// startup and on SIGWINCH. The list sits in the rows
+/// Compute and apply the pick list's absolute anchor row. Called at
+/// startup and on SIGWINCH. The statusbar's `reserve_rows` field is
+/// already inflated to include `list_count` (see the startup block),
+/// so the list anchors at the FIRST row of that combined band:
 ///
-///     (rows - statusbar.reserve_rows - list_count + 1) .. (rows - statusbar.reserve_rows)
+///     top_row = rows - statusbar.reserve_rows + 1
 ///
-/// so it never overlaps the statusbar. With statusbar disabled the
-/// list anchors at the absolute bottom rows. If the terminal is too
-/// short to fit both the statusbar and the list, we leave top_row = 0
-/// and the list silently disables itself (better than visually
-/// stomping the statusbar or the prompt).
+/// statusbar text sits at `rows`; rows above the list (within the
+/// reservation) are blank padding.
 fn setGhostListTopRow(list: *GhostList, is_tty: bool, sb: ?StatusBar) void {
     if (!is_tty or config.ghost.list_count == 0) {
         list.setTopRow(0);
@@ -648,12 +663,11 @@ fn setGhostListTopRow(list: *GhostList, is_tty: bool, sb: ?StatusBar) void {
         list.setTopRow(0);
         return;
     };
-    const reserve: u16 = if (sb) |s| s.reserve_rows else 0;
-    const total_taken: u16 = reserve + config.ghost.list_count;
-    if (size.rows <= total_taken + 1) {
-        // Need at least one row for the prompt itself.
+    const sb_reserve: u16 = if (sb) |s| s.reserve_rows else 0;
+    if (size.rows <= sb_reserve + 1) {
+        // Need at least one row above the reservation for the prompt.
         list.setTopRow(0);
         return;
     }
-    list.setTopRow(size.rows - total_taken + 1);
+    list.setTopRow(size.rows - sb_reserve + 1);
 }
