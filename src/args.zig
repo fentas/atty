@@ -35,8 +35,21 @@ pub const ParseOutcome = union(enum) {
     /// `$SHELL` doesn't match the .{bash,zsh}rc that's evaluating
     /// us. Empty string = no shell given, snippet emits bare `exec
     /// atty` (which falls back to $SHELL at atty's end).
+    ///
+    /// **Ownership**: the payload is allocator-owned (duped from
+    /// the caller's argv to match the contract of `.ok.positional`).
+    /// Free with `freePrintInit(allocator, shell)` when you're
+    /// done. `main.zig` skips the free because it exits immediately
+    /// after emitting the snippet; tests must free explicitly.
     print_init: []const u8,
 };
+
+/// Free the allocator-owned shell string carried by `.print_init`.
+/// Safe to call with the empty default (no-op when the slice is
+/// zero-length and `&.{}`-backed; otherwise frees normally).
+pub fn freePrintInit(allocator: std.mem.Allocator, shell: []const u8) void {
+    if (shell.len > 0) allocator.free(shell);
+}
 
 pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutcome {
     var positional: std.ArrayList([]const u8) = .empty;
@@ -76,13 +89,16 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
         // named `init` can still reach it via `atty -- init`.
         // The next token (if any) names the shell so the emitted
         // snippet can do `exec atty <shell>` and match the rc file
-        // it's being eval'd from. We borrow the caller's argv slice
-        // for the shell name — it outlives the parser return value
-        // because main.zig keeps the iterated argv around.
+        // it's being eval'd from. Duped from the caller's argv so
+        // ownership is consistent with `.ok.positional` and
+        // independent of argv lifetime; see `freePrintInit`.
         if (std.mem.eql(u8, a, "init") and positional.items.len == 0) {
             for (positional.items) |s| allocator.free(s);
             positional.deinit(allocator);
-            const shell_name: []const u8 = if (i + 1 < args.len) args[i + 1] else "";
+            const shell_name: []const u8 = if (i + 1 < args.len)
+                try allocator.dupe(u8, args[i + 1])
+            else
+                "";
             return .{ .print_init = shell_name };
         }
         // First positional ends flag parsing.
@@ -181,16 +197,21 @@ test "parseArgv surfaces unknown flags before parsing positionals" {
 test "parseArgv: `init` is a subcommand that prints integration snippet" {
     // `atty init` yields .print_init with empty shell. `atty init
     // bash` carries the shell name through so the snippet's
-    // `exec atty <shell>` matches the rc that's eval'ing it.
+    // `exec atty <shell>` matches the rc that's eval'ing it. The
+    // payload is allocator-owned (duped) so tests must call
+    // `freePrintInit` to keep the leak detector happy.
     const got1 = try parseArgv(testing.allocator, &.{"init"});
+    defer freePrintInit(testing.allocator, got1.print_init);
     try testing.expect(got1 == .print_init);
     try testing.expectEqualStrings("", got1.print_init);
 
     const got2 = try parseArgv(testing.allocator, &.{ "init", "bash" });
+    defer freePrintInit(testing.allocator, got2.print_init);
     try testing.expect(got2 == .print_init);
     try testing.expectEqualStrings("bash", got2.print_init);
 
     const got3 = try parseArgv(testing.allocator, &.{ "init", "zsh" });
+    defer freePrintInit(testing.allocator, got3.print_init);
     try testing.expect(got3 == .print_init);
     try testing.expectEqualStrings("zsh", got3.print_init);
 }

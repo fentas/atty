@@ -364,9 +364,39 @@ pub fn configure(comptime cfg: Config) type {
                 const v = envValue(env_name) orelse continue;
                 if (!first) try allocating.writer.writeAll(", ");
                 first = false;
-                try allocating.writer.print("{s}={s}", .{ env_name, v });
+                try allocating.writer.print("{s}=", .{env_name});
+                try writeSanitizedEnvValue(&allocating.writer, v);
             }
             return allocating.toOwnedSlice();
+        }
+
+        /// Write an env-var value into the context blob writer with
+        /// any whitespace / control bytes collapsed to a single
+        /// space. Env values can legally contain newlines, carriage
+        /// returns, tabs, NUL — without sanitisation a value with
+        /// `\n` would split the "one-line" context across multiple
+        /// lines in the JSON-encoded prompt body, confusing the
+        /// model and risking prompt-injection-shaped behaviours.
+        /// Per-value cap of 256 bytes after sanitisation; longer
+        /// values truncate with no ellipsis (the context is a
+        /// hint, not authoritative).
+        fn writeSanitizedEnvValue(w: *std.Io.Writer, v: []const u8) !void {
+            const max_per_value = 256;
+            var written: usize = 0;
+            var last_was_space = false;
+            for (v) |b| {
+                if (written >= max_per_value) break;
+                if (b < 0x20 or b == 0x7F or b == ' ' or b == '\t' or b == '\r' or b == '\n') {
+                    if (last_was_space) continue;
+                    try w.writeByte(' ');
+                    written += 1;
+                    last_was_space = true;
+                    continue;
+                }
+                try w.writeByte(b);
+                written += 1;
+                last_was_space = false;
+            }
         }
 
         fn resolveShell(allocator: std.mem.Allocator) ![]u8 {
