@@ -109,22 +109,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // shell wraps inside the visible region, and emit DECSTBM so its
     // scrolling stays out of our reserved rows.
     //
-    // **Combined reservation**: the pick list (when active) reserves
-    // `list_count` rows directly above the statusbar via the same
-    // statusbar.reserve_rows machinery — we inflate the statusbar's
-    // reserve count by list_count so DECSTBM + TIOCSWINSZ together
-    // push the shell's prompt up to leave room for the list. The
-    // statusbar still paints text only on the very last row; the rows
-    // between (cfg.reserve_rows - 1 padding rows + list_count) make
-    // up the pick-list band.
-    const cfg_sb_reserve: u16 = if (config.statusbar.enabled) config.statusbar.reserve_rows else 0;
-    const list_reserve: u16 = if (config.ghost.list_count > 0) config.ghost.list_count else 0;
-    const total_reserve: u16 = cfg_sb_reserve + list_reserve;
-
+    // The pick list NO LONGER inflates this reservation — it makes
+    // its own room dynamically (LF + CUU dance, atuin Ctrl+R style)
+    // on activation and frees it on deactivation. That avoids the
+    // "permanent dead space at the bottom" UX complaint.
     var statusbar: ?StatusBar = null;
-    if (args.is_tty and total_reserve > 0) {
+    if (args.is_tty and config.statusbar.enabled) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            statusbar = StatusBar.init(s.rows, s.cols, total_reserve, config.statusbar.style);
+            statusbar = StatusBar.init(s.rows, s.cols, config.statusbar.reserve_rows, config.statusbar.style);
         } else |_| {}
     }
 
@@ -316,7 +308,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 _ = std.c.write(pty.master, "\x15", 1);
                                 line_state.reset();
                                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
-                                if (ghost_list.visible) clearGhostList(&ghost_list, &out_buf) catch {};
+                                if (ghost_list.active) deactivateGhostList(&ghost_list, &out_buf) catch {};
                                 // Flash a status-bar message that
                                 // auto-fades after 3 s.
                                 if (statusbar) |*sb| {
@@ -567,10 +559,6 @@ fn renderStatus(
     incognito: bool,
 ) !void {
     if (!ctx.is_tty) return;
-    // The statusbar struct may exist purely to drive DECSTBM
-    // reservation for the pick list (when `list_count > 0` but
-    // `statusbar.enabled = false`). Skip text painting in that case.
-    if (!config.statusbar.enabled) return;
 
     // First gather the module contributions into a scratch buffer.
     var mod_buf: [192]u8 = undefined;
@@ -604,70 +592,61 @@ fn clearGhost(ghost: *Ghost, out_buf: []u8) !void {
     try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
 }
 
-/// Multi-row pick-list overlay. Disabled when `config.ghost.list_count == 0`.
-/// Refetches `gatherGhostList`, copies into the GhostList cache, and paints
-/// below the cursor in a save/restore wrap. Idempotent — when the list
-/// hasn't changed, `GhostList.set` short-circuits and we still paint
-/// (cheap: same bytes go out, terminal repaints the same rows).
+/// Multi-row pick-list overlay. Drives the three transitions of the
+/// dynamic dance:
+///
+///   * should-show & !active  → activate (LF×N + CUU + paint)
+///   * should-show & active   → repaint iff the cache changed
+///   * !should-show & active  → deactivate (clear, cursor stays)
+///
+/// "Should show" = TTY, list_count > 0, line non-empty and certain,
+/// and at least one module produced matches. The activate path
+/// scrolls the prompt up when the prompt is near the bottom row,
+/// matching atuin's Ctrl+R UX; mid-screen activation just moves the
+/// cursor down + back. Deactivate never scrolls the prompt back —
+/// it stays at whatever screen position activate floated it to.
 fn renderGhostList(rts: *D.Runtimes, ctx: *module.Context, list: *GhostList, out_buf: []u8) !void {
     if (!ctx.is_tty) return;
-    if (config.ghost.list_count == 0) return;
+    if (config.ghost.list_count == 0) {
+        if (list.active) try deactivateGhostList(list, out_buf);
+        return;
+    }
 
-    if (ctx.line.uncertain or ctx.line.current().len == 0) {
-        if (list.visible) try clearGhostList(list, out_buf);
+    const want = !ctx.line.uncertain and ctx.line.current().len > 0;
+    if (!want) {
+        if (list.active) try deactivateGhostList(list, out_buf);
         return;
     }
 
     const entries_opt = D.gatherGhostList(rts, ctx) catch null;
     if (entries_opt) |entries| {
-        const changed = list.set(entries, config.ghost.list_count) catch {
-            // OOM is rare; just skip this paint and let the next
-            // render cycle retry.
-            return;
-        };
-        // Skip the paint when the cache + visible state already
-        // match. Without this gate, every tick descends N rows
-        // below the cursor and emits the same bytes — near the
-        // bottom of the screen that accumulates scroll-induced
-        // drift very quickly.
-        if (!changed and list.visible) return;
+        const changed = list.set(entries, config.ghost.list_count) catch return;
         var w: std.Io.Writer = .fixed(out_buf);
-        list.show(&w) catch return;
+        if (!list.active) {
+            list.activate(&w, config.ghost.list_count) catch return;
+        } else if (changed) {
+            list.repaint(&w) catch return;
+        } else {
+            return; // active + content unchanged: emit nothing
+        }
         if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
         return;
     }
-    if (list.visible) try clearGhostList(list, out_buf);
+    if (list.active) try deactivateGhostList(list, out_buf);
 }
 
-fn clearGhostList(list: *GhostList, out_buf: []u8) !void {
+fn deactivateGhostList(list: *GhostList, out_buf: []u8) !void {
     var w: std.Io.Writer = .fixed(out_buf);
-    list.clear(&w) catch return;
-    try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+    list.deactivate(&w) catch return;
+    if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
 }
 
-/// Compute and apply the pick list's absolute anchor row. Called at
-/// startup and on SIGWINCH. The statusbar's `reserve_rows` field is
-/// already inflated to include `list_count` (see the startup block),
-/// so the list anchors at the FIRST row of that combined band:
-///
-///     top_row = rows - statusbar.reserve_rows + 1
-///
-/// statusbar text sits at `rows`; rows above the list (within the
-/// reservation) are blank padding.
+/// Compat shim — the dynamic dance doesn't use a fixed anchor row,
+/// but the SIGWINCH path still calls this. Kept as a no-op so the
+/// resize path doesn't need surgery; if we ever switch back to an
+/// absolute-CUP renderer this is where the geometry would go.
 fn setGhostListTopRow(list: *GhostList, is_tty: bool, sb: ?StatusBar) void {
-    if (!is_tty or config.ghost.list_count == 0) {
-        list.setTopRow(0);
-        return;
-    }
-    const size = Pty.querySize(posix.STDOUT_FILENO) catch {
-        list.setTopRow(0);
-        return;
-    };
-    const sb_reserve: u16 = if (sb) |s| s.reserve_rows else 0;
-    if (size.rows <= sb_reserve + 1) {
-        // Need at least one row above the reservation for the prompt.
-        list.setTopRow(0);
-        return;
-    }
-    list.setTopRow(size.rows - sb_reserve + 1);
+    _ = list;
+    _ = is_tty;
+    _ = sb;
 }

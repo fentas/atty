@@ -48,23 +48,18 @@ pub const GhostList = struct {
     /// module that provided them may rewrite its own storage
     /// between renders (e.g. history's ring shifts on every commit).
     entries: std.ArrayList(std.ArrayList(u8)),
-    /// True when the overlay is currently painted on screen.
-    visible: bool = false,
-    /// Row count of the last paint — `clear` erases exactly this
-    /// many rows. Decoupled from `entries.items.len` because the
-    /// configured `list_count` can change mid-session.
-    painted_rows: u16 = 0,
+    /// True when we currently "own" the N rows below the prompt
+    /// (i.e. we've emitted the LF+CUU "make room" dance and the
+    /// list is painted there). Drives the activate/deactivate
+    /// transitions — same shape as atuin's Ctrl+R inline TUI.
+    active: bool = false,
+    /// Number of rows currently reserved below the prompt.
+    /// Set on activate, used by paint + clear.
+    reserved_rows: u16 = 0,
     /// Style applied to the index prefix (`1: `) and the entry text.
     style: Style,
     /// Render mode — see `RenderMode`.
     mode: RenderMode,
-    /// 1-based absolute row where the list's first entry paints.
-    /// Set by the proxy after TIOCGWINSZ + statusbar coordination —
-    /// `0` means "geometry not configured yet, skip painting." Using
-    /// absolute rows (not "cursor + N below") is what avoids the
-    /// scroll-desync bug of the old `\r\n` descent: with CUP, no
-    /// paint can scroll the screen, so DECSC/DECRC stay coherent.
-    top_row: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator, style: Style, mode: RenderMode) GhostList {
         return .{
@@ -75,13 +70,11 @@ pub const GhostList = struct {
         };
     }
 
-    /// Sets the absolute paint row. Called by the proxy at startup
-    /// and on SIGWINCH. Pass `top` = (rows - statusbar.reserve_rows
-    /// - list_count + 1) — the first row of the reserved bottom
-    /// band, just above the statusbar (or at screen bottom if no
-    /// statusbar). `top = 0` deactivates painting.
+    /// Back-compat for tests that exercised the old absolute-CUP
+    /// path. The dynamic dance doesn't need a fixed anchor row.
     pub fn setTopRow(self: *GhostList, top: u16) void {
-        self.top_row = top;
+        _ = self;
+        _ = top;
     }
 
     pub fn deinit(self: *GhostList) void {
@@ -136,67 +129,93 @@ pub const GhostList = struct {
         self.entries.clearRetainingCapacity();
     }
 
-    /// Paint the cached entries at the configured absolute rows
-    /// (CUP to `top_row + i` for each entry). Save/restore cursor
-    /// wraps the whole thing so the shell's cursor position is
-    /// untouched. No `\r\n` descents — never scrolls.
+    /// Activate the list: make room for `n` rows directly below the
+    /// cursor (which is on the prompt line) and paint the entries.
     ///
-    /// No-op when `top_row == 0` (geometry not configured) or when
-    /// the cached state already matches what's on screen.
-    pub fn show(self: *GhostList, w: *std.Io.Writer) !void {
-        if (self.top_row == 0) return;
-        if (self.entries.items.len == 0) {
-            if (self.visible) try self.clear(w);
-            return;
-        }
+    /// The "make room" trick is what atuin's interactive Ctrl+R
+    /// uses, but adapted for an inline non-fullscreen overlay:
+    ///
+    ///   1. Emit LF × n. At the bottom of the screen each LF scrolls
+    ///      the scroll region up by 1 row — the prompt floats up,
+    ///      blank rows appear at the bottom. Mid-screen each LF is
+    ///      just a cursor move, no scroll.
+    ///   2. Emit CUU n. Cursor returns to the prompt row regardless
+    ///      of whether scrolling happened.
+    ///   3. Wipe whatever sits in the rows below (stale shell output,
+    ///      a previous list painting, blank rows) so the paint lands
+    ///      on a clean surface: CUD 1 + ED 0 + CUU 1.
+    ///   4. Paint the entries relatively below the cursor.
+    ///
+    /// On the way out (deactivate), we just clear the rows below the
+    /// cursor — we do NOT scroll the screen back down. That matches
+    /// atuin's behavior: close the overlay, the prompt stays where
+    /// it scrolled to.
+    pub fn activate(self: *GhostList, w: *std.Io.Writer, n: u16) !void {
+        if (n == 0) return;
+        if (self.active) return; // already reserved
+        if (self.entries.items.len == 0) return;
 
-        // If the previous paint had MORE rows, clear the trailing
-        // ones at their absolute positions before we paint over the
-        // first N rows.
-        if (self.visible and self.painted_rows > self.entries.items.len) {
-            try w.writeAll(ansi.save_cursor);
-            var i: u16 = @intCast(self.entries.items.len);
-            while (i < self.painted_rows) : (i += 1) {
-                try w.print("\x1b[{d};1H\x1b[K", .{self.top_row + i});
-            }
-            try w.writeAll(ansi.restore_cursor);
-        }
-
-        // Paint each entry at its absolute row. `\x1b[<row>;1H`
-        // (CUP) doesn't scroll; `\x1b[K` erases pre-existing
-        // content so a shorter entry can overwrite a longer one.
+        var i: u16 = 0;
+        while (i < n) : (i += 1) try w.writeByte('\n');
+        try w.print("\x1b[{d}A", .{n}); // CUU back to the prompt row
+        // Wipe the rows we just exposed. The cursor is at the END of
+        // the prompt's typed text (some column COL_ORIG > 1); we must
+        // move to column 1 BEFORE ED 0 or the erase skips columns
+        // 1..COL_ORIG-1 on row R+1, leaving stale paint there.
+        // Save/restore so the prompt-row column survives the trip.
         try w.writeAll(ansi.save_cursor);
-        for (self.entries.items, 0..) |e, i| {
-            try w.print("\x1b[{d};1H\x1b[K", .{self.top_row + @as(u16, @intCast(i))});
-            try w.print("{f}", .{self.style});
-            try w.print(" {d}: {s}", .{ i + 1, e.items });
-            try w.writeAll(style_mod.reset);
-        }
+        try w.writeAll("\x1b[1B\x1b[1G");
+        try w.writeAll("\x1b[J");
         try w.writeAll(ansi.restore_cursor);
 
-        self.visible = true;
-        self.painted_rows = @intCast(self.entries.items.len);
+        self.reserved_rows = n;
+        self.active = true;
+        try self.paintEntries(w);
     }
 
-    /// Erase the rows we last painted (at their absolute row
-    /// positions, so the clear targets the real list location even
-    /// if the cursor has since moved). Cheap when not visible.
-    pub fn clear(self: *GhostList, w: *std.Io.Writer) !void {
-        if (!self.visible) return;
-        if (self.top_row == 0) {
-            // No geometry to target — just flip the flag.
-            self.visible = false;
-            self.painted_rows = 0;
-            return;
-        }
+    /// Re-paint the entries onto rows we already reserved. Called
+    /// when the active list's content changes (e.g. user typed
+    /// another character, atuin returned a different result set).
+    /// Does NOT scroll — uses relative descent within the reserved
+    /// band.
+    pub fn repaint(self: *GhostList, w: *std.Io.Writer) !void {
+        if (!self.active) return;
+        try self.paintEntries(w);
+    }
+
+    fn paintEntries(self: *GhostList, w: *std.Io.Writer) !void {
         try w.writeAll(ansi.save_cursor);
         var i: u16 = 0;
-        while (i < self.painted_rows) : (i += 1) {
-            try w.print("\x1b[{d};1H\x1b[K", .{self.top_row + i});
+        while (i < self.reserved_rows) : (i += 1) {
+            // CUD 1 + CHA 1 (cursor to column 1) + EL 0 (erase row)
+            // then content. CUD doesn't scroll; we're inside the
+            // reserved band we made room for.
+            try w.writeAll("\x1b[1B\x1b[1G\x1b[K");
+            if (i < self.entries.items.len) {
+                try w.print("{f}", .{self.style});
+                try w.print(" {d}: {s}", .{ i + 1, self.entries.items[i].items });
+                try w.writeAll(style_mod.reset);
+            }
         }
         try w.writeAll(ansi.restore_cursor);
-        self.visible = false;
-        self.painted_rows = 0;
+    }
+
+    /// Deactivate: erase the reserved rows. Cursor stays exactly
+    /// where it was — the prompt remains in whatever screen
+    /// position scrolling put it during activate. That's the atuin
+    /// Ctrl+R UX: close the overlay, prompt doesn't snap back.
+    pub fn deactivate(self: *GhostList, w: *std.Io.Writer) !void {
+        if (!self.active) return;
+        // Same column-1 dance as activate's wipe: cursor sits at the
+        // END of the user's typed line; ED 0 from a non-1 column
+        // leaves stale list bytes on columns 1..cursor_col-1 of the
+        // first list row.
+        try w.writeAll(ansi.save_cursor);
+        try w.writeAll("\x1b[1B\x1b[1G");
+        try w.writeAll("\x1b[J");
+        try w.writeAll(ansi.restore_cursor);
+        self.active = false;
+        self.reserved_rows = 0;
     }
 };
 
@@ -250,110 +269,114 @@ test "GhostList.entry is 1-based and bounds-checked" {
     try testing.expectEqual(@as(?[]const u8, null), gl.entry(3));
 }
 
-test "GhostList.show paints with absolute CUP at top_row + i" {
+test "GhostList.activate makes room with LFs + CUU + ED-below, then paints relatively" {
     var gl = GhostList.init(testing.allocator, .{ .dim = true }, .inline_rows);
     defer gl.deinit();
-    gl.setTopRow(20);
-    const a = [_][]const u8{ "alpha", "beta" };
-    _ = try gl.set(&a, 9);
-
-    var buf: [512]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try gl.show(&w);
-    const out = buf[0..w.end];
-
-    try testing.expect(std.mem.indexOf(u8, out, ansi.save_cursor) != null);
-    try testing.expect(std.mem.indexOf(u8, out, ansi.restore_cursor) != null);
-    try testing.expect(std.mem.indexOf(u8, out, ansi.sgr_dim) != null);
-    // CUP to row 20 for entry #1, row 21 for entry #2.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[20;1H") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[21;1H") != null);
-    try testing.expect(std.mem.indexOf(u8, out, " 1: alpha") != null);
-    try testing.expect(std.mem.indexOf(u8, out, " 2: beta") != null);
-    // No `\r\n` descent bytes — that's the whole point of the
-    // absolute-CUP rewrite.
-    try testing.expect(std.mem.indexOf(u8, out, "\r\n") == null);
-    try testing.expect(gl.visible);
-    try testing.expectEqual(@as(u16, 2), gl.painted_rows);
-}
-
-test "GhostList.show is a no-op when top_row hasn't been configured" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
-    defer gl.deinit();
-    const a = [_][]const u8{"alpha"};
-    _ = try gl.set(&a, 9);
-    var buf: [128]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try gl.show(&w);
-    try testing.expectEqual(@as(usize, 0), w.end);
-    try testing.expect(!gl.visible);
-}
-
-test "GhostList.clear erases the absolute rows it last painted" {
-    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
-    defer gl.deinit();
-    gl.setTopRow(20);
     const a = [_][]const u8{ "alpha", "beta", "gamma" };
     _ = try gl.set(&a, 9);
-    var buf: [512]u8 = undefined;
+
+    var buf: [1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.show(&w);
-    try testing.expect(gl.visible);
+    try gl.activate(&w, 3);
+    const out = buf[0..w.end];
 
-    var clr_buf: [256]u8 = undefined;
-    var clr_w: std.Io.Writer = .fixed(&clr_buf);
-    try gl.clear(&clr_w);
-    const out = clr_buf[0..clr_w.end];
-
+    // The activate dance: 3 LFs + CUU 3 + step-down + ED 0 + step-up.
+    // We don't insist on the exact byte sequence (allows tightening
+    // later), only on the key markers.
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, out, "\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[3A") != null); // CUU 3 back
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[J") != null); // ED-below wipe
+    // Then the paint itself: SGR + numbered entries.
+    try testing.expect(std.mem.indexOf(u8, out, ansi.sgr_dim) != null);
+    try testing.expect(std.mem.indexOf(u8, out, " 1: alpha") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " 2: beta") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " 3: gamma") != null);
+    // Save/restore wraps the paint so the cursor stays on the prompt row.
     try testing.expect(std.mem.indexOf(u8, out, ansi.save_cursor) != null);
     try testing.expect(std.mem.indexOf(u8, out, ansi.restore_cursor) != null);
-    // CUP to each of the 3 painted absolute rows + erase_to_eol.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[20;1H\x1b[K") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[21;1H\x1b[K") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[22;1H\x1b[K") != null);
-    try testing.expect(!gl.visible);
+    try testing.expect(gl.active);
+    try testing.expectEqual(@as(u16, 3), gl.reserved_rows);
 }
 
-test "GhostList.show after empty set clears the overlay" {
+test "GhostList.activate is a no-op when entries are empty" {
     var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
     defer gl.deinit();
-    gl.setTopRow(20);
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gl.activate(&w, 3);
+    try testing.expectEqual(@as(usize, 0), w.end);
+    try testing.expect(!gl.active);
+}
+
+test "GhostList.activate is a no-op when already active" {
+    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    defer gl.deinit();
     const a = [_][]const u8{"x"};
+    _ = try gl.set(&a, 9);
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gl.activate(&w, 2);
+    const first = w.end;
+    try gl.activate(&w, 2);
+    try testing.expectEqual(first, w.end); // no bytes emitted on 2nd call
+}
+
+test "GhostList.repaint emits only the paint sequence (no LFs, no ED-below)" {
+    // Repaint is for the case where the list is already active and
+    // we got fresh entries — we don't want another LF dance.
+    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    defer gl.deinit();
+    const a = [_][]const u8{ "alpha", "beta" };
+    _ = try gl.set(&a, 9);
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gl.activate(&w, 2);
+
+    var rp_buf: [512]u8 = undefined;
+    var rp_w: std.Io.Writer = .fixed(&rp_buf);
+    const b = [_][]const u8{ "delta", "echo" };
+    _ = try gl.set(&b, 9);
+    try gl.repaint(&rp_w);
+    const out = rp_buf[0..rp_w.end];
+
+    // No LFs, no whole-screen ED in repaint — those are activation-only.
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, out, "\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[J") == null);
+    // But the new content is there.
+    try testing.expect(std.mem.indexOf(u8, out, " 1: delta") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " 2: echo") != null);
+}
+
+test "GhostList.deactivate clears reserved rows + leaves cursor put" {
+    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    defer gl.deinit();
+    const a = [_][]const u8{ "alpha", "beta" };
     _ = try gl.set(&a, 9);
     var buf: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.show(&w);
-    try testing.expect(gl.visible);
+    try gl.activate(&w, 2);
+    try testing.expect(gl.active);
 
-    const empty = [_][]const u8{};
-    _ = try gl.set(&empty, 9);
-    var w2: std.Io.Writer = .fixed(&buf);
-    try gl.show(&w2);
-    try testing.expect(!gl.visible);
+    var dx_buf: [256]u8 = undefined;
+    var dx_w: std.Io.Writer = .fixed(&dx_buf);
+    try gl.deactivate(&dx_w);
+    const out = dx_buf[0..dx_w.end];
+
+    // ED 0 to wipe below + save/restore wrap so the cursor stays
+    // exactly where it was (this is the atuin Ctrl+R "close box,
+    // prompt doesn't snap back" behavior).
+    try testing.expect(std.mem.indexOf(u8, out, ansi.save_cursor) != null);
+    try testing.expect(std.mem.indexOf(u8, out, ansi.restore_cursor) != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[J") != null);
+    try testing.expect(!gl.active);
+    try testing.expectEqual(@as(u16, 0), gl.reserved_rows);
 }
 
-test "GhostList.show shrinking from 3 → 2 rows clears the trailing row" {
-    // When the list goes from 3 entries to 2, row 22 must be
-    // explicitly erased — otherwise the third entry stays painted
-    // beneath the new (shorter) list. Tests the trailing-clear
-    // branch.
+test "GhostList.deactivate when not active is a no-op" {
     var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
     defer gl.deinit();
-    gl.setTopRow(20);
-    const three = [_][]const u8{ "a", "b", "c" };
-    _ = try gl.set(&three, 9);
-    var buf: [512]u8 = undefined;
+    var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.show(&w);
-    try testing.expectEqual(@as(u16, 3), gl.painted_rows);
-
-    const two = [_][]const u8{ "a", "b" };
-    _ = try gl.set(&two, 9);
-    var buf2: [512]u8 = undefined;
-    var w2: std.Io.Writer = .fixed(&buf2);
-    try gl.show(&w2);
-    const out = buf2[0..w2.end];
-    // Row 22 (top_row + 2) must be erased.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[22;1H\x1b[K") != null);
-    try testing.expectEqual(@as(u16, 2), gl.painted_rows);
+    try gl.deactivate(&w);
+    try testing.expectEqual(@as(usize, 0), w.end);
 }
