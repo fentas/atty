@@ -145,11 +145,18 @@ const atty = @import("atty");
 // just committed. If it matches `ssh` / `mosh` / `kubectl exec` /
 // `docker exec` / `lxc exec` / `incus exec` / `sudo bash|-s|-i` /
 // `su`, atty pushes a frame onto an in-memory stack and tags
-// subsequent recorded commits with an encoded `--cwd`:
+// subsequent recorded commits with an encoded `--cwd`. Unresolved
+// path segments emit `?` rather than asserting a value we can't
+// verify (atty doesn't read kubeconfig or capture local cwd via
+// OSC 7 at depth==0 yet — both are known follow-ups):
 //
-//   ssh://user@host/remote-cwd      kubectl: k8s://ctx/ns/pod/cwd
-//   docker://container/cwd          container://name/cwd
-//   sudo:local-cwd                  su:user:local-cwd
+//   ssh://user@host/<remote-cwd-or-?>
+//   k8s://<context-or-?>/<ns-or-?>/<pod>/<remote-cwd-or-?>
+//   docker://<container>/<remote-cwd-or-?>
+//   container://<name>/<remote-cwd-or-?>
+//   sudo:?          (today; sudo:<local-cwd> after local OSC 7 lands)
+//   su:?            (bare su, no user)
+//   su:<user>:?     (su with user, same TODO for local cwd)
 //
 // atuin's Ctrl+R `[ DIRECTORY ]` filter then scopes searches per
 // remote target. Stack pops on `;D` so nested ssh chains work.

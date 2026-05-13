@@ -317,15 +317,15 @@ records the *real* remote cwd; otherwise it falls back to `?`.
 **Encoding.** Modules call `ctx.subprocessCwd(out, fallback)` to
 get a URI-shaped scope string suitable for atuin's `--cwd` flag:
 
-| Frame kind | Encoded cwd |
-|---|---|
-| `.ssh` | `ssh://user@host/remote-cwd` |
-| `.kubectl_exec` | `k8s://context/ns/pod/cwd` |
-| `.docker_exec` | `docker://container/cwd` |
-| `.container_exec` | `container://name/cwd` |
-| `.elevation` | `sudo:local-cwd` |
-| `.su` | `su:user:local-cwd` |
-| `.none` | `fallback` (caller's value, typically the real local cwd) |
+| Frame kind | Encoded cwd | Notes |
+|---|---|---|
+| `.ssh` | `ssh://user@host/<remote-cwd-or-?>` | `<remote-cwd>` filled in from OSC 7 if remote shell emits it; `?` otherwise |
+| `.kubectl_exec` | `k8s://<context-or-?>/<ns-or-?>/<pod>/<remote-cwd-or-?>` | context/ns come from CLI flags only — atty doesn't read kubeconfig |
+| `.docker_exec` | `docker://<container>/<remote-cwd-or-?>` | |
+| `.container_exec` | `container://<name>/<remote-cwd-or-?>` | |
+| `.elevation` | `sudo:?` *(today)* / `sudo:<local-cwd>` *(after local OSC 7)* | atty doesn't yet capture local cwd at depth==0; the `?` placeholder is the current value |
+| `.su` | `su:?` / `su:<user>:?` *(today)* / `su:<user>:<local-cwd>` *(after local OSC 7)* | same TODO as `.elevation` |
+| `.none` | `<fallback>` | caller's value — atuin module passes `""` today, so atuin's own cwd resolution applies |
 
 atuin's `--cwd` is a free-form string, so `[ DIRECTORY ]` mode on
 Ctrl+R naturally scopes per remote target without atuin patches.
