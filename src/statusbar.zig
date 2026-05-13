@@ -63,6 +63,19 @@ pub const StatusBar = struct {
     transient_len: usize = 0,
     transient_until_ms: i64 = 0,
 
+    /// Hint row content — painted into row `rows - 1` (the blank
+    /// padding row above the status text, when `reserve_rows >= 2`).
+    /// Used by the LLM module to surface a one-line explanation
+    /// for the command it just injected. TTL-based, auto-clears.
+    /// When `reserve_rows < 2`, hint is silently dropped (nowhere
+    /// to draw it).
+    hint_buf: [512]u8 = undefined,
+    hint_len: usize = 0,
+    hint_until_ms: i64 = 0,
+    last_hint_buf: [512]u8 = undefined,
+    last_hint_len: usize = 0,
+    last_hint_valid: bool = false,
+
     pub fn init(rows: u16, cols: u16, reserve_rows: u16, style: Style) StatusBar {
         return .{
             .rows = rows,
@@ -102,6 +115,30 @@ pub const StatusBar = struct {
     /// True if a transient message is currently active.
     fn transientActive(self: *const StatusBar) bool {
         return self.transient_len > 0 and nowMs() < self.transient_until_ms;
+    }
+
+    /// Show `text` in the hint row (one above the status text) for
+    /// `ttl_ms` milliseconds. Auto-clears once the TTL expires.
+    /// Truncated to the buffer length; longer explanations get
+    /// clipped rather than wrapping.
+    pub fn setHint(self: *StatusBar, text: []const u8, ttl_ms: u32) void {
+        const n = @min(text.len, self.hint_buf.len);
+        @memcpy(self.hint_buf[0..n], text[0..n]);
+        self.hint_len = n;
+        self.hint_until_ms = nowMs() + @as(i64, @intCast(ttl_ms));
+        self.last_hint_valid = false;
+    }
+
+    /// Clear the hint row immediately. Forces a repaint to erase
+    /// whatever was visible.
+    pub fn clearHint(self: *StatusBar) void {
+        self.hint_len = 0;
+        self.hint_until_ms = 0;
+        self.last_hint_valid = false;
+    }
+
+    fn hintActive(self: *const StatusBar) bool {
+        return self.hint_len > 0 and nowMs() < self.hint_until_ms;
     }
 
     /// Set up the bar's reserved region:
@@ -159,20 +196,53 @@ pub const StatusBar = struct {
             break :blk self.text_buf[0..self.text_len];
         };
 
-        if (self.last_valid and self.last_len == active_text.len and
-            std.mem.eql(u8, self.last_buf[0..self.last_len], active_text))
-            return;
+        const active_hint: []const u8 = if (self.hintActive())
+            self.hint_buf[0..self.hint_len]
+        else blk: {
+            if (self.hint_len > 0 and !self.hintActive()) {
+                self.hint_len = 0;
+                self.last_hint_valid = false;
+            }
+            break :blk &[_]u8{};
+        };
+
+        const text_unchanged = self.last_valid and
+            self.last_len == active_text.len and
+            std.mem.eql(u8, self.last_buf[0..self.last_len], active_text);
+        const hint_unchanged = self.last_hint_valid and
+            self.last_hint_len == active_hint.len and
+            std.mem.eql(u8, self.last_hint_buf[0..self.last_hint_len], active_hint);
+        if (text_unchanged and hint_unchanged) return;
 
         try w.writeAll(ansi.save_cursor);
-        try w.print("\x1B[{d};1H\x1B[K", .{self.rows}); // CUP last row, erase
-        try w.print("{f}", .{self.style});
-        try w.writeAll(active_text);
-        try w.writeAll(ansi.sgr_reset);
-        try w.writeAll(ansi.restore_cursor);
 
-        @memcpy(self.last_buf[0..active_text.len], active_text);
-        self.last_len = active_text.len;
-        self.last_valid = true;
+        if (!text_unchanged) {
+            try w.print("\x1B[{d};1H\x1B[K", .{self.rows});
+            try w.print("{f}", .{self.style});
+            try w.writeAll(active_text);
+            try w.writeAll(ansi.sgr_reset);
+
+            @memcpy(self.last_buf[0..active_text.len], active_text);
+            self.last_len = active_text.len;
+            self.last_valid = true;
+        }
+
+        // Hint row lives one row above the status text. Skip when
+        // we don't have a row to paint into (reserve_rows < 2 means
+        // the row above status belongs to the shell).
+        if (!hint_unchanged and self.reserve_rows >= 2) {
+            try w.print("\x1B[{d};1H\x1B[K", .{self.rows - 1});
+            if (active_hint.len > 0) {
+                try w.print("{f}", .{self.style});
+                try w.writeAll(active_hint);
+                try w.writeAll(ansi.sgr_reset);
+            }
+            @memcpy(self.last_hint_buf[0..active_hint.len], active_hint);
+            self.last_hint_len = active_hint.len;
+            self.last_hint_valid = true;
+        }
+
+        try w.writeAll(ansi.restore_cursor);
     }
 
     /// Update tracked dimensions. Caller is responsible for calling
@@ -252,6 +322,66 @@ test "setTransient overrides text_buf for the TTL window" {
     const out = buf[0..w.end];
     try testing.expect(std.mem.indexOf(u8, out, "deleted: foo") != null);
     try testing.expect(std.mem.indexOf(u8, out, "atty") == null);
+}
+
+test "setHint paints text into rows - 1 with the bar's style" {
+    var b = StatusBar.init(24, 80, 2, .{ .dim = true });
+    b.setText("atty");
+    b.setHint("lists files in long format", 5_000);
+
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[24;1H") != null); // status row
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H") != null); // hint row
+    try testing.expect(std.mem.indexOf(u8, out, "lists files in long format") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
+}
+
+test "hint row is skipped when reserve_rows < 2 (no row above status)" {
+    var b = StatusBar.init(24, 80, 1, .{});
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "explanation") == null);
+}
+
+test "clearHint forces a repaint that erases the hint row" {
+    var b = StatusBar.init(24, 80, 2, .{});
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const first_end = w.end;
+    b.clearHint();
+    try b.render(&w);
+    const second = buf[first_end..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, second, "\x1B[23;1H") != null); // erase hint row
+    try testing.expect(std.mem.indexOf(u8, second, "explanation") == null);
+}
+
+test "expired hint is dropped on the next render" {
+    var b = StatusBar.init(24, 80, 2, .{});
+    b.setText("atty");
+    b.setHint("flash", 5_000);
+    b.hint_until_ms = 0;
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+
+    try testing.expectEqual(@as(usize, 0), b.hint_len);
 }
 
 test "expired transient is dropped on the next render" {
