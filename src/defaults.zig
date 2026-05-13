@@ -72,16 +72,19 @@ pub const terminal: Terminal = .{};
 // ───── Keymap ─────────────────────────────────────────────────────────────
 
 pub const Keymap = struct {
-    /// dwm-style bindings array. Right / End / Ctrl+F accept the
-    /// ghost suggestion; Ctrl+Shift+I toggles incognito (resolved via
-    /// `keymap.key()` to the kitty-keyboard CSI-u byte sequence —
-    /// requires `Terminal.enable_kitty_keyboard = true`, default on).
-    /// Alt+i is bound as a fallback so it still works on terminals
-    /// that don't speak the protocol.
+    /// dwm-style bindings array. Right / End / Ctrl+F / Ctrl+Tab
+    /// accept the ghost suggestion; Ctrl+Shift+I toggles incognito
+    /// (resolved via `keymap.key()` to the kitty-keyboard CSI-u byte
+    /// sequence — requires `Terminal.enable_kitty_keyboard = true`,
+    /// default on). Alt+i is bound as a fallback so it still works
+    /// on terminals that don't speak the protocol. Ctrl+Tab also
+    /// requires kitty kbd; on legacy terminals the kernel collapses
+    /// it to plain Tab and there's no portable way to disambiguate.
     bindings: []const atty.keymap.Binding = &.{
         .{ .bytes = atty.keymap.key("Right"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
+        .{ .bytes = atty.keymap.key("Ctrl+Tab"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match },

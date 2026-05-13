@@ -65,8 +65,10 @@ pub const Binding = struct {
 ///     Some (kitty/foot/Ghostty) emit kitty-keyboard-protocol bytes
 ///     when the protocol is negotiated; not encodable as a static
 ///     constant.
-///   - `Ctrl+Tab`, `Ctrl+Enter`, `Ctrl+Backspace` — typically
-///     indistinguishable from the unmodified key.
+///   - `Ctrl+Enter`, `Ctrl+Backspace` — typically indistinguishable
+///     from the unmodified key on legacy terminals. (`Ctrl+Tab` IS
+///     handled via the kitty-keyboard CSI-u form `\x1b[9;5u`, since
+///     atty pushes the disambiguate flag by default.)
 ///   - **Chord sequences** (Emacs `Ctrl+X Ctrl+S`) — would need a
 ///     stateful matcher; the current key handler matches one read.
 ///
@@ -93,6 +95,14 @@ pub fn key(comptime name: []const u8) []const u8 {
     // where mod = 1+Shift +2*Alt +4*Ctrl (Meta=8 is rare, Super has no
     // portable encoding — most terminals send nothing for it).
     if (comptime std.mem.eql(u8, name, "Shift+Tab")) return "\x1b[Z";
+
+    // Ctrl+Tab — kitty-keyboard CSI-u form. Legacy terminals don't
+    // have a distinct encoding for this (the kernel collapses it to
+    // plain Tab), so the binding only fires when the kitty kbd
+    // disambiguate flag is active (atty's default). On a terminal
+    // that doesn't speak the protocol, fall back to one of the other
+    // ghost_accept bindings (Right / End / Ctrl+F).
+    if (comptime std.mem.eql(u8, name, "Ctrl+Tab")) return "\x1b[9;5u";
 
     if (comptime std.mem.eql(u8, name, "Shift+Right")) return "\x1b[1;2C";
     if (comptime std.mem.eql(u8, name, "Shift+Left")) return "\x1b[1;2D";
@@ -173,6 +183,7 @@ test "key resolves named keys" {
     try std.testing.expectEqualStrings("\x1b[F", key("End"));
     try std.testing.expectEqualStrings("\t", key("Tab"));
     try std.testing.expectEqualStrings("\x1b[Z", key("Shift+Tab"));
+    try std.testing.expectEqualStrings("\x1b[9;5u", key("Ctrl+Tab"));
 }
 
 test "key resolves multi-modifier arrows" {
@@ -366,6 +377,7 @@ test "match does not bind Ctrl+C against the shipped default bindings" {
         .{ .bytes = key("Right"), .action = .ghost_accept },
         .{ .bytes = key("End"), .action = .ghost_accept },
         .{ .bytes = key("Ctrl+F"), .action = .ghost_accept },
+        .{ .bytes = key("Ctrl+Tab"), .action = .ghost_accept },
         .{ .bytes = key("Ctrl+Shift+I"), .action = .incognito_toggle },
         .{ .bytes = key("Alt+i"), .action = .incognito_toggle },
         .{ .bytes = key("Ctrl+Shift+D"), .action = .delete_history_match },
