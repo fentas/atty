@@ -45,9 +45,15 @@ pub const AltScreen = struct {
     /// fit comfortably.
     param: u16 = 0,
     /// True while we're inside a `\x1B[?…` private-mode CSI. The
-    /// final byte (`h` set / `l` reset) decides what to do with
-    /// `param`. Other CSIs (without `?`) are skipped wholesale.
+    /// final byte (`h` set / `l` reset) decides what to do with the
+    /// accumulated params. Other CSIs (without `?`) are skipped.
     is_private: bool = false,
+    /// True if any param we've seen in the *current* CSI matched an
+    /// alt-screen mode (47, 1047, 1049). The final `h`/`l` toggles
+    /// `active` iff this is true. Tracking it as a sticky flag lets
+    /// us handle multi-mode DECSET (`ESC[?1049;1000h`, mouse +
+    /// alt-screen in one go) without buffering every param.
+    saw_alt_mode: bool = false,
 
     const State = enum {
         ground,
@@ -88,6 +94,7 @@ pub const AltScreen = struct {
                     self.state = .csi;
                     self.param = 0;
                     self.is_private = false;
+                    self.saw_alt_mode = false;
                 } else {
                     self.state = .ground;
                 }
@@ -100,15 +107,25 @@ pub const AltScreen = struct {
                     self.param = self.param *| 10 +| d;
                 },
                 ';', ':' => {
-                    // Multi-parameter CSI — the modes we care about
-                    // only use one parameter, so any `;` means this
-                    // isn't a DECSET/DECRST we're interested in.
-                    // Drop our tracking and let the parser run to
-                    // the final byte to stay in sync.
-                    self.is_private = false;
+                    // Multi-parameter CSI separator. xterm combines
+                    // private modes — `ESC[?1049;1000h` enables alt
+                    // screen AND mouse tracking in one go. Latch
+                    // whether THIS param matched an alt-screen mode,
+                    // then reset for the next. `is_private` is kept
+                    // so subsequent params are still in DEC space.
+                    if (self.is_private and isAltMode(self.param)) {
+                        self.saw_alt_mode = true;
+                    }
+                    self.param = 0;
                 },
                 'h', 'l' => {
-                    if (self.is_private) self.applyMode(self.param, b == 'h');
+                    if (self.is_private) {
+                        // Final param hasn't been latched yet — check
+                        // it now together with anything we saw earlier
+                        // in the sequence.
+                        const hit = self.saw_alt_mode or isAltMode(self.param);
+                        if (hit) self.applyTransition(b == 'h');
+                    }
                     self.state = .ground;
                 },
                 else => {
@@ -121,17 +138,19 @@ pub const AltScreen = struct {
         }
     }
 
-    fn applyMode(self: *AltScreen, mode: u16, set: bool) void {
-        const is_alt = switch (mode) {
-            47, 1047, 1049 => true,
-            else => false,
-        };
-        if (!is_alt) return;
-        if (self.active == set) return; // no transition (idempotent app)
+    fn applyTransition(self: *AltScreen, set: bool) void {
+        if (self.active == set) return; // idempotent set/reset is silent
         self.active = set;
         self.transitioned = true;
     }
 };
+
+fn isAltMode(mode: u16) bool {
+    return switch (mode) {
+        47, 1047, 1049 => true,
+        else => false,
+    };
+}
 
 // ===========================================================================
 // Tests
@@ -237,4 +256,39 @@ test "AltScreen: malformed CSI doesn't strand the parser" {
     try testing.expect(!a.active);
     a.feed("\x1b[?1049h"); // should still work
     try testing.expect(a.active);
+}
+
+test "AltScreen: multi-mode DECSET — alt-screen + mouse in one CSI" {
+    // xterm combines private modes with `;` separators. Common in the
+    // wild: `ESC[?1049;1000h` (enter alt screen + enable mouse), the
+    // matching `ESC[?1049;1000l` on exit. Older flag arrangements use
+    // `?47;1000h`. atty must detect the alt-screen toggle regardless
+    // of which co-mode it's combined with.
+    var a = AltScreen.init();
+    a.feed("\x1b[?1049;1000h");
+    try testing.expect(a.active);
+    try testing.expect(a.takeTransition());
+
+    a.feed("\x1b[?1049;1000l");
+    try testing.expect(!a.active);
+    try testing.expect(a.takeTransition());
+}
+
+test "AltScreen: multi-mode DECSET — alt-screen at the back of the param list" {
+    // Param order isn't fixed by the spec — `?1000;1049h` is just as
+    // valid as `?1049;1000h`. The latch must work regardless of which
+    // position the alt-screen mode appears in.
+    var a = AltScreen.init();
+    a.feed("\x1b[?1000;1049h");
+    try testing.expect(a.active);
+    try testing.expect(a.takeTransition());
+}
+
+test "AltScreen: multi-mode DECSET — only co-modes, no alt-screen, leaves state untouched" {
+    // `ESC[?1000;1002;1006h` — modern mouse setup, no alt-screen.
+    // saw_alt_mode must stay false; no transition emitted.
+    var a = AltScreen.init();
+    a.feed("\x1b[?1000;1002;1006h");
+    try testing.expect(!a.active);
+    try testing.expect(!a.takeTransition());
 }
