@@ -183,6 +183,14 @@ pub fn configure(comptime cfg: Config) type {
             hint_buf: [512]u8 = undefined,
             hint_len: usize = 0,
             hint_pending: bool = false,
+            /// Latched error-style notification waiting to be
+            /// surfaced via the next `provideErrorText` call.
+            /// Separate from `hint_buf` because the two slots have
+            /// different styles + different precedence in the
+            /// statusbar (errors win when both are active).
+            err_buf: [512]u8 = undefined,
+            err_len: usize = 0,
+            err_pending: bool = false,
             /// True while a prompt is in flight.
             in_flight: bool = false,
         };
@@ -344,13 +352,14 @@ pub fn configure(comptime cfg: Config) type {
                 // Inert mode — the user has the module configured but
                 // neither `$LLM_API_BASE` nor `$OLLAMA_HOST` was set
                 // when atty attached. Silently forwarding looks like
-                // a broken feature ("nothing happens"), so latch a
-                // hint that the next `provideHintText` tick will
-                // surface above the status bar. We still .forward so
-                // the typed `#: …` reaches the shell — bash/zsh
-                // treat it as a comment, no harm done, and the user
-                // doesn't lose what they typed.
-                latchHint(rt, "llm: no endpoint set — export $LLM_API_BASE or $OLLAMA_HOST");
+                // a broken feature ("nothing happens"), so latch an
+                // error notification that the next `provideErrorText`
+                // tick will surface above the status bar (muted red
+                // + ⚠ so it pops). We still .forward so the typed
+                // `#: …` reaches the shell — bash/zsh treat it as a
+                // comment, no harm done, and the user doesn't lose
+                // what they typed.
+                latchErr(rt, "no endpoint set — export $LLM_API_BASE or $OLLAMA_HOST");
                 return .forward;
             }
 
@@ -415,18 +424,16 @@ pub fn configure(comptime cfg: Config) type {
             }
 
             // Failure path: nothing to inject, but the worker may
-            // have latched a diagnostic. Surface it via the same
-            // hint slot so the user sees *why* nothing happened.
+            // have latched a diagnostic. Surface it via the *error*
+            // slot (not the hint slot) so it renders in muted red
+            // with the ⚠ glyph — visually distinct from successful
+            // explanations so the user reads it as a notification.
             const err_n = rt.shared.error_len;
             if (n == 0 and err_n > 0) {
-                const prefix = "llm: ";
-                const prefix_n = @min(prefix.len, rt.hint_buf.len);
-                @memcpy(rt.hint_buf[0..prefix_n], prefix[0..prefix_n]);
-                const room = rt.hint_buf.len - prefix_n;
-                const copy_n = @min(err_n, room);
-                @memcpy(rt.hint_buf[prefix_n .. prefix_n + copy_n], rt.shared.error_buf[0..copy_n]);
-                rt.hint_len = prefix_n + copy_n;
-                rt.hint_pending = true;
+                const copy_n = @min(err_n, rt.err_buf.len);
+                @memcpy(rt.err_buf[0..copy_n], rt.shared.error_buf[0..copy_n]);
+                rt.err_len = copy_n;
+                rt.err_pending = true;
             }
 
             rt.shared.res_done = false;
@@ -443,14 +450,24 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         /// Synchronously latch a hint string on the Runtime so the
-        /// next `provideHintText` tick surfaces it. Used by the
-        /// onInput inert path (no worker involved) and by the test
-        /// scaffolding.
+        /// next `provideHintText` tick surfaces it. For informational
+        /// content (LLM explanation of the injected command).
         fn latchHint(rt: *Runtime, msg: []const u8) void {
             const n = @min(msg.len, rt.hint_buf.len);
             @memcpy(rt.hint_buf[0..n], msg[0..n]);
             rt.hint_len = n;
             rt.hint_pending = true;
+        }
+
+        /// Synchronously latch an error string on the Runtime so the
+        /// next `provideErrorText` tick surfaces it (muted red + ⚠
+        /// in the statusbar). Used by the onInput inert path (no
+        /// worker involved) and by the test scaffolding.
+        fn latchErr(rt: *Runtime, msg: []const u8) void {
+            const n = @min(msg.len, rt.err_buf.len);
+            @memcpy(rt.err_buf[0..n], msg[0..n]);
+            rt.err_len = n;
+            rt.err_pending = true;
         }
 
         /// One-shot hint surface: returns the latched explanation
@@ -464,6 +481,16 @@ pub fn configure(comptime cfg: Config) type {
             if (!rt.hint_pending) return null;
             rt.hint_pending = false;
             return rt.hint_buf[0..rt.hint_len];
+        }
+
+        /// Sibling of `provideHintText` — surfaces a latched error
+        /// notification (muted-red row above the status bar). Same
+        /// one-shot semantics as `provideHintText`.
+        pub fn provideErrorText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            _ = ctx;
+            if (!rt.err_pending) return null;
+            rt.err_pending = false;
+            return rt.err_buf[0..rt.err_len];
         }
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -1522,15 +1549,18 @@ test "inert mode (no endpoint env) surfaces a 'no endpoint' hint" {
     // no point killing the line when we never queried the LLM.
     try testing.expect(act == .forward);
 
-    // The hint must mention the missing env var so the user knows
-    // what to fix.
-    const hint = try L.provideHintText(&rt, &ctx);
-    try testing.expect(hint != null);
-    try testing.expect(std.mem.indexOf(u8, hint.?, "no endpoint") != null);
-    try testing.expect(std.mem.indexOf(u8, hint.?, "LLM_API_BASE") != null);
+    // The notification must mention the missing env var so the
+    // user knows what to fix. Surfaced via the *error* channel
+    // (muted red + ⚠ in the statusbar) — provideHintText returns
+    // null because hint and error are distinct slots now.
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideHintText(&rt, &ctx));
+    const err = try L.provideErrorText(&rt, &ctx);
+    try testing.expect(err != null);
+    try testing.expect(std.mem.indexOf(u8, err.?, "no endpoint") != null);
+    try testing.expect(std.mem.indexOf(u8, err.?, "LLM_API_BASE") != null);
 
     // One-shot — second call returns null.
-    try testing.expectEqual(@as(?[]const u8, null), try L.provideHintText(&rt, &ctx));
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideErrorText(&rt, &ctx));
 }
 
 fn mockServer500Handler(ctx: *MockServerCtx) void {
@@ -1637,11 +1667,13 @@ test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
                 continue;
             }
             // Worker has signalled completion + we just consumed it.
-            // The hint should now be pending with the HTTP error.
-            const hint = try L.provideHintText(&rt, &ctx);
-            try testing.expect(hint != null);
-            try testing.expect(std.mem.indexOf(u8, hint.?, "HTTP 500") != null);
-            try testing.expect(std.mem.indexOf(u8, hint.?, "llm:") != null);
+            // The error should now be pending with the HTTP code.
+            // provideHintText returns null — only the error channel
+            // is populated on failure paths.
+            try testing.expectEqual(@as(?[]const u8, null), try L.provideHintText(&rt, &ctx));
+            const err = try L.provideErrorText(&rt, &ctx);
+            try testing.expect(err != null);
+            try testing.expect(std.mem.indexOf(u8, err.?, "HTTP 500") != null);
             return;
         }
         // Unexpectedly got bytes — the mock returns 500, so the

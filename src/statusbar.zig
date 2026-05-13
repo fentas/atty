@@ -72,9 +72,29 @@ pub const StatusBar = struct {
     hint_buf: [512]u8 = undefined,
     hint_len: usize = 0,
     hint_until_ms: i64 = 0,
+
+    /// Error notification — sibling slot to `hint_buf`, painted in
+    /// `error_style` (muted red by default) with a leading "⚠ "
+    /// glyph so it reads as a notification rather than info text.
+    /// Shares the hint row with `hint_buf` but takes precedence:
+    /// while an error is active, the hint is suppressed.
+    error_buf: [512]u8 = undefined,
+    error_len: usize = 0,
+    error_until_ms: i64 = 0,
+
+    /// Style for the error notification. Defaults are populated
+    /// from `config.statusbar.error_style` via init().
+    error_style: Style = .{ .dim = true, .fg = 1 },
+
+    /// Tracks what was last painted on the hint row — text + the
+    /// "kind" (hint vs. error vs. blank) so the renderer no-ops
+    /// when nothing changed and repaints when severity flips.
     last_hint_buf: [512]u8 = undefined,
     last_hint_len: usize = 0,
+    last_hint_kind: HintKind = .blank,
     last_hint_valid: bool = false,
+
+    const HintKind = enum { blank, hint, err };
 
     pub fn init(rows: u16, cols: u16, reserve_rows: u16, style: Style) StatusBar {
         return .{
@@ -82,6 +102,19 @@ pub const StatusBar = struct {
             .cols = cols,
             .reserve_rows = reserve_rows,
             .style = style,
+        };
+    }
+
+    /// Variant that lets the caller override `error_style`. Used by
+    /// `proxy.zig` to thread the user's `config.statusbar.error_style`
+    /// through.
+    pub fn initWithError(rows: u16, cols: u16, reserve_rows: u16, style: Style, error_style: Style) StatusBar {
+        return .{
+            .rows = rows,
+            .cols = cols,
+            .reserve_rows = reserve_rows,
+            .style = style,
+            .error_style = error_style,
         };
     }
 
@@ -137,8 +170,31 @@ pub const StatusBar = struct {
         self.last_hint_valid = false;
     }
 
+    /// Show an error notification in the hint row for `ttl_ms`
+    /// milliseconds. Painted in `error_style` (muted red by
+    /// default) with a leading "⚠ " glyph so it reads as a
+    /// notification, not an explanation. Takes precedence over
+    /// `setHint` while active.
+    pub fn setError(self: *StatusBar, text: []const u8, ttl_ms: u32) void {
+        const n = @min(text.len, self.error_buf.len);
+        @memcpy(self.error_buf[0..n], text[0..n]);
+        self.error_len = n;
+        self.error_until_ms = nowMs() + @as(i64, @intCast(ttl_ms));
+        self.last_hint_valid = false;
+    }
+
+    pub fn clearError(self: *StatusBar) void {
+        self.error_len = 0;
+        self.error_until_ms = 0;
+        self.last_hint_valid = false;
+    }
+
     fn hintActive(self: *const StatusBar) bool {
         return self.hint_len > 0 and nowMs() < self.hint_until_ms;
+    }
+
+    fn errorActive(self: *const StatusBar) bool {
+        return self.error_len > 0 and nowMs() < self.error_until_ms;
     }
 
     /// Set up the bar's reserved region:
@@ -196,20 +252,35 @@ pub const StatusBar = struct {
             break :blk self.text_buf[0..self.text_len];
         };
 
-        const active_hint: []const u8 = if (self.hintActive())
-            self.hint_buf[0..self.hint_len]
-        else blk: {
-            if (self.hint_len > 0 and !self.hintActive()) {
-                self.hint_len = 0;
-                self.last_hint_valid = false;
-            }
-            break :blk &[_]u8{};
+        // Errors take precedence over hints on the same row — both
+        // are transient + TTL'd; reaping the expired one forces a
+        // repaint so it doesn't linger.
+        if (self.error_len > 0 and !self.errorActive()) {
+            self.error_len = 0;
+            self.last_hint_valid = false;
+        }
+        if (self.hint_len > 0 and !self.hintActive()) {
+            self.hint_len = 0;
+            self.last_hint_valid = false;
+        }
+
+        const hint_kind: HintKind = if (self.errorActive())
+            .err
+        else if (self.hintActive())
+            .hint
+        else
+            .blank;
+        const active_hint: []const u8 = switch (hint_kind) {
+            .err => self.error_buf[0..self.error_len],
+            .hint => self.hint_buf[0..self.hint_len],
+            .blank => &[_]u8{},
         };
 
         const text_unchanged = self.last_valid and
             self.last_len == active_text.len and
             std.mem.eql(u8, self.last_buf[0..self.last_len], active_text);
         const hint_unchanged = self.last_hint_valid and
+            self.last_hint_kind == hint_kind and
             self.last_hint_len == active_hint.len and
             std.mem.eql(u8, self.last_hint_buf[0..self.last_hint_len], active_hint);
         if (text_unchanged and hint_unchanged) return;
@@ -229,16 +300,28 @@ pub const StatusBar = struct {
 
         // Hint row lives one row above the status text. Skip when
         // we don't have a row to paint into (reserve_rows < 2 means
-        // the row above status belongs to the shell).
+        // the row above status belongs to the shell). Errors use
+        // `error_style` + a leading "⚠ " glyph to read as a
+        // notification instead of an explanation.
         if (!hint_unchanged and self.reserve_rows >= 2) {
             try w.print("\x1B[{d};1H\x1B[K", .{self.rows - 1});
-            if (active_hint.len > 0) {
-                try w.print("{f}", .{self.style});
-                try w.writeAll(active_hint);
-                try w.writeAll(ansi.sgr_reset);
+            switch (hint_kind) {
+                .err => {
+                    try w.print("{f}", .{self.error_style});
+                    try w.writeAll("\u{26A0} "); // warning sign + space
+                    try w.writeAll(active_hint);
+                    try w.writeAll(ansi.sgr_reset);
+                },
+                .hint => {
+                    try w.print("{f}", .{self.style});
+                    try w.writeAll(active_hint);
+                    try w.writeAll(ansi.sgr_reset);
+                },
+                .blank => {},
             }
             @memcpy(self.last_hint_buf[0..active_hint.len], active_hint);
             self.last_hint_len = active_hint.len;
+            self.last_hint_kind = hint_kind;
             self.last_hint_valid = true;
         }
 
@@ -382,6 +465,50 @@ test "expired hint is dropped on the next render" {
     try b.render(&w);
 
     try testing.expectEqual(@as(usize, 0), b.hint_len);
+}
+
+test "setError paints with error_style + warning glyph, hint suppressed" {
+    var b = StatusBar.initWithError(24, 80, 2, .{ .dim = true }, .{ .dim = true, .fg = 1 });
+    b.setText("atty");
+    b.setHint("an explanation", 5_000);
+    b.setError("HTTP 500", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    // Warning glyph (U+26A0) UTF-8 = 0xE2 0x9A 0xA0.
+    try testing.expect(std.mem.indexOf(u8, out, "\xE2\x9A\xA0") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "HTTP 500") != null);
+    // Error wins precedence; hint text must NOT be on screen while
+    // the error is active.
+    try testing.expect(std.mem.indexOf(u8, out, "an explanation") == null);
+    // Style emits `\x1B[38;5;<n>m` for fg=1 (256-color form).
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[38;5;1m") != null);
+}
+
+test "error expiry falls back to hint if hint is still active" {
+    var b = StatusBar.init(24, 80, 2, .{});
+    b.setText("atty");
+    b.setHint("the explanation", 60_000);
+    b.setError("HTTP 500", 5_000);
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const first_end = w.end;
+
+    // Force the error to expire without touching the hint.
+    b.error_until_ms = 0;
+    try b.render(&w);
+    const second = buf[first_end..w.end];
+
+    // After error expiry, render must paint the hint that was being
+    // suppressed.
+    try testing.expect(std.mem.indexOf(u8, second, "the explanation") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "HTTP 500") == null);
+    try testing.expectEqual(@as(usize, 0), b.error_len);
 }
 
 test "expired transient is dropped on the next render" {

@@ -159,6 +159,26 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return null;
         }
 
+        /// Sibling of `gatherHintText` for error notifications.
+        /// Same one-shot, first-non-null semantics, but the proxy
+        /// pushes the result into the statusbar's *error* slot which
+        /// renders in `error_style` (muted red + ⚠ glyph) and takes
+        /// precedence over regular hints. Lets modules surface
+        /// transient failures (LLM endpoint unreachable, HTTP non-2xx,
+        /// guardrail block, …) without polluting the explanation
+        /// channel.
+        pub fn gatherErrorText(
+            rts: *Runtimes,
+            ctx: *Context,
+        ) Error!?[]const u8 {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "provideErrorText")) {
+                    if (try M.provideErrorText(rts[i], ctx)) |text| return text;
+                }
+            }
+            return null;
+        }
+
         /// First non-null list wins, same precedence model as
         /// gatherGhostText. Used by the multi-suggestion overlay
         /// rendered below the prompt (see `Config.ghost.list_count`).

@@ -149,5 +149,15 @@ pub const StatusBar = struct {
     /// this to flash an explanation of the command it just
     /// injected. Drop to 0 to disable hint rendering.
     hint_ttl_ms: u32 = 30_000,
+    /// Style for error notifications surfaced via a module's
+    /// `provideErrorText` hook. Painted on the same row as the
+    /// regular hint, in muted red with a leading ⚠ glyph so it
+    /// reads as a notification rather than informational text.
+    /// Errors take precedence over regular hints while active.
+    error_style: atty.Style = .{ .dim = true, .fg = 1 },
+    /// How long an error notification stays visible. Defaults to
+    /// twice the hint TTL so users have time to notice and read.
+    /// Drop to 0 to disable error rendering entirely.
+    error_ttl_ms: u32 = 60_000,
 };
 pub const statusbar: StatusBar = .{};

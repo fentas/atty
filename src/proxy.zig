@@ -117,7 +117,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var statusbar: ?StatusBar = null;
     if (args.is_tty and config.statusbar.enabled) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            statusbar = StatusBar.init(s.rows, s.cols, config.statusbar.reserve_rows, config.statusbar.style);
+            statusbar = StatusBar.initWithError(s.rows, s.cols, config.statusbar.reserve_rows, config.statusbar.style, config.statusbar.error_style);
         } else |_| {}
     }
 
@@ -259,15 +259,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     writeAll(pty.master, bytes) catch {};
                 }
             }
-            // One-shot hint surface — a module just produced an
-            // explanation it wants the user to see (e.g. LLM
-            // module after injecting a command). Hand it to the
-            // statusbar's hint row; TTL governs how long it stays.
-            // hint_ttl_ms = 0 disables the surface entirely.
+            // One-shot hint / error surfaces — a module just
+            // produced text it wants the user to see (LLM module
+            // after injecting a command, or after a failure). Errors
+            // win precedence on the same row (muted-red + ⚠);
+            // explanations render in the bar's regular style. TTLs
+            // are independent — setting either to 0 disables that
+            // surface.
             if (statusbar) |*sb| {
                 if (config.statusbar.hint_ttl_ms > 0) {
                     if (D.gatherHintText(&runtimes, &ctx) catch null) |hint_text| {
                         sb.setHint(hint_text, config.statusbar.hint_ttl_ms);
+                    }
+                }
+                if (config.statusbar.error_ttl_ms > 0) {
+                    if (D.gatherErrorText(&runtimes, &ctx) catch null) |err_text| {
+                        sb.setError(err_text, config.statusbar.error_ttl_ms);
                     }
                 }
             }
