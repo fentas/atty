@@ -48,10 +48,23 @@ pub const Config = struct {
     /// Shell name for the user-prompt template. `null` → derive
     /// from `$SHELL` basename at attach time.
     shell: ?[]const u8 = null,
-    /// Env-var name holding the API base URL. Read at attach.
+    /// Hardcoded API base URL — wins over both env vars when
+    /// non-empty. Use this when you want a stable endpoint baked
+    /// into your config and don't want to depend on shell env
+    /// state (atty inherits env at fork time, so a misconfigured
+    /// `.bashrc` can leave the module inert even though the
+    /// endpoint is reachable). The string is used verbatim except
+    /// for the trailing-slash normalisation `doRequest` applies
+    /// before appending `/chat/completions`. Empty default = "use
+    /// env vars below".
+    api_base: []const u8 = "",
+    /// Env-var name holding the API base URL. Read at attach,
+    /// consulted only when `api_base` is empty.
     api_base_env: []const u8 = "LLM_API_BASE",
     /// Fallback env-var (typical Ollama setup). When this is read
-    /// AND it doesn't already end in `/v1`, we append it.
+    /// AND it doesn't already end in `/v1`, we append it. Only
+    /// consulted when both `api_base` and `$api_base_env` are
+    /// empty.
     api_base_fallback_env: []const u8 = "OLLAMA_HOST",
     /// Env-var holding the API key. Optional — when unset we send
     /// no `Authorization` header (local servers usually accept
@@ -267,13 +280,19 @@ pub fn configure(comptime cfg: Config) type {
         // ---- env / config helpers ----------------------------------------
 
         fn resolveApiBase(allocator: std.mem.Allocator) ![]u8 {
-            // Normalize a single trailing slash on either env path
-            // — `doRequest` appends `/chat/completions`, so a base
-            // ending in `/` would produce `…//chat/completions`,
-            // which some proxies/routers reject or normalize
-            // inconsistently. Strip exactly one slash; we don't
-            // want to collapse intentional multi-segment paths
-            // (e.g. `https://api.example.com/v1/proxy//routed`).
+            // Priority order: static cfg → primary env → fallback env
+            // (with /v1 suffixing for the Ollama path). Normalize a
+            // single trailing slash on each — `doRequest` appends
+            // `/chat/completions`, so a base ending in `/` would
+            // produce `…//chat/completions`, which some
+            // proxies/routers reject or normalize inconsistently.
+            // Strip exactly one slash; we don't want to collapse
+            // intentional multi-segment paths.
+            if (cfg.api_base.len > 0) {
+                const s = cfg.api_base;
+                const trimmed = if (s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
+                return allocator.dupe(u8, trimmed);
+            }
             if (envValue(cfg.api_base_env)) |s| {
                 const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
                 return allocator.dupe(u8, trimmed);
@@ -1315,6 +1334,87 @@ test "effective_system_prompt picks the with-explanation default" {
 test "effective_system_prompt honours an explicit override" {
     const L = configure(.{ .with_explanation = true, .system_prompt = "be terse" });
     try testing.expectEqualStrings("be terse", L.effective_system_prompt);
+}
+
+// Helper: attach the module and (eagerly) tear down the worker
+// thread synchronously so leak detection stays happy for tests
+// that only care about config resolution. Production `detach()`
+// uses `t.detach()` which intentionally leaks at process exit.
+fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
+    if (rt.thread) |t| {
+        {
+            rt.shared.mutex.lockUncancelable(io);
+            defer rt.shared.mutex.unlock(io);
+            rt.shared.shutdown = true;
+            rt.shared.cv.signal(io);
+        }
+        t.join();
+    }
+    rt.allocator.destroy(rt.shared);
+    rt.allocator.free(rt.api_base);
+    rt.allocator.free(rt.api_key);
+    rt.allocator.free(rt.shell);
+    rt.allocator.free(rt.context_blob);
+}
+
+test "resolveApiBase priority — static cfg.api_base beats both env vars" {
+    // With cfg.api_base set, the env vars must NOT be consulted.
+    _ = libc.setenv("ATTY_TEST_BASE_PRIMARY", "http://from-env-primary:1234/v1", 1);
+    _ = libc.setenv("ATTY_TEST_BASE_FALLBACK", "http://from-env-fallback:5678", 1);
+    defer _ = libc.unsetenv("ATTY_TEST_BASE_PRIMARY");
+    defer _ = libc.unsetenv("ATTY_TEST_BASE_FALLBACK");
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const L = configure(.{
+        .api_base = "http://static-config:9999/v1",
+        .api_base_env = "ATTY_TEST_BASE_PRIMARY",
+        .api_base_fallback_env = "ATTY_TEST_BASE_FALLBACK",
+        .api_key_env = "ATTY_TEST_BASE_NEVER",
+    });
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    try testing.expectEqualStrings("http://static-config:9999/v1", rt.api_base);
+}
+
+test "resolveApiBase priority — env wins when cfg.api_base is empty" {
+    _ = libc.setenv("ATTY_TEST_BASE_PRIMARY2", "http://from-env:1234/v1", 1);
+    defer _ = libc.unsetenv("ATTY_TEST_BASE_PRIMARY2");
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const L = configure(.{
+        // .api_base default = ""
+        .api_base_env = "ATTY_TEST_BASE_PRIMARY2",
+        .api_base_fallback_env = "ATTY_TEST_BASE_NEVER",
+        .api_key_env = "ATTY_TEST_BASE_NEVER",
+    });
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    try testing.expectEqualStrings("http://from-env:1234/v1", rt.api_base);
+}
+
+test "resolveApiBase trims a single trailing slash on cfg.api_base" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const L = configure(.{
+        .api_base = "http://static:9999/v1/",
+        .api_base_env = "ATTY_TEST_BASE_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_BASE_NEVER",
+        .api_key_env = "ATTY_TEST_BASE_NEVER",
+    });
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    try testing.expectEqualStrings("http://static:9999/v1", rt.api_base);
 }
 
 // ===========================================================================
