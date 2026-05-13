@@ -12,8 +12,6 @@ test {
     _ = @import("ansi.zig");
     _ = @import("ghost.zig");
     _ = @import("ghost_list.zig");
-    _ = @import("dsr.zig");
-    _ = @import("input_grid.zig");
     _ = @import("pty.zig");
     _ = @import("terminal.zig");
     _ = @import("keymap.zig");
