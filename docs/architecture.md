@@ -329,17 +329,18 @@ get a URI-shaped scope string suitable for atuin's `--cwd` flag:
 
 atuin's `--cwd` is a free-form string, so `[ DIRECTORY ]` mode on
 Ctrl+R naturally scopes per remote target without atuin patches.
-Local commands keep their real cwd. The two namespaces don't
-collide.
+Local commands fall back to atuin's own cwd resolution (atty
+doesn't yet capture the local shell's cwd via OSC 7 at depth==0
+— that's a known TODO; see the behaviour matrix below).
 
 **Behaviour matrix.** With local + remote shell integration both
 sourced (the "clean" mode):
 
 | Where the user is | atty records? | tagged as |
 |---|---|---|
-| Local prompt | yes | local cwd |
-| `ssh remote` prompt | yes | `ssh://user@host/…` |
-| `sudo bash` shell | yes | `sudo:local-cwd` |
+| Local prompt | yes | atuin's default `cwd` (NOT shell's real cwd — TODO: capture local OSC 7) |
+| `ssh remote` prompt | yes | `ssh://user@host/…` (remote cwd from OSC 7 if remote integration emits it) |
+| `sudo bash` shell | yes | `sudo:<atuin's default cwd>` |
 | `kubectl exec` shell | yes | `k8s://…` |
 | Inside `vim` / `less` / `psql` | no (kind=`.none`) | — |
 | Inside alt-screen TUI (k9s, htop) | no (alt-screen gate) | — |
