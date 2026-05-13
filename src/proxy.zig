@@ -595,6 +595,35 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // when the shell emits prompt-zone markers. Stays
                 // dormant otherwise.
                 osc133_tracker.feed(output);
+
+                // Continuous line_state sync while the tracker is in
+                // its input phase. Keystroke tracking models what the
+                // user TYPED; the OSC 133 capture models what the
+                // shell actually DREW on the prompt. These diverge
+                // any time the shell-side rewrites the line without
+                // the user typing — Arrow Up history recall, Tab
+                // completion expansion, paste, prompt redraw. The
+                // sync makes `ctx.line.current()` reflect on-screen
+                // truth, so ghost-text / LLM prefix signals /
+                // delete_history_match all "just work" against the
+                // recalled or completed line without the user having
+                // to retype it.
+                //
+                // Gated on `inInputPhase()` because `currentInput()`
+                // is stale or empty between commands (during
+                // `in_command` — after Enter on the typed command,
+                // including the entire run-time of `sudo`/`ssh`/etc.
+                // and their password prompts — or before any prompt
+                // marker has fired). That gate also makes this safe
+                // against password redaction: every password-reading
+                // tool (`sudo`, `ssh`, `passwd`, `gpg-agent` pinentry,
+                // `git credential`) runs post-`;C`, so the tracker
+                // is `.in_command` for the duration and the sync
+                // doesn't fire.
+                if (osc133_tracker.inInputPhase()) {
+                    line_state.syncFromCapture(osc133_tracker.currentInput());
+                }
+
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
                 try writeAll(posix.STDOUT_FILENO, output);
 
