@@ -53,7 +53,11 @@ pub const Osc7 = struct {
     cwd_buf: [max_captures][max_path_bytes]u8 = undefined,
     cwd_lens: [max_captures]usize = [_]usize{0} ** max_captures,
     cwd_offsets: [max_captures]u32 = undefined,
-    count: u8 = 0,
+    /// `usize` (not `u8`) so the proxy's merge loop compares it
+    /// against `usize` indices without coercion hoops. Capped at
+    /// `max_captures` (16) — far below u8 range, but the type
+    /// match keeps call sites clean.
+    count: usize = 0,
     /// Byte index within the current `feed()` call — incremented
     /// per byte. Reset on every feed.
     feed_byte_index: u32 = 0,
@@ -174,20 +178,20 @@ test "Osc7: plain output leaves state untouched" {
     var o = Osc7.init();
     o.feed("hello world\r\n");
     o.feed("\x1b[1;36mcolored\x1b[0m");
-    try testing.expectEqual(@as(u8, 0), o.count);
+    try testing.expectEqual(@as(usize, 0), o.count);
 }
 
 test "Osc7: BEL-terminated file:// URI is captured" {
     var o = Osc7.init();
     o.feed("\x1b]7;file://host.example.com/home/me/code\x07");
-    try testing.expectEqual(@as(u8, 1), o.count);
+    try testing.expectEqual(@as(usize, 1), o.count);
     try testing.expectEqualStrings("/home/me/code", o.path(0));
 }
 
 test "Osc7: ST-terminated file:// URI is captured" {
     var o = Osc7.init();
     o.feed("\x1b]7;file://host/var/log\x1b\\");
-    try testing.expectEqual(@as(u8, 1), o.count);
+    try testing.expectEqual(@as(usize, 1), o.count);
     try testing.expectEqualStrings("/var/log", o.path(0));
 }
 
@@ -198,7 +202,7 @@ test "Osc7: partial sequence across multiple feed calls" {
     o.feed("://host/tmp");
     // Each feed RESETS captures; final feed lands the BEL.
     o.feed("\x07");
-    try testing.expectEqual(@as(u8, 1), o.count);
+    try testing.expectEqual(@as(usize, 1), o.count);
     try testing.expectEqualStrings("/tmp", o.path(0));
 }
 
@@ -209,7 +213,7 @@ test "Osc7: multiple captures in ONE feed are preserved in order" {
     // on the correct subprocess frame.
     var o = Osc7.init();
     o.feed("\x1b]7;file://h/a\x07between\x1b]7;file://h/b\x07tail");
-    try testing.expectEqual(@as(u8, 2), o.count);
+    try testing.expectEqual(@as(usize, 2), o.count);
     try testing.expectEqualStrings("/a", o.path(0));
     try testing.expectEqualStrings("/b", o.path(1));
     // Offsets are monotonic — second capture lands at a later byte.
@@ -219,16 +223,16 @@ test "Osc7: multiple captures in ONE feed are preserved in order" {
 test "Osc7: next feed resets the capture ring" {
     var o = Osc7.init();
     o.feed("\x1b]7;file://h/x\x07");
-    try testing.expectEqual(@as(u8, 1), o.count);
+    try testing.expectEqual(@as(usize, 1), o.count);
     o.feed("no marker here");
-    try testing.expectEqual(@as(u8, 0), o.count);
+    try testing.expectEqual(@as(usize, 0), o.count);
 }
 
 test "Osc7: bare path without file:// prefix is captured" {
     // Rare but seen in some integrations. We accept it.
     var o = Osc7.init();
     o.feed("\x1b]7;/opt/work\x07");
-    try testing.expectEqual(@as(u8, 1), o.count);
+    try testing.expectEqual(@as(usize, 1), o.count);
     try testing.expectEqualStrings("/opt/work", o.path(0));
 }
 
@@ -239,7 +243,7 @@ test "Osc7: minimal bare-path `7;/` (root cwd) is accepted" {
     // would silently never have their cwd captured.
     var o = Osc7.init();
     o.feed("\x1b]7;/\x07");
-    try testing.expectEqual(@as(u8, 1), o.count);
+    try testing.expectEqual(@as(usize, 1), o.count);
     try testing.expectEqualStrings("/", o.path(0));
 }
 
@@ -248,22 +252,22 @@ test "Osc7: non-7 OSC sequences are ignored" {
     o.feed("\x1b]0;window title\x07");
     o.feed("\x1b]2;another title\x07");
     o.feed("\x1b]133;A\x07"); // prompt marker, handled elsewhere
-    try testing.expectEqual(@as(u8, 0), o.count);
+    try testing.expectEqual(@as(usize, 0), o.count);
 }
 
 test "Osc7: malformed 7; without slash returns no cwd" {
     var o = Osc7.init();
     o.feed("\x1b]7;file://nohost\x07");
-    try testing.expectEqual(@as(u8, 0), o.count);
+    try testing.expectEqual(@as(usize, 0), o.count);
 }
 
 test "Osc7: truncated (no terminator yet) doesn't crash" {
     var o = Osc7.init();
     o.feed("\x1b]7;file://h/path"); // no BEL or ST
-    try testing.expectEqual(@as(u8, 0), o.count);
+    try testing.expectEqual(@as(usize, 0), o.count);
     // Now finish.
     o.feed("\x07");
-    try testing.expectEqual(@as(u8, 1), o.count);
+    try testing.expectEqual(@as(usize, 1), o.count);
     try testing.expectEqualStrings("/path", o.path(0));
 }
 
@@ -272,9 +276,9 @@ test "Osc7: ESC inside OSC body that isn't ST terminator resets" {
     // by `\` aborts the OSC. Subsequent input recovers.
     var o = Osc7.init();
     o.feed("\x1b]7;file://h/old\x1bX");
-    try testing.expectEqual(@as(u8, 0), o.count);
+    try testing.expectEqual(@as(usize, 0), o.count);
     o.feed("\x1b]7;file://h/new\x07");
-    try testing.expectEqual(@as(u8, 1), o.count);
+    try testing.expectEqual(@as(usize, 1), o.count);
     try testing.expectEqualStrings("/new", o.path(0));
 }
 
@@ -293,5 +297,5 @@ test "Osc7: capture overflow drops the tail (rare; 16 OSC 7s in one chunk)" {
     }
     var o = Osc7.init();
     o.feed(buf[0..off]);
-    try testing.expectEqual(@as(u8, max_captures), o.count);
+    try testing.expectEqual(@as(usize, max_captures), o.count);
 }

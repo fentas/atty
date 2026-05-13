@@ -61,7 +61,11 @@ pub const Osc133 = struct {
     /// the wrong frame when `OSC 7` and `;C` co-occur in a single
     /// read chunk.
     edge_offsets: [32]u32 = undefined,
-    edge_count: u8 = 0,
+    /// `usize` rather than `u8` despite the bounded array size so
+    /// `edges[0..edge_count]` slicing and `edgeOffset(idx)` indexing
+    /// don't need explicit casts at every call site. The 32-entry
+    /// ring caps the value far below `u8` range anyway.
+    edge_count: usize = 0,
     /// Byte index within the current `feed()` call. Stamped onto
     /// each edge in `edge_offsets`. Reset at the start of every
     /// `feed()` invocation; the proxy reads it indirectly via the
