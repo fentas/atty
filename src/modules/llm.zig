@@ -468,13 +468,22 @@ pub fn configure(comptime cfg: Config) type {
         /// non-empty line. Returns bytes written to `out`, or 0 on
         /// parse failure / empty result.
         pub fn extractCommand(body: []const u8, out: []u8) usize {
-            // Minimal extraction: find `"content":"…"`. Robust JSON
-            // parsing would be nicer but std.json's Scanner is
-            // heavyweight; for the well-known OpenAI shape this is
-            // good enough.
-            const key = "\"content\":\"";
+            // Minimal extraction: find the `"content"` key, then
+            // hop over JSON whitespace + `:` + whitespace + `"`.
+            // Robust JSON parsing would be nicer but std.json's
+            // Scanner is heavyweight; for the OpenAI / Ollama
+            // shape this matches both compact (`"content":"…"`)
+            // and pretty-printed (`"content": "…"`) formatting
+            // that some compatible servers emit.
+            const key = "\"content\"";
             const start = std.mem.indexOf(u8, body, key) orelse return 0;
             var i: usize = start + key.len;
+            while (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r')) i += 1;
+            if (i >= body.len or body[i] != ':') return 0;
+            i += 1;
+            while (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r')) i += 1;
+            if (i >= body.len or body[i] != '"') return 0;
+            i += 1;
             var cmd_buf: [cfg.max_response_bytes]u8 = undefined;
             var cmd_len: usize = 0;
             while (i < body.len) : (i += 1) {
@@ -689,6 +698,30 @@ test "extractCommand returns 0 on missing content field" {
     const L = configure(.{});
     var out: [32]u8 = undefined;
     try testing.expectEqual(@as(usize, 0), L.extractCommand("{\"error\":\"bad\"}", &out));
+}
+
+test "extractCommand tolerates whitespace around the `\"content\":` key (pretty-printed JSON)" {
+    // Not every OpenAI-compatible server emits compact JSON. Some
+    // proxies and llama.cpp builds pretty-print the response. The
+    // scanner has to skip whitespace + tabs + newlines between
+    // `"content"`, `:`, and the opening quote of the value.
+    const L = configure(.{});
+    var out: [32]u8 = undefined;
+
+    const pretty =
+        \\{
+        \\  "choices": [
+        \\    { "message": { "role": "assistant", "content": "ls -la" } }
+        \\  ]
+        \\}
+    ;
+    try testing.expectEqual(@as(usize, 6), L.extractCommand(pretty, &out));
+    try testing.expectEqualStrings("ls -la", out[0..6]);
+
+    // Tabs between key/colon/value should also work.
+    const tabbed = "{\"content\"\t:\t\"echo hi\"}";
+    try testing.expectEqual(@as(usize, 7), L.extractCommand(tabbed, &out));
+    try testing.expectEqualStrings("echo hi", out[0..7]);
 }
 
 test "sanitizeCommand handles fence + whitespace combinations" {
