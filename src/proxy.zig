@@ -642,13 +642,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 _ = line_state.applyInput(input);
 
                 // If the user pressed Enter AND the OSC 133 tracker
-                // is active (shell emits prompt-zone markers), the
-                // marker stream's captured input is the ground truth
-                // for what's about to be committed — including any
-                // text the shell put there via history recall /
+                // is in INPUT phase (between `;B` and `;C` — i.e.
+                // we know we're at a real shell prompt), the marker
+                // stream's captured input is the ground truth for
+                // what's about to be committed — including any text
+                // the shell put there via history recall /
                 // completion / paste that line_state's keystroke
                 // tracking can't observe. Override.
-                if (osc133_tracker.active and containsEnter(input) and osc133_tracker.currentInput().len > 0) {
+                //
+                // Gating on `inInputPhase()` (not just `active`) is
+                // critical: `currentInput()` reflects whatever was
+                // captured between the LAST `;B` and now, so in
+                // command phase (post-`;C`, e.g. inside ssh without
+                // remote integration) it's the *previous* prompt's
+                // content. Without the gate, every Enter during
+                // command phase would set lastCommitted to the
+                // stale prompt text → recording the same line over
+                // and over.
+                if (osc133_tracker.inInputPhase() and containsEnter(input) and osc133_tracker.currentInput().len > 0) {
                     line_state.setCommitted(osc133_tracker.currentInput());
                 }
 
@@ -702,7 +713,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     // matching commit in stdin order. Overflow at
                     // capacity (8) drops the head, not this tail —
                     // the tail entry is always current.
-                    if (shell_saw_enter) pending_launches.push(committed);
+                    //
+                    // Additional gate: only push when OSC 133 says
+                    // we're actually at a SHELL prompt
+                    // (`inInputPhase()`). Without this, Enters typed
+                    // into non-shell interactive prompts (ssh's
+                    // hostkey "yes/no", sudo's password prompt,
+                    // `read` builtins from a shell script, …) would
+                    // pile up in the FIFO waiting for a `;C` that
+                    // never comes; the next real `;C` would then
+                    // pop the stale entry and misattribute the
+                    // subprocess kind. Also covers the
+                    // no-local-integration case (phase stays
+                    // `.idle` forever): we don't push, the FIFO
+                    // stays empty, and `;C` (which won't fire
+                    // anyway) gets `""` from `.pop()` — same as
+                    // before.
+                    if (shell_saw_enter and osc133_tracker.inInputPhase()) {
+                        pending_launches.push(committed);
+                    }
                     // Decide whether to record this commit. Three
                     // gating signals:
                     //
@@ -789,56 +818,46 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 alt_screen.feed(output);
                 osc7_tracker.feed(output);
 
-                // Walk the OSC 133 edge ring + OSC 7 capture
+                // Walk the OSC 133 edge ring + OSC 7 capture ring
                 // INTERLEAVED by byte offset within the current
-                // `output` chunk. Order matters because the wrong
-                // order silently mis-attributes cwd to the wrong
-                // frame:
+                // `output` chunk. 2-pointer merge: whichever event
+                // has the smaller offset fires next. Order matters
+                // because applying OSC 7 after a push in the same
+                // chunk lands it on the wrong (child) frame; before
+                // a push lands it on the parent.
                 //
-                //   chunk = "OSC7 + ;C"  → cwd belongs to the OLD
-                //     prompt (parent context); applying it AFTER
-                //     the push would land it on the freshly-
-                //     pushed (child) frame instead.
-                //   chunk = ";C + OSC7"  → cwd belongs to the NEW
-                //     frame; applying it BEFORE the push would
-                //     land it on the parent.
-                //
-                // Per-byte offset stamping on both trackers' edges
-                // / capture lets us replay events in source order
-                // without having to merge per-byte during feed.
+                // Per-byte offset stamping on both trackers lets us
+                // replay events in source order without merging
+                // per-byte during the feed itself.
                 const edges = osc133_tracker.drainEdges();
-                var edge_idx: usize = 0;
-                while (edge_idx < edges.len) : (edge_idx += 1) {
-                    const edge_off = osc133_tracker.edgeOffset(edge_idx);
-                    // If a pending OSC 7 fired BEFORE this edge in
-                    // the source byte stream, promote it now so it
-                    // lands on the current top (before this edge
-                    // mutates the stack).
-                    if (osc7_tracker.cwd_pending and osc7_tracker.cwd_offset <= edge_off) {
-                        subprocess_tracker.onRemoteCwd(osc7_tracker.takeCwd());
+                var ei: usize = 0;
+                var ci: usize = 0;
+                while (ei < edges.len or ci < osc7_tracker.count) {
+                    const edge_off: u32 = if (ei < edges.len) osc133_tracker.edgeOffset(ei) else std.math.maxInt(u32);
+                    const cwd_off: u32 = if (ci < osc7_tracker.count) osc7_tracker.offsetAt(ci) else std.math.maxInt(u32);
+                    if (cwd_off <= edge_off) {
+                        subprocess_tracker.onRemoteCwd(osc7_tracker.path(ci));
+                        ci += 1;
+                    } else {
+                        switch (edges[ei]) {
+                            .cmd_start => {
+                                // ;C — pop the next pending launch line
+                                // (FIFO order matches the Enter order
+                                // on stdin) and feed it to the
+                                // subprocess tracker. We CAN'T use
+                                // `line_state.lastCommitted()` — by the
+                                // time the shell emits `;C`, the stdin
+                                // path has already run
+                                // `clearLastCommitted()` — and if
+                                // multiple ;C edges fire in one chunk
+                                // we need the corresponding commits,
+                                // not the most recent one.
+                                subprocess_tracker.onCommandStart(pending_launches.pop(), allocator, io);
+                            },
+                            .cmd_end => subprocess_tracker.onCommandEnd(),
+                        }
+                        ei += 1;
                     }
-                    switch (edges[edge_idx]) {
-                        .cmd_start => {
-                            // ;C — pop the next pending launch line
-                            // (FIFO order matches the Enter order on
-                            // stdin) and feed it to the subprocess
-                            // tracker. We CAN'T use
-                            // `line_state.lastCommitted()` — by the
-                            // time the shell emits `;C`, the stdin
-                            // path has already run `clearLastCommitted()`
-                            // — and if multiple ;C edges fire in one
-                            // chunk we need the corresponding commits,
-                            // not the most recent one.
-                            subprocess_tracker.onCommandStart(pending_launches.pop(), allocator, io);
-                        },
-                        .cmd_end => subprocess_tracker.onCommandEnd(),
-                    }
-                }
-                // Any OSC 7 left after the last edge had a higher
-                // offset than every edge — apply it now to the
-                // post-replay top.
-                if (osc7_tracker.cwd_pending) {
-                    subprocess_tracker.onRemoteCwd(osc7_tracker.takeCwd());
                 }
 
                 // Alt-screen transition: an interactive full-screen
