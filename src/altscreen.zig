@@ -1,0 +1,240 @@
+//! Alternate-screen-buffer tracker.
+//!
+//! Full-screen TUIs (k9s, vim, less, htop, top, btm, helix, lazygit,
+//! man, …) swap to the **alternate screen buffer** while running and
+//! swap back on exit. The protocol bytes:
+//!
+//!     \x1B[?1049h   ─▶ enter alt screen + save cursor + clear     (xterm/modern)
+//!     \x1B[?1049l   ─▶ exit alt screen + restore cursor
+//!     \x1B[?47h     ─▶ enter alt screen (legacy)
+//!     \x1B[?47l     ─▶ exit alt screen  (legacy)
+//!     \x1B[?1047h   ─▶ enter alt screen (xterm intermediate)
+//!     \x1B[?1047l   ─▶ exit alt screen
+//!
+//! While the alt screen is active the app expects the WHOLE terminal:
+//! every row from 1..N, no DECSTBM clipping, no overlay painting from
+//! the proxy. atty's statusbar reservation does the opposite — it
+//! pins DECSTBM to a slimmed row range AND repaints the bottom row
+//! every iteration. The user observes (a) k9s/vim drawing clipped a
+//! row or two from the bottom and (b) `atty | atuin` bleeding through
+//! the app's UI.
+//!
+//! This tracker watches master→stdout bytes, flips an `active` flag
+//! around the alt-screen window, and surfaces a transition edge so
+//! the proxy can pop DECSTBM + suspend statusbar painting on enter,
+//! and re-apply them on exit. The parser is a small state machine
+//! that survives partial sequences across reads (one CSI may straddle
+//! a read boundary).
+//!
+//! Only DECSET / DECRST for the three modes above are recognised.
+//! Every other CSI (SGR, CUP, ED, …) passes through unchanged — the
+//! parser only tracks the modes it cares about and ignores the rest.
+
+const std = @import("std");
+
+pub const AltScreen = struct {
+    active: bool = false,
+    /// Set to true on every transition (enter or exit). The proxy
+    /// reads + clears this each iteration so it can run the
+    /// DECSTBM-tear-down / re-apply work exactly once per edge.
+    transitioned: bool = false,
+
+    state: State = .ground,
+    /// Decimal value of the CSI parameter currently being parsed
+    /// (after `?`). Capped at u16 — kitty / xterm DEC private modes
+    /// fit comfortably.
+    param: u16 = 0,
+    /// True while we're inside a `\x1B[?…` private-mode CSI. The
+    /// final byte (`h` set / `l` reset) decides what to do with
+    /// `param`. Other CSIs (without `?`) are skipped wholesale.
+    is_private: bool = false,
+
+    const State = enum {
+        ground,
+        esc, // saw 0x1B
+        csi, // saw '[' — parameters follow
+    };
+
+    pub fn init() AltScreen {
+        return .{};
+    }
+
+    /// Feed master-output bytes. Idempotent + safe across partial
+    /// sequences (state survives feed calls).
+    pub fn feed(self: *AltScreen, bytes: []const u8) void {
+        for (bytes) |b| self.feedByte(b);
+    }
+
+    /// Returns the transition flag and clears it. Use this from the
+    /// proxy each iteration:
+    ///
+    ///     if (alt.takeTransition()) {
+    ///         if (alt.active) { ... tear down decstbm ... }
+    ///         else            { ... re-apply decstbm + statusbar ... }
+    ///     }
+    pub fn takeTransition(self: *AltScreen) bool {
+        const t = self.transitioned;
+        self.transitioned = false;
+        return t;
+    }
+
+    fn feedByte(self: *AltScreen, b: u8) void {
+        switch (self.state) {
+            .ground => {
+                if (b == 0x1B) self.state = .esc;
+            },
+            .esc => {
+                if (b == '[') {
+                    self.state = .csi;
+                    self.param = 0;
+                    self.is_private = false;
+                } else {
+                    self.state = .ground;
+                }
+            },
+            .csi => switch (b) {
+                '?' => self.is_private = true,
+                '0'...'9' => {
+                    // Saturating accumulate. Real DEC modes are ≤ ~9999.
+                    const d: u16 = b - '0';
+                    self.param = self.param *| 10 +| d;
+                },
+                ';', ':' => {
+                    // Multi-parameter CSI — the modes we care about
+                    // only use one parameter, so any `;` means this
+                    // isn't a DECSET/DECRST we're interested in.
+                    // Drop our tracking and let the parser run to
+                    // the final byte to stay in sync.
+                    self.is_private = false;
+                },
+                'h', 'l' => {
+                    if (self.is_private) self.applyMode(self.param, b == 'h');
+                    self.state = .ground;
+                },
+                else => {
+                    // Any CSI intermediate / final byte we don't
+                    // recognise. 0x40..0x7E is the terminator range;
+                    // anything in there ends the CSI.
+                    if (b >= 0x40 and b <= 0x7E) self.state = .ground;
+                },
+            },
+        }
+    }
+
+    fn applyMode(self: *AltScreen, mode: u16, set: bool) void {
+        const is_alt = switch (mode) {
+            47, 1047, 1049 => true,
+            else => false,
+        };
+        if (!is_alt) return;
+        if (self.active == set) return; // no transition (idempotent app)
+        self.active = set;
+        self.transitioned = true;
+    }
+};
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+const testing = std.testing;
+
+test "AltScreen: stays inactive on plain output" {
+    var a = AltScreen.init();
+    a.feed("hello world\r\n");
+    a.feed("\x1b[1;36mcolored\x1b[0m");
+    a.feed("\x1b]0;set title\x07");
+    try testing.expect(!a.active);
+    try testing.expect(!a.takeTransition());
+}
+
+test "AltScreen: ?1049h flips active true with a transition edge" {
+    var a = AltScreen.init();
+    a.feed("\x1b[?1049h");
+    try testing.expect(a.active);
+    try testing.expect(a.takeTransition());
+    // takeTransition clears the edge — second call returns false.
+    try testing.expect(!a.takeTransition());
+}
+
+test "AltScreen: ?1049l after enter flips back with a transition edge" {
+    var a = AltScreen.init();
+    a.feed("\x1b[?1049h");
+    _ = a.takeTransition();
+    a.feed("\x1b[?1049l");
+    try testing.expect(!a.active);
+    try testing.expect(a.takeTransition());
+}
+
+test "AltScreen: legacy ?47h and ?1047h both flip active" {
+    var a = AltScreen.init();
+    a.feed("\x1b[?47h");
+    try testing.expect(a.active);
+    a.feed("\x1b[?47l");
+    try testing.expect(!a.active);
+    a.feed("\x1b[?1047h");
+    try testing.expect(a.active);
+    a.feed("\x1b[?1047l");
+    try testing.expect(!a.active);
+}
+
+test "AltScreen: redundant ?1049h while active is not a transition" {
+    var a = AltScreen.init();
+    a.feed("\x1b[?1049h");
+    _ = a.takeTransition();
+    a.feed("\x1b[?1049h");
+    try testing.expect(a.active);
+    try testing.expect(!a.takeTransition()); // no edge
+}
+
+test "AltScreen: non-private CSIs don't toggle (no `?` prefix)" {
+    // `\x1b[1049h` (without `?`) is a totally different sequence.
+    // We must NOT confuse it with a DECSET on mode 1049.
+    var a = AltScreen.init();
+    a.feed("\x1b[1049h");
+    try testing.expect(!a.active);
+}
+
+test "AltScreen: unrelated private modes leave state untouched" {
+    var a = AltScreen.init();
+    a.feed("\x1b[?25l"); // hide cursor
+    a.feed("\x1b[?7h"); // wraparound
+    a.feed("\x1b[?2004h"); // bracketed paste
+    try testing.expect(!a.active);
+    try testing.expect(!a.takeTransition());
+}
+
+test "AltScreen: sequence split across feed calls still parses" {
+    var a = AltScreen.init();
+    a.feed("\x1b");
+    a.feed("[?10");
+    a.feed("49");
+    a.feed("h");
+    try testing.expect(a.active);
+    try testing.expect(a.takeTransition());
+}
+
+test "AltScreen: realistic enter→exit round-trip mixed with other output" {
+    var a = AltScreen.init();
+    a.feed("$ k9s\r\n");
+    a.feed("\x1b[?25l\x1b[?1049h"); // hide cursor + enter alt
+    try testing.expect(a.active);
+    try testing.expect(a.takeTransition());
+    // k9s draws...
+    a.feed("\x1b[1;1H\x1b[2J\x1b[1;36msome k9s ui\x1b[0m");
+    try testing.expect(a.active);
+    try testing.expect(!a.takeTransition()); // no further edges
+    // k9s exits
+    a.feed("\x1b[?1049l\x1b[?25h");
+    try testing.expect(!a.active);
+    try testing.expect(a.takeTransition());
+}
+
+test "AltScreen: malformed CSI doesn't strand the parser" {
+    // Truncated, garbage in the middle, recover on next sequence.
+    var a = AltScreen.init();
+    a.feed("\x1b[?garbage"); // bogus letter mid-param — ends the CSI
+    try testing.expect(!a.active);
+    a.feed("\x1b[?1049h"); // should still work
+    try testing.expect(a.active);
+}

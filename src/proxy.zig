@@ -40,6 +40,7 @@ const style_mod = @import("style.zig");
 const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
+const AltScreen = @import("altscreen.zig").AltScreen;
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -183,6 +184,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var osc133_tracker = Osc133.init(allocator);
     defer osc133_tracker.deinit();
 
+    // Alternate-screen-buffer tracker — full-screen TUIs (k9s, vim,
+    // less, htop, helix, lazygit, …) swap to the alt buffer with
+    // `\x1b[?1049h` and back with `?1049l`. While they're active the
+    // app expects the whole terminal: no DECSTBM clipping, no
+    // statusbar painted over the bottom row. The tracker watches
+    // master→stdout, surfaces a transition edge each time the app
+    // enters or exits, and the proxy uses that edge to flip the
+    // slave PTY size + suspend / resume statusbar painting.
+    var alt_screen = AltScreen.init();
+
     var ctx = module.Context{
         .allocator = allocator,
         .io = io,
@@ -304,7 +315,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             }
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
-            if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+            if (statusbar) |*sb| {
+                if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+            }
             continue;
         }
 
@@ -392,7 +405,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     try keymap.translateCsiUStream(input, config.terminal.enable_kitty_keyboard, ptm_writer);
                     line_state.reset();
                     line_state.clearLastCommitted();
-                    if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    if (statusbar) |*sb| {
+                        if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    }
                     continue;
                 }
 
@@ -525,7 +540,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 if (swallow_after_binding) {
-                    if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    if (statusbar) |*sb| {
+                        if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    }
                     continue;
                 }
 
@@ -605,7 +622,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Sub-millisecond delay on a local shell; eliminates
                 // the "flickers one char left/right" jitter on every
                 // keystroke.
-                if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                if (statusbar) |*sb| {
+                    if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                }
             }
         }
 
@@ -623,6 +642,36 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // when the shell emits prompt-zone markers. Stays
                 // dormant otherwise.
                 osc133_tracker.feed(output);
+                alt_screen.feed(output);
+
+                // Alt-screen transition: an interactive full-screen
+                // TUI just entered (?1049h, ?47h, ?1047h) or exited
+                // (?1049l, …). On enter we hand the app the WHOLE
+                // terminal — re-set the slave PTY's reported rows
+                // to the full size so the app's own SIGWINCH-driven
+                // redraw uses every row (TIOCSWINSZ via
+                // `pty.setSize` delivers SIGWINCH to the slave's
+                // foreground process group). On exit we restore the
+                // slim size and re-activate the statusbar so the
+                // bottom rows aren't left in whatever state the app
+                // returned them in.
+                if (statusbar) |*sb| {
+                    if (alt_screen.takeTransition()) {
+                        if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                            var shell_size = s;
+                            if (!alt_screen.active) {
+                                shell_size.rows = sb.effectiveRows();
+                                var w2: std.Io.Writer = .fixed(&out_buf);
+                                sb.activate(&w2) catch {};
+                                if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+                                sb.last_valid = false;
+                            }
+                            _ = pty.setSize(shell_size) catch {};
+                        } else |_| {}
+                    }
+                } else {
+                    _ = alt_screen.takeTransition();
+                }
 
                 // Continuous line_state sync while the tracker is in
                 // its input phase. Keystroke tracking models what the
@@ -658,10 +707,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
                 if (statusbar) |*sb| {
-                    // Shell output may have scrolled or overwritten our
-                    // reserved row — force a repaint.
-                    sb.last_valid = false;
-                    renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    if (!alt_screen.active) {
+                        // Shell output may have scrolled or overwritten our
+                        // reserved row — force a repaint.
+                        sb.last_valid = false;
+                        renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    }
                 }
             } else if (read_n == 0) {
                 child_alive = false;
@@ -683,10 +734,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         var shell_size = s;
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
-                            var w: std.Io.Writer = .fixed(&out_buf);
-                            sb.activate(&w) catch {};
-                            try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
-                            shell_size.rows = sb.effectiveRows();
+                            // While an alt-screen TUI is running the
+                            // statusbar is suspended and the app owns
+                            // every row — don't re-paint the reserved
+                            // zone or slim the slave size. On exit
+                            // (?1049l) the master-output path runs
+                            // sb.activate again with the current size.
+                            if (!alt_screen.active) {
+                                var w: std.Io.Writer = .fixed(&out_buf);
+                                sb.activate(&w) catch {};
+                                try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+                                shell_size.rows = sb.effectiveRows();
+                            }
                         }
                         _ = pty.setSize(shell_size) catch {};
                     } else |_| {}
