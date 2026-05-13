@@ -313,8 +313,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
                 }
             }
-            renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
-            renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
+            if (!inSubprocess(&alt_screen, &osc133_tracker)) {
+                renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
+                renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
+            }
             if (statusbar) |*sb| {
                 if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             }
@@ -603,9 +605,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 };
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
+                    // Suppress when we're inside a subprocess. Catches
+                    // Enter pressed inside vim / nano / k9s / less /
+                    // psql / etc. (alt-screen TUIs) and inside ssh /
+                    // sudo / kubectl exec / etc. when shell integration
+                    // is sourced (OSC 133 in command phase). Without
+                    // this gate, every Enter inside any sub-app pollutes
+                    // the local shell's history + atuin index.
+                    const in_subproc = inSubprocess(&alt_screen, &osc133_tracker);
                     if (!line_state.committed_was_uncertain and
                         !incognito_on and
                         !leading_space and
+                        !in_subproc and
                         shell_saw_enter)
                     {
                         D.dispatchLineCommit(&runtimes, &ctx, committed) catch {};
@@ -734,8 +745,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
-                renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
-                renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
+                if (!inSubprocess(&alt_screen, &osc133_tracker)) {
+                    renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
+                    renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
+                }
                 if (statusbar) |*sb| {
                     if (!alt_screen.active) {
                         // Shell output may have scrolled or overwritten our
@@ -808,6 +821,39 @@ const POLLERR: i16 = 0x008;
 
 fn containsEnter(bytes: []const u8) bool {
     for (bytes) |b| if (b == 0x0D or b == 0x0A) return true;
+    return false;
+}
+
+/// True when the shell is running a foreground subprocess (not at
+/// the local prompt). Gates `renderGhost` / `renderGhostList` /
+/// `dispatchLineCommit` so atty doesn't paint suggestions over
+/// vim's UI or record every Enter inside vim / ssh / sudo /
+/// kubectl exec / psql / etc. as a "shell command".
+///
+/// Two signals OR'd together — either one is sufficient:
+///
+///   1. **alt-screen active** — TUI swapped to the alt buffer
+///      (`\x1b[?1049h` family). Catches vim, k9s, less, htop,
+///      helix, lazygit, top, btm. Works WITHOUT shell integration.
+///   2. **OSC 133 markers active AND not in input phase** — the
+///      LOCAL shell told us we're between `;C` and `;D` (a command
+///      is running). Catches every subprocess including ones that
+///      stay on the primary screen: ssh, sudo, su, psql, mysql,
+///      `bash -c`, `kubectl exec`, etc. Requires shell integration
+///      (Ghostty's `shell-integration-features = osc-133`, ble.sh,
+///      zsh4humans, VS Code's snippet).
+///
+/// Both signals are conservative — never false-positive at the
+/// real local prompt (alt-screen is impossible there, and OSC 133
+/// in input phase IS the prompt). For users without integration
+/// the alt-screen branch alone catches the common case (TUIs
+/// drawing on top of which ghost overlay would land); ssh / sudo
+/// remain unsuppressed without integration but those don't paint
+/// anything on top of the prompt anyway, so the consequence is
+/// "ghost-suggest while inside ssh" — annoying but harmless.
+fn inSubprocess(alt: *const AltScreen, osc: *const Osc133) bool {
+    if (alt.active) return true;
+    if (osc.active and !osc.inInputPhase()) return true;
     return false;
 }
 
