@@ -200,14 +200,18 @@ pub fn configure(comptime cfg: Config) type {
         // ---- env / config helpers ----------------------------------------
 
         fn resolveApiBase(allocator: std.mem.Allocator) ![]u8 {
-            if (envValue(cfg.api_base_env)) |s| return allocator.dupe(u8, s);
+            // Normalize a single trailing slash on either env path
+            // — `doRequest` appends `/chat/completions`, so a base
+            // ending in `/` would produce `…//chat/completions`,
+            // which some proxies/routers reject or normalize
+            // inconsistently. Strip exactly one slash; we don't
+            // want to collapse intentional multi-segment paths
+            // (e.g. `https://api.example.com/v1/proxy//routed`).
+            if (envValue(cfg.api_base_env)) |s| {
+                const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
+                return allocator.dupe(u8, trimmed);
+            }
             if (envValue(cfg.api_base_fallback_env)) |s| {
-                // Trim a single trailing slash before testing for
-                // / appending `/v1` — `OLLAMA_HOST="http://h:11434/"`
-                // would otherwise produce `http://h:11434//v1`,
-                // which some proxies / routers reject or normalize
-                // inconsistently. Strip exactly one slash; we don't
-                // want to collapse intentional multi-segment paths.
                 const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
                 if (std.mem.endsWith(u8, trimmed, "/v1")) return allocator.dupe(u8, trimmed);
                 return std.fmt.allocPrint(allocator, "{s}/v1", .{trimmed});
