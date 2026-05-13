@@ -655,9 +655,11 @@ test "translateCsiUStream: unterminated CSI-u at end is forwarded verbatim" {
     // a CSI-u we can translate. Forward as-is — the password reader
     // sees `\x1b[99;5` literally. This is the inherent flaw in
     // boundary-cutting reads; the next read should deliver the rest
-    // and the next iteration will (failing to find `u`) also forward
-    // verbatim. Documented trade-off: deletion across read boundaries
-    // is out of scope.
+    // and the next iteration will (also lacking the start of the
+    // sequence) forward verbatim. Documented trade-off: CSI-u
+    // translation across read() boundaries is out of scope. In
+    // practice the proxy uses raw mode with VMIN=1 VTIME=0, so the
+    // kernel coalesces a fully-arrived sequence into one read.
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     try translateCsiUStream("ok\x1b[99;5", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });

@@ -693,35 +693,41 @@ fn containsEnter(bytes: []const u8) bool {
     return false;
 }
 
-fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+/// Shared write loop used by every fd-target write in the proxy.
+/// On a negative `write()` return, only `INTR` / `AGAIN` are
+/// retried — every other errno propagates as `error.WriteFailed`
+/// so an unrecoverable failure (e.g. `EBADF` / `EIO` after PTY
+/// teardown) can't hang the loop at 100% CPU. EAGAIN on a
+/// blocking PTY master is effectively unreachable (the kernel
+/// blocks instead of returning the errno), but we accept it
+/// defensively in case the fd ever gets flipped to non-blocking.
+fn writeFully(fd: posix.fd_t, bytes: []const u8) !void {
     var i: usize = 0;
     while (i < bytes.len) {
         const rc = std.c.write(fd, bytes[i..].ptr, bytes.len - i);
         if (rc < 0) {
-            // EINTR / EAGAIN are vanishingly rare on PTY master; retry.
-            continue;
+            const err = posix.errno(rc);
+            if (err == .INTR or err == .AGAIN) continue;
+            return error.WriteFailed;
         }
         if (rc == 0) return error.EndOfFile;
         i += @intCast(rc);
     }
 }
 
-/// Thin Writer adapter so `keymap.translateCsiUStream` (which speaks
-/// the generic Writer interface) can target the PTY master directly,
-/// without an intermediate buffer. Inlined here rather than calling
-/// out to `proxy.writeAll` because Zig 0.16's name resolution treats
-/// the outer `writeAll` and the struct method `writeAll` as
-/// ambiguous when one references the other.
+fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+    return writeFully(fd, bytes);
+}
+
+/// Thin Writer adapter so `keymap.translateCsiUStream` (which
+/// speaks the generic Writer interface) can target the PTY master
+/// directly, without an intermediate buffer. Delegates to
+/// `writeFully` so the errno-gated retry policy is the only
+/// implementation of the write loop in this file.
 const PtmWriter = struct {
     fd: posix.fd_t,
     pub fn writeAll(self: PtmWriter, bytes: []const u8) !void {
-        var i: usize = 0;
-        while (i < bytes.len) {
-            const rc = std.c.write(self.fd, bytes[i..].ptr, bytes.len - i);
-            if (rc < 0) continue;
-            if (rc == 0) return error.EndOfFile;
-            i += @intCast(rc);
-        }
+        return writeFully(self.fd, bytes);
     }
 };
 
