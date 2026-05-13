@@ -361,6 +361,72 @@ pub fn isCsiU(input: []const u8) bool {
     return true;
 }
 
+/// If `bytes` begins with a well-formed CSI-u sequence, return its
+/// length (including the `u` terminator). Returns null otherwise.
+///
+/// Used by the byte-stream translator below to peel CSI-u sequences
+/// off the front of a multi-keystroke `read()` buffer. `isCsiU`
+/// validates the WHOLE slice — this finds the *boundary* so the
+/// caller can split mixed input (`password<Enter><Ctrl+C>` arriving
+/// as one read in raw mode, paste with embedded protocol sequences,
+/// …).
+pub fn csiULen(bytes: []const u8) ?usize {
+    if (bytes.len < 4) return null;
+    if (bytes[0] != 0x1B or bytes[1] != '[') return null;
+    var i: usize = 2;
+    while (i < bytes.len) : (i += 1) {
+        switch (bytes[i]) {
+            '0'...'9', ';', ':' => {},
+            'u' => return i + 1,
+            else => return null,
+        }
+    }
+    return null; // ran out of bytes before terminator → not yet a CSI-u
+}
+
+/// Byte-stream CSI-u translator for the password-redaction fast path
+/// (and any other site where a multi-key `read()` may carry an
+/// embedded CSI-u sequence).
+///
+/// Walks `input` front-to-back. When a CSI-u sequence is detected at
+/// the current cursor, run `csiUToLegacy` against it and write the
+/// translated bytes to `writer` (or drop them, if the key has no
+/// legacy form — e.g. Ctrl+9, F-keys). Non-CSI-u runs are written
+/// verbatim in one chunk per run, so the common case (`password\r`
+/// arriving as a single `read()`) is a single write.
+///
+/// `writer` is a Writer; in the proxy this points at pty.master via
+/// a thin shim. Returns the writer's error type unchanged so the
+/// caller can `try` it directly.
+pub fn translateCsiUStream(
+    input: []const u8,
+    enabled: bool,
+    writer: anytype,
+) !void {
+    if (!enabled) {
+        try writer.writeAll(input);
+        return;
+    }
+    var i: usize = 0;
+    var run_start: usize = 0;
+    while (i < input.len) {
+        if (input[i] == 0x1B and i + 1 < input.len and input[i + 1] == '[') {
+            if (csiULen(input[i..])) |seq_len| {
+                if (run_start < i) try writer.writeAll(input[run_start..i]);
+                var legacy_buf: [8]u8 = undefined;
+                if (csiUToLegacy(input[i .. i + seq_len], &legacy_buf)) |legacy| {
+                    try writer.writeAll(legacy);
+                } // else: drop (no legacy form — Ctrl+9, F-keys, …)
+                i += seq_len;
+                run_start = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if (run_start < input.len) try writer.writeAll(input[run_start..]);
+}
+
 /// Linear scan over `bindings` looking for an exact byte match against
 /// `input`. Returns the bound action, or null when no binding matches
 /// (or the input is empty / a binding has an empty `.bytes`). Pulled
@@ -509,6 +575,103 @@ test "csiUToLegacy: non-CSI-u input returns null without touching `out`" {
     try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x03", &out));
     try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[C", &out)); // arrow
     try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("abc", &out));
+}
+
+test "csiULen finds the boundary of an embedded CSI-u sequence" {
+    try std.testing.expectEqual(@as(?usize, 7), csiULen("\x1b[99;5u"));
+    try std.testing.expectEqual(@as(?usize, 7), csiULen("\x1b[99;5utrailing"));
+    try std.testing.expectEqual(@as(?usize, 4), csiULen("\x1b[9u"));
+    try std.testing.expectEqual(@as(?usize, null), csiULen("\x1b[99;5")); // unterminated
+    try std.testing.expectEqual(@as(?usize, null), csiULen("\x1b[Cdef")); // arrow, not CSI-u
+    try std.testing.expectEqual(@as(?usize, null), csiULen("abc")); // no escape
+    try std.testing.expectEqual(@as(?usize, null), csiULen("\x1b[")); // too short
+}
+
+const TestWriter = struct {
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    pub fn writeAll(self: @This(), bytes: []const u8) !void {
+        try self.buf.appendSlice(self.allocator, bytes);
+    }
+};
+
+test "translateCsiUStream: pure CSI-u → legacy bytes (single-key fast path)" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try translateCsiUStream("\x1b[99;5u", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
+    try std.testing.expectEqualSlices(u8, "\x03", buf.items);
+}
+
+test "translateCsiUStream: non-CSI-u byte stream passes through unchanged" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try translateCsiUStream("hunter2\r", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
+    try std.testing.expectEqualSlices(u8, "hunter2\r", buf.items);
+}
+
+test "translateCsiUStream: mixed run — password chars + embedded Ctrl+C" {
+    // Regression scenario (Copilot review on PR #9, src/proxy.zig:390):
+    // a single `read()` returned `pass\x1b[99;5u\r` (paste-style or
+    // burst typing). The earlier fast-path checked `isCsiU(input)`
+    // on the WHOLE slice — failed because it wasn't pure CSI-u — and
+    // forwarded the raw kitty-protocol bytes to the password reader.
+    // The stream translator splits the input into runs and translates
+    // each CSI-u sequence individually.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try translateCsiUStream("pass\x1b[99;5u\r", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
+    try std.testing.expectEqualSlices(u8, "pass\x03\r", buf.items);
+}
+
+test "translateCsiUStream: two CSI-u sequences back-to-back" {
+    // Ctrl+U (kill line) then Ctrl+C (cancel) — both arrive as CSI-u
+    // under kitty kbd. Both must be translated.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try translateCsiUStream("\x1b[117;5u\x1b[99;5u", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
+    try std.testing.expectEqualSlices(u8, "\x15\x03", buf.items);
+}
+
+test "translateCsiUStream: CSI-u with no legacy form is dropped" {
+    // Ctrl+9 has no legacy single-byte form. Forwarding the raw CSI-u
+    // would leak `\x1b[57;5u` into sudo's getpass. Drop instead.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try translateCsiUStream("ab\x1b[57;5ucd", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
+    try std.testing.expectEqualSlices(u8, "abcd", buf.items);
+}
+
+test "translateCsiUStream: disabled → bytes pass through unchanged" {
+    // When kitty kbd isn't enabled, the terminal can't produce CSI-u
+    // anyway — skip the parse entirely and forward everything.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try translateCsiUStream("\x1b[99;5u-but-disabled", false, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
+    try std.testing.expectEqualSlices(u8, "\x1b[99;5u-but-disabled", buf.items);
+}
+
+test "translateCsiUStream: unterminated CSI-u at end is forwarded verbatim" {
+    // A partial CSI-u (read boundary chopped the terminator) is not
+    // a CSI-u we can translate. Forward as-is — the password reader
+    // sees `\x1b[99;5` literally. This is the inherent flaw in
+    // boundary-cutting reads; the next read should deliver the rest
+    // and the next iteration will (also lacking the start of the
+    // sequence) forward verbatim. Documented trade-off: CSI-u
+    // translation across read() boundaries is out of scope. In
+    // practice the proxy uses raw mode with VMIN=1 VTIME=0, so the
+    // kernel coalesces a fully-arrived sequence into one read.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try translateCsiUStream("ok\x1b[99;5", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
+    try std.testing.expectEqualSlices(u8, "ok\x1b[99;5", buf.items);
+}
+
+test "translateCsiUStream: bare ESC (no `[`) is forwarded as-is" {
+    // Alt+letter classic encoding is `ESC <letter>`. Not a CSI-u.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try translateCsiUStream("\x1bf", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
+    try std.testing.expectEqualSlices(u8, "\x1bf", buf.items);
 }
 
 test "csiUToLegacy: malformed CSI-u (non-numeric) returns null safely" {

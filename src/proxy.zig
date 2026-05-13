@@ -30,7 +30,7 @@ fn nowMs() i64 {
 const Pty = @import("pty.zig").Pty;
 const terminal = @import("terminal.zig");
 const RawMode = terminal.RawMode;
-const slaveEchoEnabled = terminal.slaveEchoEnabled;
+const slaveIsHiddenInput = terminal.slaveIsHiddenInput;
 const LineState = @import("line_state.zig").LineState;
 const Ghost = @import("ghost.zig").Ghost;
 const GhostList = @import("ghost_list.zig").GhostList;
@@ -314,17 +314,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             if (read_n > 0) {
                 var input: []const u8 = read_buf[0..read_n];
 
-                // PASSWORD-INPUT FAST PATH: when the slave has ECHO
-                // disabled (sudo / ssh / passwd / gpg-agent / shell
-                // `read -s` / anything calling getpass(3) /
-                // readpassphrase / its own tcsetattr to drop echo),
-                // short-circuit the entire keymap + dispatchInput
-                // pipeline and forward the raw bytes straight to
-                // pty.master. Three reasons:
+                // PASSWORD-INPUT FAST PATH: when the slave PTY is in
+                // canonical hidden-input mode (ICANON=on AND ECHO=off
+                // — the termios signature of sudo / ssh / passwd /
+                // gpg-agent / shell `read -s` / getpass(3) /
+                // readpassphrase(3)), short-circuit the entire keymap
+                // + dispatchInput pipeline and forward the raw bytes
+                // straight to pty.master. Three reasons:
                 //
                 //   1. Keymap bindings (incognito_toggle on
                 //      Ctrl+Shift+I, ghost_accept on Right, …) can
-                //      swallow or substitute bytes. With ECHO off
+                //      swallow or substitute bytes. With echo off
                 //      the user gets no visual feedback that this
                 //      happened, so a stray binding silently
                 //      corrupts password entry.
@@ -341,27 +341,55 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 //      can't get set, so dispatchLineCommit can't
                 //      fire either.
                 //
-                // The reset + clearLastCommitted calls drop any
-                // leftover state from the echo-on iteration that
-                // straddled the boundary (the read before sudo's
-                // tcsetattr lands) — defence in depth.
+                // Critically, the gate is `ICANON && !ECHO`, NOT bare
+                // `!ECHO`. Interactive shells with readline / zle
+                // also drop ECHO (they handle echoing themselves) —
+                // but they ALSO drop ICANON. Gating on `!ECHO` alone
+                // mistook every interactive keystroke for a
+                // password and silently routed all input down this
+                // fast path, bypassing CSI-u translation. The user
+                // saw Ctrl+C / Ctrl+D producing `9;5u` / `0;5u`
+                // mojibake. See `terminal.slaveIsHiddenInput` for
+                // the truth table.
                 //
-                // **TOCTOU note**: `slaveEchoEnabled` is sampled
-                // once per stdin read. The child can flip ECHO off
-                // between the user striking a key and the proxy
-                // entering this branch; any bytes already in
-                // `read_buf` from before the flip were typed under
-                // echo-on conditions and will be processed as such.
-                // This is an inherent race (the kernel doesn't
-                // signal termios changes), bounded by the read's
-                // size (≤ 4 KiB) and effectively limited to a
-                // handful of keystrokes in practice. Acceptable
-                // cost for the redaction guarantee on subsequent
-                // reads. `slaveEchoEnabled` fails-closed on
-                // tcgetattr errors → an fd error is treated as
-                // "assume the worst, redact."
-                if (!slaveEchoEnabled(pty.master)) {
-                    try writeAll(pty.master, input);
+                // The reset + clearLastCommitted calls drop any
+                // leftover state from the visible-input iteration
+                // that straddled the boundary (the read before
+                // sudo's tcsetattr lands) — defence in depth.
+                //
+                // **TOCTOU note**: `slaveIsHiddenInput` is sampled
+                // once per stdin read. The child can drop into
+                // password mode between the user striking a key and
+                // the proxy entering this branch; any bytes already
+                // in `read_buf` from before the flip were typed
+                // under visible-input conditions and will be
+                // processed as such. This is an inherent race (the
+                // kernel doesn't signal termios changes), bounded
+                // by the read's size (≤ 4 KiB) and effectively
+                // limited to a handful of keystrokes in practice.
+                // Acceptable cost for the redaction guarantee on
+                // subsequent reads. `slaveIsHiddenInput` fails-
+                // closed on tcgetattr errors → an fd error is
+                // treated as "assume the worst, redact."
+                if (slaveIsHiddenInput(pty.master)) {
+                    // CSI-u translation still applies here even though
+                    // the rest of the pipeline is skipped. With kitty
+                    // kbd pushed (default), Ctrl+C / Ctrl+U / Ctrl+H
+                    // arrive as `\x1b[99;5u` / `\x1b[117;5u` /
+                    // `\x1b[104;5u` — the password reader (sudo /
+                    // ssh / passwd / getpass / `read -s`) doesn't
+                    // speak the protocol and would see mojibake
+                    // instead of the cancel / line-kill byte.
+                    //
+                    // We use the byte-stream variant so a single
+                    // `read()` that batched a password char + an
+                    // embedded CSI-u (paste, burst typing across the
+                    // read boundary) still has each CSI-u translated
+                    // in place. Sequences with no legacy form
+                    // (Ctrl+9, F-keys, …) are dropped rather than
+                    // leaking raw protocol bytes into getpass.
+                    const ptm_writer = PtmWriter{ .fd = pty.master };
+                    try keymap.translateCsiUStream(input, config.terminal.enable_kitty_keyboard, ptm_writer);
                     line_state.reset();
                     line_state.clearLastCommitted();
                     if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
@@ -694,18 +722,43 @@ fn containsEnter(bytes: []const u8) bool {
     return false;
 }
 
-fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+/// Shared write loop used by every fd-target write in the proxy.
+/// `INTR` is retried (signal arrived mid-syscall); every other
+/// errno propagates as `error.WriteFailed`. Notably `EAGAIN` is
+/// **not** retried — every fd we write to is blocking by design
+/// (pty.master, stdout for ghost overlays), so `EAGAIN` indicates
+/// the caller flipped the fd to non-blocking and we should surface
+/// it explicitly rather than tight-loop until a future POLLOUT.
+/// `EBADF` / `EIO` from PTY teardown is the other path this gate
+/// guards against — those used to spin at 100% CPU.
+fn writeFully(fd: posix.fd_t, bytes: []const u8) !void {
     var i: usize = 0;
     while (i < bytes.len) {
         const rc = std.c.write(fd, bytes[i..].ptr, bytes.len - i);
         if (rc < 0) {
-            // EINTR / EAGAIN are vanishingly rare on PTY master; retry.
-            continue;
+            if (posix.errno(rc) == .INTR) continue;
+            return error.WriteFailed;
         }
         if (rc == 0) return error.EndOfFile;
         i += @intCast(rc);
     }
 }
+
+fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+    return writeFully(fd, bytes);
+}
+
+/// Thin Writer adapter so `keymap.translateCsiUStream` (which
+/// speaks the generic Writer interface) can target the PTY master
+/// directly, without an intermediate buffer. Delegates to
+/// `writeFully` so the errno-gated retry policy is the only
+/// implementation of the write loop in this file.
+const PtmWriter = struct {
+    fd: posix.fd_t,
+    pub fn writeAll(self: PtmWriter, bytes: []const u8) !void {
+        return writeFully(self.fd, bytes);
+    }
+};
 
 /// Render the current best suggestion (or clear the overlay if no
 /// module wants one). Idempotent.

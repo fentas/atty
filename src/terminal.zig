@@ -97,25 +97,43 @@ fn makeRaw(t: *posix.termios) void {
     t.cc[@intFromEnum(posix.V.TIME)] = 0;
 }
 
-/// True if the `ECHO` line-discipline flag is on for the given fd.
-/// Used by the proxy to detect "user is typing a password" — when
-/// a child program (sudo, ssh, su, passwd, …) drops echo on the
-/// slave PTY, atty must stop tracking keystrokes so the password
-/// can't leak into history / ghost-suggest / OSC 133 tracking.
+/// True iff the slave PTY is in **canonical hidden-input** mode —
+/// the termios signature `getpass(3)` / `readpassphrase(3)` / sudo
+/// / ssh / `passwd` / shell `read -s` all use to read a password:
+/// `ICANON=on AND ECHO=off`. Kernel line-buffers the input AND
+/// suppresses screen echo.
+///
+/// This is **not** the same as "ECHO=off." Interactive shells with
+/// readline / zle (bash, zsh, fish) also drop ECHO — but they ALSO
+/// drop ICANON because the line editor handles echoing and editing
+/// itself. Gating redaction on bare `!ECHO` mistakes every
+/// interactive keystroke for a password and silently bypasses
+/// CSI-u translation + keymap handling (regression observed as
+/// Ctrl+C / Ctrl+D producing `9;5u` / `0;5u` mojibake — the
+/// untranslated CSI-u sequence flows raw to the shell).
+///
+/// Truth table for (ICANON, ECHO):
+///
+///   ICANON  ECHO   meaning                            redact?
+///   ─────   ────   ────────────────────────────────   ───────
+///     1      1     POSIX cooked mode (`sh`, no RL)     no
+///     0      0     readline / zle interactive shell    no
+///     0      1     atypical raw-with-echo              no
+///     1      0     getpass / sudo / `read -s`          YES
 ///
 /// Pass the master fd: on Linux + POSIX the slave's termios is
 /// visible from either end of the pair, so we don't need to hold
 /// the slave fd open after fork.
 ///
-/// **Fail-closed semantics**: returns `false` on tcgetattr failure.
+/// **Fail-closed semantics**: returns `true` on tcgetattr failure.
 /// This is a security gate, so "we couldn't tell" is treated as
 /// "assume the worst, redact." The cost is a partial history-
 /// tracking regression when the master fd is in an error state
 /// (itself an already-degraded scenario); the proxy will recover
 /// as soon as tcgetattr succeeds again on the next read.
-pub fn slaveEchoEnabled(master_fd: posix.fd_t) bool {
-    const t = posix.tcgetattr(master_fd) catch return false;
-    return t.lflag.ECHO;
+pub fn slaveIsHiddenInput(master_fd: posix.fd_t) bool {
+    const t = posix.tcgetattr(master_fd) catch return true;
+    return t.lflag.ICANON and !t.lflag.ECHO;
 }
 
 test "makeRaw zeroes the documented flag set" {
@@ -137,31 +155,72 @@ test "makeRaw zeroes the documented flag set" {
     try std.testing.expectEqual(@as(u8, 0), t.cc[@intFromEnum(posix.V.TIME)]);
 }
 
-test "slaveEchoEnabled reflects the slave's ECHO bit through the master fd" {
-    // Open a real PTY pair so we can flip ECHO on the slave and
-    // observe via the master that `slaveEchoEnabled` sees the
-    // transition. This is the same mechanism `sudo` / `ssh` /
-    // `passwd` use to read a password — drop ECHO, read, restore.
+test "slaveIsHiddenInput: fresh PTY (ICANON=on, ECHO=on) is NOT hidden input" {
+    // The kernel default for a freshly opened PTY is cooked mode:
+    // ICANON=on, ECHO=on. That's POSIX `sh` territory — not a
+    // password prompt. The redaction gate must stay off.
+    var pty = try @import("pty.zig").Pty.open(std.testing.allocator);
+    defer pty.deinit();
+    try std.testing.expect(!slaveIsHiddenInput(pty.master));
+}
+
+test "slaveIsHiddenInput: getpass signature (ICANON=on, ECHO=off) IS hidden input" {
+    // The signature `getpass(3)` / `sudo` / `ssh` / `passwd` /
+    // shell `read -s` all use: drop ECHO, keep canonical line
+    // buffering. The gate must fire so atty redacts the bytes
+    // out of line_state + ghost-suggest queries + history.
+    var pty = try @import("pty.zig").Pty.open(std.testing.allocator);
+    defer pty.deinit();
+    var t = try posix.tcgetattr(pty.master);
+    t.lflag.ECHO = false;
+    t.lflag.ICANON = true;
+    try posix.tcsetattr(pty.master, .NOW, t);
+    try std.testing.expect(slaveIsHiddenInput(pty.master));
+}
+
+test "slaveIsHiddenInput: interactive-shell raw mode (ICANON=off, ECHO=off) is NOT hidden input" {
+    // Regression guard: bash + readline / zsh + zle / fish drop
+    // BOTH ICANON and ECHO during normal interactive editing so
+    // the line editor can handle echo + editing itself. The
+    // earlier gate (`!ECHO` alone) mistook this for a password
+    // prompt on every keystroke, silently routing all input down
+    // the fast-path and skipping CSI-u translation. The user
+    // observed Ctrl+C / Ctrl+D producing `9;5u` / `0;5u` mojibake.
+    var pty = try @import("pty.zig").Pty.open(std.testing.allocator);
+    defer pty.deinit();
+    var t = try posix.tcgetattr(pty.master);
+    t.lflag.ECHO = false;
+    t.lflag.ICANON = false;
+    try posix.tcsetattr(pty.master, .NOW, t);
+    try std.testing.expect(!slaveIsHiddenInput(pty.master));
+}
+
+test "slaveIsHiddenInput: round-trip across a getpass-style session" {
+    // Pin the full sequence the proxy sees during `sudo`:
+    //   prompt (ICANON=off, ECHO=off — interactive shell)
+    //     ↓ sudo invoked
+    //   password (ICANON=on, ECHO=off — gate fires)
+    //     ↓ sudo finishes
+    //   prompt (ICANON=off, ECHO=off — gate releases)
     var pty = try @import("pty.zig").Pty.open(std.testing.allocator);
     defer pty.deinit();
 
-    // Fresh PTY: ECHO defaults to on. Pin that so any change in
-    // upstream defaults shows up here loudly.
-    try std.testing.expect(slaveEchoEnabled(pty.master));
-
-    // Drop ECHO via tcsetattr on the master — the pair shares the
-    // termios state. `sudo` does the same against the slave fd; we
-    // do it against the master because the slave fd isn't open in
-    // this test (it's owned by the would-be child).
     var t = try posix.tcgetattr(pty.master);
+    // Interactive shell setup.
     t.lflag.ECHO = false;
+    t.lflag.ICANON = false;
     try posix.tcsetattr(pty.master, .NOW, t);
-    try std.testing.expect(!slaveEchoEnabled(pty.master));
+    try std.testing.expect(!slaveIsHiddenInput(pty.master));
 
-    // Flip back on — sudo's restore path. Pin the round-trip so
-    // the redaction gate re-enables tracking once the password
-    // prompt is done.
-    t.lflag.ECHO = true;
+    // sudo drops ECHO + raises ICANON for the password.
+    t.lflag.ECHO = false;
+    t.lflag.ICANON = true;
     try posix.tcsetattr(pty.master, .NOW, t);
-    try std.testing.expect(slaveEchoEnabled(pty.master));
+    try std.testing.expect(slaveIsHiddenInput(pty.master));
+
+    // Restore interactive shell.
+    t.lflag.ECHO = false;
+    t.lflag.ICANON = false;
+    try posix.tcsetattr(pty.master, .NOW, t);
+    try std.testing.expect(!slaveIsHiddenInput(pty.master));
 }
