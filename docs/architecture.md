@@ -5,6 +5,9 @@ title: Architecture
 
 # atty — Architecture
 
+* TOC
+{:toc}
+
 ## Module layout
 
 ```

@@ -40,5 +40,71 @@
       <a href="https://atty.sh">atty.sh</a>
     </p>
   </footer>
+
+  <script>
+    // TOC scroll-spy. Highlights the entry pointing at whichever
+    // heading is closest to the top of the viewport. Pure DOM /
+    // IntersectionObserver — no framework, no jQuery, no dependency.
+    (function () {
+      const toc = document.getElementById('markdown-toc');
+      if (!toc) return;
+      const links = Array.from(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      const map = new Map();
+      for (const a of links) {
+        const id = decodeURIComponent(a.getAttribute('href').slice(1));
+        const el = document.getElementById(id);
+        if (el) map.set(el, a);
+      }
+      if (!map.size) return;
+      const visible = new Set();
+      let lastActive = null;
+      const setActive = function (link) {
+        if (link === lastActive) return;
+        if (lastActive) lastActive.classList.remove('is-active');
+        link.classList.add('is-active');
+        lastActive = link;
+        // Keep the active item in view inside the sidebar if it overflows.
+        if (typeof link.scrollIntoView === 'function') {
+          const r = link.getBoundingClientRect();
+          const tr = toc.getBoundingClientRect();
+          if (r.top < tr.top || r.bottom > tr.bottom) {
+            link.scrollIntoView({ block: 'nearest' });
+          }
+        }
+      };
+      const pickActive = function () {
+        let best = null, bestTop = -Infinity;
+        for (const el of visible) {
+          const top = el.getBoundingClientRect().top;
+          if (top <= 120 && top > bestTop) { bestTop = top; best = el; }
+        }
+        if (!best && visible.size) {
+          let minTop = Infinity;
+          for (const el of visible) {
+            const top = el.getBoundingClientRect().top;
+            if (top < minTop) { minTop = top; best = el; }
+          }
+        }
+        if (best && map.has(best)) setActive(map.get(best));
+      };
+      const obs = new IntersectionObserver(function (entries) {
+        for (const e of entries) {
+          if (e.isIntersecting) visible.add(e.target);
+          else visible.delete(e.target);
+        }
+        pickActive();
+      }, { rootMargin: '-80px 0px -60% 0px', threshold: 0 });
+      for (const el of map.keys()) obs.observe(el);
+      // First paint: pick whatever is at the top right now.
+      pickActive();
+      // Fallback for hash navigation (in case Intersection hasn't fired yet).
+      window.addEventListener('hashchange', function () {
+        const id = decodeURIComponent(location.hash.slice(1));
+        const el = document.getElementById(id);
+        if (el && map.has(el)) setActive(map.get(el));
+      });
+    })();
+  </script>
 </body>
 </html>
