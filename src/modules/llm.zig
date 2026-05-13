@@ -72,6 +72,13 @@ pub const Config = struct {
     /// fence/explanation guidance from your prompt or atty will
     /// happily render whatever prose it sees in the hint row.
     system_prompt: []const u8 = "",
+    /// Environment variables exposed to the model alongside the
+    /// user's prompt. Each named var is read at attach time and
+    /// (if set, non-empty) joined into a one-line `KEY=value`
+    /// context block appended to the user message. Empty default
+    /// = no context. `PATH_BASE` is the canonical example — a
+    /// project's "what does this user mean by 'here'" anchor.
+    context_env_vars: []const []const u8 = &.{},
     /// Per-request timeout in ms. Stored for future use; not yet wired
     /// to the HTTP client — requests may block indefinitely on a slow
     /// or unreachable endpoint until the OS TCP timeout fires.
@@ -153,6 +160,11 @@ pub fn configure(comptime cfg: Config) type {
             api_key: []u8 = &.{},
             /// Resolved shell name (basename of $SHELL or cfg.shell).
             shell: []u8 = &.{},
+            /// Pre-built context line ("KEY=value, KEY2=value2") to
+            /// append to the user message. Empty when no
+            /// `context_env_vars` are configured or none of them
+            /// are set in the environment. Owned by the runtime.
+            context_blob: []u8 = &.{},
             /// Copy of the response surfaced via pollShellInput.
             /// Owned by the runtime; valid until the next poll.
             inject_buf: [cfg.max_response_bytes]u8 = undefined,
@@ -180,6 +192,8 @@ pub fn configure(comptime cfg: Config) type {
             errdefer allocator.free(api_key);
             const shell_name = try resolveShell(allocator);
             errdefer allocator.free(shell_name);
+            const context_blob = try resolveContextEnv(allocator);
+            errdefer allocator.free(context_blob);
 
             // Skip the worker thread entirely in inert mode. With
             // no endpoint we'll never call the worker, and onInput
@@ -188,7 +202,7 @@ pub fn configure(comptime cfg: Config) type {
             const thread: ?std.Thread = if (api_base.len == 0)
                 null
             else
-                try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name });
+                try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name, context_blob });
 
             return .{
                 .allocator = allocator,
@@ -198,6 +212,7 @@ pub fn configure(comptime cfg: Config) type {
                 .api_base = api_base,
                 .api_key = api_key,
                 .shell = shell_name,
+                .context_blob = context_blob,
             };
         }
 
@@ -230,6 +245,7 @@ pub fn configure(comptime cfg: Config) type {
             rt.allocator.free(rt.api_base);
             rt.allocator.free(rt.api_key);
             rt.allocator.free(rt.shell);
+            rt.allocator.free(rt.context_blob);
         }
 
         // ---- env / config helpers ----------------------------------------
@@ -257,6 +273,25 @@ pub fn configure(comptime cfg: Config) type {
         fn resolveEnv(allocator: std.mem.Allocator, env_name: []const u8) ![]u8 {
             if (envValue(env_name)) |s| return allocator.dupe(u8, s);
             return allocator.dupe(u8, "");
+        }
+
+        /// Build the env-var context blob from `cfg.context_env_vars`.
+        /// Format: `KEY=value, KEY2=value2` — single line, comma-
+        /// separated, only entries whose env var is set and non-
+        /// empty are included. Returns an empty slice when no
+        /// matches are found so the worker can append-and-no-op.
+        fn resolveContextEnv(allocator: std.mem.Allocator) ![]u8 {
+            if (cfg.context_env_vars.len == 0) return allocator.dupe(u8, "");
+            var allocating: std.Io.Writer.Allocating = .init(allocator);
+            errdefer allocating.deinit();
+            var first = true;
+            for (cfg.context_env_vars) |env_name| {
+                const v = envValue(env_name) orelse continue;
+                if (!first) try allocating.writer.writeAll(", ");
+                first = false;
+                try allocating.writer.print("{s}={s}", .{ env_name, v });
+            }
+            return allocating.toOwnedSlice();
         }
 
         fn resolveShell(allocator: std.mem.Allocator) ![]u8 {
@@ -397,6 +432,7 @@ pub fn configure(comptime cfg: Config) type {
             api_base: []const u8,
             api_key: []const u8,
             shell_name: []const u8,
+            context_blob: []const u8,
         ) void {
             var prompt_local: [cfg.max_prompt_bytes]u8 = undefined;
             var prompt_len: usize = 0;
@@ -426,6 +462,7 @@ pub fn configure(comptime cfg: Config) type {
                     api_base,
                     api_key,
                     shell_name,
+                    context_blob,
                     prompt_local[0..prompt_len],
                     &response_buf,
                     &explanation_local,
@@ -469,6 +506,7 @@ pub fn configure(comptime cfg: Config) type {
             api_base: []const u8,
             api_key: []const u8,
             shell_name: []const u8,
+            context_blob: []const u8,
             prompt: []const u8,
             out: []u8,
             explanation_out: []u8,
@@ -476,7 +514,7 @@ pub fn configure(comptime cfg: Config) type {
             const url = try std.fmt.allocPrint(gpa, "{s}/chat/completions", .{api_base});
             defer gpa.free(url);
 
-            const body = try buildRequestBody(gpa, cfg.model, effective_system_prompt, shell_name, prompt);
+            const body = try buildRequestBody(gpa, cfg.model, effective_system_prompt, shell_name, context_blob, prompt);
             defer gpa.free(body);
 
             var auth_buf: [256]u8 = undefined;
@@ -535,6 +573,7 @@ pub fn configure(comptime cfg: Config) type {
             model: []const u8,
             system_prompt: []const u8,
             shell_name: []const u8,
+            context_blob: []const u8,
             prompt: []const u8,
         ) ![]u8 {
             var allocating: std.Io.Writer.Allocating = .init(allocator);
@@ -548,16 +587,23 @@ pub fn configure(comptime cfg: Config) type {
             try writer.writeAll("},{\"role\":\"user\",\"content\":");
 
             // allocPrint instead of a fixed buffer — `shell_name`
-            // comes from $SHELL / config and is not length-bounded.
-            // A pathological override (or a very long binary path
-            // if we ever stop basename-stripping) would overflow a
-            // `cfg.max_prompt_bytes + 64` buffer. Heap is fine —
-            // this is a one-shot build per request, off the hot path.
-            const user_msg = try std.fmt.allocPrint(
-                allocator,
-                "Generate a {s} command to: {s}",
-                .{ shell_name, prompt },
-            );
+            // and `context_blob` come from $SHELL / env config and
+            // are not length-bounded. A pathological override (or
+            // an unusually long env value) would overflow a fixed
+            // buffer. Heap is fine — this is a one-shot build per
+            // request, off the hot path.
+            const user_msg = if (context_blob.len > 0)
+                try std.fmt.allocPrint(
+                    allocator,
+                    "Generate a {s} command to: {s}\n\nContext: {s}",
+                    .{ shell_name, prompt, context_blob },
+                )
+            else
+                try std.fmt.allocPrint(
+                    allocator,
+                    "Generate a {s} command to: {s}",
+                    .{ shell_name, prompt },
+                );
             defer allocator.free(user_msg);
             try std.json.Stringify.encodeJsonString(user_msg, .{}, writer);
             try writer.writeAll("}],\"stream\":false}");
@@ -855,7 +901,7 @@ test "configure exposes the expected hooks" {
 
 test "buildRequestBody produces well-formed OpenAI chat-completion JSON" {
     const L = configure(.{ .model = "test-model" });
-    const body = try L.buildRequestBody(testing.allocator, "test-model", "be terse", "bash", "list zig files");
+    const body = try L.buildRequestBody(testing.allocator, "test-model", "be terse", "bash", "", "list zig files");
     defer testing.allocator.free(body);
 
     try testing.expect(std.mem.indexOf(u8, body, "\"model\":\"test-model\"") != null);
@@ -876,11 +922,45 @@ test "buildRequestBody escapes user content correctly (quotes + backslashes)" {
         "m",
         "sys",
         "bash",
+        "",
         "echo \"hello\\world\"",
     );
     defer testing.allocator.free(body);
     try testing.expect(std.mem.indexOf(u8, body, "\\\"hello") != null);
     try testing.expect(std.mem.indexOf(u8, body, "\\\\world") != null);
+}
+
+test "buildRequestBody appends a context blob when provided" {
+    const L = configure(.{});
+    const body = try L.buildRequestBody(
+        testing.allocator,
+        "m",
+        "sys",
+        "bash",
+        "PATH_BASE=/opt/foo, PROJECT=acme",
+        "list files",
+    );
+    defer testing.allocator.free(body);
+    // The user message should now include "Context: …" after the
+    // task; the literal commas + paths must survive JSON encoding
+    // (commas are not escaped — `/` may be encoded as `\/` but
+    // we expect it bare since we don't request slash escapes).
+    try testing.expect(std.mem.indexOf(u8, body, "Generate a bash command to: list files") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "Context: PATH_BASE=/opt/foo, PROJECT=acme") != null);
+}
+
+test "buildRequestBody omits the context section entirely when blob is empty" {
+    const L = configure(.{});
+    const body = try L.buildRequestBody(
+        testing.allocator,
+        "m",
+        "sys",
+        "bash",
+        "",
+        "list files",
+    );
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "Context:") == null);
 }
 
 test "extractCommand pulls choices[0].message.content out of a chat response" {
