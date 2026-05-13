@@ -106,7 +106,7 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 - OSC 133 prompt-marker support (would clean up the line-state `uncertain` mess but needs shell-side cooperation).
 - A persistent visual indicator other than the statusbar segment (cursor-color / cursor-shape were discussed and dropped).
 - Atuin `history end` with exit codes (needs ID capture + double CLI invocation; deferred).
-- atuin-side `deleteHistoryMatch` is shipped (shells out to `atuin search --search-mode prefix --filter-mode global --delete <line>`) but is **prefix-scoped** — atuin's CLI has no exact-match search mode, so deleting "echo asd" also removes "echo asdf". history.zig's local implementation is still exact-equality.
+- atuin-side `deleteHistoryMatch` is shipped. Default scope is `.exact` — shells out to `atuin search --search-mode fuzzy --delete '^<line>$'` so only the typed line is removed (atuin v18 has no exact-match search mode, but its fuzzy mode honors fzf-style anchors). Scope is configurable via `Config.delete_scope`: `.prefix` / `.full_text` / `.fuzzy` widen the sweep if you want it.
 
 ## Release flow
 

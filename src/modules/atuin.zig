@@ -37,6 +37,28 @@ fn nowMs() i64 {
 
 pub const SearchMode = enum { prefix, full_text, fuzzy };
 pub const FilterMode = enum { global, host, session, directory };
+
+/// Scope of the `deleteHistoryMatch` action. Atuin's CLI v18 has no
+/// exact-match search mode of its own — `prefix` / `full-text` /
+/// `fuzzy` all over-match — but **fuzzy mode supports fzf-style
+/// anchors**: `^line$` matches commands whose text equals `line`
+/// and nothing else. atty defaults to that so Ctrl+Shift+D only
+/// removes the line the user is staring at.
+pub const DeleteScope = enum {
+    /// `atuin search --search-mode fuzzy --delete '^<line>$'`.
+    /// True exact-match. Removes only commands equal to the line.
+    exact,
+    /// `--search-mode prefix --delete <line>`. Removes the line +
+    /// any longer command starting with it ("echo asd" → also
+    /// removes "echo asdf").
+    prefix,
+    /// `--search-mode full-text --delete <line>`. Removes any
+    /// command containing the line as a substring (anywhere).
+    full_text,
+    /// `--search-mode fuzzy --delete <line>` (no anchors).
+    /// Typo-tolerant; broadest collateral.
+    fuzzy,
+};
 pub const Backend = enum {
     /// Shells out to `atuin search`. Robust, works today.
     subprocess,
@@ -71,6 +93,13 @@ pub const Config = struct {
     sync_interval_ms: u64 = 60_000,
     /// Run one final `atuin sync` on detach if we recorded anything.
     sync_on_detach: bool = true,
+
+    /// Scope of the `deleteHistoryMatch` (Ctrl+Shift+D) action against
+    /// atuin's database. Default `.exact` uses atuin's fuzzy mode
+    /// with fzf-style `^...$` anchors so only commands *equal* to
+    /// the line are removed. See `DeleteScope` for the broader modes
+    /// if you want Ctrl+Shift+D to sweep wider.
+    delete_scope: DeleteScope = .exact,
 };
 
 pub fn configure(comptime cfg: Config) type {
@@ -393,39 +422,60 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         /// Fired by Ctrl+Shift+D (default binding for
-        /// `delete_history_match`). Shells out to:
-        ///
-        ///   atuin search --search-mode prefix --filter-mode global \
-        ///                --delete <line>
-        ///
-        /// Atuin's CLI v18+ supports `--delete` (deletes everything the
-        /// search query would have returned) but has **no exact-match
-        /// search mode**. We use prefix mode + the typed line as query
-        /// — so the deletion is prefix-scoped: pressing Ctrl+Shift+D
-        /// on "echo asd" also removes "echo asdf". This is wider than
-        /// `history.zig`'s exact-equality semantics; if you want
-        /// strict equality you can either rely on history-only
-        /// (remove atuin from the modules tuple) or accept the
-        /// over-match here.
+        /// `delete_history_match`). Shells out to atuin's
+        /// `search --delete <query>`. Atuin v18 has no per-id delete
+        /// and no exact-match search mode — but its **fuzzy mode
+        /// supports fzf-style anchors**, so `^line$` is exact match.
+        /// Default `cfg.delete_scope = .exact` uses that; the other
+        /// scopes are opt-in and sweep wider.
         ///
         /// Runs synchronously on the proxy thread — a single
         /// std.process.run call, typically <200ms. Deliberate trade
         /// vs. routing through the worker mailbox: the user just
-        /// pressed a deliberate key, and they're already staring at
-        /// a cleared prompt (the proxy sent Ctrl+U before calling us).
-        /// A brief blocking window is acceptable; the alternative is
-        /// growing a third worker-mailbox slot.
+        /// pressed a deliberate key, the prompt is already cleared
+        /// (the proxy sent Ctrl+U before calling us), so a brief
+        /// blocking window is acceptable; the alternative is growing
+        /// a third worker-mailbox slot.
         pub fn deleteHistoryMatch(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
             if (line.len == 0 or line.len > cfg.max_query) return;
+
+            const search_arg: []const u8 = switch (cfg.delete_scope) {
+                .exact, .fuzzy => "fuzzy",
+                .prefix => "prefix",
+                .full_text => "full-text",
+            };
+            const filter_arg = switch (cfg.filter_mode) {
+                .global => "global",
+                .host => "host",
+                .session => "session",
+                .directory => "directory",
+            };
+
+            // Build the query bytes. For .exact we wrap in `^...$` so
+            // atuin's fuzzy matcher reads it as "starts AND ends with
+            // this literal", which is the only CLI-accessible
+            // exact-match. Buffer sits on the stack; max_query bounds
+            // the size at comptime so the +2 anchor bytes are safe.
+            var anchored_buf: [cfg.max_query + 2]u8 = undefined;
+            const query: []const u8 = switch (cfg.delete_scope) {
+                .exact => blk: {
+                    anchored_buf[0] = '^';
+                    @memcpy(anchored_buf[1 .. 1 + line.len], line);
+                    anchored_buf[1 + line.len] = '$';
+                    break :blk anchored_buf[0 .. line.len + 2];
+                },
+                else => line,
+            };
+
             const argv = [_][]const u8{
                 cfg.atuin_binary,
                 "search",
                 "--search-mode",
-                "prefix",
+                search_arg,
                 "--filter-mode",
-                "global",
+                filter_arg,
                 "--delete",
-                line,
+                query,
             };
             const result = std.process.run(rt.allocator, ctx.io, .{
                 .argv = &argv,
@@ -467,6 +517,21 @@ test "configure exposes Runtime + hooks" {
 test "configure with socket backend swaps the lookup arm" {
     const A = configure(.{ .backend = .socket, .socket_path = "/tmp/nope" });
     try testing.expect(A.config.backend == .socket);
+}
+
+test "configure carries delete_scope through to A.config (default exact)" {
+    // Default is .exact so Ctrl+Shift+D only removes the typed line —
+    // atuin's CLI has no exact-match search mode but fuzzy + `^...$`
+    // anchors get us there. Test pins the surface so renames or
+    // removals are caught here, not in the field.
+    const A1 = configure(.{});
+    try testing.expectEqual(DeleteScope.exact, A1.config.delete_scope);
+    const A2 = configure(.{ .delete_scope = .prefix });
+    try testing.expectEqual(DeleteScope.prefix, A2.config.delete_scope);
+    const A3 = configure(.{ .delete_scope = .full_text });
+    try testing.expectEqual(DeleteScope.full_text, A3.config.delete_scope);
+    const A4 = configure(.{ .delete_scope = .fuzzy });
+    try testing.expectEqual(DeleteScope.fuzzy, A4.config.delete_scope);
 }
 
 test "configure exposes deleteHistoryMatch hook (regression: atuin-side delete must be wired)" {

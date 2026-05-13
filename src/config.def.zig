@@ -30,6 +30,13 @@ const atty = @import("atty");
 //         // .suggestion_ttl_ms = 0,        // 0 = fish-style, no fadeout
 //         // .sync_after_records = 10,
 //         // .sync_interval_ms = 60_000,
+//         // .delete_scope = .exact,       // .exact / .prefix /
+//         //                                // .full_text / .fuzzy —
+//         //                                // controls Ctrl+Shift+D's
+//         //                                // reach into atuin. Default
+//         //                                // .exact uses atuin fuzzy +
+//         //                                // `^line$` anchors so only
+//         //                                // the typed line is removed.
 //     }),
 //     atty.modules.history.configure(.{}),  // optional fallback after atuin
 // };
