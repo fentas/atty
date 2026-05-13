@@ -693,12 +693,41 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // commit. The behaviour difference vs. plain
                 // `.replace` is only that we look at the original
                 // bytes (not the replacement) for the Enter test.
-                const shell_saw_enter = switch (action) {
+                // Two related signals from the action:
+                //
+                //   - `recording_should_fire`: should `dispatchLineCommit`
+                //     run? True for `.forward` / `.replace` whose
+                //     forwarded bytes contain Enter, AND true for
+                //     `.replace_commit` (the LLM module opt-in:
+                //     fire commit even though we're swapping the
+                //     line for Ctrl+U).
+                //   - `shell_will_execute`: will the SHELL emit a
+                //     `;C` for this line? True ONLY when the bytes
+                //     actually forwarded to the PTY contain Enter.
+                //     False for `.replace_commit` (it forwards
+                //     `\x15`, no Enter → no `;C`).
+                //
+                // The split matters for `pending_launches`: pushing
+                // when `recording_should_fire` but `!shell_will_execute`
+                // would enqueue a commit that no `;C` will ever
+                // pop, so the NEXT real `;C` (from an unrelated
+                // command) would pop the stale entry and
+                // mis-classify the subprocess kind.
+                const recording_should_fire = switch (action) {
                     .forward => containsEnter(input),
                     .swallow => false,
                     .replace => |bytes| containsEnter(bytes),
                     .replace_commit => containsEnter(input),
                 };
+                const shell_will_execute = switch (action) {
+                    .forward => containsEnter(input),
+                    .swallow => false,
+                    .replace => |bytes| containsEnter(bytes),
+                    .replace_commit => |bytes| containsEnter(bytes),
+                };
+                // Legacy alias — older code paths in this file use
+                // the original name for the recording-side gate.
+                const shell_saw_enter = recording_should_fire;
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
                     // Stash the line for the upcoming `;C` edge in
@@ -729,7 +758,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     // stays empty, and `;C` (which won't fire
                     // anyway) gets `""` from `.pop()` — same as
                     // before.
-                    if (shell_saw_enter and osc133_tracker.inInputPhase()) {
+                    // Push to the FIFO requires BOTH:
+                    //   - `shell_will_execute` — the bytes the shell
+                    //     actually receives contain Enter, so a `;C`
+                    //     will follow. Without this, `.replace_commit`
+                    //     would enqueue commits that no `;C` ever
+                    //     consumes, and the next real `;C` would pop
+                    //     the wrong line (mis-classifying its frame).
+                    //   - `inInputPhase()` — we're at a real prompt
+                    //     (non-shell interactive prompts like ssh
+                    //     hostkey "yes/no" don't fire `;C` either).
+                    if (shell_will_execute and osc133_tracker.inInputPhase()) {
                         pending_launches.push(committed);
                     }
                     // Decide whether to record this commit. Three
