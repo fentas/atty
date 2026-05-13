@@ -92,6 +92,28 @@ pub const Config = struct {
     /// = no context. `PATH_BASE` is the canonical example — a
     /// project's "what does this user mean by 'here'" anchor.
     context_env_vars: []const []const u8 = &.{},
+    /// When true, change the terminal cursor's colour while the
+    /// user is typing a prompt that starts with `prefix`. atty
+    /// emits OSC 12 (set cursor colour) on transition into match,
+    /// OSC 112 (reset to default) on transition out. Reliable
+    /// signal that doesn't depend on knowing the prompt's column.
+    /// All modern terminals honour OSC 12 (Ghostty, kitty, iTerm,
+    /// VS Code's terminal, WezTerm).
+    prefix_signal_cursor: bool = true,
+    /// Cursor colour to set while the prefix is matched. Accepted
+    /// formats follow OSC 12: a named colour (`cyan`, `lightblue`,
+    /// …) or `#RRGGBB` / `rgb:RR/GG/BB`. Whatever your terminal
+    /// understands.
+    prefix_signal_cursor_color: []const u8 = "cyan",
+    /// When true, the LLM module's `statusText` returns
+    /// `prefix_signal_status_text` while the prefix is matched
+    /// (in addition to the existing `🧠 thinking…` indicator
+    /// during in-flight requests). Visible in the bottom status
+    /// bar — secondary signal alongside the cursor colour.
+    prefix_signal_status: bool = true,
+    /// Status-bar text shown while the prefix is matched. Defaults
+    /// to a sparkle so it pops against the bar's other segments.
+    prefix_signal_status_text: []const u8 = "\u{2728} prompt",
     /// Per-request timeout in ms. Stored for future use; not yet wired
     /// to the HTTP client — requests may block indefinitely on a slow
     /// or unreachable endpoint until the OS TCP timeout fires.
@@ -204,6 +226,12 @@ pub fn configure(comptime cfg: Config) type {
             err_buf: [512]u8 = undefined,
             err_len: usize = 0,
             err_pending: bool = false,
+            /// Tracks whether we've already pushed the OSC 12
+            /// cursor-colour change for the current prefix-typing
+            /// session. Transition-driven (only emit on edge changes)
+            /// so the terminal doesn't see redundant OSC traffic on
+            /// every tick.
+            cursor_signal_active: bool = false,
             /// True while a prompt is in flight.
             in_flight: bool = false,
         };
@@ -402,12 +430,18 @@ pub fn configure(comptime cfg: Config) type {
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
 
-            // `.replace = "\x15"` swaps the Enter for Ctrl+U
+            // `.replace_commit = "\x15"` swaps the Enter for Ctrl+U
             // (unix-line-discard). readline kills the typed
             // `#: …` immediately — the user sees the line vanish
             // while we wait. The LLM response will be injected
             // via pollShellInput once it arrives.
-            return .{ .replace = "\x15" };
+            //
+            // `_commit` (vs plain `.replace`) tells the proxy to
+            // ALSO fire onLineCommit on the typed `#: <prompt>` so
+            // atuin / history record it. That gives ghost-suggest
+            // the prompt next time the user starts typing `#: l…`
+            // — same recall power as any normal command.
+            return .{ .replace_commit = "\x15" };
         }
 
         pub fn pollShellInput(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -513,8 +547,44 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
-            _ = ctx;
             if (rt.in_flight) return "\u{1F9E0} thinking…";
+            // Show a signal while the user is mid-typing a prompt
+            // whose first bytes match the configured prefix. Helps
+            // confirm "atty saw this is for the LLM" before the
+            // user even hits Enter. Suppressed during in-flight so
+            // we don't fight the thinking… spinner for real estate.
+            if (cfg.prefix_signal_status) {
+                const line = ctx.line.current();
+                if (std.mem.startsWith(u8, line, cfg.prefix)) {
+                    return cfg.prefix_signal_status_text;
+                }
+            }
+            return null;
+        }
+
+        // Pre-built OSC escape strings; comptime-baked from the
+        // configured colour so we don't allocate per tick.
+        const cursor_set_seq = "\x1B]12;" ++ cfg.prefix_signal_cursor_color ++ "\x07";
+        const cursor_reset_seq = "\x1B]112\x07";
+
+        /// Bytes to write to the user's outer terminal (NOT the
+        /// pty.master, which goes to the shell). Used here for OSC
+        /// 12 / 112 cursor-colour transitions while the user is
+        /// typing a prefix-matched prompt. One-shot per transition
+        /// — we only emit on edges so the terminal doesn't see
+        /// redundant OSC traffic on every tick.
+        pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            if (!cfg.prefix_signal_cursor) return null;
+            const line = ctx.line.current();
+            const matches = std.mem.startsWith(u8, line, cfg.prefix);
+            if (matches and !rt.cursor_signal_active) {
+                rt.cursor_signal_active = true;
+                return cursor_set_seq;
+            }
+            if (!matches and rt.cursor_signal_active) {
+                rt.cursor_signal_active = false;
+                return cursor_reset_seq;
+            }
             return null;
         }
 
@@ -1400,6 +1470,101 @@ test "resolveApiBase priority — env wins when cfg.api_base is empty" {
     try testing.expectEqualStrings("http://from-env:1234/v1", rt.api_base);
 }
 
+test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+        .prefix_signal_cursor_color = "cyan",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Empty line → no transition, returns null.
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideTermBytes(&rt, &ctx));
+
+    // User starts typing the prefix. After 3 keystrokes, the line
+    // matches `#: `. The next provideTermBytes call should emit
+    // OSC 12 with the configured colour.
+    _ = line.applyInput("#: ");
+    const out1 = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(out1 != null);
+    try testing.expect(std.mem.indexOf(u8, out1.?, "\x1B]12;cyan\x07") != null);
+    try testing.expect(rt.cursor_signal_active);
+
+    // Still matching → no edge, no re-emit.
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideTermBytes(&rt, &ctx));
+
+    // User backspaces past the prefix. Edge out → OSC 112 reset.
+    line = .{};
+    _ = line.applyInput("#");
+    const out2 = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(out2 != null);
+    try testing.expect(std.mem.indexOf(u8, out2.?, "\x1B]112\x07") != null);
+    try testing.expect(!rt.cursor_signal_active);
+}
+
+test "statusText flips to prefix_signal_status_text while prefix matches" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+        .prefix_signal_status_text = "TEST_SIGNAL",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Empty line, not in flight → no segment.
+    try testing.expectEqual(@as(?[]const u8, null), try L.statusText(&rt, &ctx));
+
+    // Prefix typed → custom segment text appears.
+    _ = line.applyInput("#: list files");
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    try testing.expectEqualStrings("TEST_SIGNAL", got.?);
+
+    // In-flight takes precedence over prefix-match (thinking…
+    // spinner wins for status real estate).
+    rt.in_flight = true;
+    const got2 = try L.statusText(&rt, &ctx);
+    try testing.expect(got2 != null);
+    try testing.expect(std.mem.indexOf(u8, got2.?, "thinking") != null);
+}
+
 test "resolveApiBase trims a single trailing slash on cfg.api_base" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1588,8 +1753,8 @@ test "LLM worker round-trips a mock ollama response into the latch + hint surfac
     };
 
     const act = try L.onInput(&rt, &ctx, "\r");
-    try testing.expect(act == .replace);
-    try testing.expectEqualStrings("\x15", act.replace);
+    try testing.expect(act == .replace_commit);
+    try testing.expectEqualStrings("\x15", act.replace_commit);
 
     // Poll the latch until the worker delivers. Generous 2s budget for
     // CI variance — the mock responds immediately so locally this is
@@ -1751,7 +1916,7 @@ test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
     };
 
     const act = try L.onInput(&rt, &ctx, "\r");
-    try testing.expect(act == .replace);
+    try testing.expect(act == .replace_commit);
 
     var deadline_iters: usize = 100;
     while (deadline_iters > 0) : (deadline_iters -= 1) {

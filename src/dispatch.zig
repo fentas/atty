@@ -106,7 +106,19 @@ pub fn Dispatcher(comptime modules: anytype) type {
                         .swallow => return .swallow,
                         .replace => |b| {
                             current = b;
-                            final_action = .{ .replace = b };
+                            // Don't downgrade an earlier
+                            // .replace_commit — once a module
+                            // asks for the commit to fire, that
+                            // decision sticks. Only the bytes get
+                            // overwritten by later .replace.
+                            final_action = switch (final_action) {
+                                .replace_commit => .{ .replace_commit = b },
+                                else => .{ .replace = b },
+                            };
+                        },
+                        .replace_commit => |b| {
+                            current = b;
+                            final_action = .{ .replace_commit = b };
                         },
                     }
                 }
@@ -154,6 +166,26 @@ pub fn Dispatcher(comptime modules: anytype) type {
             inline for (modules, 0..) |M, i| {
                 if (comptime @hasDecl(M, "provideHintText")) {
                     if (try M.provideHintText(rts[i], ctx)) |text| return text;
+                }
+            }
+            return null;
+        }
+
+        /// Bytes a module wants written to the user's outer
+        /// terminal (NOT the pty.master, which would go to the
+        /// child shell). Used for OSC sequences that should affect
+        /// the user's terminal — cursor colour transitions, palette
+        /// hints, title updates. One-shot per transition: modules
+        /// should return non-null only on edge changes, not on
+        /// every tick. First non-null wins, same as the other
+        /// `gather*` walkers.
+        pub fn gatherTermBytes(
+            rts: *Runtimes,
+            ctx: *Context,
+        ) Error!?[]const u8 {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "provideTermBytes")) {
+                    if (try M.provideTermBytes(rts[i], ctx)) |bytes| return bytes;
                 }
             }
             return null;
@@ -448,6 +480,38 @@ test "dispatchInput passes replaced bytes downstream" {
     const action = try D.dispatchInput(&rts, &ctx, "hi");
     try testing.expect(action == .replace);
     try testing.expectEqualSlices(u8, "HI", action.replace);
+}
+
+const CommitReplacer = struct {
+    pub const name = "commit-replacer";
+    pub const Runtime = struct { buf: [16]u8 = undefined };
+
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn onInput(rt: *Runtime, _: *Context, input: []const u8) Error!Action {
+        const n = @min(input.len, rt.buf.len);
+        for (input[0..n], 0..) |b, i| rt.buf[i] = std.ascii.toUpper(b);
+        return .{ .replace_commit = rt.buf[0..n] };
+    }
+};
+
+test "dispatchInput preserves .replace_commit across downstream modules" {
+    // A later module returning plain `.replace` must NOT downgrade
+    // an earlier `.replace_commit` — once a module asked for the
+    // commit to fire, that decision sticks.
+    const D = Dispatcher(.{ CommitReplacer, Replacer });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    const action = try D.dispatchInput(&rts, &ctx, "hi");
+    try testing.expect(action == .replace_commit);
 }
 
 const EmptyGhost = struct {

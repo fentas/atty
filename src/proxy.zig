@@ -285,6 +285,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
             }
+            // Outer-terminal byte stream — modules can push raw
+            // OSC sequences (cursor colour transitions, title
+            // updates, …) to the user's stdout. NOT routed through
+            // pty.master because these are user-terminal concerns
+            // the child shell shouldn't see.
+            if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+            }
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
@@ -454,6 +462,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     .forward => try writeAll(pty.master, input),
                     .swallow => {},
                     .replace => |bytes| try writeAll(pty.master, bytes),
+                    .replace_commit => |bytes| try writeAll(pty.master, bytes),
                 }
 
                 // Fire onLineCommit if Enter was pressed during this read
@@ -466,10 +475,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // (guardrail's `.block` swaps the Enter for `\x15`).
                 // Recording a commit the shell didn't run would be a
                 // lie + would feed history the dangerous line.
+                //
+                // `.replace_commit` opts back in to the commit even
+                // when the replacement doesn't contain Enter — used
+                // by the LLM module so `#: <prompt>` lines land in
+                // atuin / history despite Ctrl+U eating the line.
                 const shell_saw_enter = switch (action) {
                     .forward => containsEnter(input),
                     .swallow => false,
                     .replace => |bytes| containsEnter(bytes),
+                    .replace_commit => true,
                 };
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
