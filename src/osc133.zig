@@ -39,6 +39,21 @@ pub const Osc133 = struct {
     osc_buf: [256]u8 = undefined,
     osc_len: usize = 0,
 
+    /// Bounded ring of phase-transition edges that fired during the
+    /// most recent `feed()` calls — cleared by `drainEdges()`. The
+    /// proxy uses this to drive its subprocess stack push/pop: a
+    /// SINGLE `read()` chunk may contain multiple markers (a fast
+    /// command emitting `;C;D` back-to-back, several prompt redraws,
+    /// the local shell flushing a queued PROMPT_COMMAND…), and
+    /// post-feed phase comparison alone misses intermediate edges.
+    /// 32 is plenty — one keystroke produces at most one marker in
+    /// practice; pasted scripts that batch-execute are the realistic
+    /// upper bound and a `;C;D` pair per line for ~16 lines fits.
+    /// Overflow is silently dropped (rare; would only mis-attribute
+    /// some subprocess frames in a pathological burst).
+    edges: [32]Edge = undefined,
+    edge_count: u8 = 0,
+
     const State = enum {
         ground, // regular input-byte processing (when in input phase)
         esc, // saw 0x1B; next byte chooses sub-state
@@ -50,6 +65,15 @@ pub const Osc133 = struct {
         idle, // outside any prompt/command zone
         in_input, // between ;B and ;C — capturing input
         in_command, // between ;C and ;D — command running, ignore output
+    };
+    /// Edge events the proxy consumes via `drainEdges()`. We only
+    /// surface the two markers that drive subprocess-context push/pop;
+    /// `;A` / `;B` are still observed for the phase state machine
+    /// but don't need separate edges (the proxy only needs to know
+    /// when commands start + end).
+    pub const Edge = enum {
+        cmd_start, // ;C — push a subprocess frame
+        cmd_end, // ;D — pop the top frame
     };
 
     pub fn init(allocator: std.mem.Allocator) Osc133 {
@@ -163,10 +187,32 @@ pub const Osc133 = struct {
                 self.phase = .in_input;
                 self.input.clearRetainingCapacity();
             },
-            'C' => self.phase = .in_command,
-            'D' => self.phase = .idle,
+            'C' => {
+                self.phase = .in_command;
+                self.pushEdge(.cmd_start);
+            },
+            'D' => {
+                self.phase = .idle;
+                self.pushEdge(.cmd_end);
+            },
             else => {}, // unknown 133 subtype
         }
+    }
+
+    fn pushEdge(self: *Osc133, edge: Edge) void {
+        if (self.edge_count >= self.edges.len) return; // overflow — drop
+        self.edges[self.edge_count] = edge;
+        self.edge_count += 1;
+    }
+
+    /// Drain the edge ring. Returns a slice into `self.edges`
+    /// valid until the next `feed()` (which may overwrite). The
+    /// proxy walks the slice synchronously between feeds, so the
+    /// borrow is safe.
+    pub fn drainEdges(self: *Osc133) []const Edge {
+        const out = self.edges[0..self.edge_count];
+        self.edge_count = 0;
+        return out;
     }
 };
 
@@ -259,6 +305,47 @@ test "Osc133.inInputPhase reflects the B → C transition" {
     try testing.expect(!o.inInputPhase());
     o.feed("\x1b]133;D\x07");
     try testing.expect(!o.inInputPhase());
+}
+
+test "Osc133.drainEdges captures every ;C / ;D in order, across a single chunk" {
+    // Subprocess-stack push/pop relies on this. A shell that emits
+    // `;A;B …;C…;D` for a fast command — or a paste of a script
+    // that runs several lines in one flush — will deliver several
+    // markers in a single read chunk. Post-feed phase comparison
+    // alone collapsed all of them into one (or none) transition
+    // edge; the ring captures each in order.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07\x1b]133;B\x07echo hi\x1b]133;C\x07hi\r\n\x1b]133;D\x07\x1b]133;A\x07");
+    const edges = o.drainEdges();
+    try testing.expectEqual(@as(usize, 2), edges.len);
+    try testing.expectEqual(Osc133.Edge.cmd_start, edges[0]);
+    try testing.expectEqual(Osc133.Edge.cmd_end, edges[1]);
+    // Second drain is empty — the ring was consumed.
+    try testing.expectEqual(@as(usize, 0), o.drainEdges().len);
+}
+
+test "Osc133.drainEdges: rapid C/D/C/D preserves order" {
+    // Pathological-ish: a script that batches two short commands.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;C\x07\x1b]133;D\x07\x1b]133;C\x07\x1b]133;D\x07");
+    const edges = o.drainEdges();
+    try testing.expectEqual(@as(usize, 4), edges.len);
+    try testing.expectEqual(Osc133.Edge.cmd_start, edges[0]);
+    try testing.expectEqual(Osc133.Edge.cmd_end, edges[1]);
+    try testing.expectEqual(Osc133.Edge.cmd_start, edges[2]);
+    try testing.expectEqual(Osc133.Edge.cmd_end, edges[3]);
+}
+
+test "Osc133.drainEdges: only ;A/;B markers produce no edges" {
+    // Prompt-drawing markers fire phase transitions but no subprocess
+    // edges (we only care about command boundaries).
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07$ \x1b]133;B\x07");
+    try testing.expectEqual(@as(usize, 0), o.drainEdges().len);
+    try testing.expect(o.inInputPhase());
 }
 
 test "Osc133: CR-then-redraw captures the recalled line (Arrow Up shape)" {

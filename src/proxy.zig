@@ -220,11 +220,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         .ssh_binary = config.subprocess.ssh_binary,
         .use_ssh_g = config.subprocess.use_ssh_g,
     };
-    // Remember the previous OSC 133 phase so we can detect the
-    // edge transitions (`in_input → in_command` = `;C`,
-    // `in_command → idle` = `;D`) — Osc133 doesn't track edges
-    // itself.
-    var prev_osc_phase: Osc133.Phase = osc133_tracker.phase;
 
     // Stash for the line we expect a subsequent `;C` to attribute.
     //
@@ -756,58 +751,47 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 alt_screen.feed(output);
                 osc7_tracker.feed(output);
 
-                // Edge-detect OSC 133 phase transitions to drive the
-                // subprocess stack FIRST, then apply any pending
-                // OSC 7 capture afterwards. The order matters: a
-                // single read chunk can contain `;C` + OSC 7 (a
-                // shell that emits both as part of one preexec
-                // hook) or OSC 7 + `;D` (a shell that reports cwd
-                // right before signalling command end). If we
-                // promote OSC 7 first we'd land it on the wrong
-                // frame — the about-to-be-popped one on `;D`, or
-                // the parent of the about-to-be-pushed one on `;C`.
+                // Drain every OSC 133 edge that fired in this read
+                // chunk and replay them against the subprocess
+                // stack IN ORDER. A single chunk can carry multiple
+                // markers (a fast command emitting `;C;D` in one
+                // line, a shell flushing batched prompts, a paste
+                // that includes embedded prompt-zone hooks) — earlier
+                // versions compared `prev_osc_phase` to the
+                // post-feed `phase` and missed intermediate edges
+                // entirely. Now `Osc133.drainEdges()` returns the
+                // ordered ring of `;C` / `;D` transitions, one
+                // event per actual marker.
                 //
-                // We watch `phase` rather than a custom edge flag
-                // from Osc133 because the existing
-                // line_state.lastCommitted is only valid for one
-                // dispatch cycle; doing the parse synchronously
-                // here, immediately after feed, lets us grab it
-                // before clearLastCommitted runs (further below in
-                // the stdin path) or before the next read overwrites
-                // anything.
-                const curr_osc_phase = osc133_tracker.phase;
-                if (curr_osc_phase != prev_osc_phase) {
-                    if (prev_osc_phase != .in_command and curr_osc_phase == .in_command) {
-                        // ;C — push a frame parsed from the line the
-                        // stdin path stashed at commit time. We
-                        // CAN'T read `line_state.lastCommitted()`
-                        // here — by the time the shell echoes +
-                        // emits `;C`, the stdin handler has already
-                        // run `clearLastCommitted()`, so we'd push
-                        // a `.none` frame and silently lose
-                        // recognition.
-                        const launched = pending_launch_buf[0..pending_launch_len];
-                        subprocess_tracker.onCommandStart(launched, allocator, io);
-                        pending_launch_len = 0;
-                    } else if (prev_osc_phase == .in_command and curr_osc_phase != .in_command) {
-                        // ;D — pop. We do NOT care which kind we
-                        // popped; the Tracker handles the stack
-                        // invariant and resets the popped frame so
-                        // a stale name can't leak.
-                        subprocess_tracker.onCommandEnd();
+                // Order also matters relative to the OSC 7 promotion
+                // BELOW: we apply the edges first so the cwd lands
+                // on whichever frame is at the top *after* the
+                // pushes/pops have settled.
+                for (osc133_tracker.drainEdges()) |edge| {
+                    switch (edge) {
+                        .cmd_start => {
+                            // ;C — push a frame parsed from the line the
+                            // stdin path stashed at commit time. We
+                            // CAN'T read `line_state.lastCommitted()`
+                            // here — by the time the shell echoes +
+                            // emits `;C`, the stdin handler has already
+                            // run `clearLastCommitted()`, so we'd push
+                            // a `.none` frame and silently lose
+                            // recognition.
+                            const launched = pending_launch_buf[0..pending_launch_len];
+                            subprocess_tracker.onCommandStart(launched, allocator, io);
+                            pending_launch_len = 0;
+                        },
+                        .cmd_end => subprocess_tracker.onCommandEnd(),
                     }
-                    prev_osc_phase = curr_osc_phase;
                 }
 
-                // Now promote any pending OSC 7 cwd capture. It
-                // lands on whatever is at the top after the OSC 133
-                // edge handling above — which is the correct frame
-                // by construction: if the chunk contained `;C`+OSC7
-                // it lands on the newly-pushed frame; if it
-                // contained OSC7+`;D` the popped frame is gone and
-                // a no-op or update on the prior top is correct;
-                // if it contained OSC7 alone it lands on the
-                // existing top.
+                // Now promote any pending OSC 7 cwd capture onto
+                // whatever's at the top after the edges settled.
+                // If the chunk contained `;C` + OSC 7 the cwd lands
+                // on the freshly-pushed frame; OSC 7 + `;D` updates
+                // the (now-popped, no-op) frame; OSC 7 alone lands
+                // on the existing top.
                 const remote_cwd = osc7_tracker.takeCwd();
                 if (remote_cwd.len > 0) subprocess_tracker.onRemoteCwd(remote_cwd);
 

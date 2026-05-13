@@ -101,8 +101,11 @@ pub const Context = struct {
     /// (typically the shell's real cwd, or the empty string).
     /// Otherwise returns an encoded URI scoped to the subprocess.
     ///
-    /// `out` is caller-owned scratch — needs ~512 bytes. The
-    /// returned slice points into `out`.
+    /// `out` is caller-owned scratch — should be at least
+    /// `subprocess_mod.max_cwd_bytes` (1024) to avoid silent
+    /// truncation in the worst case (full-length frame name +
+    /// remote cwd + URI scheme). The returned slice points into
+    /// `out`.
     pub fn subprocessCwd(
         self: *const Context,
         out: []u8,

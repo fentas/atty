@@ -174,6 +174,15 @@ pub fn formatCwd(
 /// just stays pinned as long as additional `;C` markers arrive.
 pub const max_depth = 8;
 
+/// Worst-case byte length of a `formatCwd` output. Derived from
+/// `Frame.name_buf` (256) + `Frame.cwd_buf` (512) + the longest
+/// fixed scheme (`container://`, 12) + a few separators. Callers
+/// allocate scratch of at least this size; anything smaller risks
+/// silent truncation by the `formatCwd` `std.Io.Writer.fixed`
+/// path (errors there are swallowed). Used in `module.Context.
+/// subprocessCwd` and in the atuin module's record mailbox.
+pub const max_cwd_bytes = 1024;
+
 /// Tracker — owns the stack. Methods are called from the proxy at
 /// `;C` / `;D` transitions, and `current()` is consulted when
 /// `dispatchLineCommit` fires.

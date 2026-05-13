@@ -26,6 +26,7 @@
 const std = @import("std");
 const m = @import("../module.zig");
 const lib = @import("_lib.zig");
+const subprocess_mod = @import("../subprocess.zig");
 const nowMs = lib.nowMs;
 
 pub const SearchMode = enum { prefix, full_text, fuzzy };
@@ -132,7 +133,7 @@ pub fn configure(comptime cfg: Config) type {
             // onLineCommit time so the worker has a stable snapshot
             // even if the user enters a new ssh/sudo/etc. before the
             // worker drains.
-            rec_cwd_buf: [768]u8 = undefined,
+            rec_cwd_buf: [subprocess_mod.max_cwd_bytes]u8 = undefined,
             rec_cwd_len: usize = 0,
 
             shutdown: bool = false,
@@ -189,7 +190,7 @@ pub fn configure(comptime cfg: Config) type {
 
             var record_local: [cfg.max_query]u8 = undefined;
             var record_len: usize = 0;
-            var record_cwd_local: [768]u8 = undefined;
+            var record_cwd_local: [subprocess_mod.max_cwd_bytes]u8 = undefined;
             var record_cwd_len: usize = 0;
             var records_since_sync: u32 = 0;
             var last_sync_ms: i64 = 0;
@@ -527,7 +528,7 @@ pub fn configure(comptime cfg: Config) type {
             // (process cwd). Non-empty → atuin records the entry with
             // the encoded URI as `cwd`, so [DIRECTORY] mode on Ctrl+R
             // naturally scopes per ssh/kubectl/etc. target.
-            var cwd_scratch: [768]u8 = undefined;
+            var cwd_scratch: [subprocess_mod.max_cwd_bytes]u8 = undefined;
             const resolved_cwd = ctx.subprocessCwd(&cwd_scratch, "");
 
             rt.shared.mutex.lockUncancelable(ctx.io);
