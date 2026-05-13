@@ -233,6 +233,30 @@ pub fn Dispatcher(comptime modules: anytype) type {
                 }
             }
         }
+
+        /// Fired on poll() timeout. Lets a module surface bytes
+        /// to inject into the shell's stdin (pty.master) when its
+        /// own state machine has produced something asynchronously
+        /// — e.g. the LLM module's response coming back from a
+        /// worker thread several seconds after the user's Enter
+        /// was swallowed. The returned slice (if any) is written
+        /// to pty.master verbatim; the module owns the storage and
+        /// keeps it alive until the next call.
+        ///
+        /// First non-null wins, same precedence model as
+        /// gatherGhostText. Most modules don't implement this and
+        /// the loop is comptime-eliminated for them.
+        pub fn pollShellInput(
+            rts: *Runtimes,
+            ctx: *Context,
+        ) Error!?[]const u8 {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "pollShellInput")) {
+                    if (try M.pollShellInput(rts[i], ctx)) |bytes| return bytes;
+                }
+            }
+            return null;
+        }
     };
 }
 
@@ -495,6 +519,62 @@ test "dispatchTick fans out to every module with onTick" {
     try testing.expectEqual(@as(u64, 2), rts[0].ticks);
     try testing.expectEqual(@as(u64, 150), rts[0].total_elapsed);
     try testing.expectEqual(@as(u64, 2), rts[2].ticks);
+}
+
+// ─── pollShellInput walker ───────────────────────────────────────────────
+
+const PollerEmpty = struct {
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn pollShellInput(_: *Runtime, _: *Context) Error!?[]const u8 {
+        return null;
+    }
+};
+
+const PollerWithResult = struct {
+    pub const Runtime = struct {
+        result: ?[]const u8 = null,
+    };
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn pollShellInput(rt: *Runtime, _: *Context) Error!?[]const u8 {
+        return rt.result;
+    }
+};
+
+const D_PollPair = Dispatcher(.{ PollerEmpty, PollerWithResult });
+
+test "pollShellInput returns first non-null, skipping null providers" {
+    const D = D_PollPair;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+    rts[1].result = "\x15ls -la";
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    const got = try D.pollShellInput(&rts, &ctx);
+    try testing.expectEqualStrings("\x15ls -la", got.?);
+}
+
+test "pollShellInput returns null when no module has bytes ready" {
+    const D = Dispatcher(.{PollerEmpty});
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    try testing.expectEqual(@as(?[]const u8, null), try D.pollShellInput(&rts, &ctx));
 }
 
 // ─── coverage for the newer walkers ──────────────────────────────────────
