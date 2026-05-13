@@ -23,7 +23,17 @@ const atty = @import("atty");
 //
 // pub const modules = .{
 //     atty.modules.guardrail.configure(.{
-//         // .rules = &.{ ... },
+//         // .rules = &.{
+//         //     // .mode is per-rule:
+//         //     //   .confirm       (default) press Enter again to confirm
+//         //     //   .confirm_once  same, then never asks again this session
+//         //     //   .block         banner + clear line; command can't run
+//         //     //   .silent_block  clear line + no banner
+//         //     .{ .name = "rm-rf-root", .kind = .{ .substring = "rm -rf /" },
+//         //        .reason = "rm -rf on root", .mode = .block },
+//         //     .{ .name = "git-force", .kind = .{ .substring = "git push --force" },
+//         //        .reason = "force-pushing", .mode = .confirm_once },
+//         // },
 //         // .warning_style = atty.style.presets.danger,
 //     }),
 //     atty.modules.atuin.configure(.{

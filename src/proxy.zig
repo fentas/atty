@@ -391,17 +391,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // and the pre-Enter line was non-empty and certain. Skip
                 // when incognito is on, when the line starts with a
                 // space (bash HISTCONTROL=ignorespace convention), or
-                // when the Enter itself was swallowed by a module — a
-                // .swallow means "this keystroke didn't reach the
-                // shell," so recording it as a committed command would
-                // be a lie (and would feed history the dangerous line
-                // guardrail was protecting against).
+                // when the shell never actually saw the Enter — a
+                // `.swallow` drops the input entirely, and a `.replace`
+                // can substitute it for bytes that DON'T contain `\r`
+                // (guardrail's `.block` swaps the Enter for `\x15`).
+                // Recording a commit the shell didn't run would be a
+                // lie + would feed history the dangerous line.
+                const shell_saw_enter = switch (action) {
+                    .forward => containsEnter(input),
+                    .swallow => false,
+                    .replace => |bytes| containsEnter(bytes),
+                };
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
                     if (!line_state.committed_was_uncertain and
                         !incognito_on and
                         !leading_space and
-                        action != .swallow)
+                        shell_saw_enter)
                     {
                         D.dispatchLineCommit(&runtimes, &ctx, committed) catch {};
                     }
@@ -495,6 +501,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 const POLLIN: i16 = 0x001;
 const POLLHUP: i16 = 0x010;
 const POLLERR: i16 = 0x008;
+
+fn containsEnter(bytes: []const u8) bool {
+    for (bytes) |b| if (b == 0x0D or b == 0x0A) return true;
+    return false;
+}
 
 fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
     var i: usize = 0;
