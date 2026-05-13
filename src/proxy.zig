@@ -28,7 +28,9 @@ fn nowMs() i64 {
 }
 
 const Pty = @import("pty.zig").Pty;
-const RawMode = @import("terminal.zig").RawMode;
+const terminal = @import("terminal.zig");
+const RawMode = terminal.RawMode;
+const slaveEchoEnabled = terminal.slaveEchoEnabled;
 const LineState = @import("line_state.zig").LineState;
 const Ghost = @import("ghost.zig").Ghost;
 const GhostList = @import("ghost_list.zig").GhostList;
@@ -311,6 +313,60 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             const read_n = posix.read(posix.STDIN_FILENO, &read_buf) catch 0;
             if (read_n > 0) {
                 var input: []const u8 = read_buf[0..read_n];
+
+                // PASSWORD-INPUT FAST PATH: when the slave has ECHO
+                // disabled (sudo / ssh / passwd / gpg-agent / shell
+                // `read -s` / anything calling getpass(3) /
+                // readpassphrase / its own tcsetattr to drop echo),
+                // short-circuit the entire keymap + dispatchInput
+                // pipeline and forward the raw bytes straight to
+                // pty.master. Three reasons:
+                //
+                //   1. Keymap bindings (incognito_toggle on
+                //      Ctrl+Shift+I, ghost_accept on Right, …) can
+                //      swallow or substitute bytes. With ECHO off
+                //      the user gets no visual feedback that this
+                //      happened, so a stray binding silently
+                //      corrupts password entry.
+                //   2. dispatchInput modules can `.replace` or
+                //      `.swallow`. Atuin / history / guardrail
+                //      have no business seeing the password
+                //      regardless of what line_state does.
+                //   3. line_state.applyInput would still accumulate
+                //      the password bytes; the fast path makes it
+                //      impossible to reach line_state at all, so
+                //      ctx.line.current() stays empty and
+                //      ghost-text / LLM prefix signals can't query
+                //      with the password as a prefix. lastCommitted
+                //      can't get set, so dispatchLineCommit can't
+                //      fire either.
+                //
+                // The reset + clearLastCommitted calls drop any
+                // leftover state from the echo-on iteration that
+                // straddled the boundary (the read before sudo's
+                // tcsetattr lands) — defence in depth.
+                //
+                // **TOCTOU note**: `slaveEchoEnabled` is sampled
+                // once per stdin read. The child can flip ECHO off
+                // between the user striking a key and the proxy
+                // entering this branch; any bytes already in
+                // `read_buf` from before the flip were typed under
+                // echo-on conditions and will be processed as such.
+                // This is an inherent race (the kernel doesn't
+                // signal termios changes), bounded by the read's
+                // size (≤ 4 KiB) and effectively limited to a
+                // handful of keystrokes in practice. Acceptable
+                // cost for the redaction guarantee on subsequent
+                // reads. `slaveEchoEnabled` fails-closed on
+                // tcgetattr errors → an fd error is treated as
+                // "assume the worst, redact."
+                if (!slaveEchoEnabled(pty.master)) {
+                    try writeAll(pty.master, input);
+                    line_state.reset();
+                    line_state.clearLastCommitted();
+                    if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    continue;
+                }
 
                 // Accept-ghost keystroke: if the user's accept key
                 // arrives while a ghost is visible and the line is

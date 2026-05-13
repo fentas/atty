@@ -97,6 +97,27 @@ fn makeRaw(t: *posix.termios) void {
     t.cc[@intFromEnum(posix.V.TIME)] = 0;
 }
 
+/// True if the `ECHO` line-discipline flag is on for the given fd.
+/// Used by the proxy to detect "user is typing a password" — when
+/// a child program (sudo, ssh, su, passwd, …) drops echo on the
+/// slave PTY, atty must stop tracking keystrokes so the password
+/// can't leak into history / ghost-suggest / OSC 133 tracking.
+///
+/// Pass the master fd: on Linux + POSIX the slave's termios is
+/// visible from either end of the pair, so we don't need to hold
+/// the slave fd open after fork.
+///
+/// **Fail-closed semantics**: returns `false` on tcgetattr failure.
+/// This is a security gate, so "we couldn't tell" is treated as
+/// "assume the worst, redact." The cost is a partial history-
+/// tracking regression when the master fd is in an error state
+/// (itself an already-degraded scenario); the proxy will recover
+/// as soon as tcgetattr succeeds again on the next read.
+pub fn slaveEchoEnabled(master_fd: posix.fd_t) bool {
+    const t = posix.tcgetattr(master_fd) catch return false;
+    return t.lflag.ECHO;
+}
+
 test "makeRaw zeroes the documented flag set" {
     var t = std.mem.zeroes(posix.termios);
     t.iflag.ICRNL = true;
@@ -114,4 +135,33 @@ test "makeRaw zeroes the documented flag set" {
     try std.testing.expect(!t.lflag.ISIG);
     try std.testing.expectEqual(@as(u8, 1), t.cc[@intFromEnum(posix.V.MIN)]);
     try std.testing.expectEqual(@as(u8, 0), t.cc[@intFromEnum(posix.V.TIME)]);
+}
+
+test "slaveEchoEnabled reflects the slave's ECHO bit through the master fd" {
+    // Open a real PTY pair so we can flip ECHO on the slave and
+    // observe via the master that `slaveEchoEnabled` sees the
+    // transition. This is the same mechanism `sudo` / `ssh` /
+    // `passwd` use to read a password — drop ECHO, read, restore.
+    var pty = try @import("pty.zig").Pty.open(std.testing.allocator);
+    defer pty.deinit();
+
+    // Fresh PTY: ECHO defaults to on. Pin that so any change in
+    // upstream defaults shows up here loudly.
+    try std.testing.expect(slaveEchoEnabled(pty.master));
+
+    // Drop ECHO via tcsetattr on the master — the pair shares the
+    // termios state. `sudo` does the same against the slave fd; we
+    // do it against the master because the slave fd isn't open in
+    // this test (it's owned by the would-be child).
+    var t = try posix.tcgetattr(pty.master);
+    t.lflag.ECHO = false;
+    try posix.tcsetattr(pty.master, .NOW, t);
+    try std.testing.expect(!slaveEchoEnabled(pty.master));
+
+    // Flip back on — sudo's restore path. Pin the round-trip so
+    // the redaction gate re-enables tracking once the password
+    // prompt is done.
+    t.lflag.ECHO = true;
+    try posix.tcsetattr(pty.master, .NOW, t);
+    try std.testing.expect(slaveEchoEnabled(pty.master));
 }
