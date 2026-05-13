@@ -34,9 +34,15 @@ const std = @import("std");
 
 pub const AltScreen = struct {
     active: bool = false,
-    /// Set to true on every transition (enter or exit). The proxy
-    /// reads + clears this each iteration so it can run the
-    /// DECSTBM-tear-down / re-apply work exactly once per edge.
+    /// Set to true whenever `active` flips since the last
+    /// `takeTransition()` call. The proxy reads + clears this each
+    /// iteration so it can converge the slave PTY size + statusbar
+    /// state to the new `active` value. Multiple enter/exit toggles
+    /// arriving in one `feed()` collapse into a single flag — the
+    /// proxy only needs to converge to the FINAL state, not replay
+    /// each intermediate flip (replaying would do redundant
+    /// `pty.setSize` + `sb.reactivate` calls back-to-back for zero
+    /// user-visible benefit; the final state already converges).
     transitioned: bool = false,
 
     state: State = .ground,

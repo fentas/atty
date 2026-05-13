@@ -713,10 +713,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             var shell_size = s;
                             if (!alt_now_active) {
                                 shell_size.rows = sb.effectiveRows();
+                                // Use the lighter `reactivate` here,
+                                // not `activate`. activate's ED 2
+                                // clears the whole screen + homes the
+                                // cursor — if the shell drew a prompt
+                                // immediately after `?1049l` in the
+                                // same `output` chunk, that prompt is
+                                // already on the primary screen and
+                                // ED 2 would wipe it. reactivate
+                                // restores DECSTBM + clears the
+                                // reserved rows around a save/restore-
+                                // cursor, leaving anything the shell
+                                // already drew untouched.
                                 var w2: std.Io.Writer = .fixed(&out_buf);
-                                sb.activate(&w2) catch {};
+                                sb.reactivate(&w2) catch {};
                                 if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
-                                sb.last_valid = false;
                             }
                             _ = pty.setSize(shell_size) catch {};
                         } else |_| {}

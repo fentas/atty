@@ -273,6 +273,33 @@ pub const StatusBar = struct {
         try w.writeAll("\x1B[r"); // reset scroll region
     }
 
+    /// Lighter re-apply used after an alt-screen TUI exited. Unlike
+    /// `activate()` this does NOT emit `ED 2` or move the cursor to
+    /// home — that would clobber bytes the shell may have already
+    /// drawn after `?1049l` in the same read chunk (e.g. a prompt
+    /// redraw, an OSC 133 marker, output from a subsequent command).
+    ///
+    /// Sequence:
+    ///   1. DECSC `\x1B[s` — save cursor.
+    ///   2. DECSTBM `\x1B[1;<top>r` — defensively re-establish the
+    ///      scroll region (the alt-screen app may have emitted
+    ///      `\x1B[r` on its own buffer; on terminals where DECSTBM
+    ///      is per-buffer this is a no-op, on terminals where it's
+    ///      global it restores our reservation).
+    ///   3. Per-row erase of the reserved rows so any leaked drawing
+    ///      from the alt-screen app is gone.
+    ///   4. DECRC `\x1B[u` — restore cursor.
+    pub fn reactivate(self: *StatusBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll("\x1B[s");
+        try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
+        var r: u16 = self.effectiveRows() + 1;
+        while (r <= self.rows) : (r += 1) {
+            try w.print("\x1B[{d};1H\x1B[K", .{r});
+        }
+        try w.writeAll("\x1B[u");
+        self.last_valid = false;
+    }
+
     /// Paint the status text into the last reserved row. Idempotent —
     /// if the text matches the last paint we emit zero bytes. When a
     /// transient message is active and not expired, it overrides
