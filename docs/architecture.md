@@ -332,7 +332,8 @@ Ctrl+R naturally scopes per remote target without atuin patches.
 Local commands keep their real cwd. The two namespaces don't
 collide.
 
-**Behaviour matrix.** With shell integration sourced:
+**Behaviour matrix.** With local + remote shell integration both
+sourced (the "clean" mode):
 
 | Where the user is | atty records? | tagged as |
 |---|---|---|
@@ -343,11 +344,39 @@ collide.
 | Inside `vim` / `less` / `psql` | no (kind=`.none`) | — |
 | Inside alt-screen TUI (k9s, htop) | no (alt-screen gate) | — |
 
-Without integration, the alt-screen gate from #14 still catches
-TUIs; OSC 7 + OSC 133 signals are silent so commands inside ssh
-remain unrecorded (the gate from #15 + the `kind=.none` drop in
-this layer compound). The user-actionable fix is shell-side: source
-any of the integrations listed above.
+The gate that distinguishes "at a prompt" from "inside an
+unrecognised command running inside a subprocess" is the OSC 133
+`;C` / `;D` edges *from the remote shell*. When the remote shell
+also emits markers, every prompt fires a fresh `;A;B`, the `.none`
+frame pushed for the running command pops at the matching `;D`, and
+the gate has clean phase info.
+
+**Without remote integration** the local tracker stays in
+`.in_command` phase for the *entire* ssh / sudo / kubectl session.
+We can't distinguish "at the remote prompt" from "inside a remote
+command" — there's no signal coming back through the PTY tunnel.
+atty records everything in this mode, tagged with the recognised
+launcher's URI:
+
+| Without remote integration | atty records? | tagged as |
+|---|---|---|
+| `ssh remote` typed lines | yes | `ssh://user@host/…` |
+| `psql` queries inside ssh | yes (noise) | `ssh://user@host/…` |
+| `cat <<EOF` heredoc body inside ssh | yes (noise) | `ssh://user@host/…` |
+| `vim` alt-screen TUI inside ssh | no (alt-screen gate) | — |
+
+This is a deliberate trade vs. the alternative "gate strictly on
+local OSC 133 input phase" — that would drop ALL remote commands
+in this mode and undo the cross-host history feature for users
+who don't run their own software on remote hosts. The noise from
+REPL-style apps is the cost; configure `incognito_targets` to
+suppress recording on hosts where you care most.
+
+Local integration (Ghostty's `osc-133` flag, ble.sh, zsh4humans,
+VS Code's snippet, or `eval "$(atty init bash)"`) is required for
+the subprocess machinery to fire at all. Without it, atty stays
+on the keystroke-only path and the only gate is the alt-screen
+detection.
 
 **Statusbar segment.** When `Config.subprocess.show_in_statusbar`
 is true (default), the bar shows `→ ssh:user@host` (or

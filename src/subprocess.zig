@@ -457,8 +457,29 @@ fn flagTakesValue(flag: []const u8) bool {
             else => false,
         };
     }
-    // GNU long-option style `--name=value` — already self-contained, no value follows.
-    // Unknown longer flags conservatively assume they take a value.
+    // GNU long-option `--name=value` is self-contained — the value
+    // is part of the same token, no next-token consumption.
+    if (std.mem.startsWith(u8, flag, "--") and std.mem.indexOfScalar(u8, flag, '=') != null) {
+        return false;
+    }
+    // Known long flags from `mosh` / `ssh` that DO take a separate
+    // value as the next token. Without these listed, the target
+    // extractor would treat the value as the positional host —
+    // e.g. `mosh --ssh ssh host` would pick `ssh` as the target.
+    //
+    // Conservative allowlist rather than "any long flag takes a
+    // value" because plenty of long flags ARE booleans (`--verbose`,
+    // `--quiet`, `--xauth-location`-style switches handled in the
+    // ssh -G path …). Mis-classifying a boolean as value-taking
+    // eats the next token (often the host), which is worse than
+    // mis-classifying a value-taking flag (the parser keeps going
+    // and finds the host anyway — the false value just looks like
+    // a positional that we then ignore).
+    if (std.mem.eql(u8, flag, "--ssh")) return true; // mosh --ssh <ssh-cmd>
+    if (std.mem.eql(u8, flag, "--port")) return true; // mosh / ssh aliases
+    if (std.mem.eql(u8, flag, "--server")) return true; // mosh --server <path>
+    if (std.mem.eql(u8, flag, "--predict")) return true; // mosh --predict <mode>
+    if (std.mem.eql(u8, flag, "--bind-server")) return true; // mosh
     return false;
 }
 
@@ -648,11 +669,23 @@ fn parseContainerExec(args: []const u8) ?[]const u8 {
 /// Run `ssh -G <args>` and extract the resolved `hostname` and `user`.
 /// Returns an allocated string `"user@host"` or `"host"` when no user.
 ///
-/// Spawned synchronously — `ssh -G` is fast (typically <100ms) and
-/// the user already paid an Enter on `ssh ...` so they're waiting
-/// anyway. Failure cases (ssh not installed, syntax error, hang …)
-/// surface as an error and the caller falls back to the regex
-/// extraction.
+/// **Synchronous on the proxy main loop.** `ssh -G` is fast in the
+/// common case (typically <100ms — config parse + DNS lookup) and
+/// the user just pressed Enter on `ssh …`, so they're already
+/// blocked waiting on the connect. The added latency is invisible
+/// behind ssh's own connect cost.
+///
+/// Known risk: a misbehaving `ssh -G` (slow DNS resolver, hung
+/// `Match exec` block, ssh binary that prints on -G and waits
+/// forever) WOULD stall the proxy until it returns. We accept this
+/// trade vs. growing a worker-thread + watchdog for what is in
+/// practice a 100ms call. `Config.subprocess.use_ssh_g = false`
+/// turns the call off and falls back to regex extraction, which
+/// users on flaky DNS or odd ssh wrappers should pick.
+///
+/// Buffers: both `stdout_limit` and `stderr_limit` are bounded so
+/// a verbose / errored ssh (e.g. one run with `-vv` in the user's
+/// ssh config) can't allocate unbounded memory.
 fn resolveViaSshG(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -672,6 +705,12 @@ fn resolveViaSshG(
     const result = std.process.run(gpa, io, .{
         .argv = argv.items,
         .stdout_limit = .limited(64 * 1024),
+        // Cap stderr too. ssh's -G output is normally clean, but
+        // unusual configs (`-vv`, broken `Match exec` block, etc.)
+        // can produce verbose / unbounded errors; without a cap
+        // the proxy would balloon memory on a single bad
+        // invocation. 4 KiB is far more than any sane diagnostic.
+        .stderr_limit = .limited(4 * 1024),
     }) catch return error.SshGFailed;
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
@@ -724,6 +763,18 @@ test "extractSshTarget: skips known value-taking flags" {
 test "extractSshTarget: returns null when no positional argument" {
     try testing.expectEqual(@as(?[]const u8, null), extractSshTarget(""));
     try testing.expectEqual(@as(?[]const u8, null), extractSshTarget("-v"));
+}
+
+test "extractSshTarget: long flag that takes a value consumes the next token" {
+    // Without `--ssh` in the value-taking allowlist, the extractor
+    // would see `ssh` as the first non-flag positional and return
+    // it as the target — mosh runs would always be tagged as
+    // `ssh:ssh` instead of `ssh:host`. Pinning the fix.
+    try testing.expectEqualStrings("host", extractSshTarget("--ssh ssh host").?);
+    try testing.expectEqualStrings("foo@bar", extractSshTarget("--port 2222 foo@bar").?);
+    // `--name=value` is self-contained — value is in the token, no
+    // next-token consumption.
+    try testing.expectEqualStrings("foo@bar", extractSshTarget("--port=2222 foo@bar").?);
 }
 
 test "looksLikeOneShotSshLine: ssh host plain interactive is NOT one-shot" {
