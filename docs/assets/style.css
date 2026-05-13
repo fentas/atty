@@ -361,10 +361,18 @@ footer a { color: var(--fg-soft); }
  * Home page specifics
  * ────────────────────────────────────────────────────────────── */
 
-.home main { padding-top: 1.5rem; }
+/* Wider column on the home layout — there's no TOC sidebar to share
+ * the page width with, and the index has tables + multi-line code
+ * blocks that benefit from the extra horizontal real estate. Match
+ * the *combined* width of a doc page's (content + sidebar) so the
+ * visual rhythm switching between sections stays consistent. */
+.home main {
+  max-width: calc(78ch + 4rem + 17rem);
+  padding-top: 1.5rem;
+}
 
 .hero {
-  max-width: 78ch;
+  max-width: calc(78ch + 4rem + 17rem);
   margin: 0 auto;
   padding: 4rem 1.5rem 2.5rem;
   position: relative;
