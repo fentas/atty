@@ -120,7 +120,23 @@ pub fn formatCwd(
     fallback_local_cwd: []const u8,
 ) []const u8 {
     var w: std.Io.Writer = .fixed(out);
-    const rcwd: []const u8 = if (frame.cwd_len > 0) frame.cwd() else "?";
+    // Strip the leading `/` from the remote path before composing the
+    // URI — OSC 7 reports absolute paths, and naively concatenating
+    // `ssh://host/` + `/home/foo` produces the double-slashed
+    // `ssh://host//home/foo`. With this normalisation we get the
+    // documented `ssh://host/home/foo` shape, which is also what
+    // atuin's `[ DIRECTORY ]` filter groups by.
+    const rcwd_raw: []const u8 = if (frame.cwd_len > 0) frame.cwd() else "?";
+    const rcwd: []const u8 = if (rcwd_raw.len > 1 and rcwd_raw[0] == '/')
+        rcwd_raw[1..]
+    else
+        rcwd_raw;
+    // Elevation/su frames format `<name>:<local-cwd>` — when the
+    // caller didn't pass a local cwd we substitute `?` so the
+    // recorded entry doesn't end with a dangling colon (`sudo:`,
+    // `su:postgres:`). The placeholder makes it visible in atuin's
+    // Ctrl+R that we elevated but didn't capture a path.
+    const elev_cwd: []const u8 = if (fallback_local_cwd.len > 0) fallback_local_cwd else "?";
     switch (frame.kind) {
         .none => {
             w.writeAll(fallback_local_cwd) catch {};
@@ -138,10 +154,10 @@ pub fn formatCwd(
             w.print("container://{s}/{s}", .{ frame.name(), rcwd }) catch {};
         },
         .elevation => {
-            w.print("{s}:{s}", .{ frame.name(), fallback_local_cwd }) catch {};
+            w.print("{s}:{s}", .{ frame.name(), elev_cwd }) catch {};
         },
         .su => {
-            w.print("{s}:{s}", .{ frame.name(), fallback_local_cwd }) catch {};
+            w.print("{s}:{s}", .{ frame.name(), elev_cwd }) catch {};
         },
     }
     return out[0..w.end];
@@ -160,6 +176,13 @@ pub const max_depth = 8;
 pub const Tracker = struct {
     frames: [max_depth]Frame = [_]Frame{.{}} ** max_depth,
     depth: usize = 0,
+    /// Pushes beyond `max_depth` increment this counter instead of
+    /// touching the frame array. `;D` pops consume the overflow
+    /// before unwinding real frames, preserving the
+    /// `depth(;C) == depth(;D) + 1` invariant after saturation
+    /// (otherwise we'd unwind the pinned-deep stack too early once
+    /// the user dropped back below the saturation point).
+    overflow: usize = 0,
 
     /// Path to `ssh` binary used for `-G` resolution. Configurable
     /// because some setups (NixOS, Guix, custom containers) put ssh
@@ -189,8 +212,15 @@ pub const Tracker = struct {
         return &self.frames[self.depth - 1];
     }
 
-    /// Pop on `;D`. Idempotent on an empty stack.
+    /// Pop on `;D`. Idempotent on an empty stack. When we previously
+    /// saturated (overflow > 0) the pop consumes overflow first so
+    /// the real stack stays pinned at max_depth until the user has
+    /// returned below the saturation point.
     pub fn onCommandEnd(self: *Tracker) void {
+        if (self.overflow > 0) {
+            self.overflow -= 1;
+            return;
+        }
         if (self.depth == 0) return;
         self.depth -= 1;
         // Reset the popped frame so a stale name doesn't leak via
@@ -213,11 +243,10 @@ pub const Tracker = struct {
         gpa: std.mem.Allocator,
         io: ?std.Io,
     ) void {
-        // Always push something — even on an unrecognized command —
-        // so `;D` pops correctly. Stack stays balanced.
+        // Saturation: increment overflow so the matching ;D pops it
+        // instead of unwinding a real frame. Top context stays pinned.
         if (self.depth >= max_depth) {
-            // Stack full. Keep the most recent context pinned; the
-            // proxy will see `;D` and pop. Don't blow up.
+            self.overflow += 1;
             return;
         }
         const frame = &self.frames[self.depth];
@@ -228,16 +257,18 @@ pub const Tracker = struct {
     }
 
     /// Capture an OSC 7 cwd report into the current top frame.
-    /// No-op when stack is empty or the URI doesn't parse.
-    pub fn onRemoteCwd(self: *Tracker, file_uri: []const u8) void {
+    /// Accepts either form:
+    ///   - A `file://<host>/<path>` URI (raw OSC 7 payload)
+    ///   - A bare absolute path (what `Osc7.takeCwd()` returns after
+    ///     it pre-strips the `file://<host>` prefix for us)
+    /// No-op when stack is empty or the input has no extractable path.
+    pub fn onRemoteCwd(self: *Tracker, cwd_or_uri: []const u8) void {
         if (self.depth == 0) return;
-        // OSC 7 is `file://<host>/<path>`. We only care about the path
-        // segment (atuin scopes per frame.name, the host segment of
-        // the URI is redundant with what we already resolved at `;C`).
-        if (!std.mem.startsWith(u8, file_uri, "file://")) return;
-        const after_scheme = file_uri["file://".len..];
-        const slash = std.mem.indexOfScalar(u8, after_scheme, '/') orelse return;
-        const path = after_scheme[slash..];
+        const path: []const u8 = if (std.mem.startsWith(u8, cwd_or_uri, "file://")) blk: {
+            const after_scheme = cwd_or_uri["file://".len..];
+            const slash = std.mem.indexOfScalar(u8, after_scheme, '/') orelse return;
+            break :blk after_scheme[slash..];
+        } else cwd_or_uri;
         if (path.len == 0) return;
         self.frames[self.depth - 1].setCwd(path);
     }
@@ -773,6 +804,36 @@ test "Tracker: stack saturates at max_depth" {
         t.onCommandStart("ssh server", testing.allocator, null);
     }
     try testing.expectEqual(max_depth, t.depth);
+    try testing.expectEqual(@as(usize, 3), t.overflow);
+}
+
+test "Tracker: balanced pops after saturation drain overflow first" {
+    // Push 11 times (max_depth=8 plus 3 overflow). The first 8 land
+    // as real frames; the last 3 increment overflow. Then 11 pops:
+    // first 3 consume overflow (depth stays pinned at 8), next 8
+    // unwind the stack one frame each.
+    var t = Tracker.init();
+    var i: usize = 0;
+    while (i < max_depth + 3) : (i += 1) {
+        t.onCommandStart("ssh foo@bar", testing.allocator, null);
+    }
+    try testing.expectEqual(max_depth, t.depth);
+    try testing.expectEqual(@as(usize, 3), t.overflow);
+
+    // First three pops drain overflow without unwinding.
+    t.onCommandEnd();
+    try testing.expectEqual(max_depth, t.depth);
+    try testing.expectEqual(@as(usize, 2), t.overflow);
+    t.onCommandEnd();
+    t.onCommandEnd();
+    try testing.expectEqual(max_depth, t.depth);
+    try testing.expectEqual(@as(usize, 0), t.overflow);
+
+    // Remaining pops unwind real frames.
+    i = 0;
+    while (i < max_depth) : (i += 1) t.onCommandEnd();
+    try testing.expectEqual(@as(usize, 0), t.depth);
+    try testing.expectEqual(@as(usize, 0), t.overflow);
 }
 
 test "Tracker: OSC 7 cwd update lands on top frame" {
@@ -782,17 +843,36 @@ test "Tracker: OSC 7 cwd update lands on top frame" {
     try testing.expectEqualStrings("/home/foo/work", t.current().?.cwd());
 }
 
+test "Tracker: onRemoteCwd accepts bare path (what Osc7.takeCwd returns)" {
+    // The Osc7 parser strips the `file://<host>` prefix before
+    // handing us the path, so onRemoteCwd must accept the bare
+    // absolute path too — otherwise the proxy → Tracker plumbing
+    // silently drops every OSC 7 in production.
+    var t = Tracker.init();
+    t.onCommandStart("ssh foo@bar", testing.allocator, null);
+    t.onRemoteCwd("/var/log");
+    try testing.expectEqualStrings("/var/log", t.current().?.cwd());
+}
+
 test "Tracker: OSC 7 ignored when no frame is active" {
     var t = Tracker.init();
     t.onRemoteCwd("file://host/path"); // no crash
     try testing.expectEqual(@as(usize, 0), t.depth);
 }
 
-test "Tracker: OSC 7 ignored for malformed URI" {
+test "Tracker: onRemoteCwd ignores empty input and malformed file:// URIs" {
     var t = Tracker.init();
     t.onCommandStart("ssh foo@bar", testing.allocator, null);
-    t.onRemoteCwd("not-a-file-uri");
+    // Empty path → silently dropped (no cwd set).
+    t.onRemoteCwd("");
     try testing.expectEqual(@as(usize, 0), t.current().?.cwd_len);
+    // file:// without a path slash → dropped (we need to know
+    // where the host ends and the path begins).
+    t.onRemoteCwd("file://hostonly");
+    try testing.expectEqual(@as(usize, 0), t.current().?.cwd_len);
+    // file:// with valid path → accepted.
+    t.onRemoteCwd("file://host/srv");
+    try testing.expectEqualStrings("/srv", t.current().?.cwd());
 }
 
 test "Tracker: one-shot ssh host cmd doesn't classify as ssh" {
@@ -839,12 +919,16 @@ test "Tracker: docker exec classification" {
     try testing.expectEqualStrings("nginx", t.current().?.name());
 }
 
-test "formatCwd: ssh frame produces ssh:// URI" {
+test "formatCwd: ssh frame produces ssh:// URI without double-slash" {
     var f = Frame{ .kind = .ssh };
     f.setName("foo@bar");
     f.setCwd("/home/foo");
     var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("ssh://foo@bar//home/foo", formatCwd(&f, &buf, "/local/cwd"));
+    // The leading `/` from the OSC 7-captured path is normalised
+    // away to avoid `ssh://host//path` — see the comment in
+    // formatCwd. atuin's [DIRECTORY] groups by exact string match;
+    // single-slash is what we want both as docs and as filter key.
+    try testing.expectEqualStrings("ssh://foo@bar/home/foo", formatCwd(&f, &buf, "/local/cwd"));
 }
 
 test "formatCwd: ssh frame without cwd uses `?`" {
@@ -866,6 +950,25 @@ test "formatCwd: elevation frame prepends sudo: to local cwd" {
     f.setName("sudo");
     var buf: [256]u8 = undefined;
     try testing.expectEqualStrings("sudo:/home/me", formatCwd(&f, &buf, "/home/me"));
+}
+
+test "formatCwd: elevation with empty fallback uses ? placeholder (not trailing colon)" {
+    // atuin's `--cwd` should never end with a bare `:`. The local
+    // shell's cwd isn't always available to atty (we'd need to
+    // shell out to read /proc/<child_pid>/cwd, which we don't do
+    // synchronously); the placeholder makes that visible in
+    // Ctrl+R rather than producing a malformed value.
+    var f = Frame{ .kind = .elevation };
+    f.setName("sudo");
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("sudo:?", formatCwd(&f, &buf, ""));
+}
+
+test "formatCwd: su with empty fallback also uses ? placeholder" {
+    var f = Frame{ .kind = .su };
+    f.setName("su:postgres");
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("su:postgres:?", formatCwd(&f, &buf, ""));
 }
 
 test "formatCwd: none frame falls back to local cwd verbatim" {

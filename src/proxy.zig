@@ -226,6 +226,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // itself.
     var prev_osc_phase: Osc133.Phase = osc133_tracker.phase;
 
+    // Stash for the line we expect a subsequent `;C` to attribute.
+    //
+    // Why: the stdin path runs `dispatchLineCommit` + `clearLastCommitted`
+    // the moment the user presses Enter, while the shell's `;C`
+    // marker doesn't arrive until later in the master-output stream
+    // (after the shell echoes, runs PROMPT_COMMAND, etc.). By that
+    // time `line_state.lastCommitted()` is null, so the subprocess
+    // tracker would push a `.none` frame and the entire ssh /
+    // sudo / kubectl recognition would silently break.
+    //
+    // We copy the committed line into this scratch on the stdin
+    // path, then the master-output `;C` edge consumes + clears it.
+    // 1 KiB is generous — `ssh foo@bar -i ~/.ssh/key ...` lines
+    // stay well under that. Lines longer than the buffer are
+    // truncated (the parser only needs the first token to
+    // classify, which is always at the front).
+    var pending_launch_buf: [1024]u8 = undefined;
+    var pending_launch_len: usize = 0;
+
     var ctx = module.Context{
         .allocator = allocator,
         .io = io,
@@ -638,6 +657,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 };
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
+                    // Stash the line for the upcoming `;C` edge in
+                    // the master-output handler. shell_saw_enter
+                    // gates this — if the shell never saw Enter
+                    // (`.swallow`, guardrail block) it can't fire
+                    // a `;C` either, so we leave any prior stash
+                    // alone. If a recording-eligible line arrives
+                    // we overwrite (latest commit wins, matching
+                    // the rec_buf mailbox semantics).
+                    if (shell_saw_enter) {
+                        const stash_n = @min(committed.len, pending_launch_buf.len);
+                        @memcpy(pending_launch_buf[0..stash_n], committed[0..stash_n]);
+                        pending_launch_len = stash_n;
+                    }
                     // Decide whether to record this commit. Three
                     // gating signals:
                     //
@@ -750,12 +782,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const curr_osc_phase = osc133_tracker.phase;
                 if (curr_osc_phase != prev_osc_phase) {
                     if (prev_osc_phase != .in_command and curr_osc_phase == .in_command) {
-                        // ;C — push a frame parsed from the just-
-                        // committed line. `lastCommitted` was set by
-                        // the stdin path when the user pressed Enter
-                        // (or via the OSC 133 input override there).
-                        const launched = line_state.lastCommitted() orelse "";
+                        // ;C — push a frame parsed from the line the
+                        // stdin path stashed at commit time. We
+                        // CAN'T read `line_state.lastCommitted()`
+                        // here — by the time the shell echoes +
+                        // emits `;C`, the stdin handler has already
+                        // run `clearLastCommitted()`, so we'd push
+                        // a `.none` frame and silently lose
+                        // recognition.
+                        const launched = pending_launch_buf[0..pending_launch_len];
                         subprocess_tracker.onCommandStart(launched, allocator, io);
+                        pending_launch_len = 0;
                     } else if (prev_osc_phase == .in_command and curr_osc_phase != .in_command) {
                         // ;D — pop. We do NOT care which kind we
                         // popped; the Tracker handles the stack

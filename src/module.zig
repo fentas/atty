@@ -168,7 +168,7 @@ test "subprocessCwd: ssh frame → ssh:// URI" {
     try testing.expectEqualStrings("ssh://foo@bar/?", ctx.subprocessCwd(&buf, "/home/me"));
 }
 
-test "subprocessCwd: ssh frame with OSC 7 cwd → ssh://host/path" {
+test "subprocessCwd: ssh frame with OSC 7 cwd → ssh://host/path (no double slash)" {
     var tr = subprocess_mod.Tracker.init();
     tr.onCommandStart("ssh foo@bar", testing.allocator, null);
     tr.onRemoteCwd("file://bar/srv/app");
@@ -183,7 +183,7 @@ test "subprocessCwd: ssh frame with OSC 7 cwd → ssh://host/path" {
         .subprocess = &tr,
     };
     var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("ssh://foo@bar//srv/app", ctx.subprocessCwd(&buf, "/home/me"));
+    try testing.expectEqualStrings("ssh://foo@bar/srv/app", ctx.subprocessCwd(&buf, "/home/me"));
 }
 
 test "subprocessCwd: kind=.none frame falls back" {
