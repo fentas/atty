@@ -607,20 +607,71 @@ fn lastNonFlagToken(args: []const u8) ?[]const u8 {
     return last;
 }
 
-/// Parse `kubectl exec [flags] <pod> -- <cmd>` (or without `--`).
-/// Returns the pod identifier in `<context>/<ns>/<pod>` form when we
-/// can extract context/namespace from CLI flags; otherwise just the
-/// pod name.
+/// Parse `kubectl [global-flags] exec [exec-flags] <pod> -- <cmd>`.
+/// Recognises kubectl's GLOBAL flags before the `exec` subcommand
+/// (`kubectl -n kube-system exec …`, `kubectl --context=prod exec …`)
+/// and the exec-side flags after. Returns the pod identifier as
+/// `<context>/<ns>/<pod>` where missing fields are `?` — *never*
+/// the kubeconfig's `default` namespace, because we don't read
+/// kubeconfig and can't know the user's current default. The `?`
+/// placeholder makes "unresolved" visible in atuin's Ctrl+R cwd
+/// view rather than silently mis-labelling commands.
 fn parseKubectlExec(args: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeAny(u8, args, " \t");
-    // First positional must be `exec`.
-    const first = it.next() orelse return null;
-    if (!std.mem.eql(u8, first, "exec")) return null;
 
     var ns: []const u8 = "";
     var ctx: []const u8 = "";
-    var pod: []const u8 = "";
 
+    // Pass 1: consume global flags + look for `exec`. kubectl's
+    // global flags include `-n` / `--namespace`, `--context`,
+    // `--kubeconfig`, `-v`, `--user`, `--server`, etc. We capture
+    // the ones we care about and skip the rest.
+    var found_exec = false;
+    while (it.next()) |tok| {
+        if (tok.len == 0) continue;
+        if (std.mem.eql(u8, tok, "exec")) {
+            found_exec = true;
+            break;
+        }
+        if (tok[0] != '-') return null; // unrecognised non-flag positional before exec
+        // Global flag handling — same name/value pairs as exec-side.
+        if (std.mem.eql(u8, tok, "-n") or std.mem.eql(u8, tok, "--namespace")) {
+            ns = it.next() orelse "";
+            continue;
+        }
+        if (std.mem.startsWith(u8, tok, "--namespace=")) {
+            ns = tok["--namespace=".len..];
+            continue;
+        }
+        if (std.mem.eql(u8, tok, "--context")) {
+            ctx = it.next() orelse "";
+            continue;
+        }
+        if (std.mem.startsWith(u8, tok, "--context=")) {
+            ctx = tok["--context=".len..];
+            continue;
+        }
+        // Other known value-taking global flags — consume value.
+        if (std.mem.eql(u8, tok, "--kubeconfig") or
+            std.mem.eql(u8, tok, "--user") or
+            std.mem.eql(u8, tok, "--server") or
+            std.mem.eql(u8, tok, "--token") or
+            std.mem.eql(u8, tok, "--cluster") or
+            std.mem.eql(u8, tok, "--as") or
+            std.mem.eql(u8, tok, "--cache-dir") or
+            std.mem.eql(u8, tok, "-s") or
+            std.mem.eql(u8, tok, "-v"))
+        {
+            _ = it.next();
+            continue;
+        }
+        if (std.mem.indexOfScalar(u8, tok, '=') != null) continue; // --flag=value, self-contained
+        // Unknown flag — boolean by default.
+    }
+    if (!found_exec) return null;
+
+    // Pass 2: exec-side flags + pod.
+    var pod: []const u8 = "";
     while (it.next()) |tok| {
         if (tok.len == 0) continue;
         if (std.mem.eql(u8, tok, "--")) {
@@ -628,7 +679,8 @@ fn parseKubectlExec(args: []const u8) ?[]const u8 {
             break;
         }
         if (tok[0] == '-') {
-            // Flag handling. We care about --namespace/-n, --context.
+            // Exec-side overrides of namespace / context (allowed
+            // by kubectl even though it's unusual).
             if (std.mem.eql(u8, tok, "-n") or std.mem.eql(u8, tok, "--namespace")) {
                 ns = it.next() orelse "";
                 continue;
@@ -664,10 +716,17 @@ fn parseKubectlExec(args: []const u8) ?[]const u8 {
     // the next parse runs, so the borrow is short-lived. This
     // module is single-threaded by design — the proxy event loop
     // is the only caller — so the shared global is safe.
+    //
+    // Unresolved fields emit `?` rather than a kubeconfig default
+    // we can't verify. That keeps the encoded `--cwd` honest:
+    // `k8s://?/?/mypod` says "we know the pod but not the
+    // context/namespace" instead of asserting `k8s://?/default/mypod`
+    // which would silently be wrong on any cluster whose current
+    // context's namespace isn't `default`.
     parse_buf_len = 0;
     appendToParseBuf(if (ctx.len > 0) ctx else "?");
     appendToParseBuf("/");
-    appendToParseBuf(if (ns.len > 0) ns else "default");
+    appendToParseBuf(if (ns.len > 0) ns else "?");
     appendToParseBuf("/");
     appendToParseBuf(pod);
     return parse_buf[0..parse_buf_len];
@@ -827,12 +886,15 @@ test "looksLikeOneShotSshLine: ssh host cmd IS one-shot" {
     try testing.expect(looksLikeOneShotSshLine("-p 22 foo@bar ls -la"));
 }
 
-test "parseKubectlExec: basic pod" {
+test "parseKubectlExec: basic pod (no flags = ?/?/<pod>)" {
+    // Unresolved fields emit `?` rather than asserting `default` —
+    // we don't read kubeconfig, so we can't know what the current
+    // context's default namespace is.
     const r = parseKubectlExec("exec mypod -- bash") orelse return error.TestUnexpectedNull;
-    try testing.expectEqualStrings("?/default/mypod", r);
+    try testing.expectEqualStrings("?/?/mypod", r);
 }
 
-test "parseKubectlExec: with namespace flag" {
+test "parseKubectlExec: with namespace flag (?/ns/<pod>)" {
     const r = parseKubectlExec("exec -n kube-system coredns-abc -- sh") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("?/kube-system/coredns-abc", r);
 }
@@ -842,8 +904,23 @@ test "parseKubectlExec: with context + namespace + container flags" {
     try testing.expectEqualStrings("prod/apps/mypod-7d", r);
 }
 
-test "parseKubectlExec: returns null when first arg isn't exec" {
+test "parseKubectlExec: global flags BEFORE exec are recognised" {
+    // `kubectl -n kube-system exec foo -- bash` is canonical
+    // kubectl style — pre-fix the parser failed because it
+    // required `exec` as the very first token.
+    const r1 = parseKubectlExec("-n kube-system exec coredns-abc -- sh") orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("?/kube-system/coredns-abc", r1);
+
+    const r2 = parseKubectlExec("--context=prod exec mypod -- bash") orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("prod/?/mypod", r2);
+
+    const r3 = parseKubectlExec("--kubeconfig /tmp/kc --context=prod -n apps exec db-0 -- bash") orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("prod/apps/db-0", r3);
+}
+
+test "parseKubectlExec: returns null when `exec` is not in the args" {
     try testing.expectEqual(@as(?[]const u8, null), parseKubectlExec("get pods"));
+    try testing.expectEqual(@as(?[]const u8, null), parseKubectlExec("-n kube-system get pods"));
 }
 
 test "parseDockerExec: basic container" {
