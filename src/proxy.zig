@@ -246,7 +246,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // the master path, the user sees the result, can edit
             // / submit / cancel.
             if (D.pollShellInput(&runtimes, &ctx) catch null) |bytes| {
-                if (bytes.len > 0) writeAll(pty.master, bytes) catch {};
+                if (bytes.len > 0) {
+                    // Treat injected bytes as if the user had typed
+                    // them: update line_state too, so the next Enter
+                    // routes through onInput / onLineCommit with the
+                    // injected line as `ctx.line.current()`. Without
+                    // this, modules (guardrail, history) wouldn't
+                    // see the LLM-generated command and the user's
+                    // Enter would commit an empty line from their
+                    // perspective.
+                    _ = line_state.applyInput(bytes);
+                    writeAll(pty.master, bytes) catch {};
+                }
             }
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};

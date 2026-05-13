@@ -33,7 +33,6 @@
 
 const std = @import("std");
 const m = @import("../module.zig");
-const lib = @import("_lib.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
@@ -114,7 +113,11 @@ pub fn configure(comptime cfg: Config) type {
             allocator: std.mem.Allocator,
             io: std.Io,
             shared: *Shared,
-            thread: std.Thread,
+            /// Worker thread. `null` when the module is inert (no
+            /// `$LLM_API_BASE` / `$OLLAMA_HOST` set) — saves the
+            /// thread spawn for the common "module configured but
+            /// no endpoint" case.
+            thread: ?std.Thread,
             /// Resolved at attach. Empty = inert (no env var set).
             api_base: []u8 = &.{},
             /// Resolved at attach. Empty = no Authorization header.
@@ -143,7 +146,14 @@ pub fn configure(comptime cfg: Config) type {
             const shell_name = try resolveShell(allocator);
             errdefer allocator.free(shell_name);
 
-            const thread = try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name });
+            // Skip the worker thread entirely in inert mode. With
+            // no endpoint we'll never call the worker, and onInput
+            // / pollShellInput already short-circuit on
+            // `api_base.len == 0`.
+            const thread: ?std.Thread = if (api_base.len == 0)
+                null
+            else
+                try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name });
 
             return .{
                 .allocator = allocator,
@@ -157,13 +167,15 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn detach(rt: *Runtime, io: std.Io) void {
-            {
-                rt.shared.mutex.lockUncancelable(io);
-                defer rt.shared.mutex.unlock(io);
-                rt.shared.shutdown = true;
-                rt.shared.cv.signal(io);
+            if (rt.thread) |t| {
+                {
+                    rt.shared.mutex.lockUncancelable(io);
+                    defer rt.shared.mutex.unlock(io);
+                    rt.shared.shutdown = true;
+                    rt.shared.cv.signal(io);
+                }
+                t.join();
             }
-            rt.thread.join();
             rt.allocator.destroy(rt.shared);
             rt.allocator.free(rt.api_base);
             rt.allocator.free(rt.api_key);
@@ -260,11 +272,13 @@ pub fn configure(comptime cfg: Config) type {
             if (!rt.shared.res_done) return null;
             // Drop responses from a stale generation — a newer
             // prompt has already been submitted; the worker's
-            // reply for THAT one will arrive shortly.
+            // reply for THAT one is still pending. Keep
+            // `in_flight = true` because the user IS waiting on
+            // the newer request; clearing it would prematurely
+            // remove the 🧠 thinking… status.
             if (rt.shared.res_gen != rt.shared.req_gen) {
                 rt.shared.res_done = false;
                 rt.shared.res_len = 0;
-                rt.in_flight = false;
                 return null;
             }
             const n = rt.shared.res_len;
@@ -389,8 +403,10 @@ pub fn configure(comptime cfg: Config) type {
             // larger than the content itself; 16× is a comfortable
             // ceiling for typical chat-completion shapes. A
             // misbehaving endpoint streaming gigabytes can no
-            // longer OOM the worker — std.Io.Writer.fixed errors
-            // on overflow, we catch and parse whatever we have.
+            // longer OOM the worker — `client.fetch` errors when
+            // the fixed writer overflows; we catch it and return 0
+            // (no partial parse — a truncated JSON envelope is
+            // useless anyway).
             const response_cap = cfg.max_response_bytes * 16;
             var response_buf: [response_cap]u8 = undefined;
             var response_writer: std.Io.Writer = .fixed(&response_buf);
@@ -429,12 +445,18 @@ pub fn configure(comptime cfg: Config) type {
             try std.json.Stringify.encodeJsonString(system_prompt, .{}, writer);
             try writer.writeAll("},{\"role\":\"user\",\"content\":");
 
-            var user_buf: [cfg.max_prompt_bytes + 64]u8 = undefined;
-            const user_msg = try std.fmt.bufPrint(
-                &user_buf,
+            // allocPrint instead of a fixed buffer — `shell_name`
+            // comes from $SHELL / config and is not length-bounded.
+            // A pathological override (or a very long binary path
+            // if we ever stop basename-stripping) would overflow a
+            // `cfg.max_prompt_bytes + 64` buffer. Heap is fine —
+            // this is a one-shot build per request, off the hot path.
+            const user_msg = try std.fmt.allocPrint(
+                allocator,
                 "Generate a {s} command to: {s}",
                 .{ shell_name, prompt },
             );
+            defer allocator.free(user_msg);
             try std.json.Stringify.encodeJsonString(user_msg, .{}, writer);
             try writer.writeAll("}],\"stream\":false}");
             return allocating.toOwnedSlice();
@@ -517,9 +539,8 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         /// Trim markdown fences (```bash … ```) + whitespace + take
-        /// the first non-empty line. Some models stubbornly wrap.
-        /// Trim markdown fences (```bash … ```) + whitespace + take
         /// the first non-empty line + strip remaining control bytes.
+        /// Some models stubbornly wrap in fences.
         ///
         /// **Security note**: writing a `\r` (CR) or `\n` (LF) byte
         /// to the PTY acts as Enter — the shell would immediately
