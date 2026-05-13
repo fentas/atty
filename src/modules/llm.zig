@@ -136,6 +136,14 @@ pub fn configure(comptime cfg: Config) type {
             /// or `with_explanation` is off).
             explanation_buf: [512]u8 = undefined,
             explanation_len: usize = 0,
+            /// Diagnostic message written by the worker when the
+            /// request fails (connect error, HTTP non-2xx,
+            /// unparseable response, or sanitiser stripped
+            /// everything). Surfaced via `provideHintText` so the
+            /// user sees *why* the prompt produced no command.
+            /// `error_len == 0` means "no error to report".
+            error_buf: [256]u8 = undefined,
+            error_len: usize = 0,
             /// Generation of the prompt this response is for.
             res_gen: u64 = 0,
             /// True when the worker has finished serving the
@@ -332,7 +340,19 @@ pub fn configure(comptime cfg: Config) type {
 
             const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
             if (body.len == 0 or body.len > cfg.max_prompt_bytes) return .forward;
-            if (rt.api_base.len == 0) return .forward; // inert without endpoint
+            if (rt.api_base.len == 0) {
+                // Inert mode — the user has the module configured but
+                // neither `$LLM_API_BASE` nor `$OLLAMA_HOST` was set
+                // when atty attached. Silently forwarding looks like
+                // a broken feature ("nothing happens"), so latch a
+                // hint that the next `provideHintText` tick will
+                // surface above the status bar. We still .forward so
+                // the typed `#: …` reaches the shell — bash/zsh
+                // treat it as a comment, no harm done, and the user
+                // doesn't lose what they typed.
+                latchHint(rt, "llm: no endpoint set — export $LLM_API_BASE or $OLLAMA_HOST");
+                return .forward;
+            }
 
             // Hand the prompt to the worker. Bump `req_gen` so a
             // late-arriving response from a previous in-flight
@@ -376,6 +396,7 @@ pub fn configure(comptime cfg: Config) type {
                 rt.shared.res_done = false;
                 rt.shared.res_len = 0;
                 rt.shared.explanation_len = 0;
+                rt.shared.error_len = 0;
                 return null;
             }
             const n = rt.shared.res_len;
@@ -393,15 +414,43 @@ pub fn configure(comptime cfg: Config) type {
                 rt.hint_pending = true;
             }
 
+            // Failure path: nothing to inject, but the worker may
+            // have latched a diagnostic. Surface it via the same
+            // hint slot so the user sees *why* nothing happened.
+            const err_n = rt.shared.error_len;
+            if (n == 0 and err_n > 0) {
+                const prefix = "llm: ";
+                const prefix_n = @min(prefix.len, rt.hint_buf.len);
+                @memcpy(rt.hint_buf[0..prefix_n], prefix[0..prefix_n]);
+                const room = rt.hint_buf.len - prefix_n;
+                const copy_n = @min(err_n, room);
+                @memcpy(rt.hint_buf[prefix_n .. prefix_n + copy_n], rt.shared.error_buf[0..copy_n]);
+                rt.hint_len = prefix_n + copy_n;
+                rt.hint_pending = true;
+            }
+
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
             rt.shared.explanation_len = 0;
+            rt.shared.error_len = 0;
             rt.in_flight = false;
             // n == 0 → worker signalled failure (network error,
             // non-2xx, parse failure). Nothing to inject; the
             // statusbar already cleared via `in_flight = false`.
+            // The error hint above is what the user will see.
             if (n == 0) return null;
             return rt.inject_buf[0..rt.inject_len];
+        }
+
+        /// Synchronously latch a hint string on the Runtime so the
+        /// next `provideHintText` tick surfaces it. Used by the
+        /// onInput inert path (no worker involved) and by the test
+        /// scaffolding.
+        fn latchHint(rt: *Runtime, msg: []const u8) void {
+            const n = @min(msg.len, rt.hint_buf.len);
+            @memcpy(rt.hint_buf[0..n], msg[0..n]);
+            rt.hint_len = n;
+            rt.hint_pending = true;
         }
 
         /// One-shot hint surface: returns the latched explanation
@@ -456,6 +505,7 @@ pub fn configure(comptime cfg: Config) type {
                 // block for many seconds.
                 var response_buf: [cfg.max_response_bytes]u8 = undefined;
                 var explanation_local: [512]u8 = undefined;
+                var error_local: [256]u8 = undefined;
                 const result = doRequest(
                     gpa,
                     io,
@@ -466,7 +516,12 @@ pub fn configure(comptime cfg: Config) type {
                     prompt_local[0..prompt_len],
                     &response_buf,
                     &explanation_local,
-                ) catch RequestResult{ .cmd_len = 0, .exp_len = 0 };
+                    &error_local,
+                ) catch RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(&error_local, "internal error in worker"),
+                };
 
                 // Signal completion regardless of outcome — proxy
                 // needs to clear `in_flight` so the 🧠 thinking…
@@ -483,9 +538,17 @@ pub fn configure(comptime cfg: Config) type {
                     } else {
                         shared.explanation_len = 0;
                     }
+                    shared.error_len = 0;
                 } else {
                     shared.res_len = 0;
                     shared.explanation_len = 0;
+                    if (result.err_len > 0) {
+                        const en = @min(result.err_len, shared.error_buf.len);
+                        @memcpy(shared.error_buf[0..en], error_local[0..en]);
+                        shared.error_len = en;
+                    } else {
+                        shared.error_len = 0;
+                    }
                 }
                 shared.res_gen = serving_gen;
                 shared.res_done = true;
@@ -493,13 +556,23 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
-        const RequestResult = struct { cmd_len: usize, exp_len: usize };
+        const RequestResult = struct { cmd_len: usize, exp_len: usize, err_len: usize = 0 };
 
-        /// One HTTP round-trip. Returns the trimmed command and
-        /// (when present) the parsed explanation. `cmd_len == 0`
-        /// signals any failure (network error, parse error, HTTP
-        /// non-2xx, empty body); the user's typed line stays
-        /// cleared and nothing is injected.
+        /// Write a static string into `dst` and return how many
+        /// bytes were written (truncated to fit). Used to populate
+        /// error messages with stable literals.
+        fn writeStatic(dst: []u8, src: []const u8) usize {
+            const n = @min(src.len, dst.len);
+            @memcpy(dst[0..n], src[0..n]);
+            return n;
+        }
+
+        /// One HTTP round-trip. On success returns `cmd_len > 0`
+        /// and (when the model emitted one) `exp_len > 0`. On any
+        /// failure `cmd_len == 0` and `err_len > 0` with a
+        /// human-readable explanation written into `error_out`
+        /// (network error, HTTP non-2xx with status code,
+        /// unparseable response, sanitiser stripped everything).
         fn doRequest(
             gpa: std.mem.Allocator,
             io: std.Io,
@@ -510,6 +583,7 @@ pub fn configure(comptime cfg: Config) type {
             prompt: []const u8,
             out: []u8,
             explanation_out: []u8,
+            error_out: []u8,
         ) !RequestResult {
             const url = try std.fmt.allocPrint(gpa, "{s}/chat/completions", .{api_base});
             defer gpa.free(url);
@@ -555,12 +629,27 @@ pub fn configure(comptime cfg: Config) type {
                 .payload = body,
                 .extra_headers = headers_buf[0..headers_len],
                 .response_writer = &response_writer,
-            }) catch return RequestResult{ .cmd_len = 0, .exp_len = 0 };
+            }) catch return RequestResult{
+                .cmd_len = 0,
+                .exp_len = 0,
+                .err_len = writeStatic(error_out, "request failed (endpoint unreachable?)"),
+            };
 
-            if (@intFromEnum(fetched.status) < 200 or @intFromEnum(fetched.status) >= 300)
-                return RequestResult{ .cmd_len = 0, .exp_len = 0 };
+            const status = @intFromEnum(fetched.status);
+            if (status < 200 or status >= 300) {
+                const err_msg = std.fmt.bufPrint(error_out, "HTTP {d}", .{status}) catch
+                    error_out[0..writeStatic(error_out, "HTTP error")];
+                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_msg.len };
+            }
 
             const extracted = extractResponse(response_buf[0..response_writer.end], out, explanation_out);
+            if (extracted.cmd_len == 0) {
+                return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "couldn't extract a command from the response"),
+                };
+            }
             return RequestResult{ .cmd_len = extracted.cmd_len, .exp_len = extracted.explanation_len };
         }
 
@@ -890,6 +979,7 @@ pub fn configure(comptime cfg: Config) type {
 // ===========================================================================
 
 const testing = std.testing;
+const test_io: std.Io = std.Io.failing;
 
 test "configure exposes the expected hooks" {
     const L = configure(.{});
@@ -1387,6 +1477,176 @@ test "LLM worker round-trips a mock ollama response into the latch + hint surfac
             return;
         }
         _ = libc.usleep(20_000); // 20ms
+    }
+    return error.WorkerTimedOut;
+}
+
+test "inert mode (no endpoint env) surfaces a 'no endpoint' hint" {
+    // Both env vars unset → api_base resolves to "" → module
+    // attaches inert (no worker thread). onInput should still
+    // latch a hint so the user sees *why* `#: …` produced no
+    // command rather than thinking the feature is broken.
+    _ = libc.unsetenv("ATTY_TEST_INERT_BASE");
+    _ = libc.unsetenv("ATTY_TEST_INERT_FALLBACK");
+
+    const L = configure(.{
+        .api_base_env = "ATTY_TEST_INERT_BASE",
+        .api_base_fallback_env = "ATTY_TEST_INERT_FALLBACK",
+        .api_key_env = "ATTY_TEST_INERT_KEY_NEVER",
+    });
+
+    var rt = try L.attach(testing.allocator, test_io);
+    defer {
+        // Inert mode: no worker spawned, detach can run cleanly.
+        L.detach(&rt, test_io);
+    }
+
+    try testing.expectEqual(@as(usize, 0), rt.api_base.len);
+    try testing.expect(rt.thread == null);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    _ = line.applyInput("#: hello\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const act = try L.onInput(&rt, &ctx, "\r");
+    // .forward — the typed `#: …` reaches the shell as a comment;
+    // no point killing the line when we never queried the LLM.
+    try testing.expect(act == .forward);
+
+    // The hint must mention the missing env var so the user knows
+    // what to fix.
+    const hint = try L.provideHintText(&rt, &ctx);
+    try testing.expect(hint != null);
+    try testing.expect(std.mem.indexOf(u8, hint.?, "no endpoint") != null);
+    try testing.expect(std.mem.indexOf(u8, hint.?, "LLM_API_BASE") != null);
+
+    // One-shot — second call returns null.
+    try testing.expectEqual(@as(?[]const u8, null), try L.provideHintText(&rt, &ctx));
+}
+
+fn mockServer500Handler(ctx: *MockServerCtx) void {
+    const conn_fd = libc.accept(ctx.listen_fd, null, null);
+    if (conn_fd < 0) return;
+    defer _ = libc.close(conn_fd);
+
+    var read_buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    var iters: usize = 0;
+    while (iters < 32) : (iters += 1) {
+        const n = read(conn_fd, read_buf[total..].ptr, read_buf.len - total);
+        if (n <= 0) break;
+        total += @intCast(n);
+        if (std.mem.indexOf(u8, read_buf[0..total], "\r\n\r\n") != null) break;
+        if (total >= read_buf.len) break;
+    }
+
+    const resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    _ = write(conn_fd, resp.ptr, resp.len);
+}
+
+test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const listen_fd = libc.socket(libc.AF_INET, libc.SOCK_STREAM, libc.IPPROTO_TCP);
+    if (listen_fd < 0) return error.SocketFailed;
+    defer _ = libc.close(listen_fd);
+    const one: c_int = 1;
+    _ = libc.setsockopt(listen_fd, libc.SOL_SOCKET, libc.SO_REUSEADDR, &one, @sizeOf(c_int));
+    var sa_in: libc.sockaddr_in = .{
+        .family = libc.AF_INET,
+        .port = 0,
+        .addr = std.mem.nativeToBig(u32, 0x7f000001),
+    };
+    if (libc.bind(listen_fd, &sa_in, @sizeOf(libc.sockaddr_in)) < 0) return error.BindFailed;
+    if (libc.listen(listen_fd, 1) < 0) return error.ListenFailed;
+    var bound_addr: libc.sockaddr_in = undefined;
+    var bound_len: u32 = @sizeOf(libc.sockaddr_in);
+    if (libc.getsockname(listen_fd, &bound_addr, &bound_len) < 0) return error.GetSockNameFailed;
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    var mock_ctx: MockServerCtx = .{ .listen_fd = listen_fd, .response_body = "" };
+    const mock_thread = try std.Thread.spawn(.{}, mockServer500Handler, .{&mock_ctx});
+    defer mock_thread.join();
+
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/v1", .{port});
+    _ = libc.setenv("ATTY_TEST_LLM_500_BASE", url.ptr, 1);
+    defer _ = libc.unsetenv("ATTY_TEST_LLM_500_BASE");
+
+    const L = configure(.{
+        .api_base_env = "ATTY_TEST_LLM_500_BASE",
+        .api_base_fallback_env = "ATTY_TEST_LLM_500_NEVER",
+        .api_key_env = "ATTY_TEST_LLM_500_NEVER",
+        .model = "test-model",
+    });
+
+    var rt = try L.attach(testing.allocator, real_io);
+    defer {
+        {
+            rt.shared.mutex.lockUncancelable(real_io);
+            defer rt.shared.mutex.unlock(real_io);
+            rt.shared.shutdown = true;
+            rt.shared.cv.signal(real_io);
+        }
+        if (rt.thread) |t| t.join();
+        testing.allocator.destroy(rt.shared);
+        testing.allocator.free(rt.api_base);
+        testing.allocator.free(rt.api_key);
+        testing.allocator.free(rt.shell);
+        testing.allocator.free(rt.context_blob);
+    }
+
+    var line: @import("../line_state.zig").LineState = .{};
+    _ = line.applyInput("#: hello\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const act = try L.onInput(&rt, &ctx, "\r");
+    try testing.expect(act == .replace);
+
+    var deadline_iters: usize = 100;
+    while (deadline_iters > 0) : (deadline_iters -= 1) {
+        // Worker has fired; if it completed, pollShellInput returns
+        // null (no command on failure) but leaves a hint pending.
+        const inject = try L.pollShellInput(&rt, &ctx);
+        if (inject == null) {
+            // pollShellInput only consumes when res_done was set.
+            // If it returned null without consuming (still
+            // in-flight), keep polling.
+            if (rt.in_flight) {
+                _ = libc.usleep(20_000);
+                continue;
+            }
+            // Worker has signalled completion + we just consumed it.
+            // The hint should now be pending with the HTTP error.
+            const hint = try L.provideHintText(&rt, &ctx);
+            try testing.expect(hint != null);
+            try testing.expect(std.mem.indexOf(u8, hint.?, "HTTP 500") != null);
+            try testing.expect(std.mem.indexOf(u8, hint.?, "llm:") != null);
+            return;
+        }
+        // Unexpectedly got bytes — the mock returns 500, so the
+        // worker should not have produced anything to inject.
+        return error.UnexpectedInjection;
     }
     return error.WorkerTimedOut;
 }
