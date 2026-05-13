@@ -72,15 +72,31 @@ pub fn assemble(args: AssembleArgs) std.Io.Writer.Error!void {
         try writeSegment(args.w, &any, sw.buffered());
     }
     if (args.subprocess_text.len > 0) {
-        var seg_buf: [256]u8 = undefined;
+        // `subprocess_text` is up to ~192 bytes from the proxy
+        // (`subp_buf`); adding the per-segment SGR (`subprocess_style`
+        // + reset + bar_style reapply) plus the arrow glyph leaves
+        // ~64 bytes of headroom in a 256-byte buffer — borderline.
+        // 384 bytes guarantees a complete sequence even when both
+        // styles are maximally verbose (truecolor fg/bg + every
+        // attribute bit set). If formatting STILL fails (impossible
+        // in practice with the bounded inputs above, but defended
+        // against by Copilot's "either fully well-formed or
+        // omitted" suggestion), we drop the segment entirely rather
+        // than risk emitting a partial style escape that bleeds
+        // into the next segment.
+        var seg_buf: [384]u8 = undefined;
         var sw: std.Io.Writer = .fixed(&seg_buf);
-        sw.print("{f}\u{2192} {s}{s}{f}", .{
+        if (sw.print("{f}\u{2192} {s}{s}{f}", .{
             args.subprocess_style,
             args.subprocess_text,
             style_mod.reset,
             args.bar_style,
-        }) catch {};
-        try writeSegment(args.w, &any, sw.buffered());
+        })) {
+            try writeSegment(args.w, &any, sw.buffered());
+        } else |_| {
+            // Partial output — omit. Better a missing segment than
+            // a half-emitted SGR leaking style into subsequent text.
+        }
     }
     try writeSegment(args.w, &any, args.base_text);
     try writeSegment(args.w, &any, args.module_text);

@@ -221,24 +221,62 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         .use_ssh_g = config.subprocess.use_ssh_g,
     };
 
-    // Stash for the line we expect a subsequent `;C` to attribute.
+    // FIFO of committed lines waiting for a matching `;C` to
+    // attribute them.
     //
-    // Why: the stdin path runs `dispatchLineCommit` + `clearLastCommitted`
-    // the moment the user presses Enter, while the shell's `;C`
-    // marker doesn't arrive until later in the master-output stream
-    // (after the shell echoes, runs PROMPT_COMMAND, etc.). By that
-    // time `line_state.lastCommitted()` is null, so the subprocess
-    // tracker would push a `.none` frame and the entire ssh /
-    // sudo / kubectl recognition would silently break.
+    // Why a FIFO and not a single slot: the stdin path runs
+    // `dispatchLineCommit` + `clearLastCommitted` the moment the
+    // user presses Enter, while the shell's `;C` marker doesn't
+    // arrive until later in the master-output stream (after the
+    // shell echoes, runs PROMPT_COMMAND, etc.). A single-slot
+    // stash was enough for the typical case (one Enter, one ;C).
+    // But a multi-line paste (or rapid back-to-back commits)
+    // pushes several Enter bytes in one stdin read; the SHELL
+    // then emits ;C per command — possibly multiple in one
+    // master-output read. Without a FIFO each ;C would consume
+    // the LATEST commit (overwriting), so the first commands
+    // would be tagged with the LAST committed line's parse —
+    // wrong attribution.
     //
-    // We copy the committed line into this scratch on the stdin
-    // path, then the master-output `;C` edge consumes + clears it.
-    // 1 KiB is generous — `ssh foo@bar -i ~/.ssh/key ...` lines
-    // stay well under that. Lines longer than the buffer are
-    // truncated (the parser only needs the first token to
-    // classify, which is always at the front).
-    var pending_launch_buf: [1024]u8 = undefined;
-    var pending_launch_len: usize = 0;
+    // Capacity 8 covers the realistic paste case; commits that
+    // overflow get dropped from the head (oldest first) so the
+    // tail stays current. Per-entry buffer 1 KiB is generous —
+    // `ssh foo@bar -i ~/.ssh/key …` stays well under, and
+    // truncation only loses tokens past the head (the parser
+    // only needs the first token to classify).
+    const max_pending_launches = 8;
+    const max_launch_line = 1024;
+    const PendingLaunches = struct {
+        buf: [max_pending_launches][max_launch_line]u8 = undefined,
+        lens: [max_pending_launches]usize = .{0} ** max_pending_launches,
+        head: usize = 0,
+        count: usize = 0,
+
+        fn push(self: *@This(), line: []const u8) void {
+            // Drop the oldest if we're at capacity. Drops are
+            // unlikely (8 simultaneous pending commits) but a
+            // pathological paste could trigger it.
+            if (self.count == max_pending_launches) {
+                self.head = (self.head + 1) % max_pending_launches;
+                self.count -= 1;
+            }
+            const slot = (self.head + self.count) % max_pending_launches;
+            const n = @min(line.len, max_launch_line);
+            @memcpy(self.buf[slot][0..n], line[0..n]);
+            self.lens[slot] = n;
+            self.count += 1;
+        }
+
+        fn pop(self: *@This()) []const u8 {
+            if (self.count == 0) return "";
+            const n = self.lens[self.head];
+            const out = self.buf[self.head][0..n];
+            self.head = (self.head + 1) % max_pending_launches;
+            self.count -= 1;
+            return out;
+        }
+    };
+    var pending_launches: PendingLaunches = .{};
 
     var ctx = module.Context{
         .allocator = allocator,
@@ -660,11 +698,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     // alone. If a recording-eligible line arrives
                     // we overwrite (latest commit wins, matching
                     // the rec_buf mailbox semantics).
-                    if (shell_saw_enter) {
-                        const stash_n = @min(committed.len, pending_launch_buf.len);
-                        @memcpy(pending_launch_buf[0..stash_n], committed[0..stash_n]);
-                        pending_launch_len = stash_n;
-                    }
+                    if (shell_saw_enter) pending_launches.push(committed);
                     // Decide whether to record this commit. Three
                     // gating signals:
                     //
@@ -770,17 +804,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 for (osc133_tracker.drainEdges()) |edge| {
                     switch (edge) {
                         .cmd_start => {
-                            // ;C — push a frame parsed from the line the
-                            // stdin path stashed at commit time. We
-                            // CAN'T read `line_state.lastCommitted()`
-                            // here — by the time the shell echoes +
-                            // emits `;C`, the stdin handler has already
-                            // run `clearLastCommitted()`, so we'd push
-                            // a `.none` frame and silently lose
-                            // recognition.
-                            const launched = pending_launch_buf[0..pending_launch_len];
-                            subprocess_tracker.onCommandStart(launched, allocator, io);
-                            pending_launch_len = 0;
+                            // ;C — pop the next pending launch line
+                            // (FIFO order matches the Enter order on
+                            // stdin) and feed it to the subprocess
+                            // tracker. We CAN'T use
+                            // `line_state.lastCommitted()` — by the
+                            // time the shell emits `;C`, the stdin
+                            // path has already run `clearLastCommitted()`
+                            // — and if multiple ;C edges fire in one
+                            // chunk we need the corresponding commits,
+                            // not the most recent one.
+                            subprocess_tracker.onCommandStart(pending_launches.pop(), allocator, io);
                         },
                         .cmd_end => subprocess_tracker.onCommandEnd(),
                     }
