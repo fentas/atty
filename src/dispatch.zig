@@ -142,6 +142,24 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return null;
         }
 
+        /// First non-null list wins, same precedence model as
+        /// gatherGhostText. Used by the multi-suggestion overlay
+        /// rendered below the prompt (see `Config.ghost.list_count`).
+        /// The returned slice is borrowed from the module's storage
+        /// (typically `ctx.scratch` or runtime-owned memory) and must
+        /// stay valid until the next dispatch call.
+        pub fn gatherGhostList(
+            rts: *Runtimes,
+            ctx: *Context,
+        ) Error!?[]const []const u8 {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "provideGhostList")) {
+                    if (try M.provideGhostList(rts[i], ctx)) |entries| return entries;
+                }
+            }
+            return null;
+        }
+
         /// Fired exactly once per Enter-press, after applyInput has
         /// cleared the line. `line` is the pre-Enter content — modules
         /// use it for history recording, audit logs, etc. We do not
@@ -383,6 +401,66 @@ const EmptyGhost = struct {
 };
 
 const D_EmptyGhost = Dispatcher(.{ EmptyGhost, GhostProvider });
+
+const ListProvider = struct {
+    pub const name = "list-provider";
+    pub const Runtime = struct {
+        entries: []const []const u8 = &.{},
+    };
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn provideGhostList(rt: *Runtime, _: *Context) Error!?[]const []const u8 {
+        if (rt.entries.len == 0) return null;
+        return rt.entries;
+    }
+};
+
+const EmptyList = struct {
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn provideGhostList(_: *Runtime, _: *Context) Error!?[]const []const u8 {
+        return null;
+    }
+};
+
+const D_EmptyList = Dispatcher(.{ EmptyList, ListProvider });
+
+test "gatherGhostList returns first non-null list, skipping nulls before it" {
+    const D = D_EmptyList;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+    const entries = [_][]const u8{ "alpha", "beta", "gamma" };
+    rts[1].entries = &entries;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    const got = try D.gatherGhostList(&rts, &ctx);
+    try testing.expect(got != null);
+    try testing.expectEqual(@as(usize, 3), got.?.len);
+    try testing.expectEqualStrings("alpha", got.?[0]);
+    try testing.expectEqualStrings("gamma", got.?[2]);
+}
+
+test "gatherGhostList returns null when no module contributes a list" {
+    const D = Dispatcher(.{NoOpA});
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    try testing.expectEqual(@as(?[]const []const u8, null), try D.gatherGhostList(&rts, &ctx));
+}
 
 test "gatherGhostText returns first non-null" {
     const D = D_EmptyGhost;

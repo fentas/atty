@@ -44,6 +44,31 @@ pub const proxy: Proxy = .{};
 pub const Ghost = struct {
     /// Overlay style. Matches fish + zsh-autosuggestions: dim only.
     style: atty.Style = atty.style.presets.muted,
+
+    /// How many alternative suggestions to render below the prompt
+    /// as a numbered pick-list, in addition to the inline ghost.
+    /// 0 disables the feature (default). Capped at 9 — the default
+    /// bindings are Ctrl+1..Ctrl+9 / Esc+1..Esc+9, and most
+    /// terminals can't address more than that without chord keys.
+    list_count: u8 = 0,
+
+    /// How the pick-list is painted.
+    ///   .inline_rows: paint N rows directly below the prompt with
+    ///     a save-cursor / CUP / restore-cursor wrap. Cheap; will
+    ///     visibly fight shell output that lands in those rows
+    ///     until the next render cycle redraws.
+    ///   .reserved_region: reserve a DECSTBM band above the
+    ///     statusbar (or at the bottom if the statusbar is off)
+    ///     for the list while it's visible; release the band on
+    ///     Enter / line clear. Sturdier; more cursor coordination.
+    list_render: enum { inline_rows, reserved_region } = .inline_rows,
+
+    /// Style of the rendered list entries. The 1-based index prefix
+    /// (`1: `, `2: `, …) inherits this style; the entry's own
+    /// trailing portion inherits the inline `style` above so the
+    /// "what would land after cursor" hint reads the same as the
+    /// inline ghost.
+    list_style: atty.Style = atty.style.presets.muted,
 };
 pub const ghost: Ghost = .{};
 
@@ -88,6 +113,27 @@ pub const Keymap = struct {
         .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match },
+        // Ghost pick — kitty kbd CSI-u + Esc+digit legacy fallback.
+        // No-ops when `ghost.list_count == 0` (default) or N exceeds
+        // the rendered list length.
+        .{ .bytes = atty.keymap.key("Ctrl+1"), .action = .{ .ghost_pick = 1 } },
+        .{ .bytes = atty.keymap.key("Ctrl+2"), .action = .{ .ghost_pick = 2 } },
+        .{ .bytes = atty.keymap.key("Ctrl+3"), .action = .{ .ghost_pick = 3 } },
+        .{ .bytes = atty.keymap.key("Ctrl+4"), .action = .{ .ghost_pick = 4 } },
+        .{ .bytes = atty.keymap.key("Ctrl+5"), .action = .{ .ghost_pick = 5 } },
+        .{ .bytes = atty.keymap.key("Ctrl+6"), .action = .{ .ghost_pick = 6 } },
+        .{ .bytes = atty.keymap.key("Ctrl+7"), .action = .{ .ghost_pick = 7 } },
+        .{ .bytes = atty.keymap.key("Ctrl+8"), .action = .{ .ghost_pick = 8 } },
+        .{ .bytes = atty.keymap.key("Ctrl+9"), .action = .{ .ghost_pick = 9 } },
+        .{ .bytes = atty.keymap.key("Esc+1"), .action = .{ .ghost_pick = 1 } },
+        .{ .bytes = atty.keymap.key("Esc+2"), .action = .{ .ghost_pick = 2 } },
+        .{ .bytes = atty.keymap.key("Esc+3"), .action = .{ .ghost_pick = 3 } },
+        .{ .bytes = atty.keymap.key("Esc+4"), .action = .{ .ghost_pick = 4 } },
+        .{ .bytes = atty.keymap.key("Esc+5"), .action = .{ .ghost_pick = 5 } },
+        .{ .bytes = atty.keymap.key("Esc+6"), .action = .{ .ghost_pick = 6 } },
+        .{ .bytes = atty.keymap.key("Esc+7"), .action = .{ .ghost_pick = 7 } },
+        .{ .bytes = atty.keymap.key("Esc+8"), .action = .{ .ghost_pick = 8 } },
+        .{ .bytes = atty.keymap.key("Esc+9"), .action = .{ .ghost_pick = 9 } },
     },
 };
 pub const keymap: Keymap = .{};

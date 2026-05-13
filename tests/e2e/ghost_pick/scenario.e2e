@@ -1,0 +1,63 @@
+# ghost_pick — multi-suggestion list + Ctrl+N pick verification.
+#
+# Flow:
+#   1. Record 4 distinct `prefix-x …` entries via Enter.
+#   2. Type the common prefix `prefix-x `. Inline ghost shows the
+#      newest entry's trailing portion; the list shows the next 3
+#      newest-first as " 1: …", " 2: …", " 3: …".
+#   3. Snapshot the screen — grid.txt should contain the list rows
+#      (dim style spans should land on those rows in grid.sgr).
+#   4. Press Ctrl+2 (kitty kbd `\x1b[50;5u`) → atty substitutes the
+#      trailing portion of list entry #2 into the shell's input.
+#   5. Press Enter so the picked command runs; wait_for its output
+#      so we know what was selected, then snapshot again.
+#
+# The point isn't to pin the exact entries (recording order has some
+# nondeterminism) but to verify:
+#   - the list appears as multiple dim rows below the prompt
+#   - Ctrl+2 lands in the proxy, gets routed to ghost_pick(2), and
+#     the substituted bytes reach the shell
+
+cols 80
+rows 24
+timeout_ms 6000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 200
+
+# Seed the history ring (each line is non-uncertain so onLineCommit fires).
+type "prefix-x alpha\r"
+wait_for "alpha"
+sleep 100
+type "prefix-x beta\r"
+wait_for "beta"
+sleep 100
+type "prefix-x gamma\r"
+wait_for "gamma"
+sleep 100
+type "prefix-x delta\r"
+wait_for "delta"
+sleep 200
+
+# Type the common prefix — inline ghost + list should both render.
+type "prefix-x "
+sleep 500
+snapshot list_visible
+
+# Ctrl+2 — pick entry #2 from the list.
+type "\x1b[50;5u"
+sleep 400
+
+# Snapshot AFTER the pick, BEFORE Enter. The line should show the
+# picked command's trailing portion appended to the typed prefix.
+# This proves: keymap.match routed the CSI-u to ghost_pick(2), the
+# action handler looked up list entry #2, substituted the trailing
+# bytes, and forwarded them to the shell which echoed them.
+snapshot post_pick
+
+key Enter
+sleep 200
+
+type "exit\r"
+exit_code 0

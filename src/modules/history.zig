@@ -113,6 +113,12 @@ pub fn configure(comptime cfg: Config) type {
             /// `provideGhostText` writes its result here for `ctx.scratch`
             /// to pick up. We also reuse this buffer across calls.
             cached_match: ?[]const u8 = null,
+            /// Scratch storage for `provideGhostList`. Slices into
+            /// `entries` items, so valid only until the next ring
+            /// mutation. Capped at 9 — matches the default Ctrl+1..9
+            /// and Esc+1..9 binding range.
+            ghost_list_buf: [9][]const u8 = undefined,
+            ghost_list_len: usize = 0,
         };
 
         pub fn attach(allocator: Allocator, io: std.Io) !Runtime {
@@ -385,6 +391,49 @@ pub fn configure(comptime cfg: Config) type {
             return null;
         }
 
+        /// Up to 9 newest-first prefix-matches for the current line.
+        /// Skips the entry that `provideGhostText` would have returned
+        /// (so the multi-row list complements rather than duplicates
+        /// the inline ghost) and deduplicates by content (history rings
+        /// can have repeated entries; users want distinct picks).
+        /// Returns null when no candidates exist; the proxy renders
+        /// nothing in that case.
+        pub fn provideGhostList(rt: *Runtime, ctx: *m.Context) m.Error!?[]const []const u8 {
+            if (!cfg.suggest) return null;
+            if (ctx.line.uncertain) return null;
+            const query = ctx.line.current();
+            if (query.len == 0) return null;
+            if (query.len > cfg.max_line) return null;
+
+            rt.ghost_list_len = 0;
+            const inline_match = findSuggestion(rt, query); // already shown inline
+
+            var i: usize = rt.entries.items.len;
+            while (i > 0 and rt.ghost_list_len < rt.ghost_list_buf.len) {
+                i -= 1;
+                const e = rt.entries.items[i];
+                if (!std.mem.startsWith(u8, e, query)) continue;
+                if (e.len <= query.len) continue;
+                // Skip the inline ghost's entry — it's already painted
+                // after the cursor; no point listing it as pick #1.
+                if (inline_match) |im| if (std.mem.eql(u8, im, e)) continue;
+                // Dedupe within the list.
+                var dup = false;
+                for (rt.ghost_list_buf[0..rt.ghost_list_len]) |existing| {
+                    if (std.mem.eql(u8, existing, e)) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) continue;
+
+                rt.ghost_list_buf[rt.ghost_list_len] = e;
+                rt.ghost_list_len += 1;
+            }
+            if (rt.ghost_list_len == 0) return null;
+            return rt.ghost_list_buf[0..rt.ghost_list_len];
+        }
+
         pub fn onTick(rt: *Runtime, _: *m.Context, elapsed_ms: u64) m.Error!void {
             _ = elapsed_ms;
             if (rt.last_keystroke_ms == 0) return;
@@ -615,6 +664,116 @@ test "loadRecent populates the ring from an existing file" {
     try testing.expectEqual(@as(usize, 3), rt.entries.items.len);
     try testing.expectEqualStrings("echo one", rt.entries.items[0]);
     try testing.expectEqualStrings("echo three", rt.entries.items[2]);
+}
+
+test "provideGhostList returns newest-first prefix matches, skipping the inline ghost and dupes" {
+    const H = configure(.{});
+    var rt: H.Runtime = .{
+        .allocator = testing.allocator,
+        .path = try testing.allocator.dupe(u8, ""),
+        .format = .plain,
+        .entries = .empty,
+    };
+    defer H.detach(&rt, std.Io.failing);
+
+    // Push entries oldest → newest. With duplicates.
+    try H.pushEntry(&rt, "git log");
+    try H.pushEntry(&rt, "git commit -m foo");
+    try H.pushEntry(&rt, "git push origin master");
+    try H.pushEntry(&rt, "git commit -m foo"); // dup
+    try H.pushEntry(&rt, "git status");
+
+    var line: @import("../line_state.zig").LineState = .{};
+    _ = line.applyInput("git ");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const got = (try H.provideGhostList(&rt, &ctx)).?;
+
+    // Inline ghost would have been "git status" (newest match).
+    // The list starts after, newest-first, deduped:
+    //   - "git commit -m foo" appears TWICE in the ring; the newer
+    //     instance is the 4th push (after "git push origin master"),
+    //     so the newest-first walk hits it before "git push" and
+    //     dedupe drops the older copy at position 1.
+    //   - "git push origin master" is older than the dup, so it
+    //     ranks below "git commit -m foo".
+    try testing.expectEqual(@as(usize, 3), got.len);
+    try testing.expectEqualStrings("git commit -m foo", got[0]);
+    try testing.expectEqualStrings("git push origin master", got[1]);
+    try testing.expectEqualStrings("git log", got[2]);
+}
+
+test "provideGhostList returns null on empty query / uncertain line" {
+    const H = configure(.{});
+    var rt: H.Runtime = .{
+        .allocator = testing.allocator,
+        .path = try testing.allocator.dupe(u8, ""),
+        .format = .plain,
+        .entries = .empty,
+    };
+    defer H.detach(&rt, std.Io.failing);
+    try H.pushEntry(&rt, "anything");
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Empty line: null.
+    try testing.expectEqual(@as(?[]const []const u8, null), try H.provideGhostList(&rt, &ctx));
+
+    // Mark uncertain (simulate arrow key): still null even with a typed prefix.
+    _ = line.applyInput("a");
+    _ = line.applyInput("\x1b[A"); // up arrow → uncertain
+    try testing.expect(line.uncertain);
+    try testing.expectEqual(@as(?[]const []const u8, null), try H.provideGhostList(&rt, &ctx));
+}
+
+test "provideGhostList caps at 9 entries (matches Ctrl+1..Ctrl+9 / Esc+1..9 default bindings)" {
+    const H = configure(.{ .capacity = 32 });
+    var rt: H.Runtime = .{
+        .allocator = testing.allocator,
+        .path = try testing.allocator.dupe(u8, ""),
+        .format = .plain,
+        .entries = .empty,
+    };
+    defer H.detach(&rt, std.Io.failing);
+
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        const entry = try std.fmt.bufPrint(&buf, "x cmd-{d}", .{i});
+        try H.pushEntry(&rt, entry);
+    }
+
+    var line: @import("../line_state.zig").LineState = .{};
+    _ = line.applyInput("x ");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const got = (try H.provideGhostList(&rt, &ctx)).?;
+    try testing.expectEqual(@as(usize, 9), got.len);
 }
 
 test "deleteHistoryMatch rewrites the on-disk file atomically" {

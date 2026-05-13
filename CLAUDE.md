@@ -76,6 +76,7 @@ pub fn onOutput  (rt, ctx, output) !void           // hot path
 pub fn onTick    (rt, ctx, elapsed_ms) !void
 pub fn onLineCommit(rt, ctx, line) !void           // Enter on non-empty + non-uncertain line
 pub fn provideGhostText(rt, ctx) !?[]const u8      // first non-null wins (order = priority)
+pub fn provideGhostList(rt, ctx) !?[]const []const u8 // multi-row pick list (Ctrl+1..9 / Esc+1..9)
 pub fn statusText(rt, ctx) !?[]const u8            // segment for the status bar
 ```
 

@@ -18,7 +18,7 @@
 
 const std = @import("std");
 
-pub const Action = enum {
+pub const Action = union(enum) {
     /// Replace the keystroke with the bytes of the currently-visible
     /// ghost suggestion (i.e. accept fish-style autosuggestion).
     /// No-op when no ghost is showing or the line is in an uncertain
@@ -30,10 +30,17 @@ pub const Action = enum {
     incognito_toggle,
     /// Delete every history entry that matches the current line.
     /// Fires `deleteHistoryMatch` on every module that implements it
-    /// (today: history; atuin's CLI doesn't expose match-delete in a
-    /// portable way), then sends Ctrl+U to the shell so the prompt
-    /// clears, and flashes a transient status-bar message.
+    /// (today: history + atuin), then sends Ctrl+U to the shell so
+    /// the prompt clears, and flashes a transient status-bar message.
     delete_history_match,
+    /// Pick the Nth entry from the multi-suggestion list rendered
+    /// below the prompt and replace the keystroke with its trailing
+    /// portion (same substitution as ghost_accept, but indexed). N
+    /// is 1-based and capped at 9; out-of-range picks no-op.
+    /// Default bindings: Ctrl+1..Ctrl+9 (kitty kbd CSI-u) and
+    /// Esc+1..Esc+9 (legacy ESC+digit; doubles as Alt+digit on
+    /// non-kitty terminals).
+    ghost_pick: u8,
 };
 
 pub const Binding = struct {
@@ -57,6 +64,11 @@ pub const Binding = struct {
 ///     `Ctrl+Up`, `Ctrl+Down`, `F1`–`F12`.
 ///   - **Ctrl + letter:** `Ctrl+A` .. `Ctrl+Z` (case-insensitive) →
 ///     ASCII 0x01..0x1A.
+///   - **Ctrl + digit (1..9):** kitty-keyboard CSI-u form. Only fires
+///     in terminals with the disambiguate flag (atty default).
+///   - **Esc + digit (1..9):** legacy `ESC <digit>`. Doubles as
+///     Alt+digit on terminals without kitty kbd. Used as the
+///     ghost_pick fallback binding.
 ///   - **Alt + single ASCII char:** `Alt+f` → `ESC f`. xterm-style.
 ///
 /// Not handled (because terminals don't have a portable sequence):
@@ -103,6 +115,32 @@ pub fn key(comptime name: []const u8) []const u8 {
     // that doesn't speak the protocol, fall back to one of the other
     // ghost_accept bindings (Right / End / Ctrl+F).
     if (comptime std.mem.eql(u8, name, "Ctrl+Tab")) return "\x1b[9;5u";
+
+    // Ctrl+<digit> — kitty kbd CSI-u. No legacy encoding for these;
+    // works only with the disambiguate flag (atty default).
+    if (comptime std.mem.eql(u8, name, "Ctrl+1")) return "\x1b[49;5u";
+    if (comptime std.mem.eql(u8, name, "Ctrl+2")) return "\x1b[50;5u";
+    if (comptime std.mem.eql(u8, name, "Ctrl+3")) return "\x1b[51;5u";
+    if (comptime std.mem.eql(u8, name, "Ctrl+4")) return "\x1b[52;5u";
+    if (comptime std.mem.eql(u8, name, "Ctrl+5")) return "\x1b[53;5u";
+    if (comptime std.mem.eql(u8, name, "Ctrl+6")) return "\x1b[54;5u";
+    if (comptime std.mem.eql(u8, name, "Ctrl+7")) return "\x1b[55;5u";
+    if (comptime std.mem.eql(u8, name, "Ctrl+8")) return "\x1b[56;5u";
+    if (comptime std.mem.eql(u8, name, "Ctrl+9")) return "\x1b[57;5u";
+
+    // Esc+<digit> — legacy ESC+digit byte pair. Doubles as Alt+digit
+    // on terminals without kitty kbd; matches the "fast Esc then digit"
+    // two-step on terminals with kitty kbd (separated reads won't
+    // trigger). Used as ghost_pick legacy fallback.
+    if (comptime std.mem.eql(u8, name, "Esc+1")) return "\x1b1";
+    if (comptime std.mem.eql(u8, name, "Esc+2")) return "\x1b2";
+    if (comptime std.mem.eql(u8, name, "Esc+3")) return "\x1b3";
+    if (comptime std.mem.eql(u8, name, "Esc+4")) return "\x1b4";
+    if (comptime std.mem.eql(u8, name, "Esc+5")) return "\x1b5";
+    if (comptime std.mem.eql(u8, name, "Esc+6")) return "\x1b6";
+    if (comptime std.mem.eql(u8, name, "Esc+7")) return "\x1b7";
+    if (comptime std.mem.eql(u8, name, "Esc+8")) return "\x1b8";
+    if (comptime std.mem.eql(u8, name, "Esc+9")) return "\x1b9";
 
     if (comptime std.mem.eql(u8, name, "Shift+Right")) return "\x1b[1;2C";
     if (comptime std.mem.eql(u8, name, "Shift+Left")) return "\x1b[1;2D";
@@ -513,6 +551,27 @@ test "key folds Ctrl+letter to control byte" {
 test "key handles Alt+char" {
     try std.testing.expectEqualStrings("\x1bf", key("Alt+f"));
     try std.testing.expectEqualStrings("\x1b.", key("Alt+."));
+}
+
+test "key resolves Ctrl+<digit> (kitty kbd CSI-u)" {
+    try std.testing.expectEqualStrings("\x1b[49;5u", key("Ctrl+1"));
+    try std.testing.expectEqualStrings("\x1b[53;5u", key("Ctrl+5"));
+    try std.testing.expectEqualStrings("\x1b[57;5u", key("Ctrl+9"));
+}
+
+test "key resolves Esc+<digit> (legacy ESC+digit, doubles as Alt+digit on non-kitty)" {
+    try std.testing.expectEqualStrings("\x1b1", key("Esc+1"));
+    try std.testing.expectEqualStrings("\x1b9", key("Esc+9"));
+}
+
+test "Action.ghost_pick carries the index as a payload" {
+    // Regression guard for the union(enum) shape — switch sites in
+    // proxy.zig depend on capturing the index via `|n|`.
+    const a: Action = .{ .ghost_pick = 3 };
+    switch (a) {
+        .ghost_pick => |n| try std.testing.expectEqual(@as(u8, 3), n),
+        else => return error.TestFailed,
+    }
 }
 
 test "key handles function keys" {

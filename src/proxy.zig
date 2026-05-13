@@ -31,6 +31,7 @@ const Pty = @import("pty.zig").Pty;
 const RawMode = @import("terminal.zig").RawMode;
 const LineState = @import("line_state.zig").LineState;
 const Ghost = @import("ghost.zig").Ghost;
+const GhostList = @import("ghost_list.zig").GhostList;
 const StatusBar = @import("statusbar.zig").StatusBar;
 const ansi = @import("ansi.zig");
 const style_mod = @import("style.zig");
@@ -152,6 +153,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var ghost = Ghost.init(allocator, config.ghost.style);
     defer ghost.deinit();
 
+    // Multi-row pick-list overlay. Disabled until config.ghost.list_count > 0.
+    const list_mode: @import("ghost_list.zig").RenderMode = switch (config.ghost.list_render) {
+        .inline_rows => .inline_rows,
+        .reserved_region => .reserved_region,
+    };
+    var ghost_list = GhostList.init(allocator, config.ghost.list_style, list_mode);
+    defer ghost_list.deinit();
+
     var ctx = module.Context{
         .allocator = allocator,
         .io = io,
@@ -218,6 +227,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             last_tick_ms = now;
             D.dispatchTick(&runtimes, &ctx, elapsed) catch {};
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
+            renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             continue;
         }
@@ -288,6 +298,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 _ = std.c.write(pty.master, "\x15", 1);
                                 line_state.reset();
                                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
+                                if (ghost_list.visible) clearGhostList(&ghost_list, &out_buf) catch {};
                                 // Flash a status-bar message that
                                 // auto-fades after 3 s.
                                 if (statusbar) |*sb| {
@@ -301,6 +312,35 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 }
                             }
                             swallow_after_binding = true;
+                        },
+                        .ghost_pick => |pick_n| {
+                            // Substitute the keystroke with the
+                            // trailing portion of list entry N (1-based).
+                            // No-op + swallow when:
+                            //   - the line is uncertain (history-nav
+                            //     etc. — suggestions would be stale)
+                            //   - N exceeds the rendered list length
+                            //   - the entry doesn't extend the current
+                            //     line prefix
+                            var did_pick = false;
+                            if (!line_state.uncertain) {
+                                if (ghost_list.entry(pick_n)) |full| {
+                                    const query = line_state.current();
+                                    if (std.mem.startsWith(u8, full, query) and full.len > query.len) {
+                                        const trailing = full[query.len..];
+                                        if (trailing.len > 0 and trailing.len <= accept_buf.len) {
+                                            @memcpy(accept_buf[0..trailing.len], trailing);
+                                            input = accept_buf[0..trailing.len];
+                                            did_pick = true;
+                                        }
+                                    }
+                                }
+                            }
+                            // Out-of-range / no-match → drop the
+                            // binding bytes (Ctrl+<digit> CSI-u or
+                            // Esc+<digit>) so the shell never sees
+                            // them as mojibake or digit-argument.
+                            if (!did_pick) swallow_after_binding = true;
                         },
                     }
                 }
@@ -332,6 +372,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
+                if (ghost_list.visible) try clearGhostList(&ghost_list, &out_buf);
                 _ = line_state.applyInput(input);
 
                 const action = D.dispatchInput(&runtimes, &ctx, input) catch .forward;
@@ -382,10 +423,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const output = read_buf[0..read_n];
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
+                if (ghost_list.visible) try clearGhostList(&ghost_list, &out_buf);
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
                 try writeAll(posix.STDOUT_FILENO, output);
 
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
+                renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
                 if (statusbar) |*sb| {
                     // Shell output may have scrolled or overwritten our
                     // reserved row — force a repaint.
@@ -527,5 +570,46 @@ fn renderStatus(
 fn clearGhost(ghost: *Ghost, out_buf: []u8) !void {
     var w: std.Io.Writer = .fixed(out_buf);
     ghost.clear(&w) catch return;
+    try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+}
+
+/// Multi-row pick-list overlay. Disabled when `config.ghost.list_count == 0`.
+/// Refetches `gatherGhostList`, copies into the GhostList cache, and paints
+/// below the cursor in a save/restore wrap. Idempotent — when the list
+/// hasn't changed, `GhostList.set` short-circuits and we still paint
+/// (cheap: same bytes go out, terminal repaints the same rows).
+fn renderGhostList(rts: *D.Runtimes, ctx: *module.Context, list: *GhostList, out_buf: []u8) !void {
+    if (!ctx.is_tty) return;
+    if (config.ghost.list_count == 0) return;
+
+    if (ctx.line.uncertain or ctx.line.current().len == 0) {
+        if (list.visible) try clearGhostList(list, out_buf);
+        return;
+    }
+
+    const entries_opt = D.gatherGhostList(rts, ctx) catch null;
+    if (entries_opt) |entries| {
+        const changed = list.set(entries, config.ghost.list_count) catch {
+            // OOM is rare; just skip this paint and let the next
+            // render cycle retry.
+            return;
+        };
+        // Skip the paint when the cache + visible state already
+        // match. Without this gate, every tick descends N rows
+        // below the cursor and emits the same bytes — near the
+        // bottom of the screen that accumulates scroll-induced
+        // drift very quickly.
+        if (!changed and list.visible) return;
+        var w: std.Io.Writer = .fixed(out_buf);
+        list.show(&w) catch return;
+        if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+        return;
+    }
+    if (list.visible) try clearGhostList(list, out_buf);
+}
+
+fn clearGhostList(list: *GhostList, out_buf: []u8) !void {
+    var w: std.Io.Writer = .fixed(out_buf);
+    list.clear(&w) catch return;
     try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
 }

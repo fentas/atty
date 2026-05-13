@@ -10,6 +10,7 @@ pub const dispatch = @import("dispatch.zig");
 pub const line_state = @import("line_state.zig");
 pub const ansi = @import("ansi.zig");
 pub const ghost = @import("ghost.zig");
+pub const ghost_list = @import("ghost_list.zig");
 pub const pty = @import("pty.zig");
 pub const terminal = @import("terminal.zig");
 pub const proxy = @import("proxy.zig");

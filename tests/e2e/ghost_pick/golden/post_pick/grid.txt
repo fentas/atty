@@ -1,0 +1,24 @@
+$ prefix-x alpha
+bash: prefix-x: command not found
+$ prefix-x beta
+bash: prefix-x: command not found
+$ prefix-x gamma
+bash: prefix-x: command not found
+$ prefix-x delta
+bash: prefix-x: command not found
+$ prefix-x beta
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
