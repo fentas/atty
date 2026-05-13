@@ -52,7 +52,21 @@ pub const Osc133 = struct {
     /// Overflow is silently dropped (rare; would only mis-attribute
     /// some subprocess frames in a pathological burst).
     edges: [32]Edge = undefined,
+    /// Byte offset within the current feed where each edge fired.
+    /// The proxy uses these offsets to interleave OSC 7 cwd updates
+    /// (which fire from a separate `Osc7` tracker on the same byte
+    /// stream) with OSC 133 push/pop in the order they actually
+    /// appeared in `output`. Without offsets, applying all OSC 7
+    /// after all edges (or vice versa) mis-attributes the cwd to
+    /// the wrong frame when `OSC 7` and `;C` co-occur in a single
+    /// read chunk.
+    edge_offsets: [32]u32 = undefined,
     edge_count: u8 = 0,
+    /// Byte index within the current `feed()` call. Stamped onto
+    /// each edge in `edge_offsets`. Reset at the start of every
+    /// `feed()` invocation; the proxy reads it indirectly via the
+    /// stamped offsets and otherwise ignores it.
+    feed_byte_index: u32 = 0,
 
     const State = enum {
         ground, // regular input-byte processing (when in input phase)
@@ -102,9 +116,16 @@ pub const Osc133 = struct {
     }
 
     /// Feed master-output bytes. Idempotent + safe across partial
-    /// sequences (state survives feed calls).
+    /// sequences (state survives feed calls). Each edge pushed by
+    /// this call is stamped with its byte offset within `bytes`
+    /// (`feed_byte_index`) so callers can interleave it with other
+    /// per-byte events captured during the same feed.
     pub fn feed(self: *Osc133, bytes: []const u8) void {
-        for (bytes) |b| self.feedByte(b);
+        self.feed_byte_index = 0;
+        for (bytes) |b| {
+            self.feedByte(b);
+            self.feed_byte_index += 1;
+        }
     }
 
     fn feedByte(self: *Osc133, b: u8) void {
@@ -202,6 +223,7 @@ pub const Osc133 = struct {
     fn pushEdge(self: *Osc133, edge: Edge) void {
         if (self.edge_count >= self.edges.len) return; // overflow — drop
         self.edges[self.edge_count] = edge;
+        self.edge_offsets[self.edge_count] = self.feed_byte_index;
         self.edge_count += 1;
     }
 
@@ -213,6 +235,13 @@ pub const Osc133 = struct {
         const out = self.edges[0..self.edge_count];
         self.edge_count = 0;
         return out;
+    }
+
+    /// Byte offset (within the most recent `feed()`) where edge
+    /// `idx` was emitted. Used by the proxy to interleave OSC 7
+    /// promotion with OSC 133 push/pop in source order.
+    pub fn edgeOffset(self: *const Osc133, idx: usize) u32 {
+        return self.edge_offsets[idx];
     }
 };
 

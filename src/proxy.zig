@@ -694,10 +694,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     // the master-output handler. shell_saw_enter
                     // gates this — if the shell never saw Enter
                     // (`.swallow`, guardrail block) it can't fire
-                    // a `;C` either, so we leave any prior stash
-                    // alone. If a recording-eligible line arrives
-                    // we overwrite (latest commit wins, matching
-                    // the rec_buf mailbox semantics).
+                    // a `;C` either, so we don't push. Each
+                    // recording-eligible line is APPENDED to the
+                    // FIFO; the next `;C` edge pops the oldest
+                    // entry, so multi-commit chunks (a paste of
+                    // several lines) attribute each `;C` to the
+                    // matching commit in stdin order. Overflow at
+                    // capacity (8) drops the head, not this tail —
+                    // the tail entry is always current.
                     if (shell_saw_enter) pending_launches.push(committed);
                     // Decide whether to record this commit. Three
                     // gating signals:
@@ -785,24 +789,35 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 alt_screen.feed(output);
                 osc7_tracker.feed(output);
 
-                // Drain every OSC 133 edge that fired in this read
-                // chunk and replay them against the subprocess
-                // stack IN ORDER. A single chunk can carry multiple
-                // markers (a fast command emitting `;C;D` in one
-                // line, a shell flushing batched prompts, a paste
-                // that includes embedded prompt-zone hooks) — earlier
-                // versions compared `prev_osc_phase` to the
-                // post-feed `phase` and missed intermediate edges
-                // entirely. Now `Osc133.drainEdges()` returns the
-                // ordered ring of `;C` / `;D` transitions, one
-                // event per actual marker.
+                // Walk the OSC 133 edge ring + OSC 7 capture
+                // INTERLEAVED by byte offset within the current
+                // `output` chunk. Order matters because the wrong
+                // order silently mis-attributes cwd to the wrong
+                // frame:
                 //
-                // Order also matters relative to the OSC 7 promotion
-                // BELOW: we apply the edges first so the cwd lands
-                // on whichever frame is at the top *after* the
-                // pushes/pops have settled.
-                for (osc133_tracker.drainEdges()) |edge| {
-                    switch (edge) {
+                //   chunk = "OSC7 + ;C"  → cwd belongs to the OLD
+                //     prompt (parent context); applying it AFTER
+                //     the push would land it on the freshly-
+                //     pushed (child) frame instead.
+                //   chunk = ";C + OSC7"  → cwd belongs to the NEW
+                //     frame; applying it BEFORE the push would
+                //     land it on the parent.
+                //
+                // Per-byte offset stamping on both trackers' edges
+                // / capture lets us replay events in source order
+                // without having to merge per-byte during feed.
+                const edges = osc133_tracker.drainEdges();
+                var edge_idx: usize = 0;
+                while (edge_idx < edges.len) : (edge_idx += 1) {
+                    const edge_off = osc133_tracker.edgeOffset(edge_idx);
+                    // If a pending OSC 7 fired BEFORE this edge in
+                    // the source byte stream, promote it now so it
+                    // lands on the current top (before this edge
+                    // mutates the stack).
+                    if (osc7_tracker.cwd_pending and osc7_tracker.cwd_offset <= edge_off) {
+                        subprocess_tracker.onRemoteCwd(osc7_tracker.takeCwd());
+                    }
+                    switch (edges[edge_idx]) {
                         .cmd_start => {
                             // ;C — pop the next pending launch line
                             // (FIFO order matches the Enter order on
@@ -819,15 +834,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         .cmd_end => subprocess_tracker.onCommandEnd(),
                     }
                 }
-
-                // Now promote any pending OSC 7 cwd capture onto
-                // whatever's at the top after the edges settled.
-                // If the chunk contained `;C` + OSC 7 the cwd lands
-                // on the freshly-pushed frame; OSC 7 + `;D` updates
-                // the (now-popped, no-op) frame; OSC 7 alone lands
-                // on the existing top.
-                const remote_cwd = osc7_tracker.takeCwd();
-                if (remote_cwd.len > 0) subprocess_tracker.onRemoteCwd(remote_cwd);
+                // Any OSC 7 left after the last edge had a higher
+                // offset than every edge — apply it now to the
+                // post-replay top.
+                if (osc7_tracker.cwd_pending) {
+                    subprocess_tracker.onRemoteCwd(osc7_tracker.takeCwd());
+                }
 
                 // Alt-screen transition: an interactive full-screen
                 // TUI just entered (?1049h, ?47h, ?1047h) or exited

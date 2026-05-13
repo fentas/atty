@@ -659,7 +659,11 @@ fn parseKubectlExec(args: []const u8) ?[]const u8 {
     }
     if (pod.len == 0) return null;
 
-    // Compose. Memory comes from a thread-local static buffer below.
+    // Compose into the module-scope `parse_buf` below. Caller
+    // (`parseInto`) copies the slice into `Frame.name_buf` before
+    // the next parse runs, so the borrow is short-lived. This
+    // module is single-threaded by design — the proxy event loop
+    // is the only caller — so the shared global is safe.
     parse_buf_len = 0;
     appendToParseBuf(if (ctx.len > 0) ctx else "?");
     appendToParseBuf("/");

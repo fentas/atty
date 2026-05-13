@@ -38,6 +38,15 @@ pub const Osc7 = struct {
     cwd_buf: [512]u8 = undefined,
     cwd_len: usize = 0,
     cwd_pending: bool = false,
+    /// Byte offset within the most recent `feed()` where the
+    /// pending cwd was captured. The proxy reads this to interleave
+    /// the cwd promotion with OSC 133 push/pop in source order
+    /// (otherwise an OSC 7 captured BEFORE a `;C` in the same chunk
+    /// would land on the new frame instead of the old one).
+    cwd_offset: u32 = 0,
+    /// Byte index within the current `feed()` call — incremented
+    /// per byte. Reset on every feed.
+    feed_byte_index: u32 = 0,
 
     const State = enum {
         ground,
@@ -62,7 +71,11 @@ pub const Osc7 = struct {
     /// Feed master-output bytes. State survives partial sequences
     /// across calls so the parser is robust to `read()` boundaries.
     pub fn feed(self: *Osc7, bytes: []const u8) void {
-        for (bytes) |b| self.feedByte(b);
+        self.feed_byte_index = 0;
+        for (bytes) |b| {
+            self.feedByte(b);
+            self.feed_byte_index += 1;
+        }
     }
 
     fn feedByte(self: *Osc7, b: u8) void {
@@ -125,6 +138,7 @@ pub const Osc7 = struct {
         @memcpy(self.cwd_buf[0..n], path[0..n]);
         self.cwd_len = n;
         self.cwd_pending = true;
+        self.cwd_offset = self.feed_byte_index;
     }
 };
 
