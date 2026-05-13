@@ -485,11 +485,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // when the replacement doesn't contain Enter — used
                 // by the LLM module so `#: <prompt>` lines land in
                 // atuin / history despite Ctrl+U eating the line.
+                // Still keyed on the ORIGINAL input containing Enter,
+                // not unconditionally true: a misbehaving module
+                // returning `.replace_commit` on a non-Enter
+                // keystroke must not be able to force a spurious
+                // commit. The behaviour difference vs. plain
+                // `.replace` is only that we look at the original
+                // bytes (not the replacement) for the Enter test.
                 const shell_saw_enter = switch (action) {
                     .forward => containsEnter(input),
                     .swallow => false,
                     .replace => |bytes| containsEnter(bytes),
-                    .replace_commit => true,
+                    .replace_commit => containsEnter(input),
                 };
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';

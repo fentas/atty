@@ -337,15 +337,19 @@ pub const StatusBar = struct {
         // `hint_unchanged` stays false forever and every tick emits
         // a save/restore-cursor pair pointlessly).
         if (!hint_unchanged) {
-            // Guard against u16 underflow on tiny terminals or a
-            // misconfigured `reserve_rows > rows`. Without this the
-            // subtraction wraps and we'd emit a CUP escape for a
-            // nonsense row in the 6×10⁴ range — terminal-dependent
-            // mojibake. The `>= 2 + (reserve_rows - 2)` check is
-            // just `rows >= reserve_rows` written so the arithmetic
-            // happens in u16 without underflowing.
-            if (self.reserve_rows >= 2 and self.rows >= self.reserve_rows) {
-                const hint_row = self.rows - self.reserve_rows + 1;
+            // Derive the hint row from `effectiveRows()`, which
+            // already clamps to at least 1 when `reserve_rows >
+            // rows`. That makes the hint surface keep working in
+            // pathological geometry (e.g. rows=3 + reserve_rows=5
+            // → effectiveRows=1, hint_row=2, status at rows=3)
+            // instead of silently disappearing. Two conditions
+            // must hold for the paint:
+            //   • `reserve_rows >= 2` so the bar is asking for
+            //     more than just the status row,
+            //   • `effectiveRows + 1 < rows` so the hint row
+            //     sits ABOVE the status row, never overlapping.
+            const hint_row: u16 = self.effectiveRows() + 1;
+            if (self.reserve_rows >= 2 and hint_row < self.rows) {
                 try w.print("\x1B[{d};1H\x1B[K", .{hint_row});
                 switch (hint_kind) {
                     .err => {
@@ -521,11 +525,11 @@ test "render is idempotent even when reserve_rows < 2 (hint silently dropped)" {
 }
 
 test "render guards against u16 underflow when rows < reserve_rows" {
-    // Pathological config: rows smaller than reserve_rows. Without
-    // the guard, `rows - reserve_rows + 1` would underflow in u16
-    // and emit `\x1B[<garbage>;1H`, which different terminals
-    // interpret differently — at best a no-op, at worst a cursor
-    // jump to row 65000+ that smears later output.
+    // Pathological config: rows smaller than reserve_rows. The
+    // computation has to use `effectiveRows()` (which clamps) so
+    // the row math never underflows in u16 — without that guard,
+    // `rows - reserve_rows + 1` wraps to ~65000 and the emitted
+    // CUP escape lands on a nonsense row.
     var b = StatusBar.init(2, 80, 5, .{}); // rows=2 < reserve_rows=5
     b.setText("status");
     b.setHint("explanation", 5_000);
@@ -540,6 +544,28 @@ test "render guards against u16 underflow when rows < reserve_rows" {
     try testing.expect(std.mem.indexOf(u8, out, "65533") == null);
     try testing.expect(std.mem.indexOf(u8, out, "65534") == null);
     try testing.expect(std.mem.indexOf(u8, out, "65535") == null);
+}
+
+test "render still paints hint when reserve_rows > rows (effectiveRows clamps)" {
+    // rows=3, reserve_rows=5 → effectiveRows=1, hint_row=2,
+    // status at rows=3. There IS room for the hint above the
+    // status row even though `rows < reserve_rows`; the previous
+    // `self.rows >= self.reserve_rows` guard would have dropped
+    // it. Pin that the new effectiveRows-based math actually
+    // paints something.
+    var b = StatusBar.init(3, 80, 5, .{});
+    b.setText("status");
+    b.setHint("hint here", 5_000);
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    // Status painted on row 3, hint painted on row 2.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[3;1H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[2;1H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "hint here") != null);
 }
 
 test "hint row is skipped when reserve_rows < 2 (no row above status)" {
