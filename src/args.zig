@@ -27,6 +27,13 @@ pub const ParseOutcome = union(enum) {
     help,
     version,
     unknown_flag: []const u8,
+    /// `atty init [shell]` — print the shell-integration snippet
+    /// to stdout and exit. Used as `eval "$(atty init bash)"` from
+    /// the user's `.bashrc` / `.zshrc`. The shell argument is
+    /// currently unused (the snippet is POSIX-compatible and works
+    /// for bash + zsh) but accepted for future per-shell variants
+    /// (fish, nu, …).
+    print_init,
 };
 
 pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutcome {
@@ -58,6 +65,17 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
         }
         if (a.len > 0 and a[0] == '-') {
             return .{ .unknown_flag = a };
+        }
+        // Special-case the `init` subcommand: `atty init [shell]`
+        // prints the shell-integration snippet to stdout. Has to
+        // come *before* we treat the first positional as a shell
+        // name — otherwise it'd be interpreted as "spawn `init` as
+        // the shell." A user who genuinely has a shell binary
+        // named `init` can still reach it via `atty -- init`.
+        if (std.mem.eql(u8, a, "init") and positional.items.len == 0) {
+            for (positional.items) |s| allocator.free(s);
+            positional.deinit(allocator);
+            return .print_init;
         }
         // First positional ends flag parsing.
         try positional.append(allocator, try allocator.dupe(u8, a));
@@ -123,6 +141,30 @@ test "parseArgv surfaces unknown flags before parsing positionals" {
         .unknown_flag => |f| try testing.expectEqualStrings("-x", f),
         else => return error.TestFailed,
     }
+}
+
+test "parseArgv: `init` is a subcommand that prints integration snippet" {
+    // `atty init` and `atty init bash` both yield .print_init —
+    // the optional shell argument is currently ignored (snippet is
+    // POSIX-compatible) but accepted for future per-shell variants.
+    const got1 = try parseArgv(testing.allocator, &.{"init"});
+    try testing.expect(got1 == .print_init);
+
+    const got2 = try parseArgv(testing.allocator, &.{ "init", "bash" });
+    try testing.expect(got2 == .print_init);
+
+    const got3 = try parseArgv(testing.allocator, &.{ "init", "zsh" });
+    try testing.expect(got3 == .print_init);
+}
+
+test "parseArgv: `--` escape lets a user reach a real shell named `init`" {
+    // Edge case — if someone genuinely has a shell binary called
+    // `init`, `atty -- init` must spawn it instead of printing
+    // the snippet.
+    const got = try parseArgv(testing.allocator, &.{ "--", "init" });
+    try testing.expectEqual(@as(usize, 1), got.ok.positional.len);
+    try testing.expectEqualStrings("init", got.ok.positional[0]);
+    freeOk(testing.allocator, got.ok);
 }
 
 test "parseArgv: a known atty flag in the spawned-command tail is preserved, not consumed" {

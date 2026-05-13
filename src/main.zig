@@ -25,6 +25,8 @@ const usage =
     \\  atty bash             spawn bash
     \\  atty bash -l          spawn bash with -l
     \\  atty zsh -c 'cmd'     spawn zsh -c 'cmd'
+    \\  atty init [shell]     print shell-integration snippet
+    \\                          (use as: eval "$(atty init bash)")
     \\
     \\Flags:
     \\  -h, --help            Print this help
@@ -32,6 +34,21 @@ const usage =
     \\
     \\Module composition is configured at build time via src/config.zig.
     \\Use `-Dconfig=path` to point zig build at a different config file.
+    \\
+;
+
+const shell_init_snippet =
+    \\# atty shell integration — drop this in your .bashrc / .zshrc:
+    \\#   eval "$(atty init bash)"
+    \\#
+    \\# Re-execs the current interactive shell under atty, with a
+    \\# guard so subshells (atty's own child + any nested invocation)
+    \\# don't recurse. Only fires for TTY-attached interactive shells
+    \\# — scripts run unchanged.
+    \\if [ -z "${ATTY:-}" ] && [ -t 0 ] && [ -t 1 ]; then
+    \\    export ATTY=1
+    \\    exec atty
+    \\fi
     \\
 ;
 
@@ -78,6 +95,10 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args) !CliOpts {
             writeStderr(msg);
             writeStderr(usage);
             std.process.exit(2);
+        },
+        .print_init => {
+            writeStdout(shell_init_snippet);
+            std.process.exit(0);
         },
     }
 }
