@@ -127,7 +127,13 @@ pub fn formatCwd(
     // documented `ssh://host/home/foo` shape, which is also what
     // atuin's `[ DIRECTORY ]` filter groups by.
     const rcwd_raw: []const u8 = if (frame.cwd_len > 0) frame.cwd() else "?";
-    const rcwd: []const u8 = if (rcwd_raw.len > 1 and rcwd_raw[0] == '/')
+    // Strip any leading `/`. The previous `len > 1` form left a bare
+    // `/` cwd untouched, producing `ssh://host//` for sessions
+    // currently at root — common enough on minimal containers /
+    // service images. With `len >= 1` the `/` becomes empty and the
+    // URI lands as `ssh://host/`, which is what atuin's
+    // `[ DIRECTORY ]` group key wants.
+    const rcwd: []const u8 = if (rcwd_raw.len >= 1 and rcwd_raw[0] == '/')
         rcwd_raw[1..]
     else
         rcwd_raw;
@@ -207,9 +213,37 @@ pub const Tracker = struct {
     }
 
     /// Borrow of the top frame. Null when stack is empty.
+    /// Reflects the IMMEDIATE state of the stack including any
+    /// `.none` frames pushed for unrecognised commands running
+    /// inside a recognised subprocess. Use this when correctness
+    /// depends on "what command is currently running"; use
+    /// `currentRecognized()` when correctness depends on the
+    /// ambient context (e.g. statusbar segment display).
     pub fn current(self: *const Tracker) ?*const Frame {
         if (self.depth == 0) return null;
         return &self.frames[self.depth - 1];
+    }
+
+    /// Borrow of the topmost frame whose `kind` is **not** `.none`,
+    /// skipping `.none` frames pushed for unrecognised commands
+    /// running INSIDE a recognised subprocess.
+    ///
+    /// Why it matters: when the user is inside `ssh remote` and runs
+    /// `ls`, the stack briefly becomes `[ssh:remote, .none(ls)]`
+    /// between `ls`'s `;C` and `;D`. `current()` returns the `.none`
+    /// frame; for statusbar display, that would make the
+    /// `→ ssh:remote` segment vanish for the duration of `ls`,
+    /// reappearing only when the next prompt fires — visible flicker.
+    /// `currentRecognized()` walks down past `.none` frames and
+    /// returns the ssh frame, so the segment stays stable across
+    /// the whole ssh session.
+    pub fn currentRecognized(self: *const Tracker) ?*const Frame {
+        var i: usize = self.depth;
+        while (i > 0) {
+            i -= 1;
+            if (self.frames[i].kind != .none) return &self.frames[i];
+        }
+        return null;
     }
 
     /// Pop on `;D`. Idempotent on an empty stack. When we previously
@@ -293,11 +327,15 @@ fn parseInto(
     if (trimmed.len == 0) return;
 
     // Split off the first token. Quoted commands aren't expanded — we
-    // just look at the first whitespace-delimited word. Aliases are
-    // shell-expanded BEFORE atty sees the bytes, so if the user typed
-    // `k exec ...` we'd see `k exec ...` here regardless of aliases.
-    // Users can extend the recognized prefixes by forking — atty is
-    // Suckless-style, no runtime alias registry.
+    // just look at the first whitespace-delimited word. atty sees the
+    // literal first token the user typed at the prompt; shell aliases
+    // are expanded by the shell at EXECUTION time, AFTER atty has
+    // already committed the line, so `alias k=kubectl` + typing
+    // `k exec pod` reaches us as `k exec pod` (NOT `kubectl exec`).
+    // That's why both `kubectl` and the common shorthand aliases
+    // (`k`, `kubecolor`) are listed below. Users with custom aliases
+    // fork the project and extend the registry — atty is Suckless-
+    // style, no runtime alias config.
     const space = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
     const head = trimmed[0..space];
     const rest = if (space < trimmed.len) std.mem.trim(u8, trimmed[space..], " \t") else "";
@@ -768,6 +806,33 @@ test "Tracker: unrecognized command pushes a .none frame" {
     try testing.expectEqual(Kind.none, t.currentKind());
     t.onCommandEnd();
     try testing.expectEqual(@as(usize, 0), t.depth);
+}
+
+test "Tracker.currentRecognized: skips `.none` frames sitting on top" {
+    // The statusbar consults `currentRecognized` so the
+    // `→ ssh:remote` segment doesn't flicker every time the user
+    // runs a regular command inside the remote shell. Stack here
+    // mirrors that scenario exactly.
+    var t = Tracker.init();
+    t.onCommandStart("ssh foo@bar", testing.allocator, null);
+    t.onCommandStart("ls -la", testing.allocator, null);
+    // current() returns the immediate top (`.none` ls frame).
+    try testing.expectEqual(Kind.none, t.current().?.kind);
+    // currentRecognized() walks down to the ssh frame underneath.
+    try testing.expectEqual(Kind.ssh, t.currentRecognized().?.kind);
+    try testing.expectEqualStrings("foo@bar", t.currentRecognized().?.name());
+}
+
+test "Tracker.currentRecognized: returns null when only `.none` frames are on the stack" {
+    var t = Tracker.init();
+    t.onCommandStart("ls -la", testing.allocator, null);
+    t.onCommandStart("date", testing.allocator, null);
+    try testing.expectEqual(@as(?*const Frame, null), t.currentRecognized());
+}
+
+test "Tracker.currentRecognized: returns null on an empty stack" {
+    var t = Tracker.init();
+    try testing.expectEqual(@as(?*const Frame, null), t.currentRecognized());
 }
 
 test "Tracker: nested ssh chain" {

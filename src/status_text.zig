@@ -197,3 +197,99 @@ test "assemble incognito alone produces no trailing separator" {
     try testing.expect(std.mem.indexOf(u8, out, "incognito") != null);
     try testing.expect(std.mem.indexOf(u8, out, separator) == null);
 }
+
+test "assemble: subprocess segment alone renders with arrow glyph" {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try assemble(.{
+        .w = &w,
+        .incognito = false,
+        .incognito_style = .{},
+        .bar_style = .{},
+        .subprocess_text = "ssh:foo@bar",
+        .subprocess_style = .{ .dim = true, .fg = 6 },
+        .base_text = "",
+        .module_text = "",
+    });
+    const out = buf[0..w.end];
+    // Right-arrow glyph + the text.
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2192} ssh:foo@bar") != null);
+    // No separator (only one segment).
+    try testing.expect(std.mem.indexOf(u8, out, separator) == null);
+}
+
+test "assemble: empty subprocess_text omits the segment entirely" {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try assemble(.{
+        .w = &w,
+        .incognito = false,
+        .incognito_style = .{},
+        .bar_style = .{},
+        .subprocess_text = "", // empty — should be skipped
+        .subprocess_style = .{ .dim = true, .fg = 6 },
+        .base_text = "atty",
+        .module_text = "",
+    });
+    const out = buf[0..w.end];
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2192}") == null);
+    try testing.expectEqualStrings("atty", out);
+}
+
+test "assemble: subprocess segment ordering — between incognito and base, with separators" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try assemble(.{
+        .w = &w,
+        .incognito = true,
+        .incognito_style = .{ .dim = true, .fg = 1 },
+        .bar_style = .{ .dim = true },
+        .subprocess_text = "ssh:foo@bar",
+        .subprocess_style = .{ .dim = true, .fg = 6 },
+        .base_text = "atty",
+        .module_text = "atuin",
+    });
+    const out = buf[0..w.end];
+    // All four segments present.
+    try testing.expect(std.mem.indexOf(u8, out, "incognito") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2192} ssh:foo@bar") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "atuin") != null);
+    // Ordering: incognito → subprocess → base → module.
+    const inc_at = std.mem.indexOf(u8, out, "incognito").?;
+    const sub_at = std.mem.indexOf(u8, out, "\u{2192}").?;
+    const base_at = std.mem.indexOf(u8, out, "atty").?;
+    const mod_at = std.mem.indexOf(u8, out, "atuin").?;
+    try testing.expect(inc_at < sub_at);
+    try testing.expect(sub_at < base_at);
+    try testing.expect(base_at < mod_at);
+    // Exactly three separators between four segments.
+    var sep_count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOf(u8, out[i..], separator)) |idx| : (i += idx + separator.len) sep_count += 1;
+    try testing.expectEqual(@as(usize, 3), sep_count);
+}
+
+test "assemble: subprocess segment style is applied with a reset after" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try assemble(.{
+        .w = &w,
+        .incognito = false,
+        .incognito_style = .{},
+        .bar_style = .{ .dim = true },
+        .subprocess_text = "ssh:host",
+        .subprocess_style = .{ .dim = true, .fg = 6 },
+        .base_text = "atty",
+        .module_text = "",
+    });
+    const out = buf[0..w.end];
+    // The subprocess SGR uses fg=6.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[38;5;6m") != null);
+    // The reset comes BEFORE the next segment's separator so
+    // the separator picks up the bar's style, not the subprocess
+    // segment's. (Reset is `\x1B[0m`.)
+    const sub_at = std.mem.indexOf(u8, out, "\u{2192}").?;
+    const reset_after = std.mem.indexOf(u8, out[sub_at..], "\x1B[0m");
+    try testing.expect(reset_after != null);
+}

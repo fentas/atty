@@ -1095,7 +1095,13 @@ fn renderStatus(
     var subp_text: []const u8 = "";
     if (config.subprocess.show_in_statusbar) {
         if (ctx.subprocess) |tr| {
-            if (tr.current()) |frame| if (frame.kind != .none) {
+            // Walk past any `.none` frames sitting on top — those are
+            // pushed for every unrecognised command running INSIDE a
+            // recognised subprocess (e.g. running `ls` inside an ssh
+            // session pushes `.none(ls)` on top of `ssh:remote`). If
+            // we used `tr.current()` the segment would flicker every
+            // time a command runs in the remote shell.
+            if (tr.currentRecognized()) |frame| {
                 const prefix: []const u8 = switch (frame.kind) {
                     .ssh => "ssh:",
                     .kubectl_exec => "k8s:",
@@ -1108,7 +1114,7 @@ fn renderStatus(
                 var sw: std.Io.Writer = .fixed(&subp_buf);
                 sw.print("{s}{s}", .{ prefix, frame.name() }) catch {};
                 subp_text = subp_buf[0..sw.end];
-            };
+            }
         }
     }
 
