@@ -212,6 +212,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         _ = writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]) catch {};
     };
 
+    // Anchor the pick-list to a fixed absolute row band at the bottom
+    // of the screen, just above the statusbar (if any). Absolute CUP
+    // paints never scroll, so the list stays put as the user types.
+    setGhostListTopRow(&ghost_list, args.is_tty, statusbar);
+
     var exit_code: u8 = 0;
     var child_alive = true;
 
@@ -372,7 +377,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
-                if (ghost_list.visible) try clearGhostList(&ghost_list, &out_buf);
+                // No clearGhostList here: the list paints at fixed
+                // absolute rows below the prompt and the typed
+                // character lands on the prompt row — they don't
+                // overlap. renderGhostList in the master path
+                // handles refresh when the content actually changes.
                 _ = line_state.applyInput(input);
 
                 const action = D.dispatchInput(&runtimes, &ctx, input) catch .forward;
@@ -423,7 +432,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const output = read_buf[0..read_n];
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
-                if (ghost_list.visible) try clearGhostList(&ghost_list, &out_buf);
+                // List is at fixed absolute rows — shell echo on the
+                // prompt row doesn't touch it. renderGhostList below
+                // refreshes the list iff content changed; no need to
+                // clear here.
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
                 try writeAll(posix.STDOUT_FILENO, output);
 
@@ -461,6 +473,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             shell_size.rows = sb.effectiveRows();
                         }
                         _ = pty.setSize(shell_size) catch {};
+                        // Re-anchor the pick list to the new geometry.
+                        setGhostListTopRow(&ghost_list, args.is_tty, statusbar);
                     } else |_| {}
                 } else if (sig == posix.SIG.CHLD) {
                     var status: u32 = 0;
@@ -612,4 +626,34 @@ fn clearGhostList(list: *GhostList, out_buf: []u8) !void {
     var w: std.Io.Writer = .fixed(out_buf);
     list.clear(&w) catch return;
     try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+}
+
+/// Compute and apply the pick list's absolute anchor row, based on
+/// the terminal size and the statusbar's reservation. Called at
+/// startup and on SIGWINCH. The list sits in the rows
+///
+///     (rows - statusbar.reserve_rows - list_count + 1) .. (rows - statusbar.reserve_rows)
+///
+/// so it never overlaps the statusbar. With statusbar disabled the
+/// list anchors at the absolute bottom rows. If the terminal is too
+/// short to fit both the statusbar and the list, we leave top_row = 0
+/// and the list silently disables itself (better than visually
+/// stomping the statusbar or the prompt).
+fn setGhostListTopRow(list: *GhostList, is_tty: bool, sb: ?StatusBar) void {
+    if (!is_tty or config.ghost.list_count == 0) {
+        list.setTopRow(0);
+        return;
+    }
+    const size = Pty.querySize(posix.STDOUT_FILENO) catch {
+        list.setTopRow(0);
+        return;
+    };
+    const reserve: u16 = if (sb) |s| s.reserve_rows else 0;
+    const total_taken: u16 = reserve + config.ghost.list_count;
+    if (size.rows <= total_taken + 1) {
+        // Need at least one row for the prompt itself.
+        list.setTopRow(0);
+        return;
+    }
+    list.setTopRow(size.rows - total_taken + 1);
 }

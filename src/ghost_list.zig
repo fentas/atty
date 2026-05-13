@@ -58,6 +58,13 @@ pub const GhostList = struct {
     style: Style,
     /// Render mode — see `RenderMode`.
     mode: RenderMode,
+    /// 1-based absolute row where the list's first entry paints.
+    /// Set by the proxy after TIOCGWINSZ + statusbar coordination —
+    /// `0` means "geometry not configured yet, skip painting." Using
+    /// absolute rows (not "cursor + N below") is what avoids the
+    /// scroll-desync bug of the old `\r\n` descent: with CUP, no
+    /// paint can scroll the screen, so DECSC/DECRC stay coherent.
+    top_row: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator, style: Style, mode: RenderMode) GhostList {
         return .{
@@ -66,6 +73,15 @@ pub const GhostList = struct {
             .style = style,
             .mode = mode,
         };
+    }
+
+    /// Sets the absolute paint row. Called by the proxy at startup
+    /// and on SIGWINCH. Pass `top` = (rows - statusbar.reserve_rows
+    /// - list_count + 1) — the first row of the reserved bottom
+    /// band, just above the statusbar (or at screen bottom if no
+    /// statusbar). `top = 0` deactivates painting.
+    pub fn setTopRow(self: *GhostList, top: u16) void {
+        self.top_row = top;
     }
 
     pub fn deinit(self: *GhostList) void {
@@ -120,61 +136,63 @@ pub const GhostList = struct {
         self.entries.clearRetainingCapacity();
     }
 
-    /// Paint the cached entries below the cursor. Idempotent — the
-    /// caller can call this every render cycle. When `entries` is
-    /// empty the overlay is cleared instead. When the cached
-    /// entries match what's already on screen, NO bytes are emitted
-    /// (critical: the proxy ticks at 100ms and each paint descends
-    /// N rows below the cursor; if we re-emit every tick near the
-    /// bottom of the screen we accumulate scroll-induced drift).
+    /// Paint the cached entries at the configured absolute rows
+    /// (CUP to `top_row + i` for each entry). Save/restore cursor
+    /// wraps the whole thing so the shell's cursor position is
+    /// untouched. No `\r\n` descents — never scrolls.
+    ///
+    /// No-op when `top_row == 0` (geometry not configured) or when
+    /// the cached state already matches what's on screen.
     pub fn show(self: *GhostList, w: *std.Io.Writer) !void {
+        if (self.top_row == 0) return;
         if (self.entries.items.len == 0) {
             if (self.visible) try self.clear(w);
             return;
         }
-        // Already on screen with the same row count → no-op. The
-        // `set` caller is expected to have skipped reaching us when
-        // the entries didn't change, but defend in case it didn't.
-        if (self.visible and self.painted_rows == self.entries.items.len)
-            return;
-        if (self.visible and self.painted_rows != self.entries.items.len) {
-            try self.clear(w);
+
+        // If the previous paint had MORE rows, clear the trailing
+        // ones at their absolute positions before we paint over the
+        // first N rows.
+        if (self.visible and self.painted_rows > self.entries.items.len) {
+            try w.writeAll(ansi.save_cursor);
+            var i: u16 = @intCast(self.entries.items.len);
+            while (i < self.painted_rows) : (i += 1) {
+                try w.print("\x1b[{d};1H\x1b[K", .{self.top_row + i});
+            }
+            try w.writeAll(ansi.restore_cursor);
         }
 
-        switch (self.mode) {
-            // reserved_region falls back to inline_rows until the
-            // statusbar coordination lands — same paint path.
-            .inline_rows, .reserved_region => try self.paintInlineRows(w),
-        }
-
-        self.visible = true;
-        self.painted_rows = @intCast(self.entries.items.len);
-    }
-
-    fn paintInlineRows(self: *GhostList, w: *std.Io.Writer) !void {
+        // Paint each entry at its absolute row. `\x1b[<row>;1H`
+        // (CUP) doesn't scroll; `\x1b[K` erases pre-existing
+        // content so a shorter entry can overwrite a longer one.
         try w.writeAll(ansi.save_cursor);
         for (self.entries.items, 0..) |e, i| {
-            // Move to start of next line. CR+LF in raw mode is just
-            // "down one + column 0"; near the bottom of the screen
-            // the terminal will scroll. Documented limitation of
-            // inline_rows mode.
-            try w.writeAll("\r\n");
-            try w.writeAll(ansi.erase_to_eol);
+            try w.print("\x1b[{d};1H\x1b[K", .{self.top_row + @as(u16, @intCast(i))});
             try w.print("{f}", .{self.style});
             try w.print(" {d}: {s}", .{ i + 1, e.items });
             try w.writeAll(style_mod.reset);
         }
         try w.writeAll(ansi.restore_cursor);
+
+        self.visible = true;
+        self.painted_rows = @intCast(self.entries.items.len);
     }
 
-    /// Erase the rows we last painted. Cheap when not visible.
+    /// Erase the rows we last painted (at their absolute row
+    /// positions, so the clear targets the real list location even
+    /// if the cursor has since moved). Cheap when not visible.
     pub fn clear(self: *GhostList, w: *std.Io.Writer) !void {
         if (!self.visible) return;
+        if (self.top_row == 0) {
+            // No geometry to target — just flip the flag.
+            self.visible = false;
+            self.painted_rows = 0;
+            return;
+        }
         try w.writeAll(ansi.save_cursor);
         var i: u16 = 0;
         while (i < self.painted_rows) : (i += 1) {
-            try w.writeAll("\r\n");
-            try w.writeAll(ansi.erase_to_eol);
+            try w.print("\x1b[{d};1H\x1b[K", .{self.top_row + i});
         }
         try w.writeAll(ansi.restore_cursor);
         self.visible = false;
@@ -232,9 +250,10 @@ test "GhostList.entry is 1-based and bounds-checked" {
     try testing.expectEqual(@as(?[]const u8, null), gl.entry(3));
 }
 
-test "GhostList.show writes save/restore cursor + N rows of erase + text" {
+test "GhostList.show paints with absolute CUP at top_row + i" {
     var gl = GhostList.init(testing.allocator, .{ .dim = true }, .inline_rows);
     defer gl.deinit();
+    gl.setTopRow(20);
     const a = [_][]const u8{ "alpha", "beta" };
     _ = try gl.set(&a, 9);
 
@@ -246,15 +265,34 @@ test "GhostList.show writes save/restore cursor + N rows of erase + text" {
     try testing.expect(std.mem.indexOf(u8, out, ansi.save_cursor) != null);
     try testing.expect(std.mem.indexOf(u8, out, ansi.restore_cursor) != null);
     try testing.expect(std.mem.indexOf(u8, out, ansi.sgr_dim) != null);
+    // CUP to row 20 for entry #1, row 21 for entry #2.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[20;1H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[21;1H") != null);
     try testing.expect(std.mem.indexOf(u8, out, " 1: alpha") != null);
     try testing.expect(std.mem.indexOf(u8, out, " 2: beta") != null);
+    // No `\r\n` descent bytes — that's the whole point of the
+    // absolute-CUP rewrite.
+    try testing.expect(std.mem.indexOf(u8, out, "\r\n") == null);
     try testing.expect(gl.visible);
     try testing.expectEqual(@as(u16, 2), gl.painted_rows);
 }
 
-test "GhostList.clear erases the rows it last painted" {
+test "GhostList.show is a no-op when top_row hasn't been configured" {
     var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
     defer gl.deinit();
+    const a = [_][]const u8{"alpha"};
+    _ = try gl.set(&a, 9);
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gl.show(&w);
+    try testing.expectEqual(@as(usize, 0), w.end);
+    try testing.expect(!gl.visible);
+}
+
+test "GhostList.clear erases the absolute rows it last painted" {
+    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    defer gl.deinit();
+    gl.setTopRow(20);
     const a = [_][]const u8{ "alpha", "beta", "gamma" };
     _ = try gl.set(&a, 9);
     var buf: [512]u8 = undefined;
@@ -269,17 +307,17 @@ test "GhostList.clear erases the rows it last painted" {
 
     try testing.expect(std.mem.indexOf(u8, out, ansi.save_cursor) != null);
     try testing.expect(std.mem.indexOf(u8, out, ansi.restore_cursor) != null);
-    // 3 erase_to_eol sequences (one per painted row).
-    var count: usize = 0;
-    var i: usize = 0;
-    while (std.mem.indexOf(u8, out[i..], ansi.erase_to_eol)) |idx| : (i += idx + ansi.erase_to_eol.len) count += 1;
-    try testing.expectEqual(@as(usize, 3), count);
+    // CUP to each of the 3 painted absolute rows + erase_to_eol.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[20;1H\x1b[K") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[21;1H\x1b[K") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[22;1H\x1b[K") != null);
     try testing.expect(!gl.visible);
 }
 
 test "GhostList.show after empty set clears the overlay" {
     var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
     defer gl.deinit();
+    gl.setTopRow(20);
     const a = [_][]const u8{"x"};
     _ = try gl.set(&a, 9);
     var buf: [512]u8 = undefined;
@@ -292,4 +330,30 @@ test "GhostList.show after empty set clears the overlay" {
     var w2: std.Io.Writer = .fixed(&buf);
     try gl.show(&w2);
     try testing.expect(!gl.visible);
+}
+
+test "GhostList.show shrinking from 3 → 2 rows clears the trailing row" {
+    // When the list goes from 3 entries to 2, row 22 must be
+    // explicitly erased — otherwise the third entry stays painted
+    // beneath the new (shorter) list. Tests the trailing-clear
+    // branch.
+    var gl = GhostList.init(testing.allocator, .{}, .inline_rows);
+    defer gl.deinit();
+    gl.setTopRow(20);
+    const three = [_][]const u8{ "a", "b", "c" };
+    _ = try gl.set(&three, 9);
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gl.show(&w);
+    try testing.expectEqual(@as(u16, 3), gl.painted_rows);
+
+    const two = [_][]const u8{ "a", "b" };
+    _ = try gl.set(&two, 9);
+    var buf2: [512]u8 = undefined;
+    var w2: std.Io.Writer = .fixed(&buf2);
+    try gl.show(&w2);
+    const out = buf2[0..w2.end];
+    // Row 22 (top_row + 2) must be erased.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[22;1H\x1b[K") != null);
+    try testing.expectEqual(@as(u16, 2), gl.painted_rows);
 }
