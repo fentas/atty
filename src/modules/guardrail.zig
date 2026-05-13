@@ -416,6 +416,55 @@ test "empty rules list always returns null" {
     try testing.expect(G.check("") == null);
 }
 
+test "guardrail fires after line_state was updated via grid (history-recall path)" {
+    // Regression for the user's reported "Up-arrow bypasses
+    // guardrail" issue. The fix: after the shell's history-recall
+    // redraw flows through the master path, atty parses it via
+    // the input_grid and calls line_state.updateFromGrid with the
+    // displayed content. That clears `uncertain` and populates
+    // the buffer so the subsequent Enter commits the recalled
+    // line — guardrail then sees the dangerous string.
+    const G = configure(.{});
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    // User pressed Up-arrow — line_state goes uncertain, buffer empty.
+    _ = line.applyInput("\x1b[A");
+    try testing.expect(line.uncertain);
+
+    // Shell readline echoed the recalled line via master output.
+    // proxy.zig fed the bytes to the grid; the grid extracted the
+    // displayed input region; this sync copies it back into the
+    // line state.
+    line.updateFromGrid("rm -rf /home/user");
+    try testing.expect(!line.uncertain);
+    try testing.expectEqualSlices(u8, "rm -rf /home/user", line.current());
+
+    // Now the user hits Enter. applyInput commits the buffer →
+    // dispatchInput sees the dangerous line and guardrail fires.
+    _ = line.applyInput("\r");
+    try testing.expectEqualStrings("rm -rf /home/user", line.lastCommitted().?);
+
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    const action = try G.onInput(&rt, &ctx, "\r");
+    try testing.expectEqual(m.Action.swallow, action);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "guardrail") != null);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "rm -rf /home/user") != null);
+}
+
 test ".block mode replaces the Enter with Ctrl+U and never arms" {
     // A `.block` rule says "never allow this command, ever." The
     // banner fires (so the user knows why nothing happened) but the

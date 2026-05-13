@@ -33,10 +33,12 @@ const LineState = @import("line_state.zig").LineState;
 const Ghost = @import("ghost.zig").Ghost;
 const GhostList = @import("ghost_list.zig").GhostList;
 const StatusBar = @import("statusbar.zig").StatusBar;
+const InputGrid = @import("input_grid.zig").InputGrid;
 const ansi = @import("ansi.zig");
 const style_mod = @import("style.zig");
 const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
+const dsr = @import("dsr.zig");
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -162,6 +164,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var ghost_list = GhostList.init(allocator, config.ghost.list_style);
     defer ghost_list.deinit();
 
+    // 1-row input-region grid. Parses master output to track what's
+    // displayed at the prompt row — the only way to see lines the
+    // user got via history recall / completion / paste (the bytes
+    // came from the shell, not the user's keystrokes). DSR sent at
+    // each fresh-prompt idle gives us the input-start column.
+    const initial_cols: u16 = blk: {
+        if (!args.is_tty) break :blk 80;
+        const s = Pty.querySize(posix.STDOUT_FILENO) catch break :blk 80;
+        break :blk s.cols;
+    };
+    var input_grid = try InputGrid.init(allocator, initial_cols);
+    defer input_grid.deinit();
+
+    // DSR (cursor-position query) state machine. `expecting_prompt`
+    // = "a fresh prompt is imminent or just appeared; once master
+    // output goes idle send a DSR to learn where input starts."
+    var expecting_prompt: bool = args.is_tty;
+    var dsr_sent: bool = false;
+    var last_master_byte_ms: i64 = nowMs();
+
     var ctx = module.Context{
         .allocator = allocator,
         .io = io,
@@ -230,6 +252,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
             renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             if (statusbar) |*sb| renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+            // Send a DSR cursor-position query when a prompt is
+            // expected and master output has been quiet long enough
+            // that the prompt should have finished painting. Reply
+            // arrives via stdin (intercepted there).
+            if (expecting_prompt and !dsr_sent and (now - last_master_byte_ms) > 50) {
+                _ = std.c.write(posix.STDOUT_FILENO, dsr.query_bytes.ptr, dsr.query_bytes.len);
+                dsr_sent = true;
+            }
             continue;
         }
 
@@ -237,7 +267,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         if (pfds[0].revents & POLLIN != 0) {
             const read_n = posix.read(posix.STDIN_FILENO, &read_buf) catch 0;
             if (read_n > 0) {
-                var input: []const u8 = read_buf[0..read_n];
+                // Intercept DSR cursor-position replies BEFORE
+                // anything else touches the bytes. The shell doesn't
+                // speak DSR replies and would echo them as mojibake.
+                var dsr_scratch: [buf_size]u8 = undefined;
+                const dsr_res = dsr.extract(read_buf[0..read_n], &dsr_scratch);
+                if (dsr_res.reply) |reply| {
+                    input_grid.setInputStart(reply.col);
+                    expecting_prompt = false;
+                    dsr_sent = false;
+                }
+                var input: []const u8 = dsr_res.cleaned;
+                if (input.len == 0) continue; // chunk was nothing but a DSR reply
 
                 // Accept-ghost keystroke: if the user's accept key
                 // arrives while a ghost is visible and the line is
@@ -414,6 +455,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     line_state.clearLastCommitted();
                 }
 
+                // Shell is about to run a command and emit a fresh
+                // prompt afterwards — re-query DSR to capture the
+                // new input_start column (which may shift for
+                // dynamic prompts like P10k's ✗/❯ depending on
+                // exit code, or async git-status updates).
+                if (shell_saw_enter) {
+                    expecting_prompt = true;
+                    dsr_sent = false;
+                }
+
                 // Deliberately NO renderGhost here. The shell hasn't
                 // echoed yet, so the terminal cursor is still at its
                 // pre-keystroke position. Painting the ghost now lands
@@ -437,6 +488,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // List sits below the prompt — shell echo lands on
                 // the prompt row, no overlap. renderGhostList below
                 // handles repaint/deactivate when content changes.
+                last_master_byte_ms = nowMs();
+                // Feed the grid so it can track redraws (history
+                // recall, completion, paste). Once input_start is
+                // known (after the first DSR reply), `currentInput`
+                // is the actual displayed line — sync it into
+                // line_state so modules see the real text even when
+                // it came from the shell, not user keystrokes.
+                input_grid.feed(output);
+                if (input_grid.input_start != 0) {
+                    line_state.updateFromGrid(input_grid.currentInput());
+                }
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
                 try writeAll(posix.STDOUT_FILENO, output);
 
@@ -474,6 +536,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             shell_size.rows = sb.effectiveRows();
                         }
                         _ = pty.setSize(shell_size) catch {};
+                        // Resize the input grid + invalidate the
+                        // input_start column (the prompt will
+                        // re-render at new width). Re-DSR after the
+                        // next idle.
+                        input_grid.resize(s.cols) catch {};
+                        expecting_prompt = true;
+                        dsr_sent = false;
                     } else |_| {}
                 } else if (sig == posix.SIG.CHLD) {
                     var status: u32 = 0;

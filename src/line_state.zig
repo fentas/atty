@@ -68,6 +68,20 @@ pub const LineState = struct {
         self.generation +%= 1;
     }
 
+    /// Overwrite the buffer with a freshly-observed line content.
+    /// The proxy calls this after every master-output update with
+    /// the grid-derived current input — this is what makes
+    /// history-recalled lines visible to modules like guardrail.
+    /// `uncertain` is dropped (we just observed the truth).
+    pub fn updateFromGrid(self: *LineState, grid_content: []const u8) void {
+        const n = @min(grid_content.len, max_line);
+        @memcpy(self.buffer[0..n], grid_content[0..n]);
+        const changed = self.len != n or !std.mem.eql(u8, self.buffer[0..n], grid_content[0..n]);
+        self.len = n;
+        self.uncertain = false;
+        if (changed) self.generation +%= 1;
+    }
+
     /// Apply a byte slice as input. Returns true if the line buffer
     /// actually changed (callers may use this to gate ghost-text
     /// recomputation).
@@ -354,6 +368,25 @@ test "Ctrl+D on an empty line is a no-op for the buffer (the shell handles EOF)"
     _ = l.applyInput("\x04");
     try std.testing.expectEqual(@as(usize, 0), l.len);
     try std.testing.expect(!l.uncertain);
+}
+
+test "updateFromGrid overwrites the buffer + drops uncertain" {
+    var l = LineState{};
+    _ = l.applyInput("\x1b[A"); // arrow → uncertain
+    try std.testing.expect(l.uncertain);
+    l.updateFromGrid("rm -rf /tmp/test");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "rm -rf /tmp/test", l.current());
+}
+
+test "updateFromGrid clamps to max_line + handles empty input" {
+    var l = LineState{};
+    l.updateFromGrid("");
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    var huge: [max_line + 100]u8 = undefined;
+    @memset(&huge, 'x');
+    l.updateFromGrid(&huge);
+    try std.testing.expectEqual(max_line, l.len);
 }
 
 test "multiple CSI sequences in one read each mark uncertain" {
