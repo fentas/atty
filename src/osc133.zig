@@ -239,7 +239,18 @@ pub const Osc133 = struct {
                 // this is the closest "user is at the prompt"
                 // signal we get; for full emitters, `;B` follows
                 // shortly and switches us into strict input capture.
+                //
+                // **Clear `self.input` too** — without this, a
+                // sequence `;B…ls…;C…;D…;A` (the previous command
+                // committed, command ran, returned to a new
+                // prompt) would leave "ls" sitting in
+                // `currentInput()`. The proxy's `syncFromCapture`
+                // path trusts `.at_prompt` as "user is at prompt",
+                // so without the clear it would re-paint the
+                // previous command's text into `line_state` as if
+                // the user had just typed it.
                 self.phase = .at_prompt;
+                self.input.clearRetainingCapacity();
             },
             'B' => {
                 self.phase = .in_input;
@@ -368,6 +379,26 @@ test "Osc133.inInputPhase: ;A alone (Ghostty-style partial integration) puts us 
     defer o.deinit();
     o.feed("\x1b]133;A\x07$ ");
     try testing.expect(o.inInputPhase());
+}
+
+test "Osc133: B → typed → C → D → A leaves currentInput() empty (not stale)" {
+    // Regression guard for the `;A`-doesn't-clear bug: without
+    // clearing `self.input` on `;A`, the captured input region
+    // from the PREVIOUS prompt's `;B`-to-`;C` window would leak
+    // forward into the new prompt's `.at_prompt` state. The proxy
+    // would then `syncFromCapture(currentInput())` and paint the
+    // previous command's text into `line_state` as if the user
+    // had just typed it again.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;B\x07ls -la\x1b]133;C\x07command output here\x1b]133;D\x07");
+    // Between B and C, "ls -la" was captured. After C/D it's not
+    // cleared (we only clear on B). Now the next prompt fires `;A`:
+    o.feed("\x1b]133;A\x07");
+    // .at_prompt + currentInput() empty → proxy's syncFromCapture
+    // is a no-op (it guards on len > 0), no stale paint.
+    try testing.expect(o.inInputPhase());
+    try testing.expectEqual(@as(usize, 0), o.currentInput().len);
 }
 
 test "Osc133: ;A without ;B doesn't capture prompt-drawing bytes" {
