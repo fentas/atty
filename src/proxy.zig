@@ -666,7 +666,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // row, no overlap. renderGhostList in the master
                 // path handles repaint/deactivate when content
                 // changes.
-                _ = line_state.applyInput(input);
+                //
+                // Skip `line_state.applyInput` while an alt-screen
+                // TUI is active. The keystrokes are going to that
+                // TUI, not to the shell prompt, so feeding them
+                // into line_state's prefix model is meaningless —
+                // and the CSI-u-passthrough path for REPORT_ALL_
+                // KEYS TUIs (atuin, lazygit, …) pushes raw CSI
+                // sequences for every plain letter, which
+                // applyInput would mark as `uncertain` and leave
+                // ghost text suppressed at the next shell prompt.
+                // The alt-screen-exit path resets line_state for
+                // the same reason: anything we accumulated during
+                // the TUI run is stale.
+                if (!alt_screen.active) {
+                    _ = line_state.applyInput(input);
+                }
 
                 // If the user pressed Enter AND the OSC 133 tracker
                 // is in INPUT phase (between `;B` and `;C` — i.e.
@@ -1077,6 +1092,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             sb.reactivate(&w2) catch {};
                             if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
                         }
+                        // Clear line_state too. Any keystrokes
+                        // recorded before the TUI entered alt-
+                        // screen are stale (the user typed `nvim<CR>`
+                        // — that's gone), and the input path
+                        // skipped `applyInput` during the TUI run
+                        // so there's nothing valid in the buffer.
+                        // Without this, the previous prompt's
+                        // suffix can resurrect at the new prompt
+                        // and ghost text + line-commit detection
+                        // see a wrong prefix.
+                        line_state.reset();
+                        line_state.clearLastCommitted();
                     }
                 }
 

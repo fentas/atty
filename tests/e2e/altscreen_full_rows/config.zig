@@ -8,9 +8,13 @@
 //!
 //! Fix shape: slave always reports FULL rows; DECSTBM keeps shell
 //! scrolling out of the reserved zone, so the bash side still works.
-//! This scenario hard-pins that contract: ask bash to print `tput
-//! lines` AND query an alt-screen TUI that echoes its size — both
-//! must read the full row count.
+//! This scenario hard-pins that contract by running `tput lines`
+//! in bash — pre-fix it would print `effectiveRows()` (rows minus
+//! reserve_rows); post-fix it prints the full row count. We don't
+//! drive an alt-screen TUI here — the e2e harness's vt grid
+//! ignores `\x1b[?1049h`, so alt-screen byte effects (including
+//! the DECSTBM-reset emission) aren't visible to snapshots.
+//! Real-Ghostty validation of the TUI side happens manually.
 //!
 //! Statusbar enabled so the slimmed-vs-full distinction is real
 //! (with statusbar off the slave is always full anyway).

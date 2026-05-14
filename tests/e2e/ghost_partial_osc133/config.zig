@@ -8,8 +8,12 @@
 //! (`captureActive()` only true for `.in_input`). But unit tests
 //! don't drive the proxy + history-module pipeline, so they can't
 //! prove ghost text ACTUALLY shows up on screen. This scenario does:
-//! pre-seed history, type a prefix at a Ghostty-style prompt, and
-//! snapshot the grid expecting a dim trailing ghost.
+//! record an entry THROUGH atty at a Ghostty-style `;A`-only
+//! prompt (so history.onLineCommit fires under partial-OSC133
+//! conditions and the in-memory ring picks it up — pre-seeding
+//! the file alone wouldn't help; history reads at attach time
+//! before this prompt exists), type a prefix, and snapshot the
+//! grid expecting a dim trailing ghost.
 //!
 //! No atuin module (would add subprocess fan-out + flake) — just
 //! history pointing at a scenario-private file. Statusbar off so
