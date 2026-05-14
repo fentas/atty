@@ -707,6 +707,60 @@ test ".confirm_once: first match arms; after confirm, subsequent forwards silent
     try testing.expectEqual(@as(usize, 0), sink.buf.items.len);
 }
 
+test ".confirm_once is per-rule: confirming rule A does not silence rule B" {
+    // Without a second rule, a future refactor could accidentally
+    // make `confirmed_once` module-wide (single bool, or keyed off
+    // something coarser than `match.idx`) and nothing would catch
+    // it. This pins the per-rule invariant.
+    const rules = [_]Rule{
+        .{
+            .name = "rule-a",
+            .match = .{ .substring = "AAA" },
+            .reason = "a",
+            .behavior = .confirm_once,
+        },
+        .{
+            .name = "rule-b",
+            .match = .{ .substring = "BBB" },
+            .reason = "b",
+            .behavior = .confirm_once,
+        },
+    };
+    const G = configure(.{ .rules = &rules });
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Arm + confirm rule A.
+    _ = line.applyInput("echo AAA\r");
+    try testing.expectEqual(m.Action.swallow, try G.onInput(&rt, &ctx, "\r"));
+    _ = line.applyInput("\r");
+    try testing.expectEqual(m.Action.forward, try G.onInput(&rt, &ctx, "\r"));
+    try testing.expect(rt.confirmed_once[0]);
+    try testing.expect(!rt.confirmed_once[1]);
+
+    // Rule B's first match must still banner + swallow — confirming
+    // A is not module-wide.
+    sink.buf.clearRetainingCapacity();
+    _ = line.applyInput("echo BBB\r");
+    try testing.expectEqual(m.Action.swallow, try G.onInput(&rt, &ctx, "\r"));
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "guardrail") != null);
+}
+
 test "AuthorMask filtering: rule scoped to .llm is invisible to .user line" {
     const rules = [_]Rule{.{
         .name = "llm-only",
