@@ -20,7 +20,7 @@ wait_for "$"
 # verbatim — bash performs no interpretation. atty's master read
 # may split the chunk anywhere; the e2e vt-grid renders the final
 # state.
-type "cat $ATTY_SCENARIO_DIR/../fixtures/nvim-startup-4k.bin\r"
+type "cat \"$ATTY_SCENARIO_DIR/../fixtures/nvim-startup-4k.bin\"\r"
 sleep 600
 snapshot nvim_initial_frame
 
