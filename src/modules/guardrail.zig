@@ -15,8 +15,8 @@ const m = @import("../module.zig");
 const style_mod = @import("../style.zig");
 
 /// How a rule decides whether the committed line is a hit. `prefix` and
-/// `substring` are O(n) byte scans; `glob` walks a small recursive
-/// matcher (handles `*` and `?` only — no character classes).
+/// `substring` are O(n) byte scans; `glob` runs an iterative
+/// `*`-backtrack matcher (no character classes, no recursion).
 pub const Match = union(enum) {
     /// Line starts with this exact byte sequence.
     prefix: []const u8,
@@ -338,8 +338,10 @@ fn matches(match: Match, line: []const u8) bool {
     };
 }
 
-/// Recursive `*` / `?` matcher. Anchored to both ends — same shape as
-/// shell globs (no `[abc]` classes).
+/// Iterative `*` / `?` matcher with backtracking to the most recent
+/// `*`. Anchored to both ends — same shape as shell globs (no `[abc]`
+/// classes). No recursion: O(pattern × line) worst case, constant
+/// stack.
 fn globMatch(pattern: []const u8, line: []const u8) bool {
     var pi: usize = 0;
     var li: usize = 0;

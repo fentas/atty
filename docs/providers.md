@@ -166,13 +166,16 @@ bomb are `.block` for both authors. Most others differentiate:
 pub const Guardrail = atty.modules.guardrail.configure(.{
     .rules = &.{
         .{
-            .name = "git-force-push-main",
+            // user-only — without the explicit mask this would also
+            // match llm-authored commits, and because first-match
+            // wins, the llm-only block below would be unreachable.
+            .name = "git-force-push-user",
             .match = .{ .substring = "git push --force" },
             .reason = "force-pushing to a shared branch",
+            .authors = .{ .user = true, .llm = false },
             .behavior = .confirm_once,
         },
         .{
-            // Block force-push outright for the LLM.
             .name = "git-force-push-llm",
             .match = .{ .substring = "git push --force" },
             .reason = "force-pushing (llm)",
