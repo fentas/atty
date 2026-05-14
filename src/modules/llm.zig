@@ -149,15 +149,28 @@ pub const Config = struct {
     /// `history_turns_max` × typical assistant + observation pairs
     /// with comfortable headroom. The trigger site that builds the
     /// body errors if this is exceeded — the LLM call is aborted
-    /// with a "context too large, try Ctrl+Shift+X" hint. Lives in
-    /// `Shared` (mutex-guarded), so growing this raises the
-    /// module's static footprint by `body_buf_bytes` bytes.
+    /// with a "context too large, try Ctrl+Shift+X" hint.
+    ///
+    /// **Footprint note**: this buffer lives in `Shared` (which is
+    /// heap-allocated by `attach`), so growing it doesn't bloat
+    /// `Runtime` itself, but it does add `body_buf_bytes` to the
+    /// module's per-instance heap usage at attach time.
     body_buf_bytes: comptime_int = 32 * 1024,
     /// Bytes of `;C` → `;D` captured output kept per execution
     /// step. Truncates with `…[truncated …]…` when exceeded so the
     /// LLM still gets the head + tail of the output. The cap is a
     /// memory bound, not a correctness bound — most commands fit
     /// in <1 KB.
+    ///
+    /// **Footprint note**: this buffer is currently inline on
+    /// `Runtime`. Together with `last_assistant_json`
+    /// (`max_response_bytes`), `pending_command`, and `body_buf`
+    /// in `Shared`, the module adds ~`captured_output_bytes +
+    /// max_response_bytes + max_response_bytes + body_buf_bytes`
+    /// bytes of static + heap memory per attach. Heap-promoting
+    /// `captured_output` / `last_assistant_json` is tracked as a
+    /// follow-up; for now reduce these knobs if you're embedding
+    /// atty's Runtime on a tight stack.
     captured_output_bytes: comptime_int = 16 * 1024,
     /// Maximum conversation turns kept in memory. FIFO truncation
     /// when exceeded — older turns drop first.
@@ -1088,14 +1101,27 @@ pub fn configure(comptime cfg: Config) type {
             const tracking = rt.dialog_state == .executing or rt.dialog_state == .capturing_output;
             if (!tracking) return;
 
+            // `edgeOffset(i)` returns the byte index of the
+            // marker's TERMINATOR (BEL `0x07` or ST's `\`), not of
+            // its leading ESC. To slice OUT the OSC 133 marker from
+            // the captured observation, we advance the capture
+            // cursor PAST the terminator on `cmd_start`, and on
+            // `cmd_end` we walk backwards from the terminator to
+            // find the ESC that began the marker — capturing only
+            // the bytes BETWEEN markers.
+            //
+            // Multi-feed caveat: if a closing marker's ESC arrives
+            // in a different feed than its BEL, the backwards
+            // search won't find it inside this `output` slice and
+            // we conservatively capture up to the BEL position
+            // (over-capturing the marker prefix into the
+            // observation). This isn't optimal but it's bounded
+            // (≤ marker size) and uncommon — shells flush whole
+            // OSC sequences atomically in practice.
             var cursor: u32 = 0;
             var capturing = rt.dialog_state == .capturing_output;
             for (edges, 0..) |edge, i| {
                 const offset = rt.osc133_capture.edgeOffset(i);
-                if (capturing and offset > cursor) {
-                    appendCaptured(rt, output[cursor..@min(offset, output.len)]);
-                }
-                cursor = offset;
                 switch (edge) {
                     .cmd_start => {
                         if (rt.dialog_state == .executing) {
@@ -1104,9 +1130,30 @@ pub fn configure(comptime cfg: Config) type {
                             rt.captured_truncated = false;
                             capturing = true;
                         }
+                        // Start capturing AFTER the marker's
+                        // terminator byte.
+                        cursor = @min(offset + 1, @as(u32, @intCast(output.len)));
                     },
                     .cmd_end, .prompt_start_implicit_end => {
                         if (capturing) {
+                            // Slice ENDS at the ESC that begins
+                            // the closing marker. Search backwards
+                            // from `offset` for the most recent
+                            // ESC byte within the current capture
+                            // window.
+                            var end_at: u32 = offset;
+                            if (offset <= output.len) {
+                                var j: usize = offset;
+                                while (j > cursor) : (j -= 1) {
+                                    if (output[j - 1] == 0x1B) {
+                                        end_at = @intCast(j - 1);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (end_at > cursor) {
+                                appendCaptured(rt, output[cursor..@min(end_at, output.len)]);
+                            }
                             capturing = false;
                             rt.dialog_state = .observation_ready;
                             // Firing the next request from onOutput
@@ -1117,6 +1164,7 @@ pub fn configure(comptime cfg: Config) type {
                             // loop where the LLM round-trip is the
                             // dominant cost anyway.
                         }
+                        cursor = @min(offset + 1, @as(u32, @intCast(output.len)));
                     },
                 }
             }
@@ -1173,12 +1221,24 @@ pub fn configure(comptime cfg: Config) type {
         /// `.suggesting`, the user just confirmed the suggested
         /// command — move to `.executing` so `onOutput` knows to
         /// start capturing when `;C` fires.
+        ///
+        /// Gated on a non-empty committed line: if the user
+        /// deleted the suggestion before pressing Enter (or
+        /// committed a blank line for any other reason), we'd
+        /// otherwise eagerly capture the NEXT command's output as
+        /// a stale observation. The reset is safer — the dialog
+        /// returns to `.idle` (via dialogReset) and the user can
+        /// retry from a clean state.
         pub fn onLineCommit(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
-            _ = ctx;
-            _ = line;
-            if (rt.dialog_state == .suggesting) {
-                rt.dialog_state = .executing;
+            if (rt.dialog_state != .suggesting) return;
+            const trimmed = std.mem.trim(u8, line, " \t");
+            if (trimmed.len == 0) {
+                latchHint(rt, "empty command — dialog cancelled, retry from scratch");
+                dialogReset(rt, ctx);
+                rt.ai_mode_active = false;
+                return;
             }
+            rt.dialog_state = .executing;
         }
 
         pub fn pollShellInput(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -1347,16 +1407,18 @@ pub fn configure(comptime cfg: Config) type {
 
                     rt.dialog_state = .suggesting;
                     // Return the command bytes for injection at
-                    // the shell prompt. The user reviews, edits if
-                    // they want, hits Enter to run (which lands us
-                    // in `.executing` via `onLineCommit`) or
-                    // Ctrl+Shift+X to cancel.
-                    @memcpy(rt.inject_buf[0..cmd_n], rt.pending_command[0..cmd_n]);
-                    rt.inject_len = cmd_n;
-                    return rt.inject_buf[0..cmd_n];
+                    // the shell prompt — directly from
+                    // `pending_command` so the buffer's role stays
+                    // obvious (no second purpose-shifted reuse of
+                    // `inject_buf`, which the single-mode path
+                    // owns with different lifetime semantics).
+                    return rt.pending_command[0..rt.pending_command_len];
                 },
                 .done => {
-                    var msg_buf: [256]u8 = undefined;
+                    // Sized to fit the "✓ done — " prefix (~12
+                    // bytes) plus the full 256-byte reason buffer
+                    // without spilling into the fallback "✓ done".
+                    var msg_buf: [320]u8 = undefined;
                     const reason = parsed.reason();
                     const msg = if (reason.len > 0)
                         std.fmt.bufPrint(&msg_buf, "✓ done — {s}", .{reason}) catch "✓ done"
@@ -1443,11 +1505,15 @@ pub fn configure(comptime cfg: Config) type {
             // Truncate content to `cfg.max_turn_bytes` if oversized.
             // We re-allocate at the smaller size so `freeTurns`
             // doesn't free a partially-handed-over allocation.
+            //
+            // Ownership contract: on success, the runtime owns
+            // `content` (or its truncated replacement); on error,
+            // the CALLER still owns `content` and frees it. The
+            // truncation `dupe` path therefore does NOT free
+            // `content` when the allocation fails — otherwise the
+            // caller's `errdefer free(content)` would double-free.
             const final_content: []u8 = if (content.len > cfg.max_turn_bytes) blk: {
-                const trimmed = rt.allocator.dupe(u8, content[0..cfg.max_turn_bytes]) catch {
-                    rt.allocator.free(content);
-                    return error.OutOfMemory;
-                };
+                const trimmed = try rt.allocator.dupe(u8, content[0..cfg.max_turn_bytes]);
                 rt.allocator.free(content);
                 break :blk trimmed;
             } else content;
@@ -1682,29 +1748,15 @@ pub fn configure(comptime cfg: Config) type {
                     return;
                 }
                 const req_kind = shared.req_kind;
-                if (req_kind == .single) {
-                    prompt_len = shared.req_len;
-                    @memcpy(prompt_local[0..prompt_len], shared.req_buf[0..prompt_len]);
-                } else {
-                    body_len = shared.body_len;
-                    @memcpy(body_local[0..body_len], shared.body_buf[0..body_len]);
-                }
-                // Read the request-time model INDEX under the same
-                // lock. Trigger sites set `model_idx` to either a
-                // valid `cfg.models[]` index, or `usize.max` as the
-                // "no list, use cfg.model" sentinel. We resolve the
-                // slice AFTER releasing the lock — `cfg.models` is
-                // comptime-static, the resolved slice's storage
-                // outlives the worker thread.
-                const idx = shared.model_idx;
-                shared.req_pending = false;
                 serving_gen = shared.req_gen;
+                shared.req_pending = false;
 
                 // Fixture mode — bypass HTTP entirely. Pop the next
                 // canned response from the shared cursor (wrapping
-                // modulo list length). Writing the response under
-                // the same lock skips the post-HTTP relock below;
-                // we `continue` to the next iteration after.
+                // modulo list length). Branch FIRST so we skip the
+                // req_buf / body_buf copy below: fixture responses
+                // don't depend on the request body at all, copying
+                // it would be dead work.
                 if (cfg.fixture_responses.len > 0) {
                     const fixture_n = cfg.fixture_responses.len;
                     const fi = shared.fixture_idx % fixture_n;
@@ -1721,6 +1773,22 @@ pub fn configure(comptime cfg: Config) type {
                     shared.mutex.unlock(io);
                     continue;
                 }
+
+                if (req_kind == .single) {
+                    prompt_len = shared.req_len;
+                    @memcpy(prompt_local[0..prompt_len], shared.req_buf[0..prompt_len]);
+                } else {
+                    body_len = shared.body_len;
+                    @memcpy(body_local[0..body_len], shared.body_buf[0..body_len]);
+                }
+                // Read the request-time model INDEX under the same
+                // lock. Trigger sites set `model_idx` to either a
+                // valid `cfg.models[]` index, or `usize.max` as the
+                // "no list, use cfg.model" sentinel. We resolve the
+                // slice AFTER releasing the lock — `cfg.models` is
+                // comptime-static, the resolved slice's storage
+                // outlives the worker thread.
+                const idx = shared.model_idx;
                 shared.mutex.unlock(io);
 
                 const model_for_request: []const u8 = if (idx < cfg.models.len)
@@ -2234,10 +2302,20 @@ pub fn configure(comptime cfg: Config) type {
             // because the alternative is a fragile dialog loop —
             // a single fence-wrapped reply would tank the whole
             // session for users running locally-quantized models.
-            if (std.mem.startsWith(u8, trimmed, "```")) {
-                const after_open = 3 + (std.mem.indexOfScalar(u8, trimmed[3..], '\n') orelse return 0) + 1;
-                const close_at = std.mem.lastIndexOf(u8, trimmed, "```") orelse return 0;
-                if (close_at <= after_open) return 0;
+            //
+            // Fence parsing is best-effort: if the boundaries
+            // can't be located cleanly (no newline after the
+            // opening fence, no closing fence, close before open),
+            // we FALL THROUGH to returning the trimmed input
+            // untouched. Better the JSON parser sees the wrapped
+            // text and complains specifically than silently
+            // dropping an otherwise-parseable reply.
+            fence_strip: {
+                if (!std.mem.startsWith(u8, trimmed, "```")) break :fence_strip;
+                const nl = std.mem.indexOfScalar(u8, trimmed[3..], '\n') orelse break :fence_strip;
+                const after_open = 3 + nl + 1;
+                const close_at = std.mem.lastIndexOf(u8, trimmed, "```") orelse break :fence_strip;
+                if (close_at <= after_open) break :fence_strip;
                 const inner = std.mem.trim(u8, trimmed[after_open..close_at], " \t\r\n");
                 @memmove(out[0..inner.len], inner);
                 return inner.len;
