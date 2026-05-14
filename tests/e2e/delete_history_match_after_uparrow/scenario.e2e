@@ -79,12 +79,21 @@ sleep 400
 #     the pattern only matches the ORIGINAL recorded entry.
 # `HIT-COUNT=0` means the delete fired; `HIT-COUNT=1` means it
 # didn't.
-type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow); echo CHECK-DONE\r"
-# Wait for the unique sentinel rather than sleeping a fixed
-# duration — on slow CI hosts the grep/echo may not have flushed
-# in 400 ms, so the snapshot would capture an in-progress prompt
-# and reintroduce the flake we're trying to remove.
-wait_for "CHECK-DONE"
+type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow)\r"
+# Wait for the COMPUTED `HIT-COUNT=0` literal — the typed command
+# contains `HIT-COUNT=$(grep …)` (with the `$(…)` substitution
+# form), NOT `HIT-COUNT=0`, so this pattern only matches the
+# actual command OUTPUT after bash has run the grep + substitution.
+# A previous draft used a fixed sentinel like `CHECK-DONE` but
+# bash's readline echoes the typed command verbatim — including
+# the literal text `CHECK-DONE` — so `wait_for "CHECK-DONE"` was
+# satisfied by the echoed input line BEFORE grep ran, capturing
+# the snapshot mid-command.
+#
+# If the delete didn't fire, the grep would emit `HIT-COUNT=1` and
+# this wait would time out, failing the scenario — which is the
+# correct failure mode for a regression.
+wait_for "HIT-COUNT=0"
 snapshot history_after_delete
 
 # Clean exit.

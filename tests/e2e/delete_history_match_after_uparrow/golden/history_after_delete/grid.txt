@@ -1,8 +1,8 @@
 $ echo UPARROW-TARGET-99999
 UPARROW-TARGET-99999
 $ TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c "echo
- $TGT" /tmp/atty-e2e-delete-uparrow); echo CHECK-DONE
-
+ $TGT" /tmp/atty-e2e-delete-uparrow)
+HIT-COUNT=0
 
 
 
