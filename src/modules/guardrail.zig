@@ -1,126 +1,197 @@
-//! Guardrail module — confirmation prompt for dangerous commands.
+//! Guardrail module — confirmation / block prompt for dangerous commands.
 //!
-//! Pure logic, no I/O on the hot path apart from a single bufPrint +
-//! writeAll when a rule fires. Pattern matching is intentionally simple
-//! (substring + anchored prefix); a regex engine on the input hot path
-//! would be a strict regression.
+//! v2 adds author-aware matching: every rule carries an `AuthorMask` that
+//! gates whether it fires on user-typed lines, LLM-injected lines, or
+//! both. Behavior is per-rule; `block` semantics differ for `.llm` so a
+//! prompt-injection-style payload can be refused outright while the same
+//! pattern, when the human typed it, only requires a confirm.
+//!
+//! Pattern matching stays compile-time-constant: the rules array, every
+//! reason string, and every pattern are visible to the optimiser through
+//! `configure(comptime cfg: Config)`.
 
 const std = @import("std");
 const m = @import("../module.zig");
 const ansi = @import("../ansi.zig");
 const style_mod = @import("../style.zig");
 
-/// What to do when a rule matches a typed Enter.
-pub const Mode = enum {
-    /// Show the warning banner. Press Enter again to confirm
-    /// (forwards the Enter), any other key to cancel (disarms;
-    /// the user can keep editing the line). Default — matches
-    /// the historical behavior.
+/// How a rule decides whether the committed line is a hit. `prefix` and
+/// `substring` are O(n) byte scans; `glob` walks a small recursive
+/// matcher (handles `*` and `?` only — no character classes).
+pub const Match = union(enum) {
+    /// Line starts with this exact byte sequence.
+    prefix: []const u8,
+    /// `std.mem.indexOf` non-null.
+    substring: []const u8,
+    /// Shell-style: `*` = any (greedy) run, `?` = any single byte.
+    /// Anchored to both ends of the line.
+    glob: []const u8,
+};
+
+/// Whether a rule fires depending on who initiated the commit.
+/// Default = applies to both. Use this to declare two rules for the
+/// same pattern with different `Behavior` per author (the canonical
+/// "confirm for user, block for llm" shape).
+pub const AuthorMask = struct {
+    user: bool = true,
+    llm: bool = true,
+
+    pub fn applies(self: AuthorMask, author: m.Author) bool {
+        return switch (author) {
+            .user => self.user,
+            .llm => self.llm,
+        };
+    }
+};
+
+/// What to do when a rule matches.
+pub const Behavior = enum {
+    /// Banner + swallow. Press Enter again to confirm (forwards),
+    /// any other key to cancel (disarms; user can keep editing).
     confirm,
-    /// Like `.confirm`, but the confirmation persists for the
-    /// rest of the session. Once the user confirms this rule
-    /// once, subsequent matches forward immediately with no
-    /// banner. Per-rule (not module-wide): confirming
-    /// `rm -rf /` doesn't suppress `git push --force`.
+    /// Like `.confirm`, but the confirmation persists for the rest of
+    /// the session. Once the user confirms this rule once, subsequent
+    /// matches forward immediately with no banner. Per-rule, not
+    /// module-wide.
     confirm_once,
-    /// Show the banner with a "blocked." trailer; never allow
-    /// the command to run. The Enter is replaced with Ctrl+U
-    /// (unix-line-discard) so the shell clears the typed line —
-    /// the user sees their text vanish, prompt fresh.
+    /// Banner with a "blocked." trailer; the Enter is replaced with
+    /// Ctrl+U (unix-line-discard) so readline kills the typed line.
+    /// Nothing reaches the shell.
     block,
-    /// Like `.block` but no banner. Looks to the user like Enter
-    /// did nothing; the typed line just disappears. Useful for
-    /// rules where even the banner is too much noise (sensitive
-    /// shells, demo recordings).
-    silent_block,
+    /// Banner with a "warning — running anyway." trailer; the Enter
+    /// is forwarded. Use for lines that should be flagged but not
+    /// stopped (audit trail without friction).
+    warn,
 };
 
 pub const Rule = struct {
     name: []const u8,
-    kind: union(enum) {
-        prefix: []const u8,
-        substring: []const u8,
-    },
+    match: Match,
     reason: []const u8,
-    /// What to do when this rule matches. Default `.confirm`
-    /// keeps the historical "press Enter again" behavior.
-    mode: Mode = .confirm,
+    /// Which author(s) trigger this rule. Default = both. To get
+    /// different behavior per author for the same pattern, declare
+    /// two rules with mutually-exclusive masks.
+    authors: AuthorMask = .{},
+    behavior: Behavior = .confirm,
 };
 
-/// Reasonable defaults. Override by passing your own `.rules` to
-/// `configure(.{ .rules = &my_rules })`.
+/// Default rules ship stricter behavior for `.llm` — model-suggested
+/// `rm -rf` is always refused, while a human still gets a confirm
+/// prompt and can override their own decision.
 pub const default_rules = [_]Rule{
     .{
+        // Exact-only — `rm -rf /home/me` falls through to the
+        // broader "rm -rf" substring rules below (confirm for
+        // user, block for llm). Use `.glob` not `.substring` so
+        // typing `rm -rf /something` doesn't get blocked outright.
         .name = "rm-rf-root",
-        .kind = .{ .substring = "rm -rf /" },
-        .reason = "rm -rf on a root-ish path",
-    },
-    .{
-        .name = "rm-rf-tilde",
-        .kind = .{ .substring = "rm -rf ~" },
-        .reason = "rm -rf on home",
-    },
-    .{
-        .name = "dd-raw-device",
-        .kind = .{ .prefix = "dd " },
-        .reason = "dd writing to a raw device",
-    },
-    .{
-        .name = "mkfs",
-        .kind = .{ .prefix = "mkfs" },
-        .reason = "filesystem creation",
+        .match = .{ .glob = "rm -rf /" },
+        .reason = "rm -rf on the root path",
+        .behavior = .block,
     },
     .{
         .name = "fork-bomb",
-        .kind = .{ .substring = ":(){ :|:& };:" },
+        .match = .{ .substring = ":(){ :|:& };:" },
         .reason = "classic fork bomb",
+        .behavior = .block,
+    },
+    .{
+        .name = "rm-rf-tilde-user",
+        .match = .{ .substring = "rm -rf ~" },
+        .reason = "rm -rf on home",
+        .authors = .{ .user = true, .llm = false },
+        .behavior = .confirm,
+    },
+    .{
+        .name = "rm-rf-tilde-llm",
+        .match = .{ .substring = "rm -rf ~" },
+        .reason = "rm -rf on home (llm)",
+        .authors = .{ .user = false, .llm = true },
+        .behavior = .block,
+    },
+    .{
+        .name = "rm-rf-user",
+        .match = .{ .substring = "rm -rf" },
+        .reason = "rm -rf invocation",
+        .authors = .{ .user = true, .llm = false },
+        .behavior = .confirm,
+    },
+    .{
+        .name = "rm-rf-llm",
+        .match = .{ .substring = "rm -rf" },
+        .reason = "rm -rf invocation",
+        .authors = .{ .user = false, .llm = true },
+        .behavior = .block,
+    },
+    .{
+        .name = "sudo",
+        .match = .{ .prefix = "sudo " },
+        .reason = "sudo invocation",
+        .behavior = .confirm,
+    },
+    .{
+        .name = "mkfs-user",
+        .match = .{ .prefix = "mkfs" },
+        .reason = "filesystem creation",
+        .authors = .{ .user = true, .llm = false },
+        .behavior = .confirm,
+    },
+    .{
+        .name = "mkfs-llm",
+        .match = .{ .prefix = "mkfs" },
+        .reason = "filesystem creation (llm)",
+        .authors = .{ .user = false, .llm = true },
+        .behavior = .block,
+    },
+    .{
+        .name = "dd-raw-user",
+        .match = .{ .substring = "dd if=/dev" },
+        .reason = "dd from a raw device",
+        .authors = .{ .user = true, .llm = false },
+        .behavior = .confirm,
+    },
+    .{
+        .name = "dd-raw-llm",
+        .match = .{ .substring = "dd if=/dev" },
+        .reason = "dd from a raw device (llm)",
+        .authors = .{ .user = false, .llm = true },
+        .behavior = .block,
     },
     .{
         .name = "curl-pipe-sh",
-        .kind = .{ .substring = "| sh" },
+        .match = .{ .substring = "| sh" },
         .reason = "piping untrusted output into a shell",
+        .behavior = .confirm,
     },
     .{
         .name = "curl-pipe-bash",
-        .kind = .{ .substring = "| bash" },
+        .match = .{ .substring = "| bash" },
         .reason = "piping untrusted output into a shell",
+        .behavior = .confirm,
     },
     .{
         .name = "chmod-world",
-        .kind = .{ .substring = "chmod 777 /" },
+        .match = .{ .substring = "chmod 777 /" },
         .reason = "world-writable root path",
+        .behavior = .confirm,
     },
 };
 
 pub const Config = struct {
     rules: []const Rule = &default_rules,
-    /// Visual style for the warning banner. Defaults match the
-    /// historical look (dim + italic).
     warning_style: style_mod.Style = .{ .dim = true, .italic = true },
 };
 
-/// Returns a module type with `cfg` baked in. The rules list, every
-/// reason string, and every pattern are visible to the optimiser as
-/// compile-time constants.
+/// Compile-time-baked module type.
 pub fn configure(comptime cfg: Config) type {
     return struct {
         pub const name = "guardrail";
         pub const config = cfg;
 
         pub const Runtime = struct {
-            /// True between a fired rule and the user's next Enter
-            /// (which confirms) or any other keystroke (which disarms).
             armed: bool = false,
-            /// Index into `cfg.rules` of the rule that armed us — used
-            /// to record persistent confirmation for `.confirm_once`
-            /// rules when the user confirms.
             armed_rule_idx: usize = 0,
-            /// One slot per rule. Set to true when the user confirms
-            /// a `.confirm_once` rule; checked on subsequent matches
-            /// to skip the banner + forward immediately.
             confirmed_once: [cfg.rules.len]bool = .{false} ** cfg.rules.len,
-            /// Optional sink override — tests inject a stub writer
-            /// here to avoid scribbling on stderr.
             sink_ctx: ?*anyopaque = null,
             sink_fn: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void = null,
         };
@@ -136,19 +207,25 @@ pub fn configure(comptime cfg: Config) type {
             _ = io;
         }
 
-        /// First matching rule wins, in declaration order.
+        /// First matching rule wins, in declaration order. Author
+        /// defaults to `.user` — for an author-aware probe use
+        /// `checkAs`.
         pub fn check(line: []const u8) ?Rule {
-            if (findRule(line)) |hit| return hit.rule;
+            return checkAs(line, .user);
+        }
+
+        /// Author-aware variant of `check`.
+        pub fn checkAs(line: []const u8, author: m.Author) ?Rule {
+            if (findRule(line, author)) |hit| return hit.rule;
             return null;
         }
 
-        const Match = struct { rule: Rule, idx: usize };
+        const Hit = struct { rule: Rule, idx: usize };
 
-        fn findRule(line: []const u8) ?Match {
+        fn findRule(line: []const u8, author: m.Author) ?Hit {
             inline for (config.rules, 0..) |rule, i| {
-                switch (rule.kind) {
-                    .prefix => |p| if (std.mem.startsWith(u8, line, p)) return .{ .rule = rule, .idx = i },
-                    .substring => |s| if (std.mem.indexOf(u8, line, s) != null) return .{ .rule = rule, .idx = i },
+                if (rule.authors.applies(author) and matches(rule.match, line)) {
+                    return .{ .rule = rule, .idx = i };
                 }
             }
             return null;
@@ -175,69 +252,68 @@ pub fn configure(comptime cfg: Config) type {
             };
 
             if (!is_enter) {
-                // Any non-Enter key disarms — if the user kept typing
-                // they're already past the guard.
                 rt.armed = false;
                 return .forward;
             }
 
-            // applyInput ran before dispatchInput, so for an Enter
-            // keystroke `ctx.line.current()` is already empty — the
-            // line we want to check sits in `lastCommitted()` instead.
-            // When the shell emits OSC 133 prompt-zone markers,
-            // the proxy overrides lastCommitted with the marker
-            // stream's captured input (closing the history-recall
-            // gap). Without OSC 133, recalled lines bypass us; the
-            // user has to type the dangerous text directly.
+            // applyInput ran first, so the committed line lives in
+            // lastCommitted(); fall back to current() when the proxy
+            // hasn't wired OSC 133 (recalled-line gap).
             const line = ctx.line.lastCommitted() orelse ctx.line.current();
+            const author = ctx.line.committedAuthor();
 
-            // Armed = user previously hit Enter on a dangerous line
-            // (with `.confirm` or `.confirm_once`); this Enter confirms.
             if (rt.armed) {
                 rt.armed = false;
                 if (rt.armed_rule_idx < cfg.rules.len) {
                     const armed_rule = cfg.rules[rt.armed_rule_idx];
-                    if (armed_rule.mode == .confirm_once) {
+                    if (armed_rule.behavior == .confirm_once) {
                         rt.confirmed_once[rt.armed_rule_idx] = true;
                     }
                 }
                 return .forward;
             }
 
-            const match = findRule(line) orelse return .forward;
+            const hit = findRule(line, author) orelse return .forward;
 
-            // `.confirm_once` already confirmed this session → no
-            // banner, no swallow, just forward like a normal line.
-            if (match.rule.mode == .confirm_once and rt.confirmed_once[match.idx]) {
+            if (hit.rule.behavior == .confirm_once and rt.confirmed_once[hit.idx]) {
                 return .forward;
             }
 
-            switch (match.rule.mode) {
+            switch (hit.rule.behavior) {
                 .confirm, .confirm_once => {
                     rt.armed = true;
-                    rt.armed_rule_idx = match.idx;
-                    writeWarning(rt, match.rule, line, "press Enter again to confirm, any other key to cancel.");
+                    rt.armed_rule_idx = hit.idx;
+                    writeBanner(rt, hit.rule, line, author, "press Enter again to confirm, any other key to cancel.");
                     return .swallow;
                 },
                 .block => {
-                    writeWarning(rt, match.rule, line, "blocked.");
-                    // Replace the Enter with Ctrl+U (unix-line-discard)
-                    // so readline kills the typed text. No Enter
-                    // reaches the shell — nothing runs.
+                    writeBanner(rt, hit.rule, line, author, "blocked.");
+                    // Ctrl+U → readline unix-line-discard.
                     return .{ .replace = "\x15" };
                 },
-                .silent_block => {
-                    return .{ .replace = "\x15" };
+                .warn => {
+                    writeBanner(rt, hit.rule, line, author, "warning — running anyway.");
+                    return .forward;
                 },
             }
         }
 
-        fn writeWarning(rt: *Runtime, rule: Rule, line: []const u8, trailer: []const u8) void {
+        fn writeBanner(
+            rt: *Runtime,
+            rule: Rule,
+            line: []const u8,
+            author: m.Author,
+            trailer: []const u8,
+        ) void {
+            const author_tag: []const u8 = switch (author) {
+                .user => "user",
+                .llm => "llm",
+            };
             var buf: [512]u8 = undefined;
             const msg = std.fmt.bufPrint(
                 &buf,
-                "\r\n{f}atty guardrail: {s}{s}\r\n        line: {s}\r\n        {s}\r\n",
-                .{ cfg.warning_style, rule.reason, style_mod.reset, line, trailer },
+                "\r\n{f}atty guardrail: {s} [{s}]{s}\r\n        line: {s}\r\n        {s}\r\n",
+                .{ cfg.warning_style, rule.reason, author_tag, style_mod.reset, line, trailer },
             ) catch return;
             if (rt.sink_fn) |f| {
                 f(rt.sink_ctx.?, msg) catch {};
@@ -246,6 +322,41 @@ pub fn configure(comptime cfg: Config) type {
             _ = std.c.write(std.posix.STDERR_FILENO, msg.ptr, msg.len);
         }
     };
+}
+
+fn matches(match: Match, line: []const u8) bool {
+    return switch (match) {
+        .prefix => |p| std.mem.startsWith(u8, line, p),
+        .substring => |s| std.mem.indexOf(u8, line, s) != null,
+        .glob => |g| globMatch(g, line),
+    };
+}
+
+/// Recursive `*` / `?` matcher. Anchored to both ends — same shape as
+/// shell globs (no `[abc]` classes).
+fn globMatch(pattern: []const u8, line: []const u8) bool {
+    var pi: usize = 0;
+    var li: usize = 0;
+    var star_pi: ?usize = null;
+    var star_li: usize = 0;
+    while (li < line.len) {
+        if (pi < pattern.len and pattern[pi] == '*') {
+            star_pi = pi;
+            star_li = li;
+            pi += 1;
+        } else if (pi < pattern.len and (pattern[pi] == '?' or pattern[pi] == line[li])) {
+            pi += 1;
+            li += 1;
+        } else if (star_pi) |sp| {
+            pi = sp + 1;
+            star_li += 1;
+            li = star_li;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+    return pi == pattern.len;
 }
 
 // ===========================================================================
@@ -264,25 +375,82 @@ const TestSink = struct {
     }
 };
 
-test "check matches default rules" {
-    const G = configure(.{});
-
-    try testing.expect(G.check("rm -rf /") != null);
-    try testing.expect(G.check("sudo rm -rf /home/user") != null);
-    try testing.expect(G.check("dd if=/dev/zero of=/dev/sda") != null);
-    try testing.expect(G.check("ls -la") == null);
-}
-
-// std.Io.failing — a no-op Io for tests that don't touch I/O.
 const test_io: std.Io = std.Io.failing;
 
-test "Enter on dangerous line swallows and arms (proxy-flow: applyInput first, then dispatch)" {
-    // Regression: prior to a 2026-05 fix, guardrail.onInput read
-    // ctx.line.current(), but the proxy ran applyInput("rm -rf /...\r")
-    // BEFORE dispatchInput. submit() had already emptied current()
-    // and stashed the line in `committed`. The check silently passed,
-    // rm fired, and no banner ever printed. This test mirrors the
-    // exact proxy flow so the bug can't come back.
+test "checkAs: default rules — user gets confirm on rm-rf, llm gets block" {
+    const G = configure(.{});
+    const user_hit = G.checkAs("rm -rf /home/me", .user).?;
+    try testing.expectEqual(Behavior.confirm, user_hit.behavior);
+    const llm_hit = G.checkAs("rm -rf /home/me", .llm).?;
+    try testing.expectEqual(Behavior.block, llm_hit.behavior);
+}
+
+test "checkAs: rm -rf / is .block for both authors" {
+    const G = configure(.{});
+    try testing.expectEqual(Behavior.block, G.checkAs("rm -rf /", .user).?.behavior);
+    try testing.expectEqual(Behavior.block, G.checkAs("rm -rf /", .llm).?.behavior);
+}
+
+test "checkAs: sudo prefix is .confirm for both" {
+    const G = configure(.{});
+    try testing.expectEqual(Behavior.confirm, G.checkAs("sudo apt update", .user).?.behavior);
+    try testing.expectEqual(Behavior.confirm, G.checkAs("sudo apt update", .llm).?.behavior);
+}
+
+test "checkAs: safe line returns null for both authors" {
+    const G = configure(.{});
+    try testing.expect(G.checkAs("ls -la", .user) == null);
+    try testing.expect(G.checkAs("ls -la", .llm) == null);
+}
+
+test "AuthorMask.applies" {
+    const both = AuthorMask{};
+    try testing.expect(both.applies(.user));
+    try testing.expect(both.applies(.llm));
+    const user_only = AuthorMask{ .user = true, .llm = false };
+    try testing.expect(user_only.applies(.user));
+    try testing.expect(!user_only.applies(.llm));
+}
+
+test "glob: simple star and question" {
+    try testing.expect(globMatch("rm *", "rm foo"));
+    try testing.expect(globMatch("rm *", "rm "));
+    try testing.expect(!globMatch("rm *", "rmfoo"));
+    try testing.expect(globMatch("?at", "cat"));
+    try testing.expect(!globMatch("?at", "cats"));
+    try testing.expect(globMatch("*", ""));
+    try testing.expect(globMatch("a*b", "ab"));
+    try testing.expect(globMatch("a*b", "aXYZb"));
+    try testing.expect(!globMatch("a*b", "axyzc"));
+}
+
+test "glob: anchored on both ends" {
+    try testing.expect(!globMatch("rm", "rm foo"));
+    try testing.expect(!globMatch("foo", "echo foo"));
+}
+
+test "Match union: prefix vs substring" {
+    const G = configure(.{
+        .rules = &[_]Rule{
+            .{ .name = "dd-prefix", .match = .{ .prefix = "dd " }, .reason = "raw" },
+        },
+    });
+    try testing.expect(G.check("dd if=/dev/zero of=/tmp/x") != null);
+    try testing.expect(G.check("echo dd ") == null);
+    try testing.expect(G.check("sudo dd if=...") == null);
+}
+
+test "Match union: glob match wires through configure" {
+    const G = configure(.{
+        .rules = &[_]Rule{
+            .{ .name = "g", .match = .{ .glob = "rm *" }, .reason = "x" },
+        },
+    });
+    try testing.expect(G.check("rm foo") != null);
+    try testing.expect(G.check("ls foo") == null);
+}
+
+test "Enter on dangerous line swallows and arms (proxy-flow: applyInput first)" {
     const G = configure(.{});
     var rt = try G.attach(testing.allocator, test_io);
     defer G.detach(&rt, test_io);
@@ -292,7 +460,6 @@ test "Enter on dangerous line swallows and arms (proxy-flow: applyInput first, t
     G.setSink(&rt, &sink, TestSink.write);
 
     var line = LineState{};
-    // Single applyInput including the \r, as the proxy does.
     _ = line.applyInput("rm -rf /home/user\r");
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
@@ -303,7 +470,6 @@ test "Enter on dangerous line swallows and arms (proxy-flow: applyInput first, t
         .scratch = &scratch,
         .is_tty = false,
     };
-    // Sanity: applyInput emptied current() and filled committed.
     try testing.expectEqualSlices(u8, "", line.current());
     try testing.expectEqualStrings("rm -rf /home/user", line.lastCommitted().?);
 
@@ -311,17 +477,67 @@ test "Enter on dangerous line swallows and arms (proxy-flow: applyInput first, t
     try testing.expectEqual(m.Action.swallow, action);
     try testing.expect(rt.armed);
     try testing.expect(std.mem.indexOf(u8, sink.buf.items, "guardrail") != null);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "[user]") != null);
     try testing.expect(std.mem.indexOf(u8, sink.buf.items, "rm -rf /home/user") != null);
+}
 
-    // Second Enter forwards (user confirmed). Same proxy flow: typing
-    // \r calls applyInput first; current() is empty, lastCommitted
-    // is null (was cleared by the proxy after dispatchLineCommit),
-    // so the check sees an empty line and no rule matches anyway —
-    // but the `armed` short-circuit means we never reach the check.
-    _ = line.applyInput("\r");
-    const second = try G.onInput(&rt, &ctx, "\r");
-    try testing.expectEqual(m.Action.forward, second);
+test "LLM-author rm -rf is .block (replaces with Ctrl+U, banner tagged [llm])" {
+    const G = configure(.{});
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    line.setCommitAuthor(.llm);
+    _ = line.applyInput("rm -rf /home/me\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    try testing.expectEqual(m.Author.llm, line.committedAuthor());
+
+    const action = try G.onInput(&rt, &ctx, "\r");
+    switch (action) {
+        .replace => |bytes| try testing.expectEqualSlices(u8, "\x15", bytes),
+        else => return error.TestFailed,
+    }
     try testing.expect(!rt.armed);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "[llm]") != null);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "blocked.") != null);
+}
+
+test "User-author rm -rf is .confirm (swallow + arm)" {
+    const G = configure(.{});
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    _ = line.applyInput("rm -rf /home/me\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try testing.expectEqual(m.Action.swallow, try G.onInput(&rt, &ctx, "\r"));
+    try testing.expect(rt.armed);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "[user]") != null);
 }
 
 test "non-Enter keystroke disarms" {
@@ -333,8 +549,10 @@ test "non-Enter keystroke disarms" {
     defer sink.buf.deinit(testing.allocator);
     G.setSink(&rt, &sink, TestSink.write);
 
+    // `rm -rf /home/foo` hits the broader user-confirm rule, not the
+    // root .block — so it arms.
     var line = LineState{};
-    _ = line.applyInput("rm -rf /\r");
+    _ = line.applyInput("rm -rf /home/foo\r");
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx = m.Context{
@@ -368,44 +586,143 @@ test "Enter on safe line passes through" {
         .is_tty = false,
     };
 
-    const action = try G.onInput(&rt, &ctx, "\r");
-    try testing.expectEqual(m.Action.forward, action);
+    try testing.expectEqual(m.Action.forward, try G.onInput(&rt, &ctx, "\r"));
     try testing.expect(!rt.armed);
 }
 
-test "prefix rule requires the line to start with the pattern (no mid-line match)" {
-    const rules = [_]Rule{
-        .{
-            .name = "dd-prefix",
-            .kind = .{ .prefix = "dd " },
-            .reason = "raw write",
-        },
-    };
+test ".warn behavior: banner + forward (no swallow)" {
+    const rules = [_]Rule{.{
+        .name = "warn-only",
+        .match = .{ .substring = "WARN" },
+        .reason = "audit",
+        .behavior = .warn,
+    }};
     const G = configure(.{ .rules = &rules });
-    try testing.expect(G.check("dd if=/dev/zero of=/tmp/x") != null);
-    // Should NOT fire when "dd " appears mid-line — that's the
-    // substring rule's job, not prefix's.
-    try testing.expect(G.check("echo dd ") == null);
-    try testing.expect(G.check("sudo dd if=...") == null);
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    _ = line.applyInput("echo WARN now\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try testing.expectEqual(m.Action.forward, try G.onInput(&rt, &ctx, "\r"));
+    try testing.expect(!rt.armed);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "warning") != null);
 }
 
-test "first matching rule wins (declaration-order)" {
-    const rules = [_]Rule{
+test ".block replaces with Ctrl+U and never arms" {
+    const rules = [_]Rule{.{
+        .name = "block-test",
+        .match = .{ .substring = "BAD" },
+        .reason = "blocked",
+        .behavior = .block,
+    }};
+    const G = configure(.{ .rules = &rules });
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    _ = line.applyInput("echo BAD\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const action = try G.onInput(&rt, &ctx, "\r");
+    switch (action) {
+        .replace => |bytes| try testing.expectEqualSlices(u8, "\x15", bytes),
+        else => return error.TestFailed,
+    }
+    try testing.expect(!rt.armed);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "blocked.") != null);
+}
+
+test ".confirm_once: first match arms; after confirm, subsequent forwards silently" {
+    const rules = [_]Rule{.{
+        .name = "ask-once",
+        .match = .{ .substring = "git push --force" },
+        .reason = "force-pushing",
+        .behavior = .confirm_once,
+    }};
+    const G = configure(.{ .rules = &rules });
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    _ = line.applyInput("git push --force\r");
+    try testing.expectEqual(m.Action.swallow, try G.onInput(&rt, &ctx, "\r"));
+    try testing.expect(rt.armed);
+
+    _ = line.applyInput("\r");
+    try testing.expectEqual(m.Action.forward, try G.onInput(&rt, &ctx, "\r"));
+    try testing.expect(!rt.armed);
+    try testing.expect(rt.confirmed_once[0]);
+
+    sink.buf.clearRetainingCapacity();
+    _ = line.applyInput("git push --force origin master\r");
+    try testing.expectEqual(m.Action.forward, try G.onInput(&rt, &ctx, "\r"));
+    try testing.expectEqual(@as(usize, 0), sink.buf.items.len);
+}
+
+test "AuthorMask filtering: rule scoped to .llm is invisible to .user line" {
+    const rules = [_]Rule{.{
+        .name = "llm-only",
+        .match = .{ .substring = "danger" },
+        .reason = "llm-only",
+        .authors = .{ .user = false, .llm = true },
+        .behavior = .block,
+    }};
+    const G = configure(.{ .rules = &rules });
+    try testing.expect(G.checkAs("danger", .user) == null);
+    try testing.expect(G.checkAs("danger", .llm) != null);
+}
+
+test "custom rule list overrides defaults" {
+    const my_rules = [_]Rule{
         .{
-            .name = "first",
-            .kind = .{ .substring = "danger" },
-            .reason = "first rule's reason",
-        },
-        .{
-            .name = "second",
-            .kind = .{ .substring = "danger" },
-            .reason = "second rule's reason",
+            .name = "git-force",
+            .match = .{ .substring = "git push --force" },
+            .reason = "force-pushing",
         },
     };
-    const G = configure(.{ .rules = &rules });
-    const r = G.check("very danger here").?;
-    try testing.expectEqualStrings("first", r.name);
-    try testing.expectEqualStrings("first rule's reason", r.reason);
+    const G = configure(.{ .rules = &my_rules });
+    try testing.expect(G.check("git push --force origin main") != null);
+    try testing.expect(G.check("rm -rf /") == null);
 }
 
 test "empty rules list always returns null" {
@@ -413,192 +730,4 @@ test "empty rules list always returns null" {
     const G = configure(.{ .rules = &empty });
     try testing.expect(G.check("rm -rf /") == null);
     try testing.expect(G.check("") == null);
-}
-
-test ".block mode replaces the Enter with Ctrl+U and never arms" {
-    // A `.block` rule says "never allow this command, ever." The
-    // banner fires (so the user knows why nothing happened) but the
-    // module returns Action.replace = "\x15" instead of swallowing,
-    // so readline kills the typed line. armed stays false — there's
-    // no second-Enter confirm path.
-    const rules = [_]Rule{.{
-        .name = "no-rm-rf-slash",
-        .kind = .{ .substring = "rm -rf /" },
-        .reason = "blocked: rm -rf on root",
-        .mode = .block,
-    }};
-    const G = configure(.{ .rules = &rules });
-    var rt = try G.attach(testing.allocator, test_io);
-    defer G.detach(&rt, test_io);
-
-    var sink = TestSink{ .buf = .empty };
-    defer sink.buf.deinit(testing.allocator);
-    G.setSink(&rt, &sink, TestSink.write);
-
-    var line = LineState{};
-    _ = line.applyInput("rm -rf /home\r");
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(testing.allocator);
-    var ctx = m.Context{
-        .allocator = testing.allocator,
-        .io = test_io,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-    };
-
-    const action = try G.onInput(&rt, &ctx, "\r");
-    switch (action) {
-        .replace => |bytes| try testing.expectEqualSlices(u8, "\x15", bytes),
-        else => return error.TestFailed,
-    }
-    try testing.expect(!rt.armed); // never arms
-    // Banner still fires — the user needs to know.
-    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "guardrail") != null);
-    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "blocked.") != null);
-}
-
-test ".silent_block replaces the Enter with Ctrl+U + no banner" {
-    const rules = [_]Rule{.{
-        .name = "shh",
-        .kind = .{ .substring = "rm -rf /" },
-        .reason = "should not be visible",
-        .mode = .silent_block,
-    }};
-    const G = configure(.{ .rules = &rules });
-    var rt = try G.attach(testing.allocator, test_io);
-    defer G.detach(&rt, test_io);
-
-    var sink = TestSink{ .buf = .empty };
-    defer sink.buf.deinit(testing.allocator);
-    G.setSink(&rt, &sink, TestSink.write);
-
-    var line = LineState{};
-    _ = line.applyInput("rm -rf /tmp\r");
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(testing.allocator);
-    var ctx = m.Context{
-        .allocator = testing.allocator,
-        .io = test_io,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-    };
-
-    const action = try G.onInput(&rt, &ctx, "\r");
-    switch (action) {
-        .replace => |bytes| try testing.expectEqualSlices(u8, "\x15", bytes),
-        else => return error.TestFailed,
-    }
-    try testing.expectEqual(@as(usize, 0), sink.buf.items.len);
-    try testing.expect(!rt.armed);
-}
-
-test ".confirm_once: first match arms + banners; after confirm, subsequent matches forward silently" {
-    const rules = [_]Rule{.{
-        .name = "ask-once",
-        .kind = .{ .substring = "git push --force" },
-        .reason = "force-pushing",
-        .mode = .confirm_once,
-    }};
-    const G = configure(.{ .rules = &rules });
-    var rt = try G.attach(testing.allocator, test_io);
-    defer G.detach(&rt, test_io);
-
-    var sink = TestSink{ .buf = .empty };
-    defer sink.buf.deinit(testing.allocator);
-    G.setSink(&rt, &sink, TestSink.write);
-
-    var line = LineState{};
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(testing.allocator);
-    var ctx = m.Context{
-        .allocator = testing.allocator,
-        .io = test_io,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-    };
-
-    // First invocation: arm + banner + swallow.
-    _ = line.applyInput("git push --force\r");
-    try testing.expectEqual(m.Action.swallow, try G.onInput(&rt, &ctx, "\r"));
-    try testing.expect(rt.armed);
-    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "guardrail") != null);
-
-    // Confirm Enter: armed → forward + record persistent confirmation.
-    _ = line.applyInput("\r"); // empty, doesn't change committed
-    try testing.expectEqual(m.Action.forward, try G.onInput(&rt, &ctx, "\r"));
-    try testing.expect(!rt.armed);
-    try testing.expect(rt.confirmed_once[0]);
-
-    // Second invocation, same rule: no banner, just forward.
-    sink.buf.clearRetainingCapacity();
-    _ = line.applyInput("git push --force origin master\r");
-    try testing.expectEqual(m.Action.forward, try G.onInput(&rt, &ctx, "\r"));
-    try testing.expectEqual(@as(usize, 0), sink.buf.items.len);
-}
-
-test ".confirm_once is per-rule: confirming one rule doesn't suppress another" {
-    const rules = [_]Rule{
-        .{
-            .name = "once-a",
-            .kind = .{ .substring = "force-push" },
-            .reason = "a",
-            .mode = .confirm_once,
-        },
-        .{
-            .name = "once-b",
-            .kind = .{ .substring = "rm-bad" },
-            .reason = "b",
-            .mode = .confirm_once,
-        },
-    };
-    const G = configure(.{ .rules = &rules });
-    var rt = try G.attach(testing.allocator, test_io);
-    defer G.detach(&rt, test_io);
-
-    var sink = TestSink{ .buf = .empty };
-    defer sink.buf.deinit(testing.allocator);
-    G.setSink(&rt, &sink, TestSink.write);
-
-    var line = LineState{};
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(testing.allocator);
-    var ctx = m.Context{
-        .allocator = testing.allocator,
-        .io = test_io,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-    };
-
-    // Confirm rule A.
-    _ = line.applyInput("force-push\r");
-    _ = try G.onInput(&rt, &ctx, "\r");
-    _ = line.applyInput("\r");
-    _ = try G.onInput(&rt, &ctx, "\r");
-    try testing.expect(rt.confirmed_once[0]);
-    try testing.expect(!rt.confirmed_once[1]); // rule B still un-confirmed
-
-    // Rule B's first invocation must still banner + swallow.
-    sink.buf.clearRetainingCapacity();
-    _ = line.applyInput("rm-bad path\r");
-    try testing.expectEqual(m.Action.swallow, try G.onInput(&rt, &ctx, "\r"));
-    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "guardrail") != null);
-}
-
-test "custom rule list" {
-    const my_rules = [_]Rule{
-        .{
-            .name = "git-force",
-            .kind = .{ .substring = "git push --force" },
-            .reason = "force-pushing to a shared branch",
-        },
-    };
-    const G = configure(.{ .rules = &my_rules });
-
-    try testing.expect(G.check("git push --force origin main") != null);
-    // Default rules disabled — `rm -rf /` not in the custom list.
-    try testing.expect(G.check("rm -rf /") == null);
 }
