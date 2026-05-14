@@ -1,16 +1,20 @@
 # LLM exec mode — post-#21 roadmap
 
 Living plan for the work remaining after the Alt+S exec dialog (PR #21) lands.
-Each PR below ships in order, runs **10 rounds of the Copilot review loop**
-(early-stops on two empty rounds in a row), then squash-merges to master before
-the next one begins.
+Each PR below ships in order, runs **10 rounds of the Copilot review loop per
+PR** (early-stops on two empty rounds in a row), then squash-merges to master
+before the next one begins.
+
+PR #21 itself runs **15 rounds** rather than 10 — the user originally requested
+that count at the time the loop was kicked off; subsequent PRs all use the
+shorter cadence.
 
 Cross-reference: `docs/llm-exec-mode-design.md` is the design contract; this
 file is the execution log.
 
 ## Status snapshot
 
-- **PR #21** — feat(llm): exec dialog (Alt+S) — *in review*, 15-round Copilot loop running.
+- **PR #21** — feat(llm): exec dialog (Alt+S) — *in review*, 15-round Copilot loop running (the one-off higher round count is intentional — see the opening paragraph).
 - **PR A** onwards — *queued*, listed below in shipping order.
 
 ## Shipping order

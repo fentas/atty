@@ -1124,7 +1124,30 @@ pub fn configure(comptime cfg: Config) type {
                 const offset = rt.osc133_capture.edgeOffset(i);
                 switch (edge) {
                     .cmd_start => {
-                        if (rt.dialog_state == .executing) {
+                        // If we were already capturing (unusual —
+                        // a stray `;C` arrived mid-capture without
+                        // a preceding `;D`), append the pre-marker
+                        // bytes to the current observation BEFORE
+                        // resetting. Mirrors the cmd_end branch's
+                        // append-then-transition order so neither
+                        // path silently drops bytes between cursor
+                        // and the marker.
+                        if (capturing and offset > cursor) {
+                            var end_at: u32 = offset;
+                            if (offset <= output.len) {
+                                var j: usize = offset;
+                                while (j > cursor) : (j -= 1) {
+                                    if (output[j - 1] == 0x1B) {
+                                        end_at = @intCast(j - 1);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (end_at > cursor) {
+                                appendCaptured(rt, output[cursor..@min(end_at, output.len)]);
+                            }
+                        }
+                        if (rt.dialog_state == .executing or rt.dialog_state == .capturing_output) {
                             rt.dialog_state = .capturing_output;
                             rt.captured_output_len = 0;
                             rt.captured_truncated = false;
@@ -2104,18 +2127,36 @@ pub fn configure(comptime cfg: Config) type {
             errdefer allocating.deinit();
             const writer = &allocating.writer;
 
+            // Compose the system message: configured system prompt
+            // PLUS a stable shell/context preamble. Putting shell
+            // name + context_blob on the SYSTEM message (rather than
+            // wrapping the first user turn) means they survive FIFO
+            // eviction — once history fills past `history_turns_max`
+            // and the original user task ages out, future requests
+            // would otherwise lose every trace of shell context.
+            // The system message is always rebuilt per request, so
+            // there's no historical-rewrite concern either.
+            const composed_system = if (context_blob.len > 0)
+                try std.fmt.allocPrint(
+                    allocator,
+                    "{s}\n\nShell: {s}\nContext: {s}",
+                    .{ system_prompt, shell_name, context_blob },
+                )
+            else
+                try std.fmt.allocPrint(
+                    allocator,
+                    "{s}\n\nShell: {s}",
+                    .{ system_prompt, shell_name },
+                );
+            defer allocator.free(composed_system);
+
             try writer.writeAll("{\"model\":");
             try std.json.Stringify.encodeJsonString(model, .{}, writer);
             try writer.writeAll(",\"messages\":[{\"role\":\"system\",\"content\":");
-            try std.json.Stringify.encodeJsonString(system_prompt, .{}, writer);
+            try std.json.Stringify.encodeJsonString(composed_system, .{}, writer);
             try writer.writeAll("}");
 
-            // First user turn carries the shell name + context blob
-            // (PATH_BASE etc) so the model can tailor commands to
-            // the user's shell. Subsequent turns include just their
-            // raw content — adding shell context every turn would
-            // bloat the prompt and confuse the conversation flow.
-            for (turns, 0..) |turn, i| {
+            for (turns) |turn| {
                 const role: []const u8 = switch (turn.kind) {
                     .assistant_exec => "assistant",
                     .user, .observation => "user",
@@ -2124,22 +2165,7 @@ pub fn configure(comptime cfg: Config) type {
                 try writer.writeAll(role);
                 try writer.writeAll("\",\"content\":");
 
-                if (turn.kind == .user and i == 0) {
-                    const wrapped = if (context_blob.len > 0)
-                        try std.fmt.allocPrint(
-                            allocator,
-                            "Shell: {s}\nContext: {s}\nTask: {s}",
-                            .{ shell_name, context_blob, turn.content },
-                        )
-                    else
-                        try std.fmt.allocPrint(
-                            allocator,
-                            "Shell: {s}\nTask: {s}",
-                            .{ shell_name, turn.content },
-                        );
-                    defer allocator.free(wrapped);
-                    try std.json.Stringify.encodeJsonString(wrapped, .{}, writer);
-                } else if (turn.kind == .observation) {
+                if (turn.kind == .observation) {
                     const wrapped = try std.fmt.allocPrint(
                         allocator,
                         "OBSERVATION:\n{s}",
@@ -2310,11 +2336,21 @@ pub fn configure(comptime cfg: Config) type {
             // untouched. Better the JSON parser sees the wrapped
             // text and complains specifically than silently
             // dropping an otherwise-parseable reply.
+            //
+            // Closing fence is located by FORWARD search from
+            // after_open (`indexOfPos`), not by `lastIndexOf`.
+            // The latter would match the trailing fence even when
+            // a nested triple-backtick appears earlier in the
+            // content (e.g. a description string containing literal
+            // fences) — but if an interior fence preceded the real
+            // closer, lastIndexOf would silently truncate. Forward
+            // search picks the FIRST closing fence after the
+            // opener, which is the conventional shape.
             fence_strip: {
                 if (!std.mem.startsWith(u8, trimmed, "```")) break :fence_strip;
                 const nl = std.mem.indexOfScalar(u8, trimmed[3..], '\n') orelse break :fence_strip;
                 const after_open = 3 + nl + 1;
-                const close_at = std.mem.lastIndexOf(u8, trimmed, "```") orelse break :fence_strip;
+                const close_at = std.mem.indexOfPos(u8, trimmed, after_open, "```") orelse break :fence_strip;
                 if (close_at <= after_open) break :fence_strip;
                 const inner = std.mem.trim(u8, trimmed[after_open..close_at], " \t\r\n");
                 @memmove(out[0..inner.len], inner);
