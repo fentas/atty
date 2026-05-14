@@ -45,9 +45,10 @@ pub const kitty_kbd_pop = "\x1B[<u";
 ///
 /// Returns null when:
 ///   - `input` isn't a CSI-u sequence at all (caller forwards as-is)
-///   - it's CSI-u but the key has no legacy form (Ctrl+9,
-///     Ctrl+Shift+Right, Shift+Tab, …) — caller drops to avoid
-///     mojibake echo
+///   - it's CSI-u but the key has no legacy form (Ctrl+9, F-keys,
+///     Ctrl+Shift+Right, Ctrl+Alt+letter, …) — caller drops to
+///     avoid mojibake echo. Note that **Shift+Tab IS translated**
+///     to its legacy `\x1b[Z` form by the kc==9+shift branch below.
 ///
 /// `out` is caller-owned scratch storage for the translated bytes.
 /// A 4-byte buffer is enough for every translation this function
