@@ -44,10 +44,18 @@ pub const Config = struct {
     /// so a missed dispatch is a silent no-op, not an executed
     /// command.
     prefix: []const u8 = "#: ",
-    /// LLM model identifier passed in the request body. Used as
-    /// the default when `models` is empty AND the current
-    /// `current_model_idx` doesn't address a `models[]` entry.
-    /// Kept for backward compat with single-model configs.
+    /// LLM model identifier passed in the request body.
+    ///
+    /// **Selection precedence** (matches `triggerSinglePrompt`):
+    /// 1. If `cfg.models.len > 0` → use `cfg.models[idx]` where
+    ///    `idx = current_model_idx` clamped to `cfg.models.len-1`
+    ///    (out-of-range falls back to `cfg.models[0]`, NOT
+    ///    `cfg.model`).
+    /// 2. If `cfg.models` is empty → use this `cfg.model`.
+    ///
+    /// So this field is the SINGLE-MODEL fallback only — once
+    /// `cfg.models` is set, this value is unreachable. Kept for
+    /// backward compat with configs that pre-date `models[]`.
     model: []const u8 = "llama3:8b",
     /// Configured model list — `Alt+M` cycles through this with
     /// wrap-around. First entry is the default at startup.
