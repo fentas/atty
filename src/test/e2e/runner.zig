@@ -283,11 +283,13 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     // cwd anchor; without this, no scenario could load fixtures.
     // Resolve `sc.dir` to a canonical absolute path via libc
     // `realpath`. Handles `.`, `..`, symlinks, and the case where
-    // `sc.dir` is already absolute. PATH_MAX (4096) is the POSIX
-    // guarantee; if a deeply-nested mount point produces a longer
-    // path realpath returns null and we surface a clear error
-    // instead of silently falling back to the relative form (which
-    // would break every scenario that resolves fixtures via
+    // `sc.dir` is already absolute. The 4096-byte buffer matches
+    // typical Linux PATH_MAX (see the extern declaration above for
+    // the framing — PATH_MAX is implementation-defined per POSIX,
+    // not mandated). If a deeply-nested mount point produces a
+    // longer path, realpath returns null and we surface a clear
+    // error instead of silently falling back to the relative form
+    // (which would break every scenario that resolves fixtures via
     // `$ATTY_SCENARIO_DIR`).
     const dir_z = try gpa.dupeZ(u8, sc.dir);
     defer gpa.free(dir_z);
