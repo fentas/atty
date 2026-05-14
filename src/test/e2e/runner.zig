@@ -26,10 +26,12 @@ const Allocator = std.mem.Allocator;
 // libc realpath — Zig 0.16's `std.Io.Dir` doesn't expose realpath
 // directly, and `std.posix.realpath` was removed. We call libc to
 // resolve the scenario directory to a canonical absolute path
-// (handles `.`, `..`, symlinks). PATH_MAX (4096) is the POSIX
-// guarantee; in pathological cases (deeply nested mount points)
-// the call returns null and we surface the error instead of
-// silently falling back to a relative path.
+// (handles `.`, `..`, symlinks). The 4096-byte buffer matches
+// typical Linux PATH_MAX (this code is Linux-only — `dev-target`
+// is x86_64-linux-gnu, CI is musl-linux); the value is
+// implementation-defined per POSIX, not mandated. In pathological
+// cases (deeper than 4 KiB) the call returns null and we surface
+// the error instead of silently falling back to a relative path.
 extern "c" fn realpath(path: [*:0]const u8, resolved: [*:0]u8) ?[*:0]u8;
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;

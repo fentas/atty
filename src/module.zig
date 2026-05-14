@@ -113,10 +113,15 @@ pub const Context = struct {
     /// - Save / restore cursor (`\x1B[s` / `\x1B[u`, `\x1B 7` /
     ///   `\x1B 8`) is not modelled. When the shell saves and
     ///   restores, the tracker keeps its current value.
-    /// - Shell-side DECSTBM scrolling is also not modelled; if a
-    ///   future shell emits `\x1B[<t>;<b>r` and scrolls within
-    ///   it, the tracker keeps incrementing past the bottom of
-    ///   that region.
+    /// - DECSTBM scrolling. atty emits `\x1B[1;<effectiveRows>r`
+    ///   whenever the statusbar is active, so LF at the DECSTBM
+    ///   bottom scrolls within the region and the terminal's
+    ///   cursor stays at that row. The proxy compensates by
+    ///   capping the tracker's `max_rows` to `sb.effectiveRows()`
+    ///   in that case — so the LF-advance saturates at the
+    ///   right row. Shell-emitted DECSTBM (rare) is still NOT
+    ///   compensated; the tracker keeps incrementing past the
+    ///   bottom of that sub-region if a shell starts using one.
     ///
     /// Net: good enough for "is the prompt currently near the top
     /// of the screen?" decisions. Don't use it for pixel-precise

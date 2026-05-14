@@ -47,9 +47,16 @@
 //!   ignore the value (just like they ignore the statusbar render
 //!   path). We don't try to be smart about saving/restoring our row
 //!   across alt-screen toggles.
-//! - Scroll regions (DECSTBM). The atty proxy emits DECSTBM but the
-//!   shell rarely does; if a future shell side does, our row will
-//!   under-count when content scrolls within a sub-region.
+//! - Scroll regions (DECSTBM). The atty proxy emits DECSTBM
+//!   whenever the statusbar is active (region = 1..effectiveRows).
+//!   LF at the bottom of that region scrolls and the terminal's
+//!   cursor stays put — the proxy compensates by initializing
+//!   the tracker's `max_rows` to `sb.effectiveRows()` (not the
+//!   physical screen height), so the LF-advance saturates at the
+//!   right row. Updated on SIGWINCH too. Shell-emitted DECSTBM
+//!   (rare) is NOT compensated for; if a future shell starts
+//!   using its own scroll region, our row will drift past the
+//!   sub-region's bottom.
 //! - Wide-character handling. `\n` / `\r` / CSI are ASCII; any
 //!   multi-byte UTF-8 the shell emits never affects row.
 //!

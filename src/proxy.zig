@@ -209,9 +209,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // `docs/research/huh-vs-atty.md` for the comparison that drove
     // adding this — bubbletea / ultraviolet's full cell grid is
     // overkill for atty's needs; just the row suffices.
+    //
+    // `max_rows` is the SHELL-VISIBLE bottom row, not the screen's
+    // physical row count. When the statusbar is active, atty emits
+    // DECSTBM with `bottom = sb.effectiveRows()` — so LF at row N
+    // (the DECSTBM bottom) scrolls within the region and the cursor
+    // stays at N. Setting `max_rows` to `effectiveRows()` lets the
+    // tracker's LF-advance clamp at the same row the terminal does,
+    // keeping row consistent with what the shell sees.
     var cursor_tracker = CursorTracker.init(blk: {
         if (args.is_tty) {
-            if (Pty.querySize(posix.STDOUT_FILENO)) |s| break :blk s.rows else |_| {}
+            if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                if (statusbar) |sb| break :blk sb.effectiveRows();
+                break :blk s.rows;
+            } else |_| {}
         }
         break :blk 24;
     });
@@ -1197,10 +1208,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const sig: posix.SIG = @enumFromInt(sig_buf[i]);
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                        cursor_tracker.setMaxRows(s.rows);
-                        if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
+                        // setMaxRows AFTER sb.onResize so we can
+                        // read the new effectiveRows() — see the
+                        // startup-init comment for why the tracker
+                        // tracks DECSTBM's bottom row, not the
+                        // screen's physical bottom.
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
+                            cursor_tracker.setMaxRows(sb.effectiveRows());
                             // While an alt-screen TUI is running the
                             // statusbar is suspended and the app owns
                             // every row — don't re-paint the reserved
@@ -1212,7 +1227,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 sb.activate(&w) catch {};
                                 try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
                             }
+                        } else {
+                            cursor_tracker.setMaxRows(s.rows);
                         }
+                        if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
                         // Always pass the FULL size — slimming would
                         // bake the statusbar reservation into the
                         // slave's TIOCGWINSZ, breaking any inner TUI
