@@ -1,0 +1,10 @@
+$ echo UPARROW-TARGET-99999
+UPARROW-TARGET-99999
+$ cat /tmp/atty-e2e-delete-uparrow
+rm -f /tmp/atty-e2e-delete-uparrow
+PS1=$'\[\033]133;A\007\]$ \[\033]133;B\007\]' && clear
+cat /tmp/atty-e2e-delete-uparrow
+$
+
+
+

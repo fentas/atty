@@ -1,0 +1,24 @@
+                                                                                
+~                                                                               
+~                                                                               
+~                                    │ ╲ ││                                     
+~                                    ││╲╲││                                     
+~                                    ││ ╲ │                                     
+~                                                                               
+~                                 NVIM v0.12.2                                  
+~                 ────────────────────────────────────────────                  
+~                 Nvim is open source and freely distributable                  
+~                           https://neovim.io/#chat                             
+~                 ──────────────────$                                           
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+[No Name]                                                     0,0-1          All
+defaults.lua: Did not detect DSR response from terminal. This results in a slowe

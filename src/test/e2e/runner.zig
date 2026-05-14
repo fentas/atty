@@ -23,6 +23,17 @@ const atty = @import("atty");
 
 const Allocator = std.mem.Allocator;
 
+// libc realpath — Zig 0.16's `std.Io.Dir` doesn't expose realpath
+// directly, and `std.posix.realpath` was removed. We call libc to
+// resolve the scenario directory to a canonical absolute path
+// (handles `.`, `..`, symlinks). The 4096-byte buffer matches
+// typical Linux PATH_MAX (this code is Linux-only — `dev-target`
+// is x86_64-linux-gnu, CI is musl-linux); the value is
+// implementation-defined per POSIX, not mandated. In pathological
+// cases (deeper than 4 KiB) the call returns null and we surface
+// the error instead of silently falling back to a relative path.
+extern "c" fn realpath(path: [*:0]const u8, resolved: [*:0]u8) ?[*:0]u8;
+
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
 const Args = struct {
@@ -264,6 +275,31 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     var timeout_ms: u32 = 5000;
     var extra_env: std.ArrayList(harness.KV) = .empty;
     defer extra_env.deinit(gpa);
+
+    // Resolve the scenario directory to an absolute path and expose
+    // it via `$ATTY_SCENARIO_DIR` so scenarios can reference
+    // fixture files (e.g. `cat $ATTY_SCENARIO_DIR/../fixtures/foo`).
+    // The harness's child gets `HOME=/tmp` and no useful default
+    // cwd anchor; without this, no scenario could load fixtures.
+    // Resolve `sc.dir` to a canonical absolute path via libc
+    // `realpath`. Handles `.`, `..`, symlinks, and the case where
+    // `sc.dir` is already absolute. The 4096-byte buffer matches
+    // typical Linux PATH_MAX (see the extern declaration above for
+    // the framing — PATH_MAX is implementation-defined per POSIX,
+    // not mandated). If a deeply-nested mount point produces a
+    // longer path, realpath returns null and we surface a clear
+    // error instead of silently falling back to the relative form
+    // (which would break every scenario that resolves fixtures via
+    // `$ATTY_SCENARIO_DIR`).
+    const dir_z = try gpa.dupeZ(u8, sc.dir);
+    defer gpa.free(dir_z);
+    var rp_buf: [4096]u8 = undefined;
+    const rp = realpath(dir_z.ptr, @ptrCast(&rp_buf));
+    if (rp == null) return error.CannotResolveScenarioDir;
+    const rp_len = std.mem.len(@as([*:0]const u8, @ptrCast(rp.?)));
+    const scenario_dir_abs = try gpa.dupe(u8, rp_buf[0..rp_len]);
+    defer gpa.free(scenario_dir_abs);
+    try extra_env.append(gpa, .{ .key = "ATTY_SCENARIO_DIR", .value = scenario_dir_abs });
     var spawn_argv: []const []const u8 = &.{};
     var spawn_seen = false;
     var first_cmd_after_spawn: usize = 0;
@@ -405,7 +441,32 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
         defer gpa.free(cast_path);
 
         if (update) {
-            // Write env.toml.
+            // Write env.toml. Build the snapshot inputs first so
+            // ownership is clear and freeing is straightforward.
+            var forced_env_arr: [forced_env.len]snapshot.EnvSnapshot.KV = undefined;
+            for (&forced_env, 0..) |kv, i| forced_env_arr[i] = .{ .key = kv.key, .value = kv.value };
+
+            // Filter out `ATTY_SCENARIO_DIR` from the committed env
+            // snapshot — its value is an absolute, machine-specific
+            // path (e.g. /home/alice/atty/tests/e2e/<scenario>) that
+            // would produce a different golden on every dev
+            // checkout. Runtime injection still happens
+            // unconditionally; we only redact it from disk.
+            var count: usize = 0;
+            for (extra_env.items) |kv| {
+                if (!std.mem.eql(u8, kv.key, "ATTY_SCENARIO_DIR")) count += 1;
+            }
+            const extra_env_filtered = try gpa.alloc(snapshot.EnvSnapshot.KV, count);
+            defer gpa.free(extra_env_filtered);
+            {
+                var w_idx: usize = 0;
+                for (extra_env.items) |kv| {
+                    if (std.mem.eql(u8, kv.key, "ATTY_SCENARIO_DIR")) continue;
+                    extra_env_filtered[w_idx] = .{ .key = kv.key, .value = kv.value };
+                    w_idx += 1;
+                }
+            }
+
             var env_file = try cwd.createFile(io, env_path, .{});
             defer env_file.close(io);
             var env_buf: [4096]u8 = undefined;
@@ -415,16 +476,8 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
                 .cols = cols,
                 .rows = rows,
                 .argv = spawn_argv,
-                .forced_env = blk: {
-                    var arr: [forced_env.len]snapshot.EnvSnapshot.KV = undefined;
-                    for (&forced_env, 0..) |kv, i| arr[i] = .{ .key = kv.key, .value = kv.value };
-                    break :blk arr[0..];
-                },
-                .extra_env = blk: {
-                    var arr = try gpa.alloc(snapshot.EnvSnapshot.KV, extra_env.items.len);
-                    for (extra_env.items, 0..) |kv, i| arr[i] = .{ .key = kv.key, .value = kv.value };
-                    break :blk arr;
-                },
+                .forced_env = forced_env_arr[0..],
+                .extra_env = extra_env_filtered,
             });
             try env_w.interface.flush();
 

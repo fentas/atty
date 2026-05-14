@@ -1,0 +1,39 @@
+# split_csi_no_corruption — emit a CSI sequence in two PTY chunks
+# separated by enough time for atty's tick to fire. Asserts the
+# rendered text doesn't contain the leaked CSI params that the
+# DECSET ?2026 (synchronized output) wrap bug would have produced
+# when it briefly lived on this PR (since reverted in b775624).
+
+cols 80
+rows 12
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Build the split-CSI emitter as a function so the typed prompt
+# is short and the printed output is visible on the snapshot grid.
+# Bash runs the function as one process; the two printf calls
+# inside flush separately, with a sleep between, giving atty's
+# tick loop a chance to fire between the two halves. With the
+# bug, anything atty wrote (a DECSET `?2026h`/`?2026l` wrap, or
+# any other escape sequence starting with `\x1B[`) lands between
+# `\x1B[3` and `1mXYZ`, aborting the SGR and rendering the params
+# as literal text. Without the bug, the terminal accumulates the
+# split bytes into one well-formed SGR and the letters `XYZ`
+# render styled red, not literal.
+# Emit SGR `\x1B[31m` (red FG) split as `\x1B[3` + sleep + `1mMARK\x1B[0m\n`.
+# Same shape as the LazyVim bug, but using a single-param SGR the
+# e2e harness's vt-grid definitely accepts.
+type "f() { printf '\\033[3'; sleep 0.5; printf '1m'; echo XYZ; printf '\\033[0m'; }\r"
+wait_for "$"
+type "f\r"
+# Wait long enough for the function body to complete: 500ms sleep
+# + output. Then snapshot. `XYZ` is unique enough to NOT match the
+# typed function-definition echo (which would be `echo XYZ`).
+sleep 1200
+snapshot split_csi_rendered
+
+# Clean exit.
+type "exit\r"
+exit_code 0

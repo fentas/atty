@@ -94,6 +94,40 @@ pub const Context = struct {
     /// Null = nothing pushed yet OR we're at the local prompt.
     subprocess: ?*const subprocess_mod.Tracker = null,
 
+    /// Shell-side cursor row (1-based), or null when the proxy
+    /// hasn't wired the tracker (unit tests, non-TTY runs). Driven
+    /// by `cursor_tracker.zig`, fed every byte the shell writes to
+    /// stdout. Modules can use it to decide overlay placement —
+    /// e.g. a future dynamic statusbar that lives at the top when
+    /// the prompt is near the bottom and vice versa.
+    ///
+    /// **Accuracy caveats — treat as approximate:**
+    /// - Column isn't tracked at all (statusbar reservation is a
+    ///   horizontal-band concept; the row alone suffices).
+    /// - **Soft-wrap drift**: a long printable line that exceeds
+    ///   `cols` auto-wraps in the terminal, advancing the cursor
+    ///   by one row without emitting any CSI or LF. The tracker
+    ///   doesn't see this and the row under-counts by however
+    ///   many wraps happened. Same applies to hard tabs that
+    ///   cross the right margin.
+    /// - Save / restore cursor (`\x1B[s` / `\x1B[u`, `\x1B 7` /
+    ///   `\x1B 8`) is not modelled. When the shell saves and
+    ///   restores, the tracker keeps its current value.
+    /// - DECSTBM scrolling. atty emits `\x1B[1;<effectiveRows>r`
+    ///   whenever the statusbar is active, so LF at the DECSTBM
+    ///   bottom scrolls within the region and the terminal's
+    ///   cursor stays at that row. The proxy compensates by
+    ///   capping the tracker's `max_rows` to `sb.effectiveRows()`
+    ///   in that case — so the LF-advance saturates at the
+    ///   right row. Shell-emitted DECSTBM (rare) is still NOT
+    ///   compensated; the tracker keeps incrementing past the
+    ///   bottom of that sub-region if a shell starts using one.
+    ///
+    /// Net: good enough for "is the prompt currently near the top
+    /// of the screen?" decisions. Don't use it for pixel-precise
+    /// cursor placement.
+    cursor_row: ?u16 = null,
+
     /// Convenience wrapper around `formatCwd` — modules call this
     /// from `onLineCommit` when they want a `--cwd` string that
     /// reflects the user's current location. When subprocess is

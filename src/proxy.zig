@@ -41,6 +41,7 @@ const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
+const CursorTracker = @import("cursor_tracker.zig").CursorTracker;
 const Osc7 = @import("osc7.zig").Osc7;
 const subprocess_mod = @import("subprocess.zig");
 
@@ -200,6 +201,32 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var osc133_tracker = Osc133.init(allocator);
     defer osc133_tracker.deinit();
 
+    // Cursor-Y tracker — observe-only state machine that watches
+    // master→stdout for cursor-moving CSI sequences (CUP / CUU / CUD
+    // / VPA / CNL / CPL) plus `\n` and updates a single u16 row.
+    // Modules read `ctx.cursor_row`; future dynamic-statusbar work
+    // uses it to decide top-vs-bottom placement. See
+    // `docs/research/huh-vs-atty.md` for the comparison that drove
+    // adding this — bubbletea / ultraviolet's full cell grid is
+    // overkill for atty's needs; just the row suffices.
+    //
+    // `max_rows` is the SHELL-VISIBLE bottom row, not the screen's
+    // physical row count. When the statusbar is active, atty emits
+    // DECSTBM with `bottom = sb.effectiveRows()` — so LF at row N
+    // (the DECSTBM bottom) scrolls within the region and the cursor
+    // stays at N. Setting `max_rows` to `effectiveRows()` lets the
+    // tracker's LF-advance clamp at the same row the terminal does,
+    // keeping row consistent with what the shell sees.
+    var cursor_tracker = CursorTracker.init(blk: {
+        if (args.is_tty) {
+            if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                if (statusbar) |sb| break :blk sb.effectiveRows();
+                break :blk s.rows;
+            } else |_| {}
+        }
+        break :blk 24;
+    });
+
     // Alternate-screen-buffer tracker — full-screen TUIs (k9s, vim,
     // less, htop, helix, lazygit, …) swap to the alt buffer with
     // `\x1b[?1049h` and back with `?1049l`. While they're active the
@@ -300,6 +327,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         .is_tty = args.is_tty,
         .incognito = false,
         .subprocess = &subprocess_tracker,
+        // Null on non-TTY runs (CI capture, piped/redirected
+        // stdout). The slave's reported size is bogus there, so the
+        // tracker's row would be meaningless to consumers — matches
+        // the contract documented on `Context.cursor_row`.
+        .cursor_row = if (args.is_tty) cursor_tracker.currentRow() else null,
     };
 
     var pfds = [_]posix.pollfd{
@@ -559,11 +591,46 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             if (statusbar) |*sb| sb.last_valid = false;
                         },
                         .delete_history_match => {
-                            const current = line_state.current();
-                            if (!line_state.uncertain and current.len > 0) {
+                            // Pick the deletion target. Prefer the
+                            // keystroke-tracked `line_state.current()`
+                            // (works for any shell, no integration
+                            // needed). When the buffer is `uncertain`
+                            // — typically because the user just hit
+                            // Up arrow to recall an entry — fall
+                            // back to the OSC 133 capture stream
+                            // when it's active and non-empty.
+                            //
+                            // Race note: atty's poll loop processes
+                            // stdin BEFORE master, so a STRICT race
+                            // (user presses Ctrl+Shift+D before any
+                            // master-output cycle has fed the recall
+                            // bytes to `osc133_tracker`) leaves
+                            // `currentInput()` empty too, and the
+                            // handler no-ops. In practice the user
+                            // waits to SEE the recalled line before
+                            // pressing the binding, by which point
+                            // multiple poll iterations have drained
+                            // the master fd and `syncFromCapture` /
+                            // `osc133_tracker.feed` have run — so
+                            // the typical case is handled. A future
+                            // pre-binding master-drain helper would
+                            // close the strict race for power users
+                            // who type faster than the kernel
+                            // schedules; deferred until anyone
+                            // actually trips it.
+                            const target: []const u8 = blk: {
+                                if (!line_state.uncertain) {
+                                    break :blk line_state.current();
+                                }
+                                if (osc133_tracker.captureActive()) {
+                                    break :blk osc133_tracker.currentInput();
+                                }
+                                break :blk "";
+                            };
+                            if (target.len > 0) {
                                 // Fire the deletion across modules that
                                 // implement the hook.
-                                D.dispatchDeleteHistoryMatch(&runtimes, &ctx, current) catch {};
+                                D.dispatchDeleteHistoryMatch(&runtimes, &ctx, target) catch {};
                                 // Clear the shell prompt: send Ctrl+U
                                 // (NAK / kill-line). Bash, zsh, dash
                                 // and friends all bind it to
@@ -580,7 +647,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                     const msg = std.fmt.bufPrint(
                                         &buf,
                                         "🗑 deleted: {s}",
-                                        .{current},
+                                        .{target},
                                     ) catch buf[0..0];
                                     sb.setTransient(msg, 3_000);
                                 }
@@ -898,6 +965,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 osc133_tracker.feed(output);
                 alt_screen.feed(output);
                 osc7_tracker.feed(output);
+                cursor_tracker.feed(output);
+                // Only surface the row to modules on real TTY runs
+                // — matches the null-on-non-TTY contract on
+                // `Context.cursor_row` and the startup gate above.
+                if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
 
                 // Walk the OSC 133 edge ring + OSC 7 capture ring
                 // INTERLEAVED by byte offset within the current
@@ -1136,8 +1208,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const sig: posix.SIG = @enumFromInt(sig_buf[i]);
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                        // setMaxRows AFTER sb.onResize so we can
+                        // read the new effectiveRows() — see the
+                        // startup-init comment for why the tracker
+                        // tracks DECSTBM's bottom row, not the
+                        // screen's physical bottom.
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
+                            cursor_tracker.setMaxRows(sb.effectiveRows());
                             // While an alt-screen TUI is running the
                             // statusbar is suspended and the app owns
                             // every row — don't re-paint the reserved
@@ -1149,7 +1227,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 sb.activate(&w) catch {};
                                 try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
                             }
+                        } else {
+                            cursor_tracker.setMaxRows(s.rows);
                         }
+                        if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
                         // Always pass the FULL size — slimming would
                         // bake the statusbar reservation into the
                         // slave's TIOCGWINSZ, breaking any inner TUI

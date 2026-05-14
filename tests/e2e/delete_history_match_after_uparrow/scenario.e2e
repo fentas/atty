@@ -1,0 +1,68 @@
+# delete_history_match_after_uparrow — verify Ctrl+Shift+D works
+# after recalling a line via Up arrow.
+#
+# Flow:
+#   1. Set up OSC 133 markers (`;A`+`;B` in PS1) so the tracker
+#      can capture the recalled line.
+#   2. Record a unique entry; bash's history -s puts it in
+#      readline's recall list too.
+#   3. Reset the history-module file so the e2e is deterministic
+#      across re-runs.
+#   4. Type the entry through atty so history.onLineCommit records
+#      it on disk + in-memory.
+#   5. Press Up arrow — bash recalls "echo UPARROW-TARGET-99999"
+#      onto the prompt. line_state.uncertain becomes true (CSI).
+#   6. Fire Ctrl+Shift+D via the kitty kbd CSI-u byte sequence.
+#      With the fix, the handler falls back to the OSC 133 capture
+#      stream and dispatches the deletion. Without the fix,
+#      line_state.uncertain would short-circuit the handler and
+#      the deletion never fires.
+#   7. Verify the file no longer contains the entry by `cat`ing it.
+
+cols 60
+rows 10
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Reset the history-module file (deterministic re-runs).
+type "rm -f /tmp/atty-e2e-delete-uparrow\r"
+wait_for "$"
+
+# Mirror what `atty init bash` injects (PS1 with `;A`+`;B`).
+type "PS1=$'\\[\\033]133;A\\007\\]$ \\[\\033]133;B\\007\\]' && clear\r"
+wait_for "$"
+sleep 200
+
+# Record the entry — atty's history module appends to the file
+# via onLineCommit. Bash's own history also gets the entry so Up
+# arrow can recall it.
+type "echo UPARROW-TARGET-99999\r"
+wait_for "UPARROW-TARGET-99999"
+sleep 300
+
+# Press Up arrow — bash recalls "echo UPARROW-TARGET-99999" onto
+# the prompt. The OSC 133 tracker captures it via the `;B`-onward
+# stream. line_state.uncertain becomes true (CSI), so the handler
+# must fall back to the capture stream.
+key Up
+sleep 300
+
+# Ctrl+Shift+D — kitty kbd CSI-u for 'd' with Ctrl+Shift (modifier
+# 6). atty's binding fires; with the fix, the handler reads the
+# recalled line from osc133_tracker.currentInput() and dispatches
+# delete_history_match. The proxy also sends Ctrl+U to clear the
+# shell prompt.
+type "\x1b[100;6u"
+sleep 400
+
+# Verify the file no longer contains the entry. Pre-fix it would
+# still be there because the handler skipped on uncertain.
+type "cat /tmp/atty-e2e-delete-uparrow\r"
+sleep 300
+snapshot history_after_delete
+
+# Clean exit.
+type "exit\r"
+exit_code 0
