@@ -559,6 +559,16 @@ pub fn configure(comptime cfg: Config) type {
                     return true;
                 },
                 .llm_exec_cancel => {
+                    // Only claim consumed when there's actual
+                    // state to clear — otherwise the user's
+                    // Ctrl+Shift+X bytes flow through to any
+                    // inner program (vim / emacs / less) that
+                    // might bind them. Without this gate every
+                    // stray Ctrl+Shift+X in a normal shell got
+                    // eaten by atty.
+                    const had_work = rt.in_flight or rt.ai_mode_active or rt.pending_injection_len > 0;
+                    if (!had_work) return false;
+
                     // Bump req_gen so any in-flight worker
                     // response is discarded as stale when it
                     // lands. Without this, the worker would
@@ -577,8 +587,7 @@ pub fn configure(comptime cfg: Config) type {
                     // right back in AI mode — surprising for an
                     // explicit cancel.
                     if (rt.ai_mode_active) {
-                        rt.pending_injection[0] = 0x15;
-                        rt.pending_injection_len = 1;
+                        queueInjection(rt, "\x15");
                     }
                     rt.in_flight = false;
                     rt.ai_mode_active = false;
@@ -634,8 +643,7 @@ pub fn configure(comptime cfg: Config) type {
                     // ahead of any LLM response. Same visible
                     // effect: line gets wiped, response gets
                     // injected when ready.
-                    rt.pending_injection[0] = 0x15;
-                    rt.pending_injection_len = 1;
+                    queueInjection(rt, "\x15");
                     return .forward;
                 },
             }
@@ -710,6 +718,20 @@ pub fn configure(comptime cfg: Config) type {
             // The error hint above is what the user will see.
             if (n == 0) return null;
             return rt.inject_buf[0..rt.inject_len];
+        }
+
+        /// Queue bytes on `pending_injection` for the next
+        /// `pollShellInput` tick to drain. Single entry point for
+        /// every site that wants to inject bytes synchronously
+        /// from a hook that has no return-value channel (i.e.
+        /// `onAction`). The compile-time assert pins the
+        /// invariant — `pending_injection` is fixed at 16 bytes
+        /// for the Ctrl+U / short-CSI use case; longer sequences
+        /// need to grow the buffer first.
+        fn queueInjection(rt: *Runtime, bytes: []const u8) void {
+            std.debug.assert(bytes.len <= rt.pending_injection.len);
+            @memcpy(rt.pending_injection[0..bytes.len], bytes);
+            rt.pending_injection_len = bytes.len;
         }
 
         /// Synchronously latch a hint string on the Runtime so the
