@@ -17,7 +17,10 @@
 #      stream and dispatches the deletion. Without the fix,
 #      line_state.uncertain would short-circuit the handler and
 #      the deletion never fires.
-#   7. Verify the file no longer contains the entry by `cat`ing it.
+#   7. Verify the file no longer contains the entry via a
+#      grep / HIT-COUNT assertion (a literal `cat` would race
+#      atty's history-write timing across test runs — see the
+#      block above the verification command for the full story).
 
 cols 60
 rows 10
@@ -77,7 +80,11 @@ sleep 400
 # `HIT-COUNT=0` means the delete fired; `HIT-COUNT=1` means it
 # didn't.
 type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow); echo CHECK-DONE\r"
-sleep 400
+# Wait for the unique sentinel rather than sleeping a fixed
+# duration — on slow CI hosts the grep/echo may not have flushed
+# in 400 ms, so the snapshot would capture an in-progress prompt
+# and reintroduce the flake we're trying to remove.
+wait_for "CHECK-DONE"
 snapshot history_after_delete
 
 # Clean exit.
