@@ -1,0 +1,63 @@
+# ghost_partial_osc133 — ghost overlay must render even when the shell
+# emits ONLY ;A (no ;B / ;C / ;D). This is the Ghostty `shell-
+# integration-features = osc-133` shape — the canonical partial
+# emitter and the user's primary terminal.
+#
+# Flow:
+#   1. Configure PS1 to embed `\e]133;A\007` so every new prompt fires
+#      a `;A` marker on atty's master-output stream.
+#   2. Record a unique command THROUGH atty so history.onLineCommit
+#      fires under partial-OSC133 conditions and the in-memory ring
+#      picks it up. (Pre-seeding the file wouldn't help: the history
+#      module reads at attach time, before the partial-emitter PS1
+#      exists.)
+#   3. Type a prefix of that command — history.provideGhostText
+#      returns the trailing portion and the proxy paints it dim
+#      after the cursor.
+#   4. Snapshot. Post-fix: the prefix + ghost are visible and the
+#      .sgr file shows a DIM span on the trailing cells. Pre-fix
+#      (`inInputPhase()` returning false after `;A`): the `inSubprocess`
+#      gate evaluates true at the local prompt, renderGhost is
+#      suppressed, and the snapshot has no dim cells → fails loudly.
+
+cols 60
+rows 6
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Set PS1 to embed a `;A` marker. The `\[ \]` escape brackets tell
+# bash these are non-printing bytes so it doesn't count them toward
+# the visible prompt width. We deliberately do NOT set up `;B` / `;C`
+# / `;D` — this is the partial-emitter case.
+type "PS1='\\[\\033]133;A\\007\\]$ ' && clear\r"
+wait_for "$"
+sleep 200
+
+# Record an entry THROUGH atty — so that history's onLineCommit
+# fires under partial-OSC133 conditions and appends to the in-memory
+# ring (which is what `provideGhostText` queries). Pre-seeding the
+# file alone wouldn't help: history.attach reads at startup, before
+# this prompt exists.
+type "echo partial-osc133-target\r"
+wait_for "partial-osc133-target"
+sleep 300
+
+# Type a prefix of the just-recorded command. atty's keystroke-tracked
+# `line_state.current()` should be "echo partial-o"; history.
+# provideGhostText should return "sc133-target" and the proxy should
+# paint it dim after the cursor.
+type "echo partial-o"
+sleep 500
+
+# Snapshot. grid.txt should contain "$ echo partial-osc133-target"
+# (prompt + typed prefix + ghost suggestion). grid.sgr should show
+# a DIM span on the trailing cells (the ghost overlay's style).
+snapshot ghost_visible
+
+# Clean exit.
+type "\r"
+sleep 100
+type "exit\r"
+exit_code 0
