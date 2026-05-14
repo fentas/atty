@@ -1,0 +1,12 @@
+$ tput lines
+12
+$
+
+
+
+
+
+
+
+
+atty

@@ -135,9 +135,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
     if (args.is_tty) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            var shell_size = s;
-            if (statusbar) |sb| shell_size.rows = sb.effectiveRows();
-            _ = pty.setSize(shell_size) catch {};
+            // Always hand the slave the FULL row count, not the
+            // statusbar's slimmed effectiveRows(). DECSTBM (set via
+            // `sb.activate`) constrains shell scrolling to the
+            // non-reserved rows, but the TIOCGWINSZ reply is what
+            // every inner program reads when sizing itself —
+            // including TUIs that the shell forks (nvim, lazygit,
+            // k9s, …). With a slim reply, the TUI queried size on
+            // startup, got `real - reserve_rows`, drew its UI
+            // centered for that smaller box, and stayed there even
+            // after our deferred resize-to-full + SIGWINCH (the
+            // dashboard plugin doesn't always redraw). Reporting
+            // the full size keeps the inner TUI correctly sized
+            // from the first byte it draws; bash sees the full
+            // size too, which is harmless (DECSTBM still guards
+            // the reserved zone from scroll, and `renderStatus`
+            // repaints over any prompt-edge bleed on every tick).
+            _ = pty.setSize(s) catch {};
         } else |_| {}
     }
 
@@ -1019,29 +1033,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // bytes (statusbar repaint) or signal the slave (resize
                 // + SIGWINCH).
                 if (alt_transitioned) {
-                    if (statusbar) |*sb| {
-                        if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                            var shell_size = s;
-                            if (!alt_now_active) {
-                                shell_size.rows = sb.effectiveRows();
-                                // Use the lighter `reactivate` here,
-                                // not `activate`. activate's ED 2
-                                // clears the whole screen + homes the
-                                // cursor — if the shell drew a prompt
-                                // immediately after `?1049l` in the
-                                // same `output` chunk, that prompt is
-                                // already on the primary screen and
-                                // ED 2 would wipe it. reactivate
-                                // restores DECSTBM + clears the
-                                // reserved rows around a save/restore-
-                                // cursor, leaving anything the shell
-                                // already drew untouched.
-                                var w2: std.Io.Writer = .fixed(&out_buf);
-                                sb.reactivate(&w2) catch {};
-                                if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
-                            }
-                            _ = pty.setSize(shell_size) catch {};
-                        } else |_| {}
+                    // Slave size is always FULL (see startup
+                    // comment) — no per-transition resize needed.
+                    // On EXIT (`?1049l`) we still need to restore
+                    // DECSTBM + clear the reserved rows, because
+                    // the alt-screen TUI may have emitted `\x1B[r`
+                    // on its own buffer and on terminals where
+                    // DECSTBM is global that propagates to the
+                    // primary screen.
+                    if (!alt_now_active) {
+                        if (statusbar) |*sb| {
+                            var w2: std.Io.Writer = .fixed(&out_buf);
+                            sb.reactivate(&w2) catch {};
+                            if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+                        }
                     }
                 }
 
@@ -1074,23 +1079,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const sig: posix.SIG = @enumFromInt(sig_buf[i]);
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                        var shell_size = s;
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
                             // While an alt-screen TUI is running the
                             // statusbar is suspended and the app owns
                             // every row — don't re-paint the reserved
-                            // zone or slim the slave size. On exit
-                            // (?1049l) the master-output path runs
-                            // sb.activate again with the current size.
+                            // zone. On exit (?1049l) the master-
+                            // output path runs sb.activate again
+                            // with the current size.
                             if (!alt_screen.active) {
                                 var w: std.Io.Writer = .fixed(&out_buf);
                                 sb.activate(&w) catch {};
                                 try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
-                                shell_size.rows = sb.effectiveRows();
                             }
                         }
-                        _ = pty.setSize(shell_size) catch {};
+                        // Always pass the FULL size — slimming would
+                        // bake the statusbar reservation into the
+                        // slave's TIOCGWINSZ, breaking any inner TUI
+                        // that queries its size before our alt-screen
+                        // resize fires.
+                        _ = pty.setSize(s) catch {};
                     } else |_| {}
                 } else if (sig == posix.SIG.CHLD) {
                     var status: u32 = 0;

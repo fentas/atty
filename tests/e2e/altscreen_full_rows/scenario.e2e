@@ -1,0 +1,30 @@
+# altscreen_full_rows — verify bash and inner-TUI both see the FULL
+# terminal rows even when atty has a statusbar reserving rows at the
+# bottom.
+#
+# Pre-fix: atty handed the slave `effectiveRows()` (rows minus
+# reserve_rows). Any program that queried TIOCGWINSZ at startup got
+# the slim number — nvim/LazyVim's dashboard plugin centered itself
+# for that smaller box and didn't redraw on the post-`?1049h` SIGWINCH.
+#
+# Post-fix: slave always sees FULL. DECSTBM still keeps shell
+# scrolling out of the reserved zone.
+
+cols 60
+rows 12
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# `tput lines` reads the terminal's row count from TIOCGWINSZ.
+# Pre-fix this would have printed 9 (12 - 3 reserve_rows). Post-fix
+# it prints 12.
+type "tput lines\r"
+wait_for "12"
+sleep 200
+snapshot bash_sees_full
+
+# Clean exit.
+type "exit\r"
+exit_code 0

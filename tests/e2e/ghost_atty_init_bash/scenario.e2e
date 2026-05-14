@@ -35,9 +35,12 @@ sleep 500
 snapshot ghost_visible
 
 # Clear the ghost + line; verify the file is on disk too.
+# `clear` first so the cat snapshot starts from a clean grid —
+# without it, scrollback alignment is sensitive to slave row count
+# (slim vs full) and timing.
 key Enter
 sleep 200
-type "cat /tmp/atty-e2e-ghost-atty-init-bash\r"
+type "clear && cat /tmp/atty-e2e-ghost-atty-init-bash\r"
 sleep 400
 snapshot history_written
 

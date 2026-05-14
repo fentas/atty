@@ -1,8 +1,8 @@
-$ cat /tmp/atty-e2e-ghost-atty-init-bash
 __atty_osc133_d() { local __code=$?; printf '\033]133;D;%s\0
 07' "$__code"; }
+PROMPT_COMMAND='__atty_osc133_d'
 PS1=$'\[\033]133;A\007\]$ \[\033]133;B\007\]' && clear
 echo init-bash-record-99999
 echo init-bash-r
-cat /tmp/atty-e2e-ghost-atty-init-bash
+clear && cat /tmp/atty-e2e-ghost-atty-init-bash
 $
