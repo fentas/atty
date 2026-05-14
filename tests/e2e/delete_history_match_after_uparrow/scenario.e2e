@@ -82,6 +82,13 @@ sleep 400
 # the grid diff would fail the test.
 type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow); printf '\\x44ONE\\n'\r"
 wait_for "DONE"
+# Settle on the next prompt before snapshotting. `wait_for "DONE"`
+# returns the instant printf flushes; bash's PS1 redraw arrives in
+# a later pump on slow hosts. `$ ` (dollar + space) appears ONLY in
+# the redrawn prompt — every dollar in the typed command is
+# followed by `T` (`$TGT`) or `(` (`$(grep …)`), never a space, so
+# this pattern can't match the readline echo of the input.
+wait_for "$ "
 snapshot history_after_delete
 
 # Clean exit.
