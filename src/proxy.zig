@@ -41,6 +41,8 @@ const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
+const CursorTracker = @import("cursor_tracker.zig").CursorTracker;
+const sync_output = @import("sync_output.zig");
 const Osc7 = @import("osc7.zig").Osc7;
 const subprocess_mod = @import("subprocess.zig");
 
@@ -200,6 +202,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var osc133_tracker = Osc133.init(allocator);
     defer osc133_tracker.deinit();
 
+    // Cursor-Y tracker — observe-only state machine that watches
+    // master→stdout for cursor-moving CSI sequences (CUP / CUU / CUD
+    // / VPA / CNL / CPL) plus `\n` and updates a single u16 row.
+    // Modules read `ctx.cursor_row`; future dynamic-statusbar work
+    // uses it to decide top-vs-bottom placement. See
+    // `docs/research/huh-vs-atty.md` for the comparison that drove
+    // adding this — bubbletea / ultraviolet's full cell grid is
+    // overkill for atty's needs; just the row suffices.
+    var cursor_tracker = CursorTracker.init(blk: {
+        if (args.is_tty) {
+            if (Pty.querySize(posix.STDOUT_FILENO)) |s| break :blk s.rows else |_| {}
+        }
+        break :blk 24;
+    });
+
     // Alternate-screen-buffer tracker — full-screen TUIs (k9s, vim,
     // less, htop, helix, lazygit, …) swap to the alt buffer with
     // `\x1b[?1049h` and back with `?1049l`. While they're active the
@@ -300,6 +317,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         .is_tty = args.is_tty,
         .incognito = false,
         .subprocess = &subprocess_tracker,
+        .cursor_row = cursor_tracker.currentRow(),
     };
 
     var pfds = [_]posix.pollfd{
@@ -412,6 +430,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
                 }
             }
+            // Synchronized output (DCS 2026): wrap the per-tick
+            // overlay paint set so the terminal applies all updates
+            // atomically. Unsupported terminals ignore the private
+            // mode set/reset and render as before.
+            writeAll(posix.STDOUT_FILENO, sync_output.begin) catch {};
             if (!inSubprocess(&alt_screen, &osc133_tracker)) {
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
@@ -419,6 +442,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             if (statusbar) |*sb| {
                 if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             }
+            writeAll(posix.STDOUT_FILENO, sync_output.end) catch {};
             continue;
         }
 
@@ -898,6 +922,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 osc133_tracker.feed(output);
                 alt_screen.feed(output);
                 osc7_tracker.feed(output);
+                cursor_tracker.feed(output);
+                ctx.cursor_row = cursor_tracker.currentRow();
 
                 // Walk the OSC 133 edge ring + OSC 7 capture ring
                 // INTERLEAVED by byte offset within the current
@@ -1107,6 +1133,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
+                // Sync output: master-output overlay paint set is the
+                // hottest multi-region site (every chunk of shell
+                // output triggers a forced statusbar repaint + a
+                // ghost refresh). Wrap atomically.
+                writeAll(posix.STDOUT_FILENO, sync_output.begin) catch {};
                 if (!inSubprocess(&alt_screen, &osc133_tracker)) {
                     renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                     renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
@@ -1119,6 +1150,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     }
                 }
+                writeAll(posix.STDOUT_FILENO, sync_output.end) catch {};
             } else if (read_n == 0) {
                 child_alive = false;
             }
@@ -1136,6 +1168,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const sig: posix.SIG = @enumFromInt(sig_buf[i]);
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                        cursor_tracker.setMaxRows(s.rows);
+                        ctx.cursor_row = cursor_tracker.currentRow();
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
                             // While an alt-screen TUI is running the

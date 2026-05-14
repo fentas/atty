@@ -94,6 +94,17 @@ pub const Context = struct {
     /// Null = nothing pushed yet OR we're at the local prompt.
     subprocess: ?*const subprocess_mod.Tracker = null,
 
+    /// Shell-side cursor row (1-based), or null when the proxy
+    /// hasn't wired the tracker (unit tests, non-TTY runs). Driven
+    /// by `cursor_tracker.zig`, fed every byte the shell writes to
+    /// stdout. Modules can use it to decide overlay placement —
+    /// e.g. a future dynamic statusbar that lives at the top when
+    /// the prompt is near the bottom and vice versa. Don't rely on
+    /// exact column accuracy: column isn't tracked, and the row is
+    /// approximate when the shell uses save/restore-cursor or its
+    /// own DECSTBM.
+    cursor_row: ?u16 = null,
+
     /// Convenience wrapper around `formatCwd` — modules call this
     /// from `onLineCommit` when they want a `--cwd` string that
     /// reflects the user's current location. When subprocess is
