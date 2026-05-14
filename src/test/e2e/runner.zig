@@ -271,12 +271,20 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     // The harness's child gets `HOME=/tmp` and no useful default
     // cwd anchor; without this, no scenario could load fixtures.
     var path_buf: [4096]u8 = undefined;
-    const cwd_rc = std.c.getcwd(@ptrCast(&path_buf), path_buf.len);
-    const cwd_abs: ?[]const u8 = if (cwd_rc == null) null else std.mem.sliceTo(@as([*:0]const u8, @ptrCast(cwd_rc.?)), 0);
-    const scenario_dir_abs = if (cwd_abs) |c|
-        try std.fmt.allocPrint(gpa, "{s}/{s}", .{ c, sc.dir })
-    else
-        try gpa.dupe(u8, sc.dir);
+    const scenario_dir_abs = if (sc.dir.len > 0 and sc.dir[0] == '/') blk: {
+        // `sc.dir` already absolute — runner invoked with an
+        // absolute tests path, e.g. `--root /abs/tests/e2e`.
+        // Prefixing CWD would produce `<cwd>/<abs>/...` which
+        // cat would fail to resolve.
+        break :blk try gpa.dupe(u8, sc.dir);
+    } else blk: {
+        const cwd_rc = std.c.getcwd(@ptrCast(&path_buf), path_buf.len);
+        const cwd_abs: ?[]const u8 = if (cwd_rc == null) null else std.mem.sliceTo(@as([*:0]const u8, @ptrCast(cwd_rc.?)), 0);
+        break :blk if (cwd_abs) |c|
+            try std.fmt.allocPrint(gpa, "{s}/{s}", .{ c, sc.dir })
+        else
+            try gpa.dupe(u8, sc.dir);
+    };
     defer gpa.free(scenario_dir_abs);
     try extra_env.append(gpa, .{ .key = "ATTY_SCENARIO_DIR", .value = scenario_dir_abs });
     var spawn_argv: []const []const u8 = &.{};

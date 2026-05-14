@@ -4,9 +4,10 @@
 # DSR filtering, sync output wraps, etc.) would show up as the
 # rendered grid drifting from the golden.
 #
-# We `cat` the fixture from outside atty's working directory because
-# the test harness runs the binary with HOME=/tmp; embed the path
-# via `$ATTY_REPO`, which the harness sets to the repo root.
+# We `cat` the fixture using `$ATTY_SCENARIO_DIR`, which the harness
+# sets to the absolute path of this scenario's directory. The repo
+# root isn't directly exposed; everything's resolved relative to the
+# scenario dir to keep fixtures co-located with their consumers.
 
 cols 80
 rows 24

@@ -1,7 +1,8 @@
 # split_csi_no_corruption — emit a CSI sequence in two PTY chunks
 # separated by enough time for atty's tick to fire. Asserts the
 # rendered text doesn't contain the leaked CSI params that the
-# DCS 2026 wrap bug would have produced.
+# DECSET ?2026 (synchronized output) wrap bug would have produced
+# when it briefly lived on this PR (since reverted in b775624).
 
 cols 80
 rows 12

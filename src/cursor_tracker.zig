@@ -145,7 +145,14 @@ pub const CursorTracker = struct {
 
     fn flushParamFromBuf(self: *CursorTracker) void {
         if (self.param_len == 0) return;
-        self.param1 = std.fmt.parseUnsigned(u16, self.param_buf[0..self.param_len], 10) catch 0;
+        // Parse into u32 first then clamp into u16. parsing directly
+        // into u16 silently turned overflow (e.g. a buggy or
+        // malicious `\x1B[999999B`) into 0 → CUD-default-1, which
+        // moved the cursor by ONE row when the intent was clearly
+        // "clamp to bottom". With u32 + clamp we move all the way
+        // to `max_rows` instead.
+        const parsed = std.fmt.parseUnsigned(u32, self.param_buf[0..self.param_len], 10) catch 0;
+        self.param1 = if (parsed > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(parsed);
         self.param_len = 0;
     }
 
@@ -310,6 +317,18 @@ test "CursorTracker: param overflow drops extra digits, doesn't crash" {
     // Parsing the truncated digits — implementation-defined exact
     // value, but must not crash and must end in `ground`.
     _ = c.currentRow();
+}
+
+test "CursorTracker: param > u16 max clamps instead of falling back to default 1" {
+    var c = CursorTracker.init(80);
+    c.feed("\x1B[10;1H"); // baseline: row 10
+    try testing.expectEqual(@as(u16, 10), c.currentRow());
+    // 999_999 is parseable as u32, overflows u16. With the previous
+    // direct-into-u16 parse, this errored to 0 → default 1 → CUD by
+    // 1 → row 11. With the clamp, we expect CUD by u16-max →
+    // clamped to max_rows.
+    c.feed("\x1B[999999B"); // CUD by huge amount
+    try testing.expectEqual(@as(u16, 80), c.currentRow());
 }
 
 test "CursorTracker: lone ESC followed by non-`[` returns to ground" {
