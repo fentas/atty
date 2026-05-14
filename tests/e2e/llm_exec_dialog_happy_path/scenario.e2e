@@ -1,0 +1,47 @@
+# llm_exec_dialog_happy_path — Alt+S walks a fixture-driven dialog
+# through: AI mode → exec → suggesting → executing → capturing_output
+# → observation_ready → generating → done.
+#
+# The first fixture reply suggests a printf that emits OSC 133 ;C /
+# ;D markers inline (so atty's osc133 capture sees cmd_start /
+# cmd_end edges even without DEBUG-trap shell integration). The
+# second fixture reply ends the dialog with action=done.
+
+cols 100
+rows 10
+timeout_ms 8000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Embed a `;A` marker in PS1 so `osc133_capture.active` flips
+# true the moment the next prompt draws — that's the gate the
+# Alt+S handler checks for "shell has OSC 133 integration".
+type "PS1=$'\\[\\033]133;A\\007\\]$ ' && clear\r"
+wait_for "$"
+sleep 200
+
+# Enter AI mode.
+type "#: print ok"
+sleep 300
+
+# Alt+S → dispatch llm_exec_dialog → worker (fixture) returns
+# the printf command → atty injects Ctrl+U + the command at the
+# prompt. State: .suggesting; hint above bar shows description.
+type "\x1bs"
+sleep 500
+snapshot suggested_command
+
+# User confirms by pressing Enter — state moves to .executing.
+# The shell runs printf which emits ;C "ok" ;D. atty captures
+# "ok" between the markers. onTick pushes the observation as a
+# turn and fires the next request, which the fixture answers
+# with action=done — final "✓ done — all set" hint latches.
+type "\r"
+sleep 700
+snapshot done_hint
+
+# Settle before exit so the exit_code assertion doesn't race.
+sleep 200
+type "exit\r"
+exit_code 0
