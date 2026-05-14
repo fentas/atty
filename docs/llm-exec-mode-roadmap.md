@@ -20,9 +20,11 @@ file is the execution log.
 ## Status snapshot
 
 - **PR #21** — feat(llm): exec dialog (Alt+S) — **merged: b1f074b** (4-round Copilot loop; user opted to stop after round 4 — 24 actionable findings addressed across rounds 1–4).
-- **PR #22** — refactor(keymap): submodule folder — *in review*, round 1 closed.
-- **PR #23** — refactor(subprocess): submodule folder — *in review*, round 1 pending.
-- **PR P** (NEW) — fix the lingering pre-existing e2e flake `delete_history_match_after_uparrow`. *queued*; see Wave 1 table.
+- **PR #22** — refactor(keymap): submodule folder — **merged: 79c498b**.
+- **PR #23** — refactor(subprocess): submodule folder — **merged: a1823ae**.
+- **PR #25** — refactor(history): submodule folder — **merged: d692dfc**.
+- **PR #24** — fix(e2e): make delete_history_match_after_uparrow deterministic — **merged: e2ce456**.
+- **PR #26** — feat(line-state): author propagation (Wave 1 E) — **merged: e2dfacf** (6-round Copilot loop; rounds 4–6 were docstring-style only).
 - Remaining roadmap PRs — *queued*, listed below in shipping order.
 
 ## Shipping order — by wave
@@ -35,13 +37,12 @@ has been merged.
 
 | # | Branch / title | Touches | LOC | Depends on | Status |
 |---|---|---|---|---|---|
-| **K** | `refactor/subprocess-submodule` | `src/subprocess.zig` only | ~0 net | none | queued |
-| **L** | `refactor/history-submodule` | `src/modules/history.zig` only | ~0 net | none | queued |
+| **K** | `refactor/subprocess-submodule` | `src/subprocess.zig` only | ~0 net | none | **merged: a1823ae** (PR #23) |
+| **L** | `refactor/history-submodule` | `src/modules/history.zig` only | ~0 net | none | **merged: d692dfc** (PR #25) |
 | **M** | `refactor/atuin-submodule` | `src/modules/atuin.zig` only | ~0 net | none | queued |
-| **N** | `refactor/keymap-submodule` | `src/keymap.zig` only | ~0 net | none | **in review** (PR #22) |
-| **E** | `feat/line-state-author` | `src/line_state.zig` + `src/module.zig` | ~200 | none | queued |
-| **K** | `refactor/subprocess-submodule` | `src/subprocess.zig` only | ~0 net | none | **in review** (PR #23, hoisted from Phase 2) |
-| **P** | `fix/delete-history-match-after-uparrow-flake` | `tests/e2e/delete_history_match_after_uparrow/golden/` only | ~10 | none | queued (regenerate the lone surviving golden mismatch flagged on master e2e runs) |
+| **N** | `refactor/keymap-submodule` | `src/keymap.zig` only | ~0 net | none | **merged: 79c498b** (PR #22) |
+| **E** | `feat/line-state-author` | `src/line_state.zig` + `src/module.zig` | ~200 | none | **merged: e2dfacf** (PR #26) |
+| **P** | `fix/delete-history-match-after-uparrow-flake` | `tests/e2e/.../scenario.e2e` + golden | ~30 | none | **merged: e2ce456** (PR #24) |
 
 ### Wave 2 — opens after PR #21 + Wave 1 prerequisites merge
 
