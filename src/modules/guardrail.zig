@@ -126,6 +126,24 @@ pub const default_rules = [_]Rule{
         .behavior = .block,
     },
     .{
+        // Must precede the generic `sudo` rule: `sudo mkfs.ext4 /dev/sda`
+        // would otherwise match `sudo` first and only require
+        // `.confirm`, bypassing the prefix-anchored `mkfs` block rule
+        // for llm. Same goes for the dd variant below.
+        .name = "sudo-mkfs-llm",
+        .match = .{ .prefix = "sudo mkfs" },
+        .reason = "sudo mkfs (llm)",
+        .authors = .{ .user = false, .llm = true },
+        .behavior = .block,
+    },
+    .{
+        .name = "sudo-dd-llm",
+        .match = .{ .prefix = "sudo dd " },
+        .reason = "sudo dd (llm)",
+        .authors = .{ .user = false, .llm = true },
+        .behavior = .block,
+    },
+    .{
         .name = "sudo",
         .match = .{ .prefix = "sudo " },
         .reason = "sudo invocation",
@@ -819,6 +837,28 @@ test "custom rule list overrides defaults" {
     const G = configure(.{ .rules = &my_rules });
     try testing.expect(G.check("git push --force origin main") != null);
     try testing.expect(G.check("rm -rf /") == null);
+}
+
+test "sudo-prefixed mkfs/dd from llm still hits .block (generic sudo rule must not shadow)" {
+    const G = configure(.{});
+
+    const mkfs_user = G.checkAs("sudo mkfs.ext4 /dev/sda1", .user).?;
+    try testing.expectEqual(Behavior.confirm, mkfs_user.behavior);
+
+    const mkfs_llm = G.checkAs("sudo mkfs.ext4 /dev/sda1", .llm).?;
+    try testing.expectEqual(Behavior.block, mkfs_llm.behavior);
+    try testing.expectEqualStrings("sudo-mkfs-llm", mkfs_llm.name);
+
+    const dd_user = G.checkAs("sudo dd if=/dev/zero of=/dev/sda", .user).?;
+    try testing.expectEqual(Behavior.confirm, dd_user.behavior);
+
+    const dd_llm = G.checkAs("sudo dd if=/dev/zero of=/dev/sda", .llm).?;
+    try testing.expectEqual(Behavior.block, dd_llm.behavior);
+    try testing.expectEqualStrings("sudo-dd-llm", dd_llm.name);
+
+    // Sanity: plain `sudo apt update` from llm still only `.confirm`.
+    const sudo_apt_llm = G.checkAs("sudo apt update", .llm).?;
+    try testing.expectEqual(Behavior.confirm, sudo_apt_llm.behavior);
 }
 
 test "first matching rule wins in declaration order — including across author masks" {
