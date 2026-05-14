@@ -82,13 +82,27 @@ sleep 400
 # the grid diff would fail the test.
 type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow); printf '\\x44ONE\\n'\r"
 wait_for "DONE"
-# Settle on the next prompt before snapshotting. `wait_for "DONE"`
-# returns the instant printf flushes; bash's PS1 redraw arrives in
-# a later pump on slow hosts. `$ ` (dollar + space) appears ONLY in
-# the redrawn prompt — every dollar in the typed command is
-# followed by `T` (`$TGT`) or `(` (`$(grep …)`), never a space, so
-# this pattern can't match the readline echo of the input.
-wait_for "$ "
+# Fire a SECOND command whose output marker can only appear AFTER
+# bash has finished the first command, redrawn its prompt, accepted
+# the second command's keystrokes, and run it. The typed bytes for
+# the marker spell `P\x4FST-DONE` (twelve chars including the
+# literal backslash + `x` + `4` + `F`); printf interprets `\x4F` as
+# the byte `O` so the runtime output is `POST-DONE`. Since waitFor
+# searches the entire rendered grid, the wait pattern MUST be a
+# substring that doesn't appear in any earlier rendered content —
+# `POST-DONE` has no `O` adjacent to `P` in the typed echo of any
+# prior line (verified by inspection of the scenario), so the wait
+# only fires after the second printf has flushed.
+type "printf 'P\\x4FST-DONE\\n'\r"
+wait_for "POST-DONE"
+# `wait_for "POST-DONE"` returns the instant the second printf's
+# output lands, but bash's next-prompt redraw is a separate write
+# that arrives in a later pump. Without this final settle, the
+# grid's last row sometimes captures bash's pre-redraw blank, other
+# times captures the redrawn `$ `. A bounded sleep is the
+# pragmatic way to give bash a deterministic window — 200 ms is
+# orders of magnitude more than the local-pipe redraw needs.
+sleep 200
 snapshot history_after_delete
 
 # Clean exit.

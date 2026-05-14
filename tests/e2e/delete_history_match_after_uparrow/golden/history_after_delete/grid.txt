@@ -4,7 +4,7 @@ $ TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c "echo
  $TGT" /tmp/atty-e2e-delete-uparrow); printf '\x44ONE\n'
 HIT-COUNT=0
 DONE
-
-
-
+$ printf 'P\x4FST-DONE\n'
+POST-DONE
+$
 
