@@ -690,15 +690,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         .llm_exec_toggle_help,
                         .llm_exec_cancel,
                         => {
-                            // TODO(feat/llm-exec-mode): dispatch to
-                            // llm_exec module. For now, swallow the
-                            // binding bytes so the shell doesn't see
-                            // the unmapped CSI-u / ESC-letter form
-                            // (which would otherwise echo as mojibake
-                            // — Ghostty sends Alt+a as `\x1ba` and
-                            // bash's readline would interpret that
-                            // as a meta-prefix-a → some readline
-                            // binding fires).
+                            // Hand the action to the llm module via
+                            // the generic onAction dispatch. Module
+                            // decides whether to act (AI-mode gate)
+                            // or no-op. Swallow the binding bytes
+                            // either way so the shell never sees
+                            // them (Ghostty sends Alt+a as `\x1ba`
+                            // which bash's readline would treat as
+                            // a meta-prefix).
+                            D.dispatchAction(&runtimes, &ctx, act);
                             swallow_after_binding = true;
                         },
                     }

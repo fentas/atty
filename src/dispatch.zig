@@ -339,6 +339,28 @@ pub fn Dispatcher(comptime modules: anytype) type {
             }
             return null;
         }
+
+        /// Dispatch a keymap-matched `Action` to every module that
+        /// implements `onAction`. Used by the proxy when a binding
+        /// fires for actions whose semantics live in a module (e.g.
+        /// `llm_exec_*`). Module decides whether to handle it (e.g.
+        /// the llm module ignores ghost_accept, the history module
+        /// ignores llm_exec_dialog).
+        ///
+        /// Per-module errors are swallowed — same shape as
+        /// `dispatchDeleteHistoryMatch`. The proxy needs the call
+        /// to complete so the binding-bytes-swallow logic runs.
+        pub fn dispatchAction(
+            rts: *Runtimes,
+            ctx: *Context,
+            action: anytype,
+        ) void {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "onAction")) {
+                    M.onAction(rts[i], ctx, action) catch {};
+                }
+            }
+        }
     };
 }
 
