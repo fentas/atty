@@ -59,8 +59,25 @@ sleep 400
 
 # Verify the file no longer contains the entry. Pre-fix it would
 # still be there because the handler skipped on uncertain.
-type "cat /tmp/atty-e2e-delete-uparrow\r"
-sleep 300
+#
+# Why grep through a shell variable instead of `cat`-ing the whole
+# file:
+#   • The file accumulates atty's other recorded commands (rm, PS1,
+#     …) across test runs — the recorded `rm` is appended BEFORE
+#     bash actually runs it, so the file persists with stale
+#     entries even though the scenario starts with an `rm -f`. The
+#     exact order also races with how fast bash flushes vs atty's
+#     history-write timing. A full snapshot is unavoidably brittle.
+#   • The grep command line itself gets recorded into the same
+#     file. Naively `grep -c UPARROW-TARGET-99999` would match its
+#     OWN recorded line and never report 0 — false negative on the
+#     deletion. Using `grep "echo $TGT"` makes the recorded grep
+#     line contain literal `$TGT`, not the expanded sentinel, so
+#     the pattern only matches the ORIGINAL recorded entry.
+# `HIT-COUNT=0` means the delete fired; `HIT-COUNT=1` means it
+# didn't.
+type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow); echo CHECK-DONE\r"
+sleep 400
 snapshot history_after_delete
 
 # Clean exit.
