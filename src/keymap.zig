@@ -15,8 +15,40 @@
 //! module won the gather race") are decoupled. A single accept key
 //! shouldn't have to know whether atuin or history provided the
 //! suggestion.
+//!
+//! File layout: this file owns the Action enum, the Binding struct,
+//! the linear `match` scan, and the public re-exports. The compile-
+//! time `key("Right")` name parser lives in `keymap/parser.zig`;
+//! the kitty-keyboard CSI-u encode/decode + stream translator live
+//! in `keymap/csiu.zig`. The split keeps each file under a few
+//! hundred lines and prevents the ~150-line CSI-u table and the
+//! ~200-line key-name parser from crowding the public types.
 
 const std = @import("std");
+
+const parser = @import("keymap/parser.zig");
+const csiu = @import("keymap/csiu.zig");
+
+/// Compile-time key name parser — `key("Right")` returns `"\x1b[C"`.
+/// Re-exported from `keymap/parser.zig`. Unknown names trip
+/// `@compileError` so typos in user configs are caught at build
+/// time.
+pub const key = parser.key;
+
+/// Kitty keyboard protocol push/pop byte strings. Re-exported from
+/// `keymap/csiu.zig`. Proxy emits the push at startup so terminals
+/// like Ghostty disambiguate Ctrl+Shift+I from Tab; pop on exit.
+pub const kitty_kbd_push = csiu.kitty_kbd_push;
+pub const kitty_kbd_pop = csiu.kitty_kbd_pop;
+
+/// Re-exported CSI-u helpers from `keymap/csiu.zig`. The proxy uses
+/// these to detect, classify, and fold kitty-keyboard sequences
+/// back to legacy bytes before forwarding them to bash readline
+/// (which doesn't speak the protocol).
+pub const csiUToLegacy = csiu.csiUToLegacy;
+pub const isCsiU = csiu.isCsiU;
+pub const csiULen = csiu.csiULen;
+pub const translateCsiUStream = csiu.translateCsiUStream;
 
 pub const Action = union(enum) {
     /// Replace the keystroke with the bytes of the currently-visible
@@ -101,381 +133,6 @@ pub const Binding = struct {
     action: Action,
 };
 
-/// Comptime name → byte-sequence lookup, so user configs read like
-/// `key("Right")` instead of `"\x1b[C"`. Unknown names error at compile
-/// time, so typos break the build rather than silently no-op.
-///
-/// Recognised forms:
-///
-///   - **Named keys:** `Right`, `Left`, `Up`, `Down`, `Home`, `End`,
-///     `PageUp`, `PageDown`, `Insert`, `Delete`, `Tab`, `Enter`,
-///     `Backspace`, `Esc`, `Shift+Tab`, `Ctrl+Right`, `Ctrl+Left`,
-///     `Ctrl+Up`, `Ctrl+Down`, `F1`–`F12`.
-///   - **Ctrl + letter:** `Ctrl+A` .. `Ctrl+Z` (case-insensitive) →
-///     ASCII 0x01..0x1A.
-///   - **Ctrl + digit (1..9):** kitty-keyboard CSI-u form. Only fires
-///     in terminals with the disambiguate flag (atty default).
-///   - **Esc + digit (1..9):** legacy `ESC <digit>`. Doubles as
-///     Alt+digit on terminals without kitty kbd. Used as the
-///     ghost_pick fallback binding.
-///   - **Alt + single ASCII char:** `Alt+f` → `ESC f`. xterm-style.
-///
-/// Not handled (because terminals don't have a portable sequence):
-///
-///   - `Super+…` / `Win+…` / `Cmd+…` — most terminals send nothing.
-///     Some (kitty/foot/Ghostty) emit kitty-keyboard-protocol bytes
-///     when the protocol is negotiated; not encodable as a static
-///     constant.
-///   - `Ctrl+Enter`, `Ctrl+Backspace` — typically indistinguishable
-///     from the unmodified key on legacy terminals. (`Ctrl+Tab` IS
-///     handled via the kitty-keyboard CSI-u form `\x1b[9;5u`, since
-///     atty pushes the disambiguate flag by default.)
-///   - **Chord sequences** (Emacs `Ctrl+X Ctrl+S`) — would need a
-///     stateful matcher; the current key handler matches one read.
-///
-/// For any of these, you can still set `.bytes` to a raw byte literal
-/// if your terminal does emit something distinct.
-pub fn key(comptime name: []const u8) []const u8 {
-    // Plain named keys.
-    if (comptime std.mem.eql(u8, name, "Right")) return "\x1b[C";
-    if (comptime std.mem.eql(u8, name, "Left")) return "\x1b[D";
-    if (comptime std.mem.eql(u8, name, "Up")) return "\x1b[A";
-    if (comptime std.mem.eql(u8, name, "Down")) return "\x1b[B";
-    if (comptime std.mem.eql(u8, name, "Home")) return "\x1b[H";
-    if (comptime std.mem.eql(u8, name, "End")) return "\x1b[F";
-    if (comptime std.mem.eql(u8, name, "PageUp")) return "\x1b[5~";
-    if (comptime std.mem.eql(u8, name, "PageDown")) return "\x1b[6~";
-    if (comptime std.mem.eql(u8, name, "Insert")) return "\x1b[2~";
-    if (comptime std.mem.eql(u8, name, "Delete")) return "\x1b[3~";
-    if (comptime std.mem.eql(u8, name, "Tab")) return "\t";
-    if (comptime std.mem.eql(u8, name, "Enter")) return "\r";
-    if (comptime std.mem.eql(u8, name, "Backspace")) return "\x7f";
-    if (comptime std.mem.eql(u8, name, "Esc")) return "\x1b";
-
-    // Modifier-tagged variants — xterm CSI-1 form: `ESC [ 1 ; <mod> X`
-    // where mod = 1+Shift +2*Alt +4*Ctrl (Meta=8 is rare, Super has no
-    // portable encoding — most terminals send nothing for it).
-    if (comptime std.mem.eql(u8, name, "Shift+Tab")) return "\x1b[Z";
-
-    // Ctrl+Tab — kitty-keyboard CSI-u form. Legacy terminals don't
-    // have a distinct encoding for this (the kernel collapses it to
-    // plain Tab), so the binding only fires when the kitty kbd
-    // disambiguate flag is active (atty's default). On a terminal
-    // that doesn't speak the protocol, fall back to one of the other
-    // ghost_accept bindings (Right / End / Ctrl+F).
-    if (comptime std.mem.eql(u8, name, "Ctrl+Tab")) return "\x1b[9;5u";
-
-    // Ctrl+<digit> — kitty kbd CSI-u. No legacy encoding for these;
-    // works only with the disambiguate flag (atty default).
-    if (comptime std.mem.eql(u8, name, "Ctrl+1")) return "\x1b[49;5u";
-    if (comptime std.mem.eql(u8, name, "Ctrl+2")) return "\x1b[50;5u";
-    if (comptime std.mem.eql(u8, name, "Ctrl+3")) return "\x1b[51;5u";
-    if (comptime std.mem.eql(u8, name, "Ctrl+4")) return "\x1b[52;5u";
-    if (comptime std.mem.eql(u8, name, "Ctrl+5")) return "\x1b[53;5u";
-    if (comptime std.mem.eql(u8, name, "Ctrl+6")) return "\x1b[54;5u";
-    if (comptime std.mem.eql(u8, name, "Ctrl+7")) return "\x1b[55;5u";
-    if (comptime std.mem.eql(u8, name, "Ctrl+8")) return "\x1b[56;5u";
-    if (comptime std.mem.eql(u8, name, "Ctrl+9")) return "\x1b[57;5u";
-
-    // Esc+<digit> — legacy ESC+digit byte pair. Doubles as Alt+digit
-    // on terminals without kitty kbd; matches the "fast Esc then digit"
-    // two-step on terminals with kitty kbd (separated reads won't
-    // trigger). Used as ghost_pick legacy fallback.
-    if (comptime std.mem.eql(u8, name, "Esc+1")) return "\x1b1";
-    if (comptime std.mem.eql(u8, name, "Esc+2")) return "\x1b2";
-    if (comptime std.mem.eql(u8, name, "Esc+3")) return "\x1b3";
-    if (comptime std.mem.eql(u8, name, "Esc+4")) return "\x1b4";
-    if (comptime std.mem.eql(u8, name, "Esc+5")) return "\x1b5";
-    if (comptime std.mem.eql(u8, name, "Esc+6")) return "\x1b6";
-    if (comptime std.mem.eql(u8, name, "Esc+7")) return "\x1b7";
-    if (comptime std.mem.eql(u8, name, "Esc+8")) return "\x1b8";
-    if (comptime std.mem.eql(u8, name, "Esc+9")) return "\x1b9";
-
-    if (comptime std.mem.eql(u8, name, "Shift+Right")) return "\x1b[1;2C";
-    if (comptime std.mem.eql(u8, name, "Shift+Left")) return "\x1b[1;2D";
-    if (comptime std.mem.eql(u8, name, "Shift+Up")) return "\x1b[1;2A";
-    if (comptime std.mem.eql(u8, name, "Shift+Down")) return "\x1b[1;2B";
-    if (comptime std.mem.eql(u8, name, "Shift+Home")) return "\x1b[1;2H";
-    if (comptime std.mem.eql(u8, name, "Shift+End")) return "\x1b[1;2F";
-
-    if (comptime std.mem.eql(u8, name, "Alt+Right")) return "\x1b[1;3C";
-    if (comptime std.mem.eql(u8, name, "Alt+Left")) return "\x1b[1;3D";
-    if (comptime std.mem.eql(u8, name, "Alt+Up")) return "\x1b[1;3A";
-    if (comptime std.mem.eql(u8, name, "Alt+Down")) return "\x1b[1;3B";
-    if (comptime std.mem.eql(u8, name, "Alt+Home")) return "\x1b[1;3H";
-    if (comptime std.mem.eql(u8, name, "Alt+End")) return "\x1b[1;3F";
-
-    if (comptime std.mem.eql(u8, name, "Ctrl+Right")) return "\x1b[1;5C";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Left")) return "\x1b[1;5D";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Up")) return "\x1b[1;5A";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Down")) return "\x1b[1;5B";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Home")) return "\x1b[1;5H";
-    if (comptime std.mem.eql(u8, name, "Ctrl+End")) return "\x1b[1;5F";
-
-    if (comptime std.mem.eql(u8, name, "Ctrl+Shift+Right")) return "\x1b[1;6C";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Shift+Left")) return "\x1b[1;6D";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Shift+Up")) return "\x1b[1;6A";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Shift+Down")) return "\x1b[1;6B";
-
-    if (comptime std.mem.eql(u8, name, "Ctrl+Alt+Right")) return "\x1b[1;7C";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Alt+Left")) return "\x1b[1;7D";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Alt+Up")) return "\x1b[1;7A";
-    if (comptime std.mem.eql(u8, name, "Ctrl+Alt+Down")) return "\x1b[1;7B";
-
-    // Function keys.
-    if (comptime std.mem.eql(u8, name, "F1")) return "\x1bOP";
-    if (comptime std.mem.eql(u8, name, "F2")) return "\x1bOQ";
-    if (comptime std.mem.eql(u8, name, "F3")) return "\x1bOR";
-    if (comptime std.mem.eql(u8, name, "F4")) return "\x1bOS";
-    if (comptime std.mem.eql(u8, name, "F5")) return "\x1b[15~";
-    if (comptime std.mem.eql(u8, name, "F6")) return "\x1b[17~";
-    if (comptime std.mem.eql(u8, name, "F7")) return "\x1b[18~";
-    if (comptime std.mem.eql(u8, name, "F8")) return "\x1b[19~";
-    if (comptime std.mem.eql(u8, name, "F9")) return "\x1b[20~";
-    if (comptime std.mem.eql(u8, name, "F10")) return "\x1b[21~";
-    if (comptime std.mem.eql(u8, name, "F11")) return "\x1b[23~";
-    if (comptime std.mem.eql(u8, name, "F12")) return "\x1b[24~";
-
-    // Ctrl + ASCII letter — comptime fold to control byte.
-    if (comptime name.len == 6 and std.mem.eql(u8, name[0..5], "Ctrl+")) {
-        const c: u8 = name[5];
-        if (comptime (c >= 'a' and c <= 'z')) return comptime &[_]u8{c - 'a' + 1};
-        if (comptime (c >= 'A' and c <= 'Z')) return comptime &[_]u8{c - 'A' + 1};
-    }
-
-    // Alt + single ASCII char → ESC + char (xterm metaSendsEscape).
-    if (comptime name.len == 5 and std.mem.eql(u8, name[0..4], "Alt+")) {
-        return comptime "\x1b" ++ name[4..5];
-    }
-
-    // Ctrl+Shift+<letter> → kitty-keyboard `CSI <code> ; 6 u` form.
-    // This is the *disambiguated* encoding for Ctrl+letter combos that
-    // would otherwise collide with control bytes (Ctrl+Shift+I vs Tab,
-    // Ctrl+Shift+M vs Enter, …). Requires the terminal to be in kitty
-    // keyboard protocol mode — proxy.zig sends `\x1b[>1u` on startup
-    // when `enable_kitty_keyboard` is true (default).
-    if (comptime name.len == 12 and std.mem.eql(u8, name[0..11], "Ctrl+Shift+")) {
-        const c: u8 = name[11];
-        const code: u8 = if (c >= 'a' and c <= 'z') c else if (c >= 'A' and c <= 'Z') c + 32 else 0;
-        if (comptime code != 0) {
-            return comptime std.fmt.comptimePrint("\x1B[{d};6u", .{code});
-        }
-    }
-
-    @compileError("unknown key name: '" ++ name ++ "' — see src/keymap.zig");
-}
-
-test "key resolves named keys" {
-    try std.testing.expectEqualStrings("\x1b[C", key("Right"));
-    try std.testing.expectEqualStrings("\x1b[F", key("End"));
-    try std.testing.expectEqualStrings("\t", key("Tab"));
-    try std.testing.expectEqualStrings("\x1b[Z", key("Shift+Tab"));
-    try std.testing.expectEqualStrings("\x1b[9;5u", key("Ctrl+Tab"));
-}
-
-test "key resolves multi-modifier arrows" {
-    try std.testing.expectEqualStrings("\x1b[1;5C", key("Ctrl+Right"));
-    try std.testing.expectEqualStrings("\x1b[1;2D", key("Shift+Left"));
-    try std.testing.expectEqualStrings("\x1b[1;6A", key("Ctrl+Shift+Up"));
-    try std.testing.expectEqualStrings("\x1b[1;7B", key("Ctrl+Alt+Down"));
-}
-
-/// Kitty keyboard protocol — disambiguate-flag push/pop bytes. atty
-/// emits the push on startup (so terminals like Ghostty/kitty/foot
-/// send CSI-u for keys that would otherwise collide with control
-/// bytes — Ctrl+Shift+I vs Tab, …) and the pop on exit. Terminals
-/// that don't speak the protocol silently ignore these bytes.
-pub const kitty_kbd_push = "\x1B[>1u";
-pub const kitty_kbd_pop = "\x1B[<u";
-
-/// Translate a kitty-keyboard CSI-u sequence back to its legacy
-/// single-byte encoding (or short escape sequence), if one exists.
-///
-/// **Why this is critical.** With the kitty kbd disambiguate flag
-/// (`\x1b[>1u`) pushed, terminals like Ghostty emit CSI-u for keys
-/// that previously had a single-byte encoding:
-///
-///     Ctrl+C           →  \x1b[99;5u    (legacy: \x03)
-///     Ctrl+R           →  \x1b[114;5u   (legacy: \x12)
-///     Esc              →  \x1b[27u      (legacy: \x1b)
-///     Tab              →  \x1b[9u       (legacy: \t)
-///     Enter            →  \x1b[13u      (legacy: \r)
-///     Backspace        →  \x1b[127u     (legacy: \x7f)
-///
-/// The shell (bash readline) expects the legacy form — it does NOT
-/// speak the kitty kbd protocol. So the proxy must translate before
-/// forwarding. Without translation, Ctrl+C in a Ghostty-on-atty
-/// session does nothing: atty drops the unmapped CSI-u, no bytes
-/// reach the shell.
-///
-/// Returns null when:
-///   - `input` isn't a CSI-u sequence at all (caller forwards as-is)
-///   - it's CSI-u but the key has no legacy form (Ctrl+9,
-///     Ctrl+Shift+Right, Shift+Tab, …) — caller drops to avoid
-///     mojibake echo
-///
-/// `out` is caller-owned scratch storage for the translated bytes.
-/// A 4-byte buffer is enough for every translation this function
-/// produces today.
-pub fn csiUToLegacy(input: []const u8, out: []u8) ?[]const u8 {
-    if (!isCsiU(input)) return null;
-
-    // Body = the digits/semicolons between `ESC [` and `u`.
-    const body = input[2 .. input.len - 1];
-
-    // Format: `<keycode>[ ; <modifier> [ : <text-as-codepoints> ] ]`.
-    // The `:` form appears under the "Report associated text" flag,
-    // which we don't push — but we tolerate it defensively.
-    var kc: u32 = 0;
-    var mod: u32 = 1;
-    if (std.mem.indexOfScalar(u8, body, ';')) |semi| {
-        kc = std.fmt.parseInt(u32, body[0..semi], 10) catch return null;
-        const after = body[semi + 1 ..];
-        const mod_end = std.mem.indexOfScalar(u8, after, ':') orelse after.len;
-        mod = std.fmt.parseInt(u32, after[0..mod_end], 10) catch return null;
-    } else {
-        kc = std.fmt.parseInt(u32, body, 10) catch return null;
-    }
-
-    // Modifier encoding (kitty kbd): 1=none, 2=shift, 3=alt, 4=alt+shift,
-    // 5=ctrl, 6=ctrl+shift, 7=ctrl+alt, 8=ctrl+alt+shift.
-    const has_ctrl = (mod == 5 or mod == 6 or mod == 7 or mod == 8);
-    const has_shift = (mod == 2 or mod == 4 or mod == 6 or mod == 8);
-    const has_alt = (mod == 3 or mod == 4 or mod == 7 or mod == 8);
-
-    // --- Unmodified named keys → their legacy single bytes ---------------
-    if (mod == 1 or mod == 0) switch (kc) {
-        9 => return writeOne(out, '\t'),
-        13 => return writeOne(out, '\r'),
-        27 => return writeOne(out, 0x1b),
-        127 => return writeOne(out, 0x7f),
-        else => {},
-    };
-
-    // --- Ctrl + lowercase letter → 0x01..0x1A control byte ---------------
-    // Bash readline's default key bindings live here:
-    //   Ctrl+A = beginning-of-line, Ctrl+C = abort,
-    //   Ctrl+D = EOF/exit, Ctrl+E = end-of-line,
-    //   Ctrl+R = reverse-i-search, Ctrl+U = unix-line-discard, …
-    if (has_ctrl and !has_alt and kc >= 'a' and kc <= 'z') {
-        return writeOne(out, @intCast(kc - 'a' + 1));
-    }
-
-    // --- Alt + ASCII char → ESC <char> (xterm metaSendsEscape) -----------
-    if (has_alt and !has_ctrl and !has_shift and kc < 128) {
-        if (out.len < 2) return null;
-        out[0] = 0x1b;
-        out[1] = @intCast(kc);
-        return out[0..2];
-    }
-
-    // Shift+Tab has a well-known legacy form. Other modifier-bearing
-    // keys (Ctrl+Shift+letter for example) intentionally fall through
-    // to null — those are atty's binding territory (Ctrl+Shift+I,
-    // Ctrl+Shift+D) and a matching binding handles them at the
-    // call-site before this translator runs.
-    if (kc == 9 and has_shift and !has_ctrl and !has_alt) {
-        return writeBytes(out, "\x1b[Z");
-    }
-
-    return null;
-}
-
-fn writeOne(out: []u8, b: u8) ?[]const u8 {
-    if (out.len < 1) return null;
-    out[0] = b;
-    return out[0..1];
-}
-
-fn writeBytes(out: []u8, s: []const u8) ?[]const u8 {
-    if (out.len < s.len) return null;
-    @memcpy(out[0..s.len], s);
-    return out[0..s.len];
-}
-
-/// True if `input` is a kitty-keyboard CSI-u sequence: `ESC [`
-/// followed by digit / `;` / `:` parameters, terminated by `u`.
-/// Used by the proxy to drop unmapped kitty-protocol keys so they
-/// don't reach the shell as mojibake when the protocol is enabled.
-pub fn isCsiU(input: []const u8) bool {
-    if (input.len < 4) return false; // min: `ESC [ <digit> u`
-    if (input[0] != 0x1B or input[1] != '[') return false;
-    if (input[input.len - 1] != 'u') return false;
-    for (input[2 .. input.len - 1]) |b| {
-        switch (b) {
-            '0'...'9', ';', ':' => {},
-            else => return false,
-        }
-    }
-    return true;
-}
-
-/// If `bytes` begins with a well-formed CSI-u sequence, return its
-/// length (including the `u` terminator). Returns null otherwise.
-///
-/// Used by the byte-stream translator below to peel CSI-u sequences
-/// off the front of a multi-keystroke `read()` buffer. `isCsiU`
-/// validates the WHOLE slice — this finds the *boundary* so the
-/// caller can split mixed input (`password<Enter><Ctrl+C>` arriving
-/// as one read in raw mode, paste with embedded protocol sequences,
-/// …).
-pub fn csiULen(bytes: []const u8) ?usize {
-    if (bytes.len < 4) return null;
-    if (bytes[0] != 0x1B or bytes[1] != '[') return null;
-    var i: usize = 2;
-    while (i < bytes.len) : (i += 1) {
-        switch (bytes[i]) {
-            '0'...'9', ';', ':' => {},
-            'u' => return i + 1,
-            else => return null,
-        }
-    }
-    return null; // ran out of bytes before terminator → not yet a CSI-u
-}
-
-/// Byte-stream CSI-u translator for the password-redaction fast path
-/// (and any other site where a multi-key `read()` may carry an
-/// embedded CSI-u sequence).
-///
-/// Walks `input` front-to-back. When a CSI-u sequence is detected at
-/// the current cursor, run `csiUToLegacy` against it and write the
-/// translated bytes to `writer` (or drop them, if the key has no
-/// legacy form — e.g. Ctrl+9, F-keys). Non-CSI-u runs are written
-/// verbatim in one chunk per run, so the common case (`password\r`
-/// arriving as a single `read()`) is a single write.
-///
-/// `writer` is a Writer; in the proxy this points at pty.master via
-/// a thin shim. Returns the writer's error type unchanged so the
-/// caller can `try` it directly.
-pub fn translateCsiUStream(
-    input: []const u8,
-    enabled: bool,
-    writer: anytype,
-) !void {
-    if (!enabled) {
-        try writer.writeAll(input);
-        return;
-    }
-    var i: usize = 0;
-    var run_start: usize = 0;
-    while (i < input.len) {
-        if (input[i] == 0x1B and i + 1 < input.len and input[i + 1] == '[') {
-            if (csiULen(input[i..])) |seq_len| {
-                if (run_start < i) try writer.writeAll(input[run_start..i]);
-                var legacy_buf: [8]u8 = undefined;
-                if (csiUToLegacy(input[i .. i + seq_len], &legacy_buf)) |legacy| {
-                    try writer.writeAll(legacy);
-                } // else: drop (no legacy form — Ctrl+9, F-keys, …)
-                i += seq_len;
-                run_start = i;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    if (run_start < input.len) try writer.writeAll(input[run_start..]);
-}
-
 /// Linear scan over `bindings` looking for an exact byte match against
 /// `input`. Returns the bound action, or null when no binding matches
 /// (or the input is empty / a binding has an empty `.bytes`). Pulled
@@ -536,244 +193,15 @@ test "match does not bind Ctrl+C against the shipped default bindings" {
         .{ .bytes = key("Ctrl+Shift+D"), .action = .delete_history_match },
     };
     try std.testing.expectEqual(@as(?Action, null), match(&defaults_bindings, "\x03"));
-    // Same for Ctrl+D (0x04), Ctrl+Z (0x1A), Ctrl+\ (0x1C) — the
-    // other control codes a shell wants to see verbatim.
     try std.testing.expectEqual(@as(?Action, null), match(&defaults_bindings, "\x04"));
     try std.testing.expectEqual(@as(?Action, null), match(&defaults_bindings, "\x1A"));
     try std.testing.expectEqual(@as(?Action, null), match(&defaults_bindings, "\x1C"));
 }
 
-test "isCsiU lets bare Ctrl+C through (not a CSI-u sequence)" {
-    // The CSI-u drop is the second gate after match — if a key
-    // doesn't match any binding AND looks like CSI-u, we drop it.
-    // Bare \x03 isn't CSI-u shaped, so isCsiU returns false and
-    // the byte falls through to the pty.master write.
-    try std.testing.expect(!isCsiU("\x03"));
-    try std.testing.expect(!isCsiU("\x04"));
-}
-
 test "match requires byte-exact equality (chunked reads don't trigger)" {
     const bs = [_]Binding{.{ .bytes = "\x1b[C", .action = .ghost_accept }};
-    // partial match
     try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b["));
-    // trailing junk
     try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b[Cx"));
-}
-
-test "csiUToLegacy: Ctrl+letter combos become their 0x01..0x1A control byte" {
-    var out: [4]u8 = undefined;
-    // Ctrl+A = 0x01
-    try std.testing.expectEqualSlices(u8, "\x01", csiUToLegacy("\x1b[97;5u", &out).?);
-    // Ctrl+C = 0x03 (the user's reported breakage)
-    try std.testing.expectEqualSlices(u8, "\x03", csiUToLegacy("\x1b[99;5u", &out).?);
-    // Ctrl+D = 0x04
-    try std.testing.expectEqualSlices(u8, "\x04", csiUToLegacy("\x1b[100;5u", &out).?);
-    // Ctrl+E = 0x05
-    try std.testing.expectEqualSlices(u8, "\x05", csiUToLegacy("\x1b[101;5u", &out).?);
-    // Ctrl+R = 0x12 (bash reverse-i-search)
-    try std.testing.expectEqualSlices(u8, "\x12", csiUToLegacy("\x1b[114;5u", &out).?);
-    // Ctrl+U = 0x15
-    try std.testing.expectEqualSlices(u8, "\x15", csiUToLegacy("\x1b[117;5u", &out).?);
-    // Ctrl+Z = 0x1A
-    try std.testing.expectEqualSlices(u8, "\x1a", csiUToLegacy("\x1b[122;5u", &out).?);
-}
-
-test "csiUToLegacy: named keys with legacy single-byte encodings" {
-    var out: [4]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, "\t", csiUToLegacy("\x1b[9u", &out).?);
-    try std.testing.expectEqualSlices(u8, "\r", csiUToLegacy("\x1b[13u", &out).?);
-    try std.testing.expectEqualSlices(u8, "\x1b", csiUToLegacy("\x1b[27u", &out).?);
-    try std.testing.expectEqualSlices(u8, "\x7f", csiUToLegacy("\x1b[127u", &out).?);
-}
-
-test "csiUToLegacy: Shift+Tab → \\x1b[Z" {
-    var out: [4]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, "\x1b[Z", csiUToLegacy("\x1b[9;2u", &out).?);
-}
-
-test "csiUToLegacy: Alt+letter → ESC + letter (xterm metaSendsEscape)" {
-    var out: [4]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, "\x1bf", csiUToLegacy("\x1b[102;3u", &out).?);
-}
-
-test "csiUToLegacy: keys with no legacy form return null (caller drops)" {
-    var out: [4]u8 = undefined;
-    // Ctrl+9 — no legacy encoding (kitty kbd's whole reason for existing).
-    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[57;5u", &out));
-    // Ctrl+Alt+C — Alt-bearing combos fall outside our simple table.
-    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[99;7u", &out));
-}
-
-test "csiUToLegacy: Ctrl+Shift+letter folds to the same control byte as Ctrl+letter" {
-    // Rationale: in classic terminal mode, Ctrl+Shift+C and Ctrl+C
-    // both send 0x03 — the shift bit doesn't propagate through a
-    // control-byte encoding. Under kitty kbd they get distinct CSI-u
-    // sequences, but if a user's binding doesn't catch them the
-    // shell should still see the same bytes a non-kitty terminal
-    // would have produced. Note: the proxy's binding-match runs
-    // BEFORE this translator, so atty's own Ctrl+Shift+I /
-    // Ctrl+Shift+D bindings still take precedence — this case only
-    // triggers when no binding matched.
-    var out: [4]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, "\x03", csiUToLegacy("\x1b[99;6u", &out).?); // Ctrl+Shift+C
-    try std.testing.expectEqualSlices(u8, "\x1a", csiUToLegacy("\x1b[122;6u", &out).?); // Ctrl+Shift+Z
-}
-
-test "csiUToLegacy: non-CSI-u input returns null without touching `out`" {
-    var out: [4]u8 = undefined;
-    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x03", &out));
-    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[C", &out)); // arrow
-    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("abc", &out));
-}
-
-test "csiULen finds the boundary of an embedded CSI-u sequence" {
-    try std.testing.expectEqual(@as(?usize, 7), csiULen("\x1b[99;5u"));
-    try std.testing.expectEqual(@as(?usize, 7), csiULen("\x1b[99;5utrailing"));
-    try std.testing.expectEqual(@as(?usize, 4), csiULen("\x1b[9u"));
-    try std.testing.expectEqual(@as(?usize, null), csiULen("\x1b[99;5")); // unterminated
-    try std.testing.expectEqual(@as(?usize, null), csiULen("\x1b[Cdef")); // arrow, not CSI-u
-    try std.testing.expectEqual(@as(?usize, null), csiULen("abc")); // no escape
-    try std.testing.expectEqual(@as(?usize, null), csiULen("\x1b[")); // too short
-}
-
-const TestWriter = struct {
-    buf: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    pub fn writeAll(self: @This(), bytes: []const u8) !void {
-        try self.buf.appendSlice(self.allocator, bytes);
-    }
-};
-
-test "translateCsiUStream: pure CSI-u → legacy bytes (single-key fast path)" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try translateCsiUStream("\x1b[99;5u", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
-    try std.testing.expectEqualSlices(u8, "\x03", buf.items);
-}
-
-test "translateCsiUStream: non-CSI-u byte stream passes through unchanged" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try translateCsiUStream("hunter2\r", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
-    try std.testing.expectEqualSlices(u8, "hunter2\r", buf.items);
-}
-
-test "translateCsiUStream: mixed run — password chars + embedded Ctrl+C" {
-    // Regression scenario (Copilot review on PR #9, src/proxy.zig:390):
-    // a single `read()` returned `pass\x1b[99;5u\r` (paste-style or
-    // burst typing). The earlier fast-path checked `isCsiU(input)`
-    // on the WHOLE slice — failed because it wasn't pure CSI-u — and
-    // forwarded the raw kitty-protocol bytes to the password reader.
-    // The stream translator splits the input into runs and translates
-    // each CSI-u sequence individually.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try translateCsiUStream("pass\x1b[99;5u\r", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
-    try std.testing.expectEqualSlices(u8, "pass\x03\r", buf.items);
-}
-
-test "translateCsiUStream: two CSI-u sequences back-to-back" {
-    // Ctrl+U (kill line) then Ctrl+C (cancel) — both arrive as CSI-u
-    // under kitty kbd. Both must be translated.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try translateCsiUStream("\x1b[117;5u\x1b[99;5u", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
-    try std.testing.expectEqualSlices(u8, "\x15\x03", buf.items);
-}
-
-test "translateCsiUStream: CSI-u with no legacy form is dropped" {
-    // Ctrl+9 has no legacy single-byte form. Forwarding the raw CSI-u
-    // would leak `\x1b[57;5u` into sudo's getpass. Drop instead.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try translateCsiUStream("ab\x1b[57;5ucd", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
-    try std.testing.expectEqualSlices(u8, "abcd", buf.items);
-}
-
-test "translateCsiUStream: disabled → bytes pass through unchanged" {
-    // When kitty kbd isn't enabled, the terminal can't produce CSI-u
-    // anyway — skip the parse entirely and forward everything.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try translateCsiUStream("\x1b[99;5u-but-disabled", false, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
-    try std.testing.expectEqualSlices(u8, "\x1b[99;5u-but-disabled", buf.items);
-}
-
-test "translateCsiUStream: unterminated CSI-u at end is forwarded verbatim" {
-    // A partial CSI-u (read boundary chopped the terminator) is not
-    // a CSI-u we can translate. Forward as-is — the password reader
-    // sees `\x1b[99;5` literally. This is the inherent flaw in
-    // boundary-cutting reads; the next read should deliver the rest
-    // and the next iteration will (also lacking the start of the
-    // sequence) forward verbatim. Documented trade-off: CSI-u
-    // translation across read() boundaries is out of scope. In
-    // practice the proxy uses raw mode with VMIN=1 VTIME=0, so the
-    // kernel coalesces a fully-arrived sequence into one read.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try translateCsiUStream("ok\x1b[99;5", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
-    try std.testing.expectEqualSlices(u8, "ok\x1b[99;5", buf.items);
-}
-
-test "translateCsiUStream: bare ESC (no `[`) is forwarded as-is" {
-    // Alt+letter classic encoding is `ESC <letter>`. Not a CSI-u.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try translateCsiUStream("\x1bf", true, TestWriter{ .buf = &buf, .allocator = std.testing.allocator });
-    try std.testing.expectEqualSlices(u8, "\x1bf", buf.items);
-}
-
-test "csiUToLegacy: malformed CSI-u (non-numeric) returns null safely" {
-    var out: [4]u8 = undefined;
-    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[abc;5u", &out));
-    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[99;xyu", &out));
-}
-
-test "isCsiU recognises kitty-protocol CSI-u shapes" {
-    try std.testing.expect(isCsiU("\x1B[105;6u")); // Ctrl+Shift+I
-    try std.testing.expect(isCsiU("\x1B[57;5u")); // Ctrl+9
-    try std.testing.expect(isCsiU("\x1B[27u")); // Esc (single param)
-    try std.testing.expect(isCsiU("\x1B[1;5:2u")); // alternate-key indicator
-}
-
-test "isCsiU rejects non-CSI-u sequences" {
-    try std.testing.expect(!isCsiU("\x1B[C")); // arrow (CSI final = C)
-    try std.testing.expect(!isCsiU("\x1B[1;5C")); // Ctrl+Right (CSI-1 form)
-    try std.testing.expect(!isCsiU("\t")); // bare Tab
-    try std.testing.expect(!isCsiU("\x1B[2J")); // ED
-    try std.testing.expect(!isCsiU("u")); // too short
-    try std.testing.expect(!isCsiU("\x1B[abc;6u")); // non-digit in params
-}
-
-test "key resolves Ctrl+Shift+letter via kitty kbd encoding" {
-    // i = 105
-    try std.testing.expectEqualStrings("\x1B[105;6u", key("Ctrl+Shift+I"));
-    try std.testing.expectEqualStrings("\x1B[105;6u", key("Ctrl+Shift+i"));
-    // a = 97, z = 122
-    try std.testing.expectEqualStrings("\x1B[97;6u", key("Ctrl+Shift+A"));
-    try std.testing.expectEqualStrings("\x1B[122;6u", key("Ctrl+Shift+z"));
-}
-
-test "key folds Ctrl+letter to control byte" {
-    try std.testing.expectEqualStrings("\x01", key("Ctrl+A"));
-    try std.testing.expectEqualStrings("\x06", key("Ctrl+f"));
-    try std.testing.expectEqualStrings("\x1a", key("Ctrl+Z"));
-}
-
-test "key handles Alt+char" {
-    try std.testing.expectEqualStrings("\x1bf", key("Alt+f"));
-    try std.testing.expectEqualStrings("\x1b.", key("Alt+."));
-}
-
-test "key resolves Ctrl+<digit> (kitty kbd CSI-u)" {
-    try std.testing.expectEqualStrings("\x1b[49;5u", key("Ctrl+1"));
-    try std.testing.expectEqualStrings("\x1b[53;5u", key("Ctrl+5"));
-    try std.testing.expectEqualStrings("\x1b[57;5u", key("Ctrl+9"));
-}
-
-test "key resolves Esc+<digit> (legacy ESC+digit, doubles as Alt+digit on non-kitty)" {
-    try std.testing.expectEqualStrings("\x1b1", key("Esc+1"));
-    try std.testing.expectEqualStrings("\x1b9", key("Esc+9"));
 }
 
 test "Action.ghost_pick carries the index as a payload" {
@@ -786,7 +214,9 @@ test "Action.ghost_pick carries the index as a payload" {
     }
 }
 
-test "key handles function keys" {
-    try std.testing.expectEqualStrings("\x1bOP", key("F1"));
-    try std.testing.expectEqualStrings("\x1b[24~", key("F12"));
+// Pull in the sub-files so `zig build test` discovers their tests
+// when only `keymap.zig` is referenced from `unit_tests.zig`.
+test {
+    _ = parser;
+    _ = csiu;
 }
