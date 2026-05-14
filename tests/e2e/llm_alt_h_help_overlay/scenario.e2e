@@ -1,0 +1,36 @@
+# llm_alt_h_help_overlay — Alt+H surfaces model + cycle + endpoint
+# in a transient hint above the statusbar.
+#
+# Inert mode (empty `api_base`) → overlay reports `(inert — no
+# endpoint)`. Two models configured so the cycle indicator shows
+# `(1/2)` at idx 0.
+
+cols 120
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Enter AI mode.
+type "#: "
+sleep 200
+
+# Alt+H → help overlay latched.
+type "\x1bh"
+sleep 300
+snapshot help_at_idx_0
+
+# Cycle to second model.
+type "\x1bm"
+sleep 300
+
+# Alt+H again — should now report `(2/2)` and `model-beta`.
+type "\x1bh"
+sleep 300
+snapshot help_at_idx_1
+
+# Settle before exit so the exit_code assertion isn't racing.
+sleep 200
+type "exit\r"
+exit_code 0

@@ -176,14 +176,22 @@ pub fn configure(comptime cfg: Config) type {
             req_buf: [cfg.max_prompt_bytes]u8 = undefined,
             req_len: usize = 0,
             req_pending: bool = false,
-            /// Selected model for the pending request. Filled by
-            /// the request-trigger sites (onInput / onAction) from
-            /// `cfg.models[rt.current_model_idx]` (or `cfg.model`
-            /// when `models` is empty) under the same mutex that
-            /// sets req_pending. Worker reads it for buildRequestBody.
-            /// Bounded at 64 chars — model names are short ASCII.
-            model_buf: [64]u8 = undefined,
-            model_len: usize = 0,
+            /// Selected model INDEX for the pending request.
+            /// Stored as an index (not a copy of the string) so we
+            /// can't truncate long model names AND there's no
+            /// length-zero sentinel confusion with an empty
+            /// `cfg.models[i]` (which would be a user-config bug
+            /// anyway). Filled by request-trigger sites (onInput /
+            /// onAction) under the same mutex that sets req_pending.
+            ///
+            /// Out-of-range sentinel: `model_idx == usize.max`
+            /// means "no models[] — fall back to cfg.model".
+            /// Worker resolves the slice from `cfg.models` at
+            /// read time. `cfg.*` strings are comptime/static so
+            /// the resolved slice's backing storage lives forever
+            /// — safe to use across the worker thread boundary
+            /// without a copy.
+            model_idx: usize = std.math.maxInt(usize),
             /// Monotonic counter — bumped on every prompt the proxy
             /// hands to the worker. The worker stamps each
             /// response with the generation it was serving; the
@@ -752,18 +760,17 @@ pub fn configure(comptime cfg: Config) type {
                 return .forward;
             }
 
-            // Resolve the model: prefer `cfg.models[idx]` when
-            // configured, else fall back to the legacy single
-            // `cfg.model`. Truncated at the model_buf width
-            // (Shared.model_buf is 64 bytes — model names are short
-            // ASCII so the cap is academic).
-            const selected_model: []const u8 = blk: {
-                if (cfg.models.len > 0) {
-                    const idx = if (rt.current_model_idx < cfg.models.len) rt.current_model_idx else 0;
-                    break :blk cfg.models[idx];
-                }
-                break :blk cfg.model;
-            };
+            // Resolve the model INDEX to stage. Worker reads
+            // `cfg.models[idx]` directly when idx is in-range, else
+            // falls back to `cfg.model`. Out-of-range
+            // `current_model_idx` (shouldn't happen — Alt+M wraps —
+            // but defensive) clamps to 0.
+            const idx_to_send: usize = if (cfg.models.len == 0)
+                std.math.maxInt(usize) // sentinel: "no list, use cfg.model"
+            else if (rt.current_model_idx < cfg.models.len)
+                rt.current_model_idx
+            else
+                0;
 
             // Hand the prompt to the worker. Same locking + req-gen
             // bump as before — see the original onInput comment for
@@ -772,9 +779,7 @@ pub fn configure(comptime cfg: Config) type {
             defer rt.shared.mutex.unlock(ctx.io);
             @memcpy(rt.shared.req_buf[0..body.len], body);
             rt.shared.req_len = body.len;
-            const m_n = @min(selected_model.len, rt.shared.model_buf.len);
-            @memcpy(rt.shared.model_buf[0..m_n], selected_model[0..m_n]);
-            rt.shared.model_len = m_n;
+            rt.shared.model_idx = idx_to_send;
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
@@ -1031,18 +1036,22 @@ pub fn configure(comptime cfg: Config) type {
                 }
                 prompt_len = shared.req_len;
                 @memcpy(prompt_local[0..prompt_len], shared.req_buf[0..prompt_len]);
-                // Copy the request-time model under the same lock.
-                // Triggers (onInput / onAction) write model_len > 0
-                // before signalling; if the buffer somehow stayed
-                // empty we fall back to cfg.model.
-                var model_local: [64]u8 = undefined;
-                const model_n = shared.model_len;
-                if (model_n > 0) @memcpy(model_local[0..model_n], shared.model_buf[0..model_n]);
+                // Read the request-time model INDEX under the same
+                // lock. Trigger sites set `model_idx` to either a
+                // valid `cfg.models[]` index, or `usize.max` as the
+                // "no list, use cfg.model" sentinel. We resolve the
+                // slice AFTER releasing the lock — `cfg.models` is
+                // comptime-static, the resolved slice's storage
+                // outlives the worker thread.
+                const idx = shared.model_idx;
                 shared.req_pending = false;
                 serving_gen = shared.req_gen;
                 shared.mutex.unlock(io);
 
-                const model_for_request: []const u8 = if (model_n > 0) model_local[0..model_n] else cfg.model;
+                const model_for_request: []const u8 = if (idx < cfg.models.len)
+                    cfg.models[idx]
+                else
+                    cfg.model;
 
                 // Fire the HTTP request OUTSIDE the lock — it may
                 // block for many seconds.

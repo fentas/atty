@@ -1,0 +1,8 @@
+$ #:
+
+
+
+
+model: model-beta (2/2) · endpoint: (inert — no endpoint) · Ctrl+Shift+X cancel · Ctrl+Shift+I incognito
+
+atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-beta · Alt+H help · Ctrl+Shift+X cancel
