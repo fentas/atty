@@ -59,24 +59,15 @@ pub const LineState = struct {
     committed_was_uncertain: bool = false,
 
     /// Author of the line currently being typed (pending).
-    /// LLM-driven modules flip this to `.llm` via
-    /// `setCommitAuthor` BEFORE injecting a suggested command so
-    /// the resulting commit lands with the right author tag.
-    ///
-    /// Reset to `.user` by:
-    ///   • `submit()` (Enter snapshots pending → committed, then resets)
-    ///   • `reset()` (Ctrl-C / Ctrl-D / Ctrl-G clear the line)
-    ///   • `markUncertain()` (CSI / Tab / unmodelled control byte —
-    ///     line model lost track; a staged author can no longer be
-    ///     attributed to a specific buffer content)
-    ///   • `backspace` / `killLine` / `killWord` when they leave
-    ///     the buffer empty (the user wiped the staged line; the
-    ///     next thing they type is theirs)
+    /// Reset to `.user` whenever the buffer's content is no longer
+    /// attributable to a previously-staged author: on `submit()`
+    /// (after the snapshot to committed_author), on `reset()`, on
+    /// `markUncertain()`, and on `backspace` / `killLine` /
+    /// `killWord` that empty the buffer.
     pending_author: Author = .user,
-    /// Snapshot of `pending_author` at commit time. Read via
-    /// `committedAuthor()` from `onLineCommit`. Reset to `.user` by
-    /// `clearLastCommitted()` (after consumers drain the commit)
-    /// and by `setCommitted("")` (explicit "no commit" clear).
+    /// Snapshot of `pending_author` at commit time. Lives until the
+    /// next `clearLastCommitted()` or until `setCommitted("")`
+    /// explicitly clears the commit slot.
     committed_author: Author = .user,
 
     pub fn current(self: *const LineState) []const u8 {
@@ -121,8 +112,7 @@ pub const LineState = struct {
     }
 
     /// Author of the line currently in `committed[0..committed_len]`,
-    /// or `.user` when nothing is committed. Modules read this from
-    /// `onLineCommit` to attribute the recorded line.
+    /// or `.user` when nothing is committed.
     pub fn committedAuthor(self: *const LineState) Author {
         return self.committed_author;
     }

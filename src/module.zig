@@ -38,8 +38,6 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// Re-export of `line_state.Author` to keep all module-framework
-/// types reachable through this file.
 pub const Author = @import("line_state.zig").Author;
 
 /// What a module decides about a keystroke.
