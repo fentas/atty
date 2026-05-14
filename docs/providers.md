@@ -125,28 +125,40 @@ Confirmation prompt for dangerous commands.
 
 When the user presses Enter:
 
-1. Match the current line against a configurable rule list (substring
-   or prefix).
-2. If a rule fires:
-   - Swallow the Enter (don't forward to shell).
-   - Print a one-line warning banner to stderr.
-   - Enter "armed" state.
-3. The next Enter passes through.
-4. Any non-Enter keystroke disarms (so editing the command doesn't
-   accidentally double-press past the guard).
+1. Match the current line against a configurable rule list. Each rule
+   carries a `Match` (substring / prefix / glob), an `AuthorMask`
+   (user / llm gate), and a `Behavior` (`.confirm`, `.confirm_once`,
+   `.block`, `.warn`).
+2. First matching rule wins, in declaration order.
+3. `.confirm` swallows the Enter, prints a banner, enters "armed"
+   state. Next Enter passes through; non-Enter keystroke disarms.
+4. `.confirm_once` works like `.confirm` but the confirmation
+   persists for the rest of the session (per rule).
+5. `.block` replaces the Enter with Ctrl+U (clears the typed line)
+   and prints a banner; the command can never run.
+6. `.warn` prints a banner and forwards the Enter — useful when you
+   want an audit trail without friction.
+
+The banner tags the author: `atty guardrail: <reason> [user|llm]`.
 
 ### Default rules
 
-| Name              | Match                  | Reason                            |
-|-------------------|------------------------|-----------------------------------|
-| `rm-rf-root`      | substring `rm -rf /`   | rm -rf on a root-ish path         |
-| `rm-rf-tilde`     | substring `rm -rf ~`   | rm -rf on home                    |
-| `dd-raw-device`   | prefix    `dd `        | dd writing to a raw device        |
-| `mkfs`            | prefix    `mkfs`       | filesystem creation               |
-| `fork-bomb`       | substring `:(){ :\|:& };:` | classic fork bomb             |
-| `curl-pipe-sh`    | substring `\| sh`       | curl … \| sh                      |
-| `curl-pipe-bash`  | substring `\| bash`     | curl … \| bash                    |
-| `chmod-world`     | substring `chmod 777 /`| world-writable root path          |
+Author-aware: model-suggested destructive commands are stricter than
+user-typed ones. The exact root-path `rm -rf /` and the classic fork
+bomb are `.block` for both authors. Most others differentiate:
+
+| Pattern                     | User behavior | LLM behavior |
+|-----------------------------|---------------|--------------|
+| `rm -rf /` (exact glob)     | `.block`      | `.block`     |
+| `:(){ :\|:& };:` (substring) | `.block`     | `.block`     |
+| `rm -rf ~` (substring)      | `.confirm`    | `.block`     |
+| `rm -rf` (substring)        | `.confirm`    | `.block`     |
+| `sudo ` (prefix)            | `.confirm`    | `.confirm`   |
+| `mkfs` (prefix)             | `.confirm`    | `.block`     |
+| `dd ` (prefix)              | `.confirm`    | `.block`     |
+| `\| sh` (substring)          | `.confirm`   | `.confirm`   |
+| `\| bash` (substring)        | `.confirm`   | `.confirm`   |
+| `chmod 777 /` (substring)   | `.confirm`    | `.confirm`   |
 
 ### Custom rules
 
@@ -155,8 +167,17 @@ pub const Guardrail = atty.modules.guardrail.configure(.{
     .rules = &.{
         .{
             .name = "git-force-push-main",
-            .kind = .{ .substring = "git push --force" },
+            .match = .{ .substring = "git push --force" },
             .reason = "force-pushing to a shared branch",
+            .behavior = .confirm_once,
+        },
+        .{
+            // Block force-push outright for the LLM.
+            .name = "git-force-push-llm",
+            .match = .{ .substring = "git push --force" },
+            .reason = "force-pushing (llm)",
+            .authors = .{ .user = false, .llm = true },
+            .behavior = .block,
         },
     },
     .warning_style = atty.style.presets.danger,   // bold red

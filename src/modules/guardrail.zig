@@ -74,9 +74,12 @@ pub const Rule = struct {
     behavior: Behavior = .confirm,
 };
 
-/// Default rules ship stricter behavior for `.llm` — model-suggested
-/// `rm -rf` is always refused, while a human still gets a confirm
-/// prompt and can override their own decision.
+/// Default rules. Catastrophic patterns (exact `rm -rf /`, fork bomb)
+/// are `.block` for both authors so neither party can talk their way
+/// past them. Merely-dangerous patterns (`rm -rf` with a subpath,
+/// `mkfs`, `dd …`) `.block` when the line is `.llm`-authored but only
+/// `.confirm` for `.user` — the human can override their own decision;
+/// a model suggesting the same line cannot.
 pub const default_rules = [_]Rule{
     .{
         // Exact-only — `rm -rf /home/me` falls through to the
@@ -143,16 +146,20 @@ pub const default_rules = [_]Rule{
         .behavior = .block,
     },
     .{
-        .name = "dd-raw-user",
-        .match = .{ .substring = "dd if=/dev" },
-        .reason = "dd from a raw device",
+        // Prefix not substring — any `dd ` invocation deserves a beat
+        // (covers both `dd if=/dev/sda …` reads and
+        // `dd … of=/dev/sda` writes; `dd if=/tmp of=/tmp/copy` too,
+        // which is fine, the confirm prompt is cheap).
+        .name = "dd-user",
+        .match = .{ .prefix = "dd " },
+        .reason = "dd invocation",
         .authors = .{ .user = true, .llm = false },
         .behavior = .confirm,
     },
     .{
-        .name = "dd-raw-llm",
-        .match = .{ .substring = "dd if=/dev" },
-        .reason = "dd from a raw device (llm)",
+        .name = "dd-llm",
+        .match = .{ .prefix = "dd " },
+        .reason = "dd invocation",
         .authors = .{ .user = false, .llm = true },
         .behavior = .block,
     },
@@ -722,6 +729,43 @@ test "custom rule list overrides defaults" {
     const G = configure(.{ .rules = &my_rules });
     try testing.expect(G.check("git push --force origin main") != null);
     try testing.expect(G.check("rm -rf /") == null);
+}
+
+test "first matching rule wins in declaration order — including across author masks" {
+    // Two rules pattern-overlap. Earlier-declared one must win even
+    // when a later one is more specific.
+    const rules = [_]Rule{
+        .{
+            .name = "first-warn-user",
+            .match = .{ .substring = "danger" },
+            .reason = "first",
+            .authors = .{ .user = true, .llm = false },
+            .behavior = .warn,
+        },
+        .{
+            .name = "second-block-user",
+            .match = .{ .substring = "danger" },
+            .reason = "second",
+            .authors = .{ .user = true, .llm = false },
+            .behavior = .block,
+        },
+        .{
+            // Only-this-rule applies to llm; user-author probe must
+            // skip it entirely.
+            .name = "third-llm-only",
+            .match = .{ .substring = "danger" },
+            .reason = "third",
+            .authors = .{ .user = false, .llm = true },
+            .behavior = .block,
+        },
+    };
+    const G = configure(.{ .rules = &rules });
+    const user_hit = G.checkAs("danger", .user).?;
+    try testing.expectEqualStrings("first-warn-user", user_hit.name);
+    try testing.expectEqual(Behavior.warn, user_hit.behavior);
+
+    const llm_hit = G.checkAs("danger", .llm).?;
+    try testing.expectEqualStrings("third-llm-only", llm_hit.name);
 }
 
 test "empty rules list always returns null" {
