@@ -17,7 +17,10 @@
 #      stream and dispatches the deletion. Without the fix,
 #      line_state.uncertain would short-circuit the handler and
 #      the deletion never fires.
-#   7. Verify the file no longer contains the entry by `cat`ing it.
+#   7. Verify the file no longer contains the entry via a
+#      grep / HIT-COUNT assertion (a literal `cat` would race
+#      atty's history-write timing across test runs — see the
+#      block above the verification command for the full story).
 
 cols 60
 rows 10
@@ -57,10 +60,51 @@ sleep 300
 type "\x1b[100;6u"
 sleep 400
 
-# Verify the file no longer contains the entry. Pre-fix it would
-# still be there because the handler skipped on uncertain.
-type "cat /tmp/atty-e2e-delete-uparrow\r"
-sleep 300
+# Verify the deletion via three output-only sync points:
+#
+#   • `HIT-COUNT=$(grep -c "echo $TGT" …)` — bash's readline echoes
+#     the typed line verbatim, so the literal text the harness sees
+#     contains `$(grep …)`, NOT the computed `HIT-COUNT=0` (or
+#     `HIT-COUNT=1`). Same trick for `$TGT`: the recorded grep line
+#     carries `"echo $TGT"` literally, so the grep can't self-match
+#     its own entry — only the ORIGINAL `echo UPARROW-TARGET-99999`.
+#   • `printf '\x44ONE\n'` — the typed bytes spell `\x44ONE` (seven
+#     ASCII chars), but printf interprets `\x44` as the byte `D` so
+#     OUTPUT lands as `DONE`. `wait_for "DONE"` blocks until printf
+#     has actually run — its output cannot leak via the readline
+#     echo of the typed bytes.
+#   • A second chained command `printf 'P\x4FST-DONE\n'` emits
+#     `POST-DONE` for the same reason; waiting on it (below) blocks
+#     until the verification command has finished + bash redrew the
+#     prompt + accepted the second command + ran it.
+#
+# Snapshot pins `HIT-COUNT=0` (delete fired). A regression that
+# leaves the entry would emit `HIT-COUNT=1` here — the snapshot
+# would still capture deterministically (printf still runs), but
+# the grid diff would fail the test.
+type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow); printf '\\x44ONE\\n'\r"
+wait_for "DONE"
+# Fire a SECOND command whose output marker can only appear AFTER
+# bash has finished the first command, redrawn its prompt, accepted
+# the second command's keystrokes, and run it. The typed bytes for
+# the marker spell `P\x4FST-DONE` (twelve chars including the
+# literal backslash + `x` + `4` + `F`); printf interprets `\x4F` as
+# the byte `O` so the runtime output is `POST-DONE`. Since waitFor
+# searches the entire rendered grid, the wait pattern MUST be a
+# substring that doesn't appear in any earlier rendered content —
+# `POST-DONE` has no `O` adjacent to `P` in the typed echo of any
+# prior line (verified by inspection of the scenario), so the wait
+# only fires after the second printf has flushed.
+type "printf 'P\\x4FST-DONE\\n'\r"
+wait_for "POST-DONE"
+# `wait_for "POST-DONE"` returns the instant the second printf's
+# output lands, but bash's next-prompt redraw is a separate write
+# that arrives in a later pump. Without this final settle, the
+# grid's last row sometimes captures bash's pre-redraw blank, other
+# times captures the redrawn `$ `. A bounded sleep is the
+# pragmatic way to give bash a deterministic window — 200 ms is
+# orders of magnitude more than the local-pipe redraw needs.
+sleep 200
 snapshot history_after_delete
 
 # Clean exit.
