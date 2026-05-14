@@ -615,13 +615,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 //   1. If the sequence has a legacy form, translate
                 //      and forward the legacy bytes (e.g. Ctrl+C
                 //      becomes \x03 — bash's line-abort).
-                //   2. If it doesn't (Ctrl+9, Ctrl+Shift+Right, …),
-                //      drop to avoid mojibake.
+                //   2. If it doesn't (Ctrl+9, Ctrl+Shift+Right, …)
+                //      AND we're NOT in alt-screen, drop to avoid
+                //      mojibake.
+                //   3. If it doesn't AND we ARE in alt-screen, pass
+                //      the raw CSI-u through. Alt-screen apps that
+                //      push their own kitty kbd flags (atuin via
+                //      crossterm's REPORT_ALL_KEYS, nvim, lazygit,
+                //      …) need every keystroke — including plain
+                //      letters — to arrive as `\x1b[<kc>u`. Dropping
+                //      "unmapped" CSI-u in that mode swallowed
+                //      regular typing inside atuin's Ctrl+R picker
+                //      and any TUI that opts into the report-all
+                //      flag. Bash itself never enters alt-screen,
+                //      so the at-the-prompt mojibake guard still
+                //      applies wherever it's needed.
                 var legacy_buf: [8]u8 = undefined;
                 if (!matched_binding and config.terminal.enable_kitty_keyboard and keymap.isCsiU(input)) {
                     if (keymap.csiUToLegacy(input, &legacy_buf)) |legacy| {
                         input = legacy;
-                    } else {
+                    } else if (!alt_screen.active) {
                         swallow_after_binding = true;
                     }
                 }
