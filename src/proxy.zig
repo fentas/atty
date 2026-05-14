@@ -1033,40 +1033,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // bytes (statusbar repaint) or signal the slave (resize
                 // + SIGWINCH).
                 if (alt_transitioned) {
-                    // On ENTER: force a SIGWINCH at the inner TUI
-                    // by flickering the winsize (N-1, then N).
-                    // Linux only delivers SIGWINCH on TIOCSWINSZ
-                    // when the size ACTUALLY changes (see
-                    // drivers/tty/tty_io.c:tty_do_resize — `memcmp`
-                    // gate on the size struct), so a no-op resize
-                    // doesn't wake the TUI's resize handler. Some
-                    // dashboard plugins (LazyVim's alpha-nvim
-                    // / dashboard.nvim splash, …) only re-center
-                    // on the `VimResized` autocmd, which fires from
-                    // that handler — without the flicker the splash
-                    // stays at its initial-render position even
-                    // though the underlying size has been correct
-                    // (full rows) since startup. The flicker is
-                    // brief enough (sub-ms between the two ioctls)
-                    // that no TUI gets to draw a frame at the
-                    // intermediate size.
-                    //
-                    // On EXIT (`?1049l`): no flicker needed — bash
-                    // doesn't have this redraw problem. Restore
-                    // DECSTBM + clear the reserved rows; some
-                    // terminals propagate the alt-screen's `\x1B[r`
-                    // to the primary buffer so `sb.reactivate`
-                    // defensively re-asserts the reservation.
-                    if (alt_now_active) {
-                        if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                            if (s.rows > 1) {
-                                var flicker = s;
-                                flicker.rows = s.rows - 1;
-                                _ = pty.setSize(flicker) catch {};
-                                _ = pty.setSize(s) catch {};
-                            }
-                        } else |_| {}
-                    } else {
+                    // Slave size is always FULL (see startup
+                    // comment) — no per-transition resize needed.
+                    // On EXIT (`?1049l`) we still need to restore
+                    // DECSTBM + clear the reserved rows, because
+                    // the alt-screen TUI may have emitted `\x1B[r`
+                    // on its own buffer and on terminals where
+                    // DECSTBM is global that propagates to the
+                    // primary screen.
+                    if (!alt_now_active) {
                         if (statusbar) |*sb| {
                             var w2: std.Io.Writer = .fixed(&out_buf);
                             sb.reactivate(&w2) catch {};
