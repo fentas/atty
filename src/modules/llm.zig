@@ -540,7 +540,23 @@ pub fn configure(comptime cfg: Config) type {
                     // the flag. Without this, the verbose hint
                     // would linger in the statusbar until the
                     // user's next keystroke.
-                    rt.ai_mode_active = false;
+                    //
+                    // BUT only when the worker actually got the
+                    // prompt. In inert mode (no api_base resolved
+                    // at attach), `triggerSinglePrompt` latches
+                    // the "no endpoint" error and returns without
+                    // queuing Ctrl+U — so the typed `#: …` text
+                    // stays on the prompt. If we cleared
+                    // ai_mode_active here, the very next
+                    // keystroke would see the prefix still on
+                    // line_state.current() and flip the flag
+                    // back to true, producing a visible one-
+                    // tick flicker in the statusbar hint. Inert
+                    // mode is the user's signal to fix their
+                    // config + re-try, so leave them IN AI mode
+                    // — the error notification points at the
+                    // fix.
+                    if (rt.api_base.len != 0) rt.ai_mode_active = false;
                     return true;
                 },
                 .llm_exec_dialog, .llm_exec_auto => {

@@ -15,16 +15,18 @@ Three escalating LLM interaction modes triggered from inside an "AI mode" the us
 The user types `#: ` (hash, colon, space) at the prompt. atty detects this in `line_state` and:
 
 1. Sets `llm_exec.Runtime.ai_mode = true`.
-2. statusbar swaps its base text to `AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Esc cancel`.
+2. statusbar swaps its base text to `AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel`.
 3. User continues typing the task.
 
 **Enter in AI mode is a no-op** (intentionally — avoids accidental LLM calls). User must explicitly press one of the action keys.
 
 Mode exits on:
 
-- Action key pressed (action fires, mode exits)
-- `Esc` (clear line, exit mode)
+- Action key pressed (action fires, mode exits — except inert mode where prefix stays so the user can correct config and re-try)
+- `Ctrl+Shift+X` (cancel binding — clears state + wipes line via injected Ctrl+U)
 - User deletes the `#: ` prefix from `line_state`
+
+> An `Esc → clear line + exit AI mode` shortcut is desirable but not yet wired. The proxy doesn't currently special-case Esc for module dispatch; it flows through to readline. Tracked as a follow-up.
 
 ## Keybindings (defaults)
 
@@ -36,7 +38,7 @@ Mode exits on:
 | `Alt+M` | `llm_exec_cycle_model` | Cycle through configured models, surface current in statusbar |
 | `Alt+H` | `llm_exec_toggle_help` | Open / close help overlay |
 | `Ctrl+Shift+X` | `llm_exec_cancel` | Cancel mid-execution (works during running exec loop) |
-| `Esc` | (no new action) | If in AI mode: clear line + exit. Otherwise default Esc passthrough. |
+| `Esc` | (no new action — follow-up) | Desirable: "clear line + exit AI mode". Not wired yet; the proxy doesn't currently route Esc to module dispatch. Use `Ctrl+Shift+X` until this lands. |
 
 `Enter` in AI mode is **swallowed** (with optional 2s statusbar hint).
 
