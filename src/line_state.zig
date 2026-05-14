@@ -28,28 +28,21 @@ pub const max_line = 4096;
 
 /// Who typed the line that's about to be committed?
 ///
-/// Most commits are `.user` — what the human typed at the prompt.
-/// `.llm` is set by the LLM exec-dialog module (PR #21+) BEFORE it
-/// injects a suggested command, via `LineState.setCommitAuthor(.llm)`.
-/// Modules that record history (atuin, history) and the guardrail
-/// read this via `committedAuthor()` from `onLineCommit` so they can
-/// tag entries / apply per-author rule behaviours.
+/// Two answers today: `.user` (human at the prompt — the default)
+/// or `.llm` (an LLM-driven module injected the line, set via
+/// `LineState.setCommitAuthor(.llm)` BEFORE the injection).
+/// Recording and policy modules read the snapshot at commit time
+/// via `committedAuthor()` so they can tag entries or apply
+/// different rules per author.
 ///
-/// Lives in `line_state.zig` (the natural owner — author state has
-/// to survive across dispatch cycles, since an LLM round-trip can
-/// span many polls between flipping the author and the actual
-/// commit). Re-exported from `module.zig` as `module.Author` for
-/// callers that work through the module-framework surface.
-///
-/// PR E ships only the propagation infrastructure; the consumers
-/// remain `.user`-only until follow-up PRs (F: guardrail v2,
-/// G: atuin --author/--intent) light them up.
+/// Author state lives here rather than on `Context` because an
+/// async LLM round-trip can span many dispatch cycles between
+/// flipping the author and the actual commit; per-dispatch
+/// Context storage would lose the staging.
 pub const Author = enum {
     /// Human typed at the local prompt. Default for every line.
     user,
-    /// Line was injected by an LLM-driven module — the exec-dialog
-    /// flow in `src/modules/llm.zig` upgrades commits to `.llm`
-    /// before pushing the suggested command through readline.
+    /// Line was injected by an LLM-driven module.
     llm,
 };
 
@@ -72,17 +65,25 @@ pub const LineState = struct {
     committed_len: usize = 0,
     committed_was_uncertain: bool = false,
 
-    /// Author of the line currently being typed (pending). LLM-driven
-    /// modules flip this to `.llm` via `setCommitAuthor` BEFORE
-    /// injecting a suggested command so the resulting commit lands
-    /// with the right author tag. Resets to `.user` after every
-    /// `clearLastCommitted` (consuming the commit) and on `reset`
-    /// (Ctrl-C / Ctrl-D / unknown CSI).
+    /// Author of the line currently being typed (pending).
+    /// LLM-driven modules flip this to `.llm` via
+    /// `setCommitAuthor` BEFORE injecting a suggested command so
+    /// the resulting commit lands with the right author tag.
+    ///
+    /// Reset to `.user` by:
+    ///   • `submit()` (Enter snapshots pending → committed, then resets)
+    ///   • `reset()` (Ctrl-C / Ctrl-D / Ctrl-G clear the line)
+    ///   • `markUncertain()` (CSI / Tab / unmodelled control byte —
+    ///     line model lost track; a staged author can no longer be
+    ///     attributed to a specific buffer content)
+    ///   • `backspace` / `killLine` / `killWord` when they leave
+    ///     the buffer empty (the user wiped the staged line; the
+    ///     next thing they type is theirs)
     pending_author: Author = .user,
-    /// Snapshot of `pending_author` at commit time — i.e. the author
-    /// the consumer in `onLineCommit` should attribute the recorded
-    /// line to. Read via `committedAuthor()`. Cleared by
-    /// `clearLastCommitted` alongside the committed buffer.
+    /// Snapshot of `pending_author` at commit time. Read via
+    /// `committedAuthor()` from `onLineCommit`. Reset to `.user` by
+    /// `clearLastCommitted()` (after consumers drain the commit)
+    /// and by `setCommitted("")` (explicit "no commit" clear).
     committed_author: Author = .user,
 
     pub fn current(self: *const LineState) []const u8 {
@@ -140,8 +141,18 @@ pub const LineState = struct {
         @memcpy(self.committed[0..n], content[0..n]);
         self.committed_len = n;
         self.committed_was_uncertain = false;
-        self.committed_author = self.pending_author;
-        self.pending_author = .user;
+        // Author is owned by `submit()` (the keystroke-derived commit
+        // path) — `setCommitted` is the OSC 133 override that
+        // refines the BUFFER content of the same commit. Touching
+        // `committed_author` here would clobber an `.llm` tag that
+        // submit() already snapshotted from `pending_author` before
+        // resetting it (proxy calls applyInput("\r") BEFORE
+        // setCommitted, so by the time we land here pending is
+        // already reset). Exception: when callers explicitly clear
+        // via `setCommitted("")`, the snapshot becomes "no commit"
+        // and the author should reset too — otherwise
+        // `committedAuthor()` would expose stale state.
+        if (n == 0) self.committed_author = .user;
     }
 
     /// Replace the live input buffer from an externally-observed
@@ -186,8 +197,13 @@ pub const LineState = struct {
                     if (c >= 0x40 and c <= 0x7E) break;
                 }
                 // Treat any CSI as uncertainty — most likely a cursor
-                // movement or history navigation we don't model.
-                self.uncertain = true;
+                // movement or history navigation we don't model. We
+                // also drop `pending_author` here: a CSI we don't
+                // model could be Arrow-Up (history recall) which
+                // replaces the buffer with content we haven't seen,
+                // and a staged `.llm` author on that line would be
+                // wrong. Caller re-stages if it still wants the tag.
+                self.markUncertain();
                 i = j + 1;
                 continue;
             }
@@ -204,20 +220,30 @@ pub const LineState = struct {
                 // Ctrl-W — kill previous word
                 0x17 => self.killWord(),
                 // Tab — completion is shell-driven; we lose track.
-                0x09 => self.uncertain = true,
+                0x09 => self.markUncertain(),
                 // Any other control byte we don't model. The ranges are
                 // carefully carved around the codes we *do* handle above.
                 0x00, 0x01, 0x02, 0x05, 0x06, 0x0B, 0x0C, 0x0E...0x14, 0x16, 0x18, 0x19, 0x1A, 0x1C...0x1F => {
-                    self.uncertain = true;
+                    self.markUncertain();
                 },
                 // Lone ESC (no '[' follower).
-                0x1B => self.uncertain = true,
+                0x1B => self.markUncertain(),
                 // Printable.
                 else => self.append(b),
             }
             i += 1;
         }
         return self.generation != start_gen or self.uncertain;
+    }
+
+    /// Set `uncertain = true` AND drop any staged `pending_author`.
+    /// We pair the two because every "unmodelled keystroke" path
+    /// (CSI, Tab, lone ESC, exotic control bytes) potentially
+    /// replaces the buffer with content we haven't seen — keeping
+    /// an `.llm` tag staged would mis-attribute the next commit.
+    fn markUncertain(self: *LineState) void {
+        self.uncertain = true;
+        self.pending_author = .user;
     }
 
     fn append(self: *LineState, b: u8) void {
@@ -235,9 +261,13 @@ pub const LineState = struct {
         self.len -= 1;
         // Reaching an empty buffer is the user telling us they've
         // cleaned house — drop the uncertain flag so ghost suggestions
-        // come back. If we'd been wrong about the *content* before, we
-        // can't be wrong about an empty buffer.
-        if (self.len == 0) self.uncertain = false;
+        // come back, AND drop any staged `pending_author`. After
+        // wiping an LLM-staged suggestion, the next thing the user
+        // types is theirs, not the model's.
+        if (self.len == 0) {
+            self.uncertain = false;
+            self.pending_author = .user;
+        }
         self.generation +%= 1;
     }
 
@@ -245,6 +275,10 @@ pub const LineState = struct {
         if (self.len == 0) return;
         self.len = 0;
         self.uncertain = false;
+        // Drop the staged author too — Ctrl-U after an LLM
+        // suggestion means the user wiped it; whatever they type
+        // next is theirs, not the model's.
+        self.pending_author = .user;
         self.generation +%= 1;
     }
 
@@ -256,7 +290,10 @@ pub const LineState = struct {
         while (end > 0 and self.buffer[end - 1] != ' ') : (end -= 1) {}
         if (end != self.len) {
             self.len = end;
-            if (self.len == 0) self.uncertain = false;
+            if (self.len == 0) {
+                self.uncertain = false;
+                self.pending_author = .user;
+            }
             self.generation +%= 1;
         }
     }
@@ -570,7 +607,7 @@ test "clearLastCommitted resets committed_author to .user" {
     try std.testing.expectEqual(Author.user, l.committedAuthor());
 }
 
-test "reset() drops pending author (Ctrl-C / Ctrl-D / unknown CSI mid-line)" {
+test "reset() drops pending author (Ctrl-C / Ctrl-D / Ctrl-G)" {
     var l = LineState{};
     l.setCommitAuthor(.llm);
 
@@ -579,11 +616,80 @@ test "reset() drops pending author (Ctrl-C / Ctrl-D / unknown CSI mid-line)" {
     try std.testing.expectEqual(Author.user, l.pending_author);
 }
 
-test "setCommitted propagates pending_author to committed_author" {
+test "CSI sequences drop pending author (Arrow-Up history recall is unknown content)" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+
+    // Up arrow — shell will redraw with a recalled command we
+    // haven't observed. Can't keep the `.llm` tag on a buffer
+    // the user might commit as their own.
+    _ = l.applyInput("\x1b[A");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Tab / lone ESC / unmodelled control bytes drop pending author" {
+    inline for (.{ "\x09", "\x1b", "\x16" }) |seq| {
+        var l = LineState{};
+        l.setCommitAuthor(.llm);
+        _ = l.applyInput(seq);
+        try std.testing.expectEqual(Author.user, l.pending_author);
+    }
+}
+
+test "Ctrl-U (kill line) drops pending author so a fresh user command isn't mis-tagged" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("llm-staged content\x15");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "backspace to empty drops pending author" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    // Type two chars under .llm, then backspace both → empty.
+    _ = l.applyInput("ab\x7f\x7f");
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "setCommitted preserves the author submit() snapshotted (OSC 133 override path)" {
+    // Simulates the proxy flow: applyInput("\r") fires submit (which
+    // snapshots pending → committed and resets pending), then proxy
+    // calls setCommitted with the OSC 133 capture. The override must
+    // keep the `.llm` author submit() already recorded.
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("ls\r");
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+
+    l.setCommitted("ls -la"); // OSC 133 capture refines the buffer
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+    try std.testing.expectEqualSlices(u8, "ls -la", l.lastCommitted().?);
+}
+
+test "setCommitted(\"\") resets committed_author (no-commit signal)" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("ls\r");
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+
+    l.setCommitted(""); // explicit clear via the OSC 133 path
+    try std.testing.expectEqual(Author.user, l.committedAuthor());
+}
+
+test "setCommitted called WITHOUT a prior submit leaves pending_author untouched" {
+    // The OSC 133 override path is the only legitimate caller, and
+    // it always runs AFTER applyInput("\r") → submit() has already
+    // snapshotted the author. A bare `setCommitted` (no prior
+    // submit) is a degenerate case — we leave `pending_author` as
+    // staged and the caller can call `submit()` itself or accept
+    // the default `.user` for `committed_author`.
     var l = LineState{};
     l.setCommitAuthor(.llm);
     l.setCommitted("echo hi");
-    try std.testing.expectEqual(Author.llm, l.committedAuthor());
-    // And pending resets so the next line starts as .user.
-    try std.testing.expectEqual(Author.user, l.pending_author);
+    // committed_author stays .user (no submit() ran to snapshot
+    // pending → committed).
+    try std.testing.expectEqual(Author.user, l.committedAuthor());
+    // pending stays staged — caller still owns it.
+    try std.testing.expectEqual(Author.llm, l.pending_author);
 }

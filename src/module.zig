@@ -38,14 +38,11 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// Who typed the line that's about to be committed? Re-exported from
-/// `line_state.zig` (the natural owner — the state survives across
-/// dispatch cycles, and Context is per-dispatch). Modules access
-/// the current author via `ctx.line.committedAuthor()` from
-/// `onLineCommit`, and LLM-driven modules upgrade pending commits
-/// via `ctx.line.setCommitAuthor(.llm)` before triggering the
-/// commit. Consumers (lit by follow-up PRs F + G): atuin tagging,
-/// guardrail v2 per-author rule behaviours.
+/// Author of a committed line — re-export so modules using the
+/// framework surface as `module.Author` don't have to know about
+/// `line_state.zig` directly. The state lives in `LineState`
+/// (which survives across dispatch cycles) and is exposed via
+/// `ctx.line.committedAuthor()` + `ctx.line.setCommitAuthor(...)`.
 pub const Author = @import("line_state.zig").Author;
 
 /// What a module decides about a keystroke.
