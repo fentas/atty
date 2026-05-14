@@ -1,0 +1,32 @@
+# llm_exec_no_osc133 — Alt+S without shell integration must abort
+# with a "needs OSC 133" hard error. No PS1 ;A marker, so atty's
+# per-runtime osc133_capture stays inert; the Alt+S gate trips
+# and we never fire a request. The error notification lands in
+# the muted-red ⚠ row above the bar.
+
+cols 100
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Enter AI mode under PLAIN PS1 (no OSC 133).
+type "#: do something"
+sleep 200
+
+# Alt+S — should hit the hard-error path, NOT consume the
+# fixture response. The "$ #: do something" line stays visible
+# under the error hint because the gate fires before Ctrl+U is
+# queued.
+type "\x1bs"
+sleep 400
+snapshot needs_osc133_error
+
+# Cleanup. Wipe the typed prefix with Ctrl+U so the next Enter
+# in onInput doesn't see a `#: …` line and fire the legacy
+# single-shot trigger. Then exit normally.
+type "\x15"
+sleep 100
+type "exit\r"
+exit_code 0

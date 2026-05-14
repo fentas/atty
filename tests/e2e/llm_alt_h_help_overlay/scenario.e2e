@@ -32,5 +32,10 @@ snapshot help_at_idx_1
 
 # Settle before exit so the exit_code assertion isn't racing.
 sleep 200
+# Clear the `#: ` prefix BEFORE exit — otherwise bash treats
+# `#: exit` as a comment and never quits, leaving the harness
+# to time out + report exit_code != 0.
+type "\x15"
+sleep 100
 type "exit\r"
 exit_code 0

@@ -34,6 +34,7 @@
 const std = @import("std");
 const m = @import("../module.zig");
 const keymap = @import("../keymap.zig");
+const Osc133 = @import("../osc133.zig").Osc133;
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
@@ -143,6 +144,68 @@ pub const Config = struct {
     /// inputs are ignored — likely paste / file content, not a
     /// natural-language task.
     max_prompt_bytes: comptime_int = 2048,
+    /// Maximum bytes of a serialized dialog-request JSON body
+    /// (`{model, messages: [system, …]}`). Sized to fit
+    /// `history_turns_max` × typical assistant + observation pairs
+    /// with comfortable headroom. The trigger site that builds the
+    /// body errors if this is exceeded — the LLM call is aborted
+    /// with a "context too large, try Ctrl+Shift+X" hint.
+    ///
+    /// **Footprint note**: this buffer lives in `Shared` (which is
+    /// heap-allocated by `attach`), so growing it doesn't bloat
+    /// `Runtime` itself, but it does add `body_buf_bytes` to the
+    /// module's per-instance heap usage at attach time.
+    body_buf_bytes: comptime_int = 32 * 1024,
+    /// Bytes of `;C` → `;D` captured output kept per execution
+    /// step. Truncates with `…[truncated …]…` when exceeded so the
+    /// LLM still gets the head + tail of the output. The cap is a
+    /// memory bound, not a correctness bound — most commands fit
+    /// in <1 KB.
+    ///
+    /// **Footprint note**: this buffer is currently inline on
+    /// `Runtime`. Together with `last_assistant_json`
+    /// (`max_response_bytes`), `pending_command`, and `body_buf`
+    /// in `Shared`, the module adds ~`captured_output_bytes +
+    /// max_response_bytes + max_response_bytes + body_buf_bytes`
+    /// bytes of static + heap memory per attach. Heap-promoting
+    /// `captured_output` / `last_assistant_json` is tracked as a
+    /// follow-up; for now reduce these knobs if you're embedding
+    /// atty's Runtime on a tight stack.
+    captured_output_bytes: comptime_int = 16 * 1024,
+    /// Maximum conversation turns kept in memory. FIFO truncation
+    /// when exceeded — older turns drop first.
+    history_turns_max: comptime_int = 8,
+    /// Bytes of allocated content per turn (capped so an LLM that
+    /// vomits 50 KB of "thinking" output can't OOM the runtime).
+    /// Truncated at this length; the model loses the tail of a
+    /// pathological response.
+    max_turn_bytes: comptime_int = 4 * 1024,
+    /// Auto-confirm delay in ms (used by `Alt+Shift+S` — not
+    /// wired in this PR; landed as a config knob so a future
+    /// auto-exec PR can read it without a defaults bump).
+    auto_delay_ms: u32 = 800,
+    /// Fixture-driven LLM responses for e2e tests. When non-empty,
+    /// the worker bypasses HTTP entirely and returns the next slice
+    /// from this list (wrapping around if requests exceed the list
+    /// length). Each slice is the RAW assistant-message content —
+    /// for dialog requests, that's the JSON envelope
+    /// `{"action":..., "command":..., …}`; for single requests it's
+    /// the bare command. The wrap-around behaviour means a fixture
+    /// list of `&.{ "{\"action\":\"done\"}" }` will end any dialog
+    /// loop on the first reply. Stays empty in production builds.
+    fixture_responses: []const []const u8 = &.{},
+    /// System prompt for dialog mode (Alt+S). Distinct from
+    /// `system_prompt` (single-prompt mode) because dialog mode
+    /// requires a strict JSON envelope rather than the
+    /// "explanation + fenced command" format. Override only if
+    /// you're using a model that struggles with the default
+    /// prompt — most modern instruction-tuned models follow it
+    /// cleanly.
+    ///
+    /// **Comptime only**: the override resolves at `configure`
+    /// time (mirroring `system_prompt`). There is no runtime
+    /// fallback; recompile to change it.
+    dialog_system_prompt: []const u8 = "",
 };
 
 pub fn configure(comptime cfg: Config) type {
@@ -169,6 +232,99 @@ pub fn configure(comptime cfg: Config) type {
         const inert_error_msg: []const u8 = "no endpoint set — export $" ++
             cfg.api_base_env ++ " / $" ++ cfg.api_base_fallback_env ++
             ", or set Config.api_base in config.zig";
+
+        /// Dialog-mode system prompt. Locks the model into a strict
+        /// JSON-envelope response so we can parse `action` /
+        /// `command` / `description` / `reason` reliably. The
+        /// instruction set is deliberately terse — every line spent
+        /// on prose costs tokens that should go to the user's
+        /// task.
+        const effective_dialog_system_prompt: []const u8 = if (cfg.dialog_system_prompt.len > 0)
+            cfg.dialog_system_prompt
+        else
+            \\You are an interactive shell assistant. You receive a task and step-by-step OBSERVATIONS from previously executed commands. Reply ONLY with a JSON object on a single line. Allowed shapes:
+            \\{"action":"exec","command":"<single-line shell command>","description":"<one short sentence>"}
+            \\{"action":"done","reason":"<one short sentence>"}
+            \\{"action":"question","question":"<short question>","options":["<opt1>","<opt2>"]}
+            \\Never wrap the JSON in markdown fences. Never add prose around it. The command must be a single line, runnable as-is in the user's shell.
+        ;
+
+        /// Sentinel — used in `Shared.req_kind` to discriminate
+        /// the legacy single-prompt path from the new dialog-loop
+        /// path. Single-prompt uses `req_buf`+template; dialog
+        /// uses the pre-built `body_buf`.
+        const RequestKind = enum { single, dialog };
+
+        const DialogState = enum {
+            /// Not in a dialog. Either user hasn't entered AI mode
+            /// or a previous dialog has been completed/cancelled.
+            idle,
+            /// Request is in flight (initial Alt+S, or a follow-up
+            /// after an observation arrived). Worker is POSTing.
+            generating,
+            /// LLM has replied with `action=exec`; the suggested
+            /// command is injected at the prompt and waiting for
+            /// the user to press Enter (or cancel).
+            suggesting,
+            /// User hit Enter. Command bytes are on their way to
+            /// the shell; we're waiting for OSC 133 `;C` to fire
+            /// so we know the command actually started.
+            executing,
+            /// Between OSC 133 `;C` and `;D` — `onOutput` is
+            /// appending bytes to `captured_output`.
+            capturing_output,
+            /// `;D` fired; observation is ready. Next `onTick` will
+            /// push the observation as a turn and re-enter
+            /// `.generating` with the follow-up request.
+            observation_ready,
+        };
+
+        const DialogAction = enum { exec, question, done };
+
+        const TurnKind = enum {
+            /// Initial user task (`#: <task>` body).
+            user,
+            /// LLM's raw JSON reply for an exec step. Echoed back
+            /// to the model verbatim on the next turn so the
+            /// conversation stays self-consistent.
+            assistant_exec,
+            /// OSC 133 `;C` → `;D` captured output for the prior
+            /// exec turn. Prefixed with `OBSERVATION:\n` when
+            /// rendered into the request body.
+            observation,
+        };
+
+        /// Conversation turn — heap-owned by the runtime (freed in
+        /// `detach` and on cancel). Content length is bounded at
+        /// `cfg.max_turn_bytes` so a runaway model can't bloat the
+        /// process memory.
+        const Turn = struct {
+            kind: TurnKind,
+            content: []u8,
+        };
+
+        /// Parsed dialog response. Stack-allocated; populated by
+        /// `parseDialogResponse` from the raw assistant content.
+        /// Unset fields stay len=0.
+        const DialogResponse = struct {
+            action: DialogAction = .done,
+            command_buf: [cfg.max_response_bytes]u8 = undefined,
+            command_len: usize = 0,
+            description_buf: [256]u8 = undefined,
+            description_len: usize = 0,
+            reason_buf: [256]u8 = undefined,
+            reason_len: usize = 0,
+
+            fn command(self: *const DialogResponse) []const u8 {
+                return self.command_buf[0..self.command_len];
+            }
+            fn description(self: *const DialogResponse) []const u8 {
+                return self.description_buf[0..self.description_len];
+            }
+            fn reason(self: *const DialogResponse) []const u8 {
+                return self.reason_buf[0..self.reason_len];
+            }
+        };
 
         const Shared = struct {
             mutex: std.Io.Mutex = .init,
@@ -232,6 +388,31 @@ pub fn configure(comptime cfg: Config) type {
             /// consumes via pollShellInput and clears.
             res_done: bool = false,
             shutdown: bool = false,
+
+            /// Discriminator for the worker — `.single` uses
+            /// `req_buf` + the legacy template builder; `.dialog`
+            /// POSTs `body_buf[0..body_len]` verbatim. Trigger
+            /// sites set this under the same mutex as `req_pending`.
+            req_kind: RequestKind = .single,
+            /// The `req_kind` that was active when the worker
+            /// started serving the current response. Stamped onto
+            /// the response so pollShellInput knows whether to run
+            /// the single-mode injection path or the dialog
+            /// JSON-parse path — `req_kind` itself can be mutated
+            /// by a fresh trigger between the worker writing
+            /// `res_done = true` and the proxy reading it.
+            res_kind: RequestKind = .single,
+            /// Pre-built JSON request body for dialog mode. The
+            /// trigger site (main thread) serializes the full
+            /// conversation here so the worker doesn't need to
+            /// know about turns / system prompts / history bounds.
+            body_buf: [cfg.body_buf_bytes]u8 = undefined,
+            body_len: usize = 0,
+            /// Fixture-stub cursor. Used when `cfg.fixture_responses.len > 0`
+            /// to deterministically replay canned responses without HTTP.
+            /// Indexed under the shared mutex by the worker; wraps
+            /// around modulo list length.
+            fixture_idx: usize = 0,
         };
 
         pub const Runtime = struct {
@@ -314,6 +495,64 @@ pub fn configure(comptime cfg: Config) type {
             /// fits in 16 bytes (a Ctrl+U or a short ESC sequence).
             pending_injection: [16]u8 = undefined,
             pending_injection_len: usize = 0,
+
+            // ── Dialog mode state (Alt+S) ────────────────────────
+            //
+            // Distinct from the single-prompt path. State machine
+            // walks `idle → generating → suggesting → executing →
+            // capturing_output → observation_ready → generating` in
+            // a loop until the LLM says `action=done` (or the user
+            // cancels). See `DialogState` for the per-state
+            // semantics. Single-mode requests leave `dialog_state`
+            // untouched at `.idle`.
+            dialog_state: DialogState = .idle,
+            /// Conversation history. Heap-allocated turns, FIFO
+            /// truncation at `cfg.history_turns_max`. Freed
+            /// individually as they age out, and bulk-freed on
+            /// cancel / detach.
+            turns: [cfg.history_turns_max]Turn = undefined,
+            turns_len: usize = 0,
+            /// Captured output between OSC 133 `;C` and `;D` for
+            /// the most recent exec step. Filled in `onOutput`;
+            /// drained in `onTick` (built into the next observation
+            /// turn) and reset to 0.
+            captured_output: [cfg.captured_output_bytes]u8 = undefined,
+            captured_output_len: usize = 0,
+            /// True when `captured_output` was filled to the cap
+            /// and tail bytes were dropped. Surfaced in the
+            /// observation turn with a "[truncated]" suffix so the
+            /// model knows the output was clipped.
+            captured_truncated: bool = false,
+            /// Per-runtime OSC 133 tracker. The proxy has its own
+            /// global tracker for subprocess push/pop; we maintain
+            /// a SECOND independent one here so we own the `;C` /
+            /// `;D` edge stream + offsets and can capture the exact
+            /// byte ranges between markers. Parsing cost is
+            /// negligible — character-state-machine, no
+            /// allocation.
+            osc133_capture: Osc133 = undefined,
+            /// Pending command suggested by the LLM, displayed at
+            /// the prompt while in `.suggesting`. The user reviews,
+            /// optionally edits, and presses Enter (or cancels).
+            /// Lives separately from `inject_buf` because the
+            /// single-mode path uses that buffer with different
+            /// lifetime semantics.
+            pending_command: [cfg.max_response_bytes]u8 = undefined,
+            pending_command_len: usize = 0,
+            /// Description of the pending command (model's
+            /// `description` field). Surfaced as the hint above
+            /// the bar while in `.suggesting`. 256 bytes ≈ enough
+            /// for a one-line summary; longer descriptions are
+            /// truncated.
+            pending_description: [256]u8 = undefined,
+            pending_description_len: usize = 0,
+            /// Raw JSON response body for the current exec step.
+            /// Owned by `pollShellInput` (where the JSON is
+            /// parsed); appended verbatim as an `assistant_exec`
+            /// turn so the conversation echoes back what the LLM
+            /// actually emitted.
+            last_assistant_json: [cfg.max_response_bytes]u8 = undefined,
+            last_assistant_json_len: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -350,10 +589,13 @@ pub fn configure(comptime cfg: Config) type {
                 .api_key = api_key,
                 .shell = shell_name,
                 .context_blob = context_blob,
+                .osc133_capture = Osc133.init(allocator),
             };
         }
 
         pub fn detach(rt: *Runtime, io: std.Io) void {
+            freeTurns(rt);
+            rt.osc133_capture.deinit();
             if (rt.thread) |t| {
                 {
                     rt.shared.mutex.lockUncancelable(io);
@@ -622,9 +864,60 @@ pub fn configure(comptime cfg: Config) type {
                     if (rt.api_base.len != 0) rt.ai_mode_active = false;
                     return true;
                 },
-                .llm_exec_dialog, .llm_exec_auto => {
+                .llm_exec_dialog => {
                     if (!rt.ai_mode_active) return false;
-                    latchHint(rt, "exec dialog/auto coming in a follow-up commit — use Alt+A for now");
+                    const line = ctx.line.current();
+                    const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
+                    if (body.len == 0) {
+                        latchHint(rt, "type your task after `#: ` then press Alt+S");
+                        return true;
+                    }
+                    if (body.len > cfg.max_prompt_bytes) {
+                        latchHint(rt, "prompt too long — shorten the task and try again");
+                        return true;
+                    }
+                    if (rt.api_base.len == 0) {
+                        latchErr(rt, inert_error_msg);
+                        return true;
+                    }
+                    // Dialog mode requires OSC 133 — without `;C` /
+                    // `;D` we can't tell when the shell finished
+                    // running each step's command. Detect missing
+                    // integration by checking whether ANY marker has
+                    // arrived since the runtime attached. Single mode
+                    // (Alt+A) doesn't have this requirement.
+                    if (!rt.osc133_capture.active) {
+                        latchErr(rt, "exec mode needs OSC 133 — run `eval \"$(atty init bash)\"` or use Alt+A");
+                        return true;
+                    }
+                    // Stage the first user turn from the typed body.
+                    const initial = rt.allocator.dupe(u8, body) catch {
+                        latchErr(rt, "out of memory starting dialog");
+                        return true;
+                    };
+                    pushTurn(rt, .user, initial) catch {
+                        rt.allocator.free(initial);
+                        latchErr(rt, "out of memory starting dialog");
+                        return true;
+                    };
+
+                    fireDialogRequest(rt, ctx) catch |err| {
+                        abortDialog(rt, ctx, switch (err) {
+                            error.BodyTooLarge => "dialog body too large for buffer — increase Config.body_buf_bytes",
+                            error.OutOfMemory => "out of memory firing dialog request",
+                            else => "internal error firing dialog request",
+                        });
+                        return true;
+                    };
+                    // Wipe the `#: …` typed text — about to be
+                    // replaced by the suggested command on response.
+                    queueInjection(rt, "\x15");
+                    rt.ai_mode_active = false;
+                    return true;
+                },
+                .llm_exec_auto => {
+                    if (!rt.ai_mode_active) return false;
+                    latchHint(rt, "auto exec coming in a follow-up PR — use Alt+S for now");
                     return true;
                 },
                 .llm_exec_cycle_model => {
@@ -697,41 +990,27 @@ pub fn configure(comptime cfg: Config) type {
                     // might bind them. Without this gate every
                     // stray Ctrl+Shift+X in a normal shell got
                     // eaten by atty.
-                    const had_work = rt.in_flight or rt.ai_mode_active or rt.pending_injection_len > 0;
+                    const dialog_active = rt.dialog_state != .idle;
+                    const had_work = rt.in_flight or rt.ai_mode_active or rt.pending_injection_len > 0 or dialog_active;
                     if (!had_work) return false;
 
-                    // Bump req_gen so any in-flight worker
-                    // response is discarded as stale when it
-                    // lands. Without this, the worker would
-                    // happily inject the LLM-generated command
-                    // even after the user explicitly cancelled.
-                    rt.shared.mutex.lockUncancelable(ctx.io);
-                    rt.shared.req_gen +%= 1;
-                    rt.shared.res_done = false;
-                    rt.shared.res_len = 0;
-                    rt.shared.mutex.unlock(ctx.io);
-                    // Queue Ctrl+U so the typed `#: …` text gets
-                    // wiped from the shell prompt. Without this,
-                    // onInput would recompute ai_mode_active on
-                    // the very next keystroke from the still-
-                    // visible prefix and the user would land
-                    // right back in AI mode — surprising for an
-                    // explicit cancel.
-                    if (rt.ai_mode_active) {
-                        queueInjection(rt, "\x15");
-                    } else {
-                        // Cancel fired with no AI prefix visible —
-                        // could be the "in_flight after Alt+A
-                        // already cleared the prefix" path. Drop
-                        // any already-queued pending_injection
-                        // so the explicit "clear all pending
-                        // state" semantic is honoured. queueing
-                        // a fresh Ctrl+U above already overwrites,
-                        // but this branch makes the intent clear
-                        // for the no-active-AI case.
-                        rt.pending_injection_len = 0;
-                    }
-                    rt.in_flight = false;
+                    // Dialog cancel funnels through dialogReset
+                    // which handles the req_gen bump + turn
+                    // cleanup + state machine reset. Always wipe
+                    // the prompt — the suggested command (or
+                    // `#: …` prefix) is typically visible.
+                    dialogReset(rt, ctx);
+                    queueInjection(rt, "\x15");
+                    // Reset line_state to match the post-Ctrl+U
+                    // shell state. The injection wipes the shell's
+                    // readline buffer but `applyInput` doesn't see
+                    // it (injections flow atty→shell, while
+                    // line_state observes shell→user / user→shell);
+                    // without this reset, line_state would keep the
+                    // pre-cancel `#: …` prefix and the next Enter
+                    // would re-fire the legacy single-shot
+                    // trigger in `onInput`.
+                    ctx.line.reset();
                     rt.ai_mode_active = false;
                     return true;
                 },
@@ -781,6 +1060,7 @@ pub fn configure(comptime cfg: Config) type {
             @memcpy(rt.shared.req_buf[0..body.len], body);
             rt.shared.req_len = body.len;
             rt.shared.model_idx = idx_to_send;
+            rt.shared.req_kind = .single;
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
@@ -804,6 +1084,191 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
+        /// OSC 133 output capture for dialog mode. Always feeds the
+        /// per-runtime tracker (so `osc133_capture.active` is current
+        /// the moment the user hits Alt+S); state transitions and
+        /// byte capture only fire while a dialog is mid-execution.
+        ///
+        /// We use a SECOND osc133 instance independent of the proxy's
+        /// global one because the proxy's tracker is consumed
+        /// destructively by `drainEdges()` — sharing it would race
+        /// the subprocess-stack consumer.
+        pub fn onOutput(rt: *Runtime, ctx: *m.Context, output: []const u8) m.Error!void {
+            _ = ctx;
+            rt.osc133_capture.feed(output);
+            const edges = rt.osc133_capture.drainEdges();
+
+            // Outside dialog execution, the only reason to feed was
+            // to keep `active` tracking up to date. No state work
+            // needed when we're idle/generating/suggesting (the
+            // command hasn't run yet, so `;C` hasn't fired).
+            const tracking = rt.dialog_state == .executing or rt.dialog_state == .capturing_output;
+            if (!tracking) return;
+
+            // `edgeOffset(i)` returns the byte index of the
+            // marker's TERMINATOR (BEL `0x07` or ST's `\`), not of
+            // its leading ESC. To slice OUT the OSC 133 marker from
+            // the captured observation, we advance the capture
+            // cursor PAST the terminator on `cmd_start`, and on
+            // `cmd_end` we walk backwards from the terminator to
+            // find the ESC that began the marker — capturing only
+            // the bytes BETWEEN markers.
+            //
+            // Multi-feed caveat: if a closing marker's ESC arrives
+            // in a different feed than its BEL, the backwards
+            // search won't find it inside this `output` slice and
+            // we conservatively capture up to the BEL position
+            // (over-capturing the marker prefix into the
+            // observation). This isn't optimal but it's bounded
+            // (≤ marker size) and uncommon — shells flush whole
+            // OSC sequences atomically in practice.
+            var cursor: u32 = 0;
+            var capturing = rt.dialog_state == .capturing_output;
+            for (edges, 0..) |edge, i| {
+                const offset = rt.osc133_capture.edgeOffset(i);
+                switch (edge) {
+                    .cmd_start => {
+                        // Stray `;C` mid-capture (no preceding `;D`):
+                        // append the pre-marker bytes to the current
+                        // observation BEFORE deciding the next state.
+                        // We deliberately KEEP the in-progress
+                        // observation across the stray marker rather
+                        // than starting fresh — concatenated output is
+                        // more useful to the LLM than a silently
+                        // dropped half. The reset below is gated on
+                        // `!capturing` for exactly this reason.
+                        if (capturing and offset > cursor) {
+                            var end_at: u32 = offset;
+                            if (offset <= output.len) {
+                                var j: usize = offset;
+                                while (j > cursor) : (j -= 1) {
+                                    if (output[j - 1] == 0x1B) {
+                                        end_at = @intCast(j - 1);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (end_at > cursor) {
+                                appendCaptured(rt, output[cursor..@min(end_at, output.len)]);
+                            }
+                        }
+                        if (!capturing and rt.dialog_state == .executing) {
+                            rt.dialog_state = .capturing_output;
+                            rt.captured_output_len = 0;
+                            rt.captured_truncated = false;
+                            capturing = true;
+                        }
+                        // Start capturing AFTER the marker's
+                        // terminator byte.
+                        cursor = @min(offset + 1, @as(u32, @intCast(output.len)));
+                    },
+                    .cmd_end, .prompt_start_implicit_end => {
+                        if (capturing) {
+                            // Slice ENDS at the ESC that begins
+                            // the closing marker. Search backwards
+                            // from `offset` for the most recent
+                            // ESC byte within the current capture
+                            // window.
+                            var end_at: u32 = offset;
+                            if (offset <= output.len) {
+                                var j: usize = offset;
+                                while (j > cursor) : (j -= 1) {
+                                    if (output[j - 1] == 0x1B) {
+                                        end_at = @intCast(j - 1);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (end_at > cursor) {
+                                appendCaptured(rt, output[cursor..@min(end_at, output.len)]);
+                            }
+                            capturing = false;
+                            rt.dialog_state = .observation_ready;
+                            // Firing the next request from onOutput
+                            // would mean doing JSON serialization +
+                            // mutex acquisition on the master-output
+                            // hot path. Defer to `onTick` instead —
+                            // ~50ms latency is fine for a dialog
+                            // loop where the LLM round-trip is the
+                            // dominant cost anyway.
+                        }
+                        cursor = @min(offset + 1, @as(u32, @intCast(output.len)));
+                    },
+                }
+            }
+            if (capturing and cursor < output.len) {
+                appendCaptured(rt, output[cursor..]);
+            }
+        }
+
+        /// `.observation_ready` → `.generating` transition. Triggered
+        /// here (not in onOutput) so the JSON serialization and
+        /// mutex acquisition stay off the master-output hot path.
+        pub fn onTick(rt: *Runtime, ctx: *m.Context, elapsed_ms: u64) m.Error!void {
+            _ = elapsed_ms;
+            if (rt.dialog_state != .observation_ready) return;
+
+            // Push the observation as a turn, build the next
+            // request, signal the worker. Any allocation failure
+            // here aborts the dialog cleanly — we latch an error
+            // and reset to idle so the user isn't stuck in a
+            // half-state.
+            const observation_slice = if (rt.captured_truncated)
+                std.fmt.allocPrint(
+                    rt.allocator,
+                    "{s}\n[truncated — output exceeded {d} bytes]",
+                    .{ rt.captured_output[0..rt.captured_output_len], cfg.captured_output_bytes },
+                ) catch {
+                    abortDialog(rt, ctx, "out of memory building observation");
+                    return;
+                }
+            else
+                rt.allocator.dupe(u8, rt.captured_output[0..rt.captured_output_len]) catch {
+                    abortDialog(rt, ctx, "out of memory building observation");
+                    return;
+                };
+
+            pushTurn(rt, .observation, observation_slice) catch {
+                rt.allocator.free(observation_slice);
+                abortDialog(rt, ctx, "out of memory recording observation");
+                return;
+            };
+            rt.captured_output_len = 0;
+            rt.captured_truncated = false;
+
+            fireDialogRequest(rt, ctx) catch |err| {
+                abortDialog(rt, ctx, switch (err) {
+                    error.BodyTooLarge => "context too large — cancel and start a new task",
+                    error.OutOfMemory => "out of memory firing follow-up request",
+                    else => "internal error firing follow-up request",
+                });
+            };
+        }
+
+        /// Enter-key transition for dialog mode: while in
+        /// `.suggesting`, the user just confirmed the suggested
+        /// command — move to `.executing` so `onOutput` knows to
+        /// start capturing when `;C` fires.
+        ///
+        /// Gated on a non-empty committed line: if the user
+        /// deleted the suggestion before pressing Enter (or
+        /// committed a blank line for any other reason), we'd
+        /// otherwise eagerly capture the NEXT command's output as
+        /// a stale observation. The reset is safer — the dialog
+        /// returns to `.idle` (via dialogReset) and the user can
+        /// retry from a clean state.
+        pub fn onLineCommit(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
+            if (rt.dialog_state != .suggesting) return;
+            const trimmed = std.mem.trim(u8, line, " \t");
+            if (trimmed.len == 0) {
+                latchHint(rt, "empty command — dialog cancelled, retry from scratch");
+                dialogReset(rt, ctx);
+                rt.ai_mode_active = false;
+                return;
+            }
+            rt.dialog_state = .executing;
+        }
+
         pub fn pollShellInput(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             // Drain `pending_injection` ahead of the worker's
             // response. Used by the `onAction` path (Alt+A) to
@@ -818,61 +1283,206 @@ pub fn configure(comptime cfg: Config) type {
                 return rt.inject_buf[0..n];
             }
 
-            rt.shared.mutex.lockUncancelable(ctx.io);
-            defer rt.shared.mutex.unlock(ctx.io);
-            if (!rt.shared.res_done) return null;
-            // Drop responses from a stale generation — a newer
-            // prompt has already been submitted; the worker's
-            // reply for THAT one is still pending. Keep
-            // `in_flight = true` because the user IS waiting on
-            // the newer request; clearing it would prematurely
-            // remove the 🧠 thinking… status.
-            if (rt.shared.res_gen != rt.shared.req_gen) {
+            // Inner scope so the mutex is released BEFORE we run
+            // the dialog-response handler, which may re-acquire
+            // the mutex in `fireDialogRequest`.
+            var res_kind: RequestKind = .single;
+            var n: usize = 0;
+            {
+                rt.shared.mutex.lockUncancelable(ctx.io);
+                defer rt.shared.mutex.unlock(ctx.io);
+                if (!rt.shared.res_done) return null;
+                // Drop responses from a stale generation — a newer
+                // prompt has already been submitted; the worker's
+                // reply for THAT one is still pending. Keep
+                // `in_flight = true` because the user IS waiting on
+                // the newer request; clearing it would prematurely
+                // remove the 🧠 thinking… status.
+                if (rt.shared.res_gen != rt.shared.req_gen) {
+                    rt.shared.res_done = false;
+                    rt.shared.res_len = 0;
+                    rt.shared.explanation_len = 0;
+                    rt.shared.error_len = 0;
+                    return null;
+                }
+                res_kind = rt.shared.res_kind;
+                n = rt.shared.res_len;
+                @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
+                rt.inject_len = n;
+
+                // Latch the explanation (single mode only). Dialog
+                // responses never populate `explanation_buf` — the
+                // worker leaves `explanation_len = 0` for dialog
+                // kind because the JSON envelope's `description`
+                // field is surfaced later (inside
+                // `handleDialogResponse` via `latchHint`). The
+                // shared `explanation_buf` is therefore dead weight
+                // on the dialog path; kept around so single-mode
+                // doesn't have to branch.
+                const exp_n = rt.shared.explanation_len;
+                if (n > 0 and exp_n > 0) {
+                    @memcpy(rt.hint_buf[0..exp_n], rt.shared.explanation_buf[0..exp_n]);
+                    rt.hint_len = exp_n;
+                    rt.hint_pending = true;
+                }
+
+                // Failure path: nothing to inject, but the worker
+                // may have latched a diagnostic. Surface it via the
+                // *error* slot (not the hint slot) so it renders
+                // in muted red with the ⚠ glyph.
+                const err_n = rt.shared.error_len;
+                if (n == 0 and err_n > 0) {
+                    const copy_n = @min(err_n, rt.err_buf.len);
+                    @memcpy(rt.err_buf[0..copy_n], rt.shared.error_buf[0..copy_n]);
+                    rt.err_len = copy_n;
+                    rt.err_pending = true;
+                }
+
                 rt.shared.res_done = false;
                 rt.shared.res_len = 0;
                 rt.shared.explanation_len = 0;
                 rt.shared.error_len = 0;
-                return null;
             }
-            const n = rt.shared.res_len;
-            @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
-            rt.inject_len = n;
-
-            // Latch the explanation for provideHintText to surface
-            // on the next tick. Only do so when there's actually a
-            // command to inject — a failed request shouldn't paint
-            // a stale or partial hint.
-            const exp_n = rt.shared.explanation_len;
-            if (n > 0 and exp_n > 0) {
-                @memcpy(rt.hint_buf[0..exp_n], rt.shared.explanation_buf[0..exp_n]);
-                rt.hint_len = exp_n;
-                rt.hint_pending = true;
-            }
-
-            // Failure path: nothing to inject, but the worker may
-            // have latched a diagnostic. Surface it via the *error*
-            // slot (not the hint slot) so it renders in muted red
-            // with the ⚠ glyph — visually distinct from successful
-            // explanations so the user reads it as a notification.
-            const err_n = rt.shared.error_len;
-            if (n == 0 and err_n > 0) {
-                const copy_n = @min(err_n, rt.err_buf.len);
-                @memcpy(rt.err_buf[0..copy_n], rt.shared.error_buf[0..copy_n]);
-                rt.err_len = copy_n;
-                rt.err_pending = true;
-            }
-
-            rt.shared.res_done = false;
-            rt.shared.res_len = 0;
-            rt.shared.explanation_len = 0;
-            rt.shared.error_len = 0;
             rt.in_flight = false;
-            // n == 0 → worker signalled failure (network error,
-            // non-2xx, parse failure). Nothing to inject; the
-            // statusbar already cleared via `in_flight = false`.
-            // The error hint above is what the user will see.
+
+            // Dialog mode: parse the JSON envelope on the main
+            // thread (where the runtime + state machine live) and
+            // act on the LLM's instruction. Returns the bytes to
+            // inject (the suggested command for `action=exec`) or
+            // null for done/error/question paths.
+            //
+            // The `inject_buf` was populated with the raw JSON
+            // envelope above by the shared-state copy — that's
+            // the wrong thing to expose if any downstream caller
+            // reads `rt.inject_buf[0..rt.inject_len]` directly
+            // assuming it holds the next-injection bytes. Zero
+            // `inject_len` now so any such stale read sees an
+            // empty slice instead of JSON; the returned slice
+            // from `handleDialogResponse` is the authoritative
+            // injection payload for dialog mode.
+            if (res_kind == .dialog) {
+                rt.inject_len = 0;
+                return try handleDialogResponse(rt, ctx, n);
+            }
+
+            // Single mode: n == 0 → worker signalled failure
+            // (network error, non-2xx, parse failure). Nothing to
+            // inject; the statusbar already cleared via
+            // `in_flight = false`. The error hint above is what
+            // the user will see.
             if (n == 0) return null;
             return rt.inject_buf[0..rt.inject_len];
+        }
+
+        /// Process a parsed dialog response. Branches by `action`:
+        /// `exec` injects the command + transitions to `.suggesting`
+        /// (description goes to the hint row); `done` clears state
+        /// and latches a confirmation; `question` latches a
+        /// "not yet wired" hint and resets (Question UI lands in a
+        /// follow-up PR). Returns bytes to inject — for `exec`
+        /// that's the command; for done/question/error it's null
+        /// after queueing Ctrl+U on `pending_injection` so the
+        /// suggested-command text gets wiped from the prompt.
+        fn handleDialogResponse(rt: *Runtime, ctx: *m.Context, n: usize) m.Error!?[]const u8 {
+            if (n == 0) {
+                // Worker reported failure; the error slot already
+                // has the diagnostic. End the dialog cleanly.
+                dialogReset(rt, ctx);
+                rt.ai_mode_active = false;
+                queueInjection(rt, "\x15");
+                return null;
+            }
+
+            const raw = rt.inject_buf[0..n];
+
+            // Stash the raw response so it becomes the next
+            // assistant_exec turn. Done before parsing so we have
+            // it whether or not the JSON parses cleanly.
+            const stash_n = @min(raw.len, rt.last_assistant_json.len);
+            @memcpy(rt.last_assistant_json[0..stash_n], raw[0..stash_n]);
+            rt.last_assistant_json_len = stash_n;
+
+            var parsed: DialogResponse = .{};
+            parseDialogResponse(rt.allocator, raw, &parsed) catch {
+                latchErr(rt, "LLM reply wasn't valid JSON — cancel and retry");
+                dialogReset(rt, ctx);
+                rt.ai_mode_active = false;
+                queueInjection(rt, "\x15");
+                return null;
+            };
+
+            switch (parsed.action) {
+                .exec => {
+                    if (parsed.command_len == 0) {
+                        latchErr(rt, "LLM reply had no command — cancel and retry");
+                        dialogReset(rt, ctx);
+                        rt.ai_mode_active = false;
+                        queueInjection(rt, "\x15");
+                        return null;
+                    }
+                    // Echo the assistant's JSON back to the model
+                    // on the next turn so the conversation stays
+                    // coherent.
+                    const assistant_copy = rt.allocator.dupe(u8, rt.last_assistant_json[0..rt.last_assistant_json_len]) catch {
+                        abortDialog(rt, ctx, "out of memory continuing dialog");
+                        return null;
+                    };
+                    pushTurn(rt, .assistant_exec, assistant_copy) catch {
+                        rt.allocator.free(assistant_copy);
+                        abortDialog(rt, ctx, "out of memory continuing dialog");
+                        return null;
+                    };
+
+                    // Stage the command for injection. Cap +
+                    // copy in case the LLM's command exceeds
+                    // `cfg.max_response_bytes` (shouldn't — the
+                    // command field is bounded at parse time —
+                    // but defensive).
+                    const cmd = parsed.command();
+                    const cmd_n = @min(cmd.len, rt.pending_command.len);
+                    @memcpy(rt.pending_command[0..cmd_n], cmd[0..cmd_n]);
+                    rt.pending_command_len = cmd_n;
+
+                    if (parsed.description_len > 0) {
+                        const desc = parsed.description();
+                        const desc_n = @min(desc.len, rt.pending_description.len);
+                        @memcpy(rt.pending_description[0..desc_n], desc[0..desc_n]);
+                        rt.pending_description_len = desc_n;
+                        latchHint(rt, desc);
+                    }
+
+                    rt.dialog_state = .suggesting;
+                    // Return the command bytes for injection at
+                    // the shell prompt — directly from
+                    // `pending_command` so the buffer's role stays
+                    // obvious (no second purpose-shifted reuse of
+                    // `inject_buf`, which the single-mode path
+                    // owns with different lifetime semantics).
+                    return rt.pending_command[0..rt.pending_command_len];
+                },
+                .done => {
+                    // Sized to fit the "✓ done — " prefix (~12
+                    // bytes) plus the full 256-byte reason buffer
+                    // without spilling into the fallback "✓ done".
+                    var msg_buf: [320]u8 = undefined;
+                    const reason = parsed.reason();
+                    const msg = if (reason.len > 0)
+                        std.fmt.bufPrint(&msg_buf, "✓ done — {s}", .{reason}) catch "✓ done"
+                    else
+                        "✓ done";
+                    latchHint(rt, msg);
+                    dialogReset(rt, ctx);
+                    rt.ai_mode_active = false;
+                    return null;
+                },
+                .question => {
+                    latchHint(rt, "question UI lands in a follow-up PR — cancel and retry without ambiguity");
+                    dialogReset(rt, ctx);
+                    rt.ai_mode_active = false;
+                    queueInjection(rt, "\x15");
+                    return null;
+                },
+            }
         }
 
         /// Queue bytes on `pending_injection` for the next
@@ -908,6 +1518,177 @@ pub fn configure(comptime cfg: Config) type {
             @memcpy(rt.err_buf[0..n], msg[0..n]);
             rt.err_len = n;
             rt.err_pending = true;
+        }
+
+        // ---- dialog helpers ----------------------------------------------
+
+        /// Append bytes to `captured_output`, respecting the cap.
+        /// On overflow, set `captured_truncated = true` so the
+        /// observation turn surfaces a `[truncated]` suffix. Caller
+        /// doesn't need to know the bound — bytes silently drop
+        /// when the buffer is full.
+        fn appendCaptured(rt: *Runtime, bytes: []const u8) void {
+            const room = rt.captured_output.len - rt.captured_output_len;
+            if (bytes.len > room) {
+                rt.captured_truncated = true;
+                if (room == 0) return;
+                @memcpy(rt.captured_output[rt.captured_output_len..][0..room], bytes[0..room]);
+                rt.captured_output_len += room;
+                return;
+            }
+            @memcpy(rt.captured_output[rt.captured_output_len..][0..bytes.len], bytes);
+            rt.captured_output_len += bytes.len;
+        }
+
+        /// Push a turn onto the conversation history. `content`
+        /// must be heap-allocated by the caller and is OWNED by the
+        /// runtime after this call (freed in `freeTurns`). When
+        /// already at `history_turns_max`, drops the OLDEST turn
+        /// first (FIFO eviction). The truncation bound is the only
+        /// memory pressure mitigation — without it, a long dialog
+        /// would grow unbounded across the long-lived runtime.
+        fn pushTurn(rt: *Runtime, kind: TurnKind, content: []u8) !void {
+            // Truncate content to `cfg.max_turn_bytes` if oversized.
+            // We re-allocate at the smaller size so `freeTurns`
+            // doesn't free a partially-handed-over allocation.
+            //
+            // Ownership contract:
+            //   - SUCCESS path: the runtime now owns `content` (or
+            //     its truncated replacement). Caller MUST NOT free.
+            //   - FAILURE path (any returned error): the CALLER
+            //     still owns `content` and is responsible for the
+            //     `free`. We achieve this by letting `try dupe`
+            //     propagate the error BEFORE we'd `free(content)` —
+            //     so a failed truncation leaves `content` untouched
+            //     by us.
+            const final_content: []u8 = if (content.len > cfg.max_turn_bytes) blk: {
+                const trimmed = try rt.allocator.dupe(u8, content[0..cfg.max_turn_bytes]);
+                rt.allocator.free(content);
+                break :blk trimmed;
+            } else content;
+
+            if (rt.turns_len == cfg.history_turns_max) {
+                // FIFO eviction — drop the oldest turn, shift the
+                // rest down. O(n) per push but n ≤ 8, so totally
+                // fine. Keeps the index/slot semantics simple.
+                rt.allocator.free(rt.turns[0].content);
+                for (1..rt.turns_len) |i| {
+                    rt.turns[i - 1] = rt.turns[i];
+                }
+                rt.turns_len -= 1;
+            }
+            rt.turns[rt.turns_len] = .{ .kind = kind, .content = final_content };
+            rt.turns_len += 1;
+        }
+
+        /// Free every turn's content + reset the count. Called on
+        /// `detach` and on cancel so a follow-up dialog starts
+        /// clean. Safe to call when `turns_len == 0`.
+        fn freeTurns(rt: *Runtime) void {
+            for (rt.turns[0..rt.turns_len]) |turn| {
+                rt.allocator.free(turn.content);
+            }
+            rt.turns_len = 0;
+        }
+
+        /// Serialize the current conversation, hand it to the
+        /// worker. Sets `dialog_state` to `.generating` on success.
+        /// Returns `error.BodyTooLarge` when the serialized body
+        /// exceeds `cfg.body_buf_bytes` (the conversation has
+        /// outgrown the shared buffer — user needs to cancel).
+        fn fireDialogRequest(rt: *Runtime, ctx: *m.Context) !void {
+            const model_for_request: []const u8 = if (rt.current_model_idx < cfg.models.len)
+                cfg.models[rt.current_model_idx]
+            else
+                cfg.model;
+
+            // Build the JSON body OUTSIDE the mutex (allocator work,
+            // potentially expensive). In fixture mode the worker
+            // discards the body entirely, so skip the serialization
+            // altogether.
+            const built_body: ?[]u8 = if (cfg.fixture_responses.len > 0) null else blk: {
+                const body = try buildDialogRequestBody(
+                    rt.allocator,
+                    model_for_request,
+                    effective_dialog_system_prompt,
+                    rt.shell,
+                    rt.context_blob,
+                    rt.turns[0..rt.turns_len],
+                );
+                if (body.len > cfg.body_buf_bytes) {
+                    rt.allocator.free(body);
+                    return error.BodyTooLarge;
+                }
+                break :blk body;
+            };
+            defer if (built_body) |b| rt.allocator.free(b);
+
+            const idx_to_send: usize = if (cfg.models.len == 0)
+                std.math.maxInt(usize)
+            else if (rt.current_model_idx < cfg.models.len)
+                rt.current_model_idx
+            else
+                0;
+
+            // SINGLE critical section: body copy + metadata stamp
+            // happen under one lock so the worker never sees a half-
+            // written request (e.g. fresh body bytes with stale
+            // `body_len`). Mirrors the single-mode trigger path's
+            // copy-and-stamp-together shape.
+            rt.shared.mutex.lockUncancelable(ctx.io);
+            defer rt.shared.mutex.unlock(ctx.io);
+            if (built_body) |b| {
+                @memcpy(rt.shared.body_buf[0..b.len], b);
+                rt.shared.body_len = b.len;
+            } else {
+                rt.shared.body_len = 0;
+            }
+            rt.shared.model_idx = idx_to_send;
+            rt.shared.req_kind = .dialog;
+            rt.shared.req_pending = true;
+            rt.shared.req_gen +%= 1;
+            rt.shared.res_done = false;
+            rt.shared.res_len = 0;
+            rt.shared.cv.signal(ctx.io);
+            rt.in_flight = true;
+            rt.dialog_state = .generating;
+        }
+
+        /// Reset all dialog state — used by both `abortDialog` and
+        /// the `llm_exec_cancel` action. Bumps `req_gen` so any
+        /// in-flight worker response is discarded as stale; clears
+        /// `req_pending` so a queued-but-not-yet-picked-up request
+        /// doesn't fire AFTER the cancel (which would otherwise
+        /// burn a wasted API call AND advance `shared.fixture_idx`,
+        /// desynchronising the fixture cursor across cancel-aware
+        /// e2e scenarios).
+        fn dialogReset(rt: *Runtime, ctx: *m.Context) void {
+            rt.shared.mutex.lockUncancelable(ctx.io);
+            rt.shared.req_gen +%= 1;
+            rt.shared.req_pending = false;
+            rt.shared.res_done = false;
+            rt.shared.res_len = 0;
+            rt.shared.mutex.unlock(ctx.io);
+
+            freeTurns(rt);
+            rt.dialog_state = .idle;
+            rt.captured_output_len = 0;
+            rt.captured_truncated = false;
+            rt.pending_command_len = 0;
+            rt.pending_description_len = 0;
+            rt.last_assistant_json_len = 0;
+            rt.in_flight = false;
+        }
+
+        /// Abort the dialog with an error notification. Surfaces in
+        /// the ⚠ row and resets to idle. Used for unrecoverable
+        /// states mid-loop (OOM, body too large, malformed JSON
+        /// from the model on second attempt).
+        fn abortDialog(rt: *Runtime, ctx: *m.Context, msg: []const u8) void {
+            latchErr(rt, msg);
+            dialogReset(rt, ctx);
+            rt.ai_mode_active = false;
+            queueInjection(rt, "\x15");
         }
 
         /// One-shot hint surface: returns the latched explanation
@@ -1024,7 +1805,9 @@ pub fn configure(comptime cfg: Config) type {
             context_blob: []const u8,
         ) void {
             var prompt_local: [cfg.max_prompt_bytes]u8 = undefined;
+            var body_local: [cfg.body_buf_bytes]u8 = undefined;
             var prompt_len: usize = 0;
+            var body_len: usize = 0;
             var serving_gen: u64 = 0;
             while (true) {
                 shared.mutex.lockUncancelable(io);
@@ -1035,8 +1818,48 @@ pub fn configure(comptime cfg: Config) type {
                     shared.mutex.unlock(io);
                     return;
                 }
-                prompt_len = shared.req_len;
-                @memcpy(prompt_local[0..prompt_len], shared.req_buf[0..prompt_len]);
+                const req_kind = shared.req_kind;
+                serving_gen = shared.req_gen;
+                shared.req_pending = false;
+
+                // Fixture mode — bypass HTTP entirely. Pop the next
+                // canned response from the shared cursor (wrapping
+                // modulo list length). Branch FIRST so we skip the
+                // req_buf / body_buf copy below: fixture responses
+                // don't depend on the request body at all, copying
+                // it would be dead work.
+                //
+                // **Stamping contract**: even in fixture mode we
+                // stamp `res_kind` and `res_gen` exactly like the
+                // HTTP path so `pollShellInput`'s stale-response
+                // guard and dialog/single discriminator work
+                // identically. The `shared.model_idx` read is the
+                // ONLY field intentionally skipped here (fixture
+                // responses are model-agnostic).
+                if (cfg.fixture_responses.len > 0) {
+                    const fixture_n = cfg.fixture_responses.len;
+                    const fi = shared.fixture_idx % fixture_n;
+                    shared.fixture_idx = (fi + 1) % fixture_n;
+                    const canned = cfg.fixture_responses[fi];
+                    const copy_n = @min(canned.len, shared.res_buf.len);
+                    @memcpy(shared.res_buf[0..copy_n], canned[0..copy_n]);
+                    shared.res_len = copy_n;
+                    shared.explanation_len = 0;
+                    shared.error_len = 0;
+                    shared.res_gen = serving_gen;
+                    shared.res_kind = req_kind;
+                    shared.res_done = true;
+                    shared.mutex.unlock(io);
+                    continue;
+                }
+
+                if (req_kind == .single) {
+                    prompt_len = shared.req_len;
+                    @memcpy(prompt_local[0..prompt_len], shared.req_buf[0..prompt_len]);
+                } else {
+                    body_len = shared.body_len;
+                    @memcpy(body_local[0..body_len], shared.body_buf[0..body_len]);
+                }
                 // Read the request-time model INDEX under the same
                 // lock. Trigger sites set `model_idx` to either a
                 // valid `cfg.models[]` index, or `usize.max` as the
@@ -1045,8 +1868,6 @@ pub fn configure(comptime cfg: Config) type {
                 // comptime-static, the resolved slice's storage
                 // outlives the worker thread.
                 const idx = shared.model_idx;
-                shared.req_pending = false;
-                serving_gen = shared.req_gen;
                 shared.mutex.unlock(io);
 
                 const model_for_request: []const u8 = if (idx < cfg.models.len)
@@ -1059,23 +1880,38 @@ pub fn configure(comptime cfg: Config) type {
                 var response_buf: [cfg.max_response_bytes]u8 = undefined;
                 var explanation_local: [512]u8 = undefined;
                 var error_local: [256]u8 = undefined;
-                const result = doRequest(
-                    gpa,
-                    io,
-                    api_base,
-                    api_key,
-                    shell_name,
-                    context_blob,
-                    prompt_local[0..prompt_len],
-                    model_for_request,
-                    &response_buf,
-                    &explanation_local,
-                    &error_local,
-                ) catch RequestResult{
-                    .cmd_len = 0,
-                    .exp_len = 0,
-                    .err_len = writeStatic(&error_local, "internal error in worker"),
-                };
+                const result = if (req_kind == .single)
+                    doRequest(
+                        gpa,
+                        io,
+                        api_base,
+                        api_key,
+                        shell_name,
+                        context_blob,
+                        prompt_local[0..prompt_len],
+                        model_for_request,
+                        &response_buf,
+                        &explanation_local,
+                        &error_local,
+                    ) catch RequestResult{
+                        .cmd_len = 0,
+                        .exp_len = 0,
+                        .err_len = writeStatic(&error_local, "internal error in worker"),
+                    }
+                else
+                    doDialogRequest(
+                        gpa,
+                        io,
+                        api_base,
+                        api_key,
+                        body_local[0..body_len],
+                        &response_buf,
+                        &error_local,
+                    ) catch RequestResult{
+                        .cmd_len = 0,
+                        .exp_len = 0,
+                        .err_len = writeStatic(&error_local, "internal error in worker"),
+                    };
 
                 // Signal completion regardless of outcome — proxy
                 // needs to clear `in_flight` so the 🧠 thinking…
@@ -1105,6 +1941,7 @@ pub fn configure(comptime cfg: Config) type {
                     }
                 }
                 shared.res_gen = serving_gen;
+                shared.res_kind = req_kind;
                 shared.res_done = true;
                 shared.mutex.unlock(io);
             }
@@ -1208,6 +2045,91 @@ pub fn configure(comptime cfg: Config) type {
             return RequestResult{ .cmd_len = extracted.cmd_len, .exp_len = extracted.explanation_len };
         }
 
+        /// Dialog-mode HTTP round-trip. The request body is already
+        /// built (by `buildDialogRequestBody` on the main thread)
+        /// because it depends on conversation history that lives in
+        /// `Runtime`; the worker just POSTs it and extracts the
+        /// raw assistant `content` field. Differs from `doRequest`
+        /// in that the result `out` slice holds the *JSON envelope*
+        /// (`{"action":...,"command":...}`) — `pollShellInput` does
+        /// the second-stage parse on the main thread where the
+        /// runtime + allocator + state machine live.
+        fn doDialogRequest(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            api_base: []const u8,
+            api_key: []const u8,
+            body: []const u8,
+            out: []u8,
+            error_out: []u8,
+        ) !RequestResult {
+            const url = try std.fmt.allocPrint(gpa, "{s}/chat/completions", .{api_base});
+            defer gpa.free(url);
+
+            var auth_buf: [256]u8 = undefined;
+            const auth_header: ?[]const u8 = blk: {
+                if (api_key.len == 0) break :blk null;
+                if (api_key.len + 7 > auth_buf.len) break :blk null;
+                break :blk std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key}) catch null;
+            };
+
+            var headers_buf: [2]std.http.Header = undefined;
+            var headers_len: usize = 0;
+            headers_buf[headers_len] = .{ .name = "Content-Type", .value = "application/json" };
+            headers_len += 1;
+            if (auth_header) |h| {
+                headers_buf[headers_len] = .{ .name = "Authorization", .value = h };
+                headers_len += 1;
+            }
+
+            var client: std.http.Client = .{ .allocator = gpa, .io = io };
+            defer client.deinit();
+
+            // Heap-allocate the response buffer — at the default
+            // cfg.max_response_bytes=4KiB this is 64 KiB which is
+            // a substantial stack frame inside the worker thread.
+            // Scales with the comptime knob, so a user raising
+            // max_response_bytes shouldn't silently push the worker
+            // thread close to its stack limit.
+            const response_cap = cfg.max_response_bytes * 16;
+            const response_buf = gpa.alloc(u8, response_cap) catch return RequestResult{
+                .cmd_len = 0,
+                .exp_len = 0,
+                .err_len = writeStatic(error_out, "out of memory allocating response buffer"),
+            };
+            defer gpa.free(response_buf);
+            var response_writer: std.Io.Writer = .fixed(response_buf);
+
+            const fetched = client.fetch(.{
+                .location = .{ .url = url },
+                .method = .POST,
+                .payload = body,
+                .extra_headers = headers_buf[0..headers_len],
+                .response_writer = &response_writer,
+            }) catch return RequestResult{
+                .cmd_len = 0,
+                .exp_len = 0,
+                .err_len = writeStatic(error_out, "request failed (endpoint unreachable?)"),
+            };
+
+            const status = @intFromEnum(fetched.status);
+            if (status < 200 or status >= 300) {
+                const err_msg = std.fmt.bufPrint(error_out, "HTTP {d}", .{status}) catch
+                    error_out[0..writeStatic(error_out, "HTTP error")];
+                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_msg.len };
+            }
+
+            const n = extractRawContent(response_buf[0..response_writer.end], out);
+            if (n == 0) {
+                return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "empty response from model"),
+                };
+            }
+            return RequestResult{ .cmd_len = n, .exp_len = 0 };
+        }
+
         // ---- pure helpers (testable) -------------------------------------
 
         /// Build the JSON request body. Pure — no I/O. Exposed for
@@ -1252,6 +2174,142 @@ pub fn configure(comptime cfg: Config) type {
             try std.json.Stringify.encodeJsonString(user_msg, .{}, writer);
             try writer.writeAll("}],\"stream\":false}");
             return allocating.toOwnedSlice();
+        }
+
+        /// Build the dialog-mode JSON request body. Pure — no I/O.
+        /// Serializes the system prompt + the full conversation
+        /// history as a sequence of OpenAI-style messages. Observation
+        /// turns are wrapped as user messages prefixed with
+        /// `OBSERVATION:` so the model recognizes them as command
+        /// output rather than a fresh task. Caller frees the slice.
+        pub fn buildDialogRequestBody(
+            allocator: std.mem.Allocator,
+            model: []const u8,
+            system_prompt: []const u8,
+            shell_name: []const u8,
+            context_blob: []const u8,
+            turns: []const Turn,
+        ) ![]u8 {
+            var allocating: std.Io.Writer.Allocating = .init(allocator);
+            errdefer allocating.deinit();
+            const writer = &allocating.writer;
+
+            // Compose the system message: configured system prompt
+            // PLUS a stable shell/context preamble. Putting shell
+            // name + context_blob on the SYSTEM message (rather than
+            // wrapping the first user turn) means they survive FIFO
+            // eviction — once history fills past `history_turns_max`
+            // and the original user task ages out, future requests
+            // would otherwise lose every trace of shell context.
+            // The system message is always rebuilt per request, so
+            // there's no historical-rewrite concern either.
+            const composed_system = if (context_blob.len > 0)
+                try std.fmt.allocPrint(
+                    allocator,
+                    "{s}\n\nShell: {s}\nContext: {s}",
+                    .{ system_prompt, shell_name, context_blob },
+                )
+            else
+                try std.fmt.allocPrint(
+                    allocator,
+                    "{s}\n\nShell: {s}",
+                    .{ system_prompt, shell_name },
+                );
+            defer allocator.free(composed_system);
+
+            try writer.writeAll("{\"model\":");
+            try std.json.Stringify.encodeJsonString(model, .{}, writer);
+            try writer.writeAll(",\"messages\":[{\"role\":\"system\",\"content\":");
+            try std.json.Stringify.encodeJsonString(composed_system, .{}, writer);
+            try writer.writeAll("}");
+
+            for (turns) |turn| {
+                const role: []const u8 = switch (turn.kind) {
+                    .assistant_exec => "assistant",
+                    .user, .observation => "user",
+                };
+                try writer.writeAll(",{\"role\":\"");
+                try writer.writeAll(role);
+                try writer.writeAll("\",\"content\":");
+
+                if (turn.kind == .observation) {
+                    const wrapped = try std.fmt.allocPrint(
+                        allocator,
+                        "OBSERVATION:\n{s}",
+                        .{turn.content},
+                    );
+                    defer allocator.free(wrapped);
+                    try std.json.Stringify.encodeJsonString(wrapped, .{}, writer);
+                } else {
+                    try std.json.Stringify.encodeJsonString(turn.content, .{}, writer);
+                }
+                try writer.writeAll("}");
+            }
+
+            try writer.writeAll("],\"stream\":false}");
+            return allocating.toOwnedSlice();
+        }
+
+        /// Parse a dialog response (the raw assistant content
+        /// returned by `extractRawContent`). `std.json.parseFromSlice`
+        /// owns an internal arena which is released by
+        /// `parsed.deinit()` — we copy out the fields we care about
+        /// into fixed-size buffers on the returned struct BEFORE
+        /// `deinit` fires, so the slices we hand back point at the
+        /// caller's `out` storage, not at arena-owned memory.
+        /// `ignore_unknown_fields` is on so a model emitting extra
+        /// keys doesn't error out the loop.
+        pub fn parseDialogResponse(
+            allocator: std.mem.Allocator,
+            raw: []const u8,
+            out: *DialogResponse,
+        ) !void {
+            // `std.json.parseFromSlice` returns a `Parsed(T)` whose
+            // `.deinit()` frees an INTERNAL arena allocated through
+            // the passed allocator. Wrapping our own arena AROUND
+            // that and calling both `arena.deinit()` and
+            // `parsed.deinit()` would be redundant at best and
+            // dangerous at worst (double free of arena-owned
+            // storage on some Zig versions). Use `parsed.deinit()`
+            // alone — it owns everything `parsed.value` references.
+            const Parsed = struct {
+                action: []const u8,
+                command: ?[]const u8 = null,
+                description: ?[]const u8 = null,
+                reason: ?[]const u8 = null,
+                question: ?[]const u8 = null,
+            };
+
+            const parsed = std.json.parseFromSlice(
+                Parsed,
+                allocator,
+                raw,
+                .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+            ) catch return error.MalformedJson;
+            defer parsed.deinit();
+
+            const action_enum = std.meta.stringToEnum(DialogAction, parsed.value.action) orelse return error.UnknownAction;
+            out.* = .{ .action = action_enum };
+
+            if (parsed.value.command) |c| {
+                const n = @min(c.len, out.command_buf.len);
+                @memcpy(out.command_buf[0..n], c[0..n]);
+                out.command_len = n;
+            }
+            if (parsed.value.description) |d| {
+                const n = @min(d.len, out.description_buf.len);
+                @memcpy(out.description_buf[0..n], d[0..n]);
+                out.description_len = n;
+            }
+            if (parsed.value.reason) |r| {
+                const n = @min(r.len, out.reason_buf.len);
+                @memcpy(out.reason_buf[0..n], r[0..n]);
+                out.reason_len = n;
+            }
+            // `question` is parsed but not surfaced in this PR —
+            // questions land in the Question UI follow-up. Caller
+            // checks `action == .question` and emits a "not yet
+            // wired" hint without inspecting the question text.
         }
 
         /// Result of `extractResponse` — both halves of the model's
@@ -1324,6 +2382,58 @@ pub fn configure(comptime cfg: Config) type {
                 .cmd_len = sanitizeCommand(fence_body, cmd_out),
                 .explanation_len = sanitizeExplanation(explanation_raw, explanation_out),
             };
+        }
+
+        /// Dialog-mode response extraction. Returns the raw content
+        /// field VERBATIM (after JSON-unescape) so the main thread
+        /// can parse the inner JSON envelope. Strips markdown
+        /// ```json fences if the model wrapped its reply despite
+        /// the system prompt forbidding it — common with smaller
+        /// models that "helpfully" format JSON.
+        pub fn extractRawContent(body: []const u8, out: []u8) usize {
+            const decoded_len = decodeContent(body, out);
+            if (decoded_len == 0) return 0;
+            const decoded = out[0..decoded_len];
+            const trimmed = std.mem.trim(u8, decoded, " \t\r\n");
+
+            // Strip an outer ```json …``` fence if present. We DO
+            // this even though the system prompt says "no fences"
+            // because the alternative is a fragile dialog loop —
+            // a single fence-wrapped reply would tank the whole
+            // session for users running locally-quantized models.
+            //
+            // Fence parsing is best-effort: if the boundaries
+            // can't be located cleanly (no newline after the
+            // opening fence, no closing fence, close before open),
+            // we FALL THROUGH to returning the trimmed input
+            // untouched. Better the JSON parser sees the wrapped
+            // text and complains specifically than silently
+            // dropping an otherwise-parseable reply.
+            //
+            // Closing fence is located by FORWARD search from
+            // after_open (`indexOfPos`), not by `lastIndexOf`.
+            // The latter would match the trailing fence even when
+            // a nested triple-backtick appears earlier in the
+            // content (e.g. a description string containing literal
+            // fences) — but if an interior fence preceded the real
+            // closer, lastIndexOf would silently truncate. Forward
+            // search picks the FIRST closing fence after the
+            // opener, which is the conventional shape.
+            fence_strip: {
+                if (!std.mem.startsWith(u8, trimmed, "```")) break :fence_strip;
+                const nl = std.mem.indexOfScalar(u8, trimmed[3..], '\n') orelse break :fence_strip;
+                const after_open = 3 + nl + 1;
+                const close_at = std.mem.indexOfPos(u8, trimmed, after_open, "```") orelse break :fence_strip;
+                if (close_at <= after_open) break :fence_strip;
+                const inner = std.mem.trim(u8, trimmed[after_open..close_at], " \t\r\n");
+                @memmove(out[0..inner.len], inner);
+                return inner.len;
+            }
+
+            if (trimmed.ptr != decoded.ptr) {
+                @memmove(out[0..trimmed.len], trimmed);
+            }
+            return trimmed.len;
         }
 
         /// Decode the JSON `"content"` field of an OpenAI-style

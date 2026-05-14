@@ -1,0 +1,48 @@
+# llm_exec_cancel_mid_run — Ctrl+Shift+X cancels a dialog after the
+# suggested command has landed on the prompt. Without intervention
+# the user would hit Enter and execute `echo never`; instead they
+# press the cancel binding and the line gets wiped, dialog state
+# resets, AI mode clears.
+#
+# We snapshot the clean prompt to assert no residual text. If the
+# cancel path regresses (forgets the Ctrl+U queue or leaves
+# `dialog_state` populated), the suggested command would still be
+# visible and the snapshot diff would scream.
+
+cols 100
+rows 8
+timeout_ms 6000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# PS1 emits ;A so osc133 active=true → Alt+S won't hit the
+# no-OSC-133 guard.
+type "PS1=$'\\[\\033]133;A\\007\\]$ ' && clear\r"
+wait_for "$"
+sleep 200
+
+# Enter AI mode, fire dialog, suggested command lands on prompt.
+type "#: do nothing"
+sleep 200
+type "\x1bs"
+sleep 500
+
+# Cancel — kitty-protocol-style "Ctrl+Shift+X". atty's stdin
+# interceptor matches this; the action wipes the line + clears
+# all dialog state. (We're not running under a kitty kbd
+# protocol in this scenario, but the cancel binding is also
+# registered for the classic-encoded Ctrl+X — kitty's
+# disambiguation flag is set by atty at startup.)
+type "\x1b[88;6u"
+sleep 400
+snapshot post_cancel_prompt
+
+sleep 200
+# Clear any residue so `exit` doesn't get treated as part of
+# a `#: …` comment line (the cancel resets line_state, but the
+# shell readline buffer's state can race the snapshot).
+type "\x15"
+sleep 100
+type "exit\r"
+exit_code 0
