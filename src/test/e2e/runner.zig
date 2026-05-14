@@ -23,6 +23,15 @@ const atty = @import("atty");
 
 const Allocator = std.mem.Allocator;
 
+// libc realpath — Zig 0.16's `std.Io.Dir` doesn't expose realpath
+// directly, and `std.posix.realpath` was removed. We call libc to
+// resolve the scenario directory to a canonical absolute path
+// (handles `.`, `..`, symlinks). PATH_MAX (4096) is the POSIX
+// guarantee; in pathological cases (deeply nested mount points)
+// the call returns null and we surface the error instead of
+// silently falling back to a relative path.
+extern "c" fn realpath(path: [*:0]const u8, resolved: [*:0]u8) ?[*:0]u8;
+
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
 const Args = struct {
@@ -270,21 +279,21 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     // fixture files (e.g. `cat $ATTY_SCENARIO_DIR/../fixtures/foo`).
     // The harness's child gets `HOME=/tmp` and no useful default
     // cwd anchor; without this, no scenario could load fixtures.
-    var path_buf: [4096]u8 = undefined;
-    const scenario_dir_abs = if (sc.dir.len > 0 and sc.dir[0] == '/') blk: {
-        // `sc.dir` already absolute — runner invoked with an
-        // absolute tests path, e.g. `--root /abs/tests/e2e`.
-        // Prefixing CWD would produce `<cwd>/<abs>/...` which
-        // cat would fail to resolve.
-        break :blk try gpa.dupe(u8, sc.dir);
-    } else blk: {
-        const cwd_rc = std.c.getcwd(@ptrCast(&path_buf), path_buf.len);
-        const cwd_abs: ?[]const u8 = if (cwd_rc == null) null else std.mem.sliceTo(@as([*:0]const u8, @ptrCast(cwd_rc.?)), 0);
-        break :blk if (cwd_abs) |c|
-            try std.fmt.allocPrint(gpa, "{s}/{s}", .{ c, sc.dir })
-        else
-            try gpa.dupe(u8, sc.dir);
-    };
+    // Resolve `sc.dir` to a canonical absolute path via libc
+    // `realpath`. Handles `.`, `..`, symlinks, and the case where
+    // `sc.dir` is already absolute. PATH_MAX (4096) is the POSIX
+    // guarantee; if a deeply-nested mount point produces a longer
+    // path realpath returns null and we surface a clear error
+    // instead of silently falling back to the relative form (which
+    // would break every scenario that resolves fixtures via
+    // `$ATTY_SCENARIO_DIR`).
+    const dir_z = try gpa.dupeZ(u8, sc.dir);
+    defer gpa.free(dir_z);
+    var rp_buf: [4096]u8 = undefined;
+    const rp = realpath(dir_z.ptr, @ptrCast(&rp_buf));
+    if (rp == null) return error.CannotResolveScenarioDir;
+    const rp_len = std.mem.len(@as([*:0]const u8, @ptrCast(rp.?)));
+    const scenario_dir_abs = try gpa.dupe(u8, rp_buf[0..rp_len]);
     defer gpa.free(scenario_dir_abs);
     try extra_env.append(gpa, .{ .key = "ATTY_SCENARIO_DIR", .value = scenario_dir_abs });
     var spawn_argv: []const []const u8 = &.{};

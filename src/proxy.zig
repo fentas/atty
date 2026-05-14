@@ -585,17 +585,28 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // (works for any shell, no integration
                             // needed). When the buffer is `uncertain`
                             // — typically because the user just hit
-                            // Up arrow to recall an entry and the
-                            // master-read with the echoed line
-                            // hasn't been drained yet (atty's poll
-                            // processes stdin BEFORE master, so a
-                            // fast Up→Ctrl+Shift+D sequence races
-                            // ahead of `syncFromCapture`) — fall
+                            // Up arrow to recall an entry — fall
                             // back to the OSC 133 capture stream
-                            // when it's active. That's the trusted
-                            // ground truth for what's on the prompt
-                            // right now, even before line_state
-                            // catches up.
+                            // when it's active and non-empty.
+                            //
+                            // Race note: atty's poll loop processes
+                            // stdin BEFORE master, so a STRICT race
+                            // (user presses Ctrl+Shift+D before any
+                            // master-output cycle has fed the recall
+                            // bytes to `osc133_tracker`) leaves
+                            // `currentInput()` empty too, and the
+                            // handler no-ops. In practice the user
+                            // waits to SEE the recalled line before
+                            // pressing the binding, by which point
+                            // multiple poll iterations have drained
+                            // the master fd and `syncFromCapture` /
+                            // `osc133_tracker.feed` have run — so
+                            // the typical case is handled. A future
+                            // pre-binding master-drain helper would
+                            // close the strict race for power users
+                            // who type faster than the kernel
+                            // schedules; deferred until anyone
+                            // actually trips it.
                             const target: []const u8 = blk: {
                                 if (!line_state.uncertain) {
                                     break :blk line_state.current();
