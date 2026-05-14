@@ -201,6 +201,10 @@ pub const Config = struct {
     /// you're using a model that struggles with the default
     /// prompt — most modern instruction-tuned models follow it
     /// cleanly.
+    ///
+    /// **Comptime only**: the override resolves at `configure`
+    /// time (mirroring `system_prompt`). There is no runtime
+    /// fallback; recompile to change it.
     dialog_system_prompt: []const u8 = "",
 };
 
@@ -1124,14 +1128,15 @@ pub fn configure(comptime cfg: Config) type {
                 const offset = rt.osc133_capture.edgeOffset(i);
                 switch (edge) {
                     .cmd_start => {
-                        // If we were already capturing (unusual —
-                        // a stray `;C` arrived mid-capture without
-                        // a preceding `;D`), append the pre-marker
-                        // bytes to the current observation BEFORE
-                        // resetting. Mirrors the cmd_end branch's
-                        // append-then-transition order so neither
-                        // path silently drops bytes between cursor
-                        // and the marker.
+                        // Stray `;C` mid-capture (no preceding `;D`):
+                        // append the pre-marker bytes to the current
+                        // observation BEFORE deciding the next state.
+                        // We deliberately KEEP the in-progress
+                        // observation across the stray marker rather
+                        // than starting fresh — concatenated output is
+                        // more useful to the LLM than a silently
+                        // dropped half. The reset below is gated on
+                        // `!capturing` for exactly this reason.
                         if (capturing and offset > cursor) {
                             var end_at: u32 = offset;
                             if (offset <= output.len) {
@@ -1147,7 +1152,7 @@ pub fn configure(comptime cfg: Config) type {
                                 appendCaptured(rt, output[cursor..@min(end_at, output.len)]);
                             }
                         }
-                        if (rt.dialog_state == .executing or rt.dialog_state == .capturing_output) {
+                        if (!capturing and rt.dialog_state == .executing) {
                             rt.dialog_state = .capturing_output;
                             rt.captured_output_len = 0;
                             rt.captured_truncated = false;
@@ -1305,8 +1310,15 @@ pub fn configure(comptime cfg: Config) type {
                 @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
                 rt.inject_len = n;
 
-                // Latch the explanation (single mode) or stash the
-                // description for the dialog handler to use.
+                // Latch the explanation (single mode only). Dialog
+                // responses never populate `explanation_buf` — the
+                // worker leaves `explanation_len = 0` for dialog
+                // kind because the JSON envelope's `description`
+                // field is surfaced later (inside
+                // `handleDialogResponse` via `latchHint`). The
+                // shared `explanation_buf` is therefore dead weight
+                // on the dialog path; kept around so single-mode
+                // doesn't have to branch.
                 const exp_n = rt.shared.explanation_len;
                 if (n > 0 and exp_n > 0) {
                     @memcpy(rt.hint_buf[0..exp_n], rt.shared.explanation_buf[0..exp_n]);
@@ -1338,7 +1350,18 @@ pub fn configure(comptime cfg: Config) type {
             // act on the LLM's instruction. Returns the bytes to
             // inject (the suggested command for `action=exec`) or
             // null for done/error/question paths.
+            //
+            // The `inject_buf` was populated with the raw JSON
+            // envelope above by the shared-state copy — that's
+            // the wrong thing to expose if any downstream caller
+            // reads `rt.inject_buf[0..rt.inject_len]` directly
+            // assuming it holds the next-injection bytes. Zero
+            // `inject_len` now so any such stale read sees an
+            // empty slice instead of JSON; the returned slice
+            // from `handleDialogResponse` is the authoritative
+            // injection payload for dialog mode.
             if (res_kind == .dialog) {
+                rt.inject_len = 0;
                 return try handleDialogResponse(rt, ctx, n);
             }
 
@@ -1529,12 +1552,15 @@ pub fn configure(comptime cfg: Config) type {
             // We re-allocate at the smaller size so `freeTurns`
             // doesn't free a partially-handed-over allocation.
             //
-            // Ownership contract: on success, the runtime owns
-            // `content` (or its truncated replacement); on error,
-            // the CALLER still owns `content` and frees it. The
-            // truncation `dupe` path therefore does NOT free
-            // `content` when the allocation fails — otherwise the
-            // caller's `errdefer free(content)` would double-free.
+            // Ownership contract:
+            //   - SUCCESS path: the runtime now owns `content` (or
+            //     its truncated replacement). Caller MUST NOT free.
+            //   - FAILURE path (any returned error): the CALLER
+            //     still owns `content` and is responsible for the
+            //     `free`. We achieve this by letting `try dupe`
+            //     propagate the error BEFORE we'd `free(content)` —
+            //     so a failed truncation leaves `content` untouched
+            //     by us.
             const final_content: []u8 = if (content.len > cfg.max_turn_bytes) blk: {
                 const trimmed = try rt.allocator.dupe(u8, content[0..cfg.max_turn_bytes]);
                 rt.allocator.free(content);
@@ -1576,17 +1602,31 @@ pub fn configure(comptime cfg: Config) type {
             else
                 cfg.model;
 
-            const body = try buildDialogRequestBody(
-                rt.allocator,
-                model_for_request,
-                effective_dialog_system_prompt,
-                rt.shell,
-                rt.context_blob,
-                rt.turns[0..rt.turns_len],
-            );
-            defer rt.allocator.free(body);
-
-            if (body.len > cfg.body_buf_bytes) return error.BodyTooLarge;
+            // In fixture mode the worker discards the body entirely
+            // (it returns the next canned response regardless of
+            // request shape). Skip the JSON serialization to keep
+            // fixture-driven e2e ticks fast and to mirror the
+            // worker-side short-circuit.
+            const body_len: usize = if (cfg.fixture_responses.len > 0) 0 else blk: {
+                const body = try buildDialogRequestBody(
+                    rt.allocator,
+                    model_for_request,
+                    effective_dialog_system_prompt,
+                    rt.shell,
+                    rt.context_blob,
+                    rt.turns[0..rt.turns_len],
+                );
+                defer rt.allocator.free(body);
+                if (body.len > cfg.body_buf_bytes) return error.BodyTooLarge;
+                // Copy under the mutex below, not here — keep this
+                // block side-effect-free so the early-return on
+                // BodyTooLarge doesn't leave the shared buffer in
+                // a half-written state.
+                rt.shared.mutex.lockUncancelable(ctx.io);
+                @memcpy(rt.shared.body_buf[0..body.len], body);
+                rt.shared.mutex.unlock(ctx.io);
+                break :blk body.len;
+            };
 
             const idx_to_send: usize = if (cfg.models.len == 0)
                 std.math.maxInt(usize)
@@ -1597,8 +1637,7 @@ pub fn configure(comptime cfg: Config) type {
 
             rt.shared.mutex.lockUncancelable(ctx.io);
             defer rt.shared.mutex.unlock(ctx.io);
-            @memcpy(rt.shared.body_buf[0..body.len], body);
-            rt.shared.body_len = body.len;
+            rt.shared.body_len = body_len;
             rt.shared.model_idx = idx_to_send;
             rt.shared.req_kind = .dialog;
             rt.shared.req_pending = true;
@@ -1780,6 +1819,14 @@ pub fn configure(comptime cfg: Config) type {
                 // req_buf / body_buf copy below: fixture responses
                 // don't depend on the request body at all, copying
                 // it would be dead work.
+                //
+                // **Stamping contract**: even in fixture mode we
+                // stamp `res_kind` and `res_gen` exactly like the
+                // HTTP path so `pollShellInput`'s stale-response
+                // guard and dialog/single discriminator work
+                // identically. The `shared.model_idx` read is the
+                // ONLY field intentionally skipped here (fixture
+                // responses are model-agnostic).
                 if (cfg.fixture_responses.len > 0) {
                     const fixture_n = cfg.fixture_responses.len;
                     const fi = shared.fixture_idx % fixture_n;
@@ -2195,10 +2242,14 @@ pub fn configure(comptime cfg: Config) type {
             raw: []const u8,
             out: *DialogResponse,
         ) !void {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
-            const arena_alloc = arena.allocator();
-
+            // `std.json.parseFromSlice` returns a `Parsed(T)` whose
+            // `.deinit()` frees an INTERNAL arena allocated through
+            // the passed allocator. Wrapping our own arena AROUND
+            // that and calling both `arena.deinit()` and
+            // `parsed.deinit()` would be redundant at best and
+            // dangerous at worst (double free of arena-owned
+            // storage on some Zig versions). Use `parsed.deinit()`
+            // alone — it owns everything `parsed.value` references.
             const Parsed = struct {
                 action: []const u8,
                 command: ?[]const u8 = null,
@@ -2209,7 +2260,7 @@ pub fn configure(comptime cfg: Config) type {
 
             const parsed = std.json.parseFromSlice(
                 Parsed,
-                arena_alloc,
+                allocator,
                 raw,
                 .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
             ) catch return error.MalformedJson;
