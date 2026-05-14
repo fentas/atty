@@ -428,7 +428,32 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
         defer gpa.free(cast_path);
 
         if (update) {
-            // Write env.toml.
+            // Write env.toml. Build the snapshot inputs first so
+            // ownership is clear and freeing is straightforward.
+            var forced_env_arr: [forced_env.len]snapshot.EnvSnapshot.KV = undefined;
+            for (&forced_env, 0..) |kv, i| forced_env_arr[i] = .{ .key = kv.key, .value = kv.value };
+
+            // Filter out `ATTY_SCENARIO_DIR` from the committed env
+            // snapshot — its value is an absolute, machine-specific
+            // path (e.g. /home/alice/atty/tests/e2e/<scenario>) that
+            // would produce a different golden on every dev
+            // checkout. Runtime injection still happens
+            // unconditionally; we only redact it from disk.
+            var count: usize = 0;
+            for (extra_env.items) |kv| {
+                if (!std.mem.eql(u8, kv.key, "ATTY_SCENARIO_DIR")) count += 1;
+            }
+            const extra_env_filtered = try gpa.alloc(snapshot.EnvSnapshot.KV, count);
+            defer gpa.free(extra_env_filtered);
+            {
+                var w_idx: usize = 0;
+                for (extra_env.items) |kv| {
+                    if (std.mem.eql(u8, kv.key, "ATTY_SCENARIO_DIR")) continue;
+                    extra_env_filtered[w_idx] = .{ .key = kv.key, .value = kv.value };
+                    w_idx += 1;
+                }
+            }
+
             var env_file = try cwd.createFile(io, env_path, .{});
             defer env_file.close(io);
             var env_buf: [4096]u8 = undefined;
@@ -438,33 +463,8 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
                 .cols = cols,
                 .rows = rows,
                 .argv = spawn_argv,
-                .forced_env = blk: {
-                    var arr: [forced_env.len]snapshot.EnvSnapshot.KV = undefined;
-                    for (&forced_env, 0..) |kv, i| arr[i] = .{ .key = kv.key, .value = kv.value };
-                    break :blk arr[0..];
-                },
-                .extra_env = blk: {
-                    // Filter out `ATTY_SCENARIO_DIR` from the
-                    // committed env snapshot — its value is an
-                    // absolute, machine-specific path (e.g. /home/
-                    // alice/atty/tests/e2e/<scenario>) that would
-                    // produce a different golden on every dev
-                    // checkout. The runtime injection still happens
-                    // unconditionally; we only redact it from
-                    // disk.
-                    var count: usize = 0;
-                    for (extra_env.items) |kv| {
-                        if (!std.mem.eql(u8, kv.key, "ATTY_SCENARIO_DIR")) count += 1;
-                    }
-                    var arr = try gpa.alloc(snapshot.EnvSnapshot.KV, count);
-                    var w_idx: usize = 0;
-                    for (extra_env.items) |kv| {
-                        if (std.mem.eql(u8, kv.key, "ATTY_SCENARIO_DIR")) continue;
-                        arr[w_idx] = .{ .key = kv.key, .value = kv.value };
-                        w_idx += 1;
-                    }
-                    break :blk arr;
-                },
+                .forced_env = forced_env_arr[0..],
+                .extra_env = extra_env_filtered,
             });
             try env_w.interface.flush();
 

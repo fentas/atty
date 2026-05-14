@@ -145,14 +145,32 @@ pub const CursorTracker = struct {
 
     fn flushParamFromBuf(self: *CursorTracker) void {
         if (self.param_len == 0) return;
-        // Parse into u32 first then clamp into u16. parsing directly
-        // into u16 silently turned overflow (e.g. a buggy or
-        // malicious `\x1B[999999B`) into 0 → CUD-default-1, which
-        // moved the cursor by ONE row when the intent was clearly
-        // "clamp to bottom". With u32 + clamp we move all the way
-        // to `max_rows` instead.
-        const parsed = std.fmt.parseUnsigned(u32, self.param_buf[0..self.param_len], 10) catch 0;
-        self.param1 = if (parsed > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(parsed);
+        // Saturating accumulator — parsing into a fixed-width int
+        // (even u64) errors out for sufficiently long digit runs
+        // (20+ digits for u64, fewer for smaller). `parseUnsigned`
+        // returns an error, the catch-default fires, and the param
+        // becomes 0 → default 1 → CUD by 1 instead of "all the way
+        // to the bottom". By saturating digit-by-digit we map any
+        // arbitrarily-long numeric param to `max(u16)`, which the
+        // downstream advance/retreat then clamps to `max_rows`.
+        //
+        // Non-digit bytes are silently skipped — the surrounding
+        // state machine guarantees we only land here with digits,
+        // but the defensive skip lets us tolerate any future CSI
+        // sub-parameter weirdness without UB.
+        var acc: u32 = 0;
+        const cap: u32 = std.math.maxInt(u16);
+        for (self.param_buf[0..self.param_len]) |b| {
+            if (b < '0' or b > '9') continue;
+            if (acc >= cap) {
+                acc = cap;
+                continue; // already saturated; consume remaining digits
+            }
+            const digit: u32 = b - '0';
+            const next: u64 = @as(u64, acc) * 10 + digit;
+            acc = if (next > cap) cap else @intCast(next);
+        }
+        self.param1 = @intCast(acc);
         self.param_len = 0;
     }
 
@@ -328,6 +346,19 @@ test "CursorTracker: param > u16 max clamps instead of falling back to default 1
     // 1 → row 11. With the clamp, we expect CUD by u16-max →
     // clamped to max_rows.
     c.feed("\x1B[999999B"); // CUD by huge amount
+    try testing.expectEqual(@as(u16, 80), c.currentRow());
+}
+
+test "CursorTracker: arbitrarily-long digit run saturates instead of falling back to default" {
+    var c = CursorTracker.init(80);
+    c.feed("\x1B[10;1H"); // baseline: row 10
+    try testing.expectEqual(@as(u16, 10), c.currentRow());
+    // 16-digit param exceeds u64 mantissa when accumulated — the
+    // old `parseUnsigned(u32, …)` would error to 0 → default 1.
+    // The saturating accumulator clamps to u16 max → CUD all the
+    // way to `max_rows`. (Param buffer caps at 16 bytes so all
+    // 16 digits get accumulated.)
+    c.feed("\x1B[9999999999999999B");
     try testing.expectEqual(@as(u16, 80), c.currentRow());
 }
 
