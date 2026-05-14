@@ -26,6 +26,33 @@ const std = @import("std");
 
 pub const max_line = 4096;
 
+/// Who typed the line that's about to be committed?
+///
+/// Most commits are `.user` — what the human typed at the prompt.
+/// `.llm` is set by the LLM exec-dialog module (PR #21+) BEFORE it
+/// injects a suggested command, via `LineState.setCommitAuthor(.llm)`.
+/// Modules that record history (atuin, history) and the guardrail
+/// read this via `committedAuthor()` from `onLineCommit` so they can
+/// tag entries / apply per-author rule behaviours.
+///
+/// Lives in `line_state.zig` (the natural owner — author state has
+/// to survive across dispatch cycles, since an LLM round-trip can
+/// span many polls between flipping the author and the actual
+/// commit). Re-exported from `module.zig` as `module.Author` for
+/// callers that work through the module-framework surface.
+///
+/// PR E ships only the propagation infrastructure; the consumers
+/// remain `.user`-only until follow-up PRs (F: guardrail v2,
+/// G: atuin --author/--intent) light them up.
+pub const Author = enum {
+    /// Human typed at the local prompt. Default for every line.
+    user,
+    /// Line was injected by an LLM-driven module — the exec-dialog
+    /// flow in `src/modules/llm.zig` upgrades commits to `.llm`
+    /// before pushing the suggested command through readline.
+    llm,
+};
+
 pub const LineState = struct {
     buffer: [max_line]u8 = undefined,
     len: usize = 0,
@@ -45,6 +72,19 @@ pub const LineState = struct {
     committed_len: usize = 0,
     committed_was_uncertain: bool = false,
 
+    /// Author of the line currently being typed (pending). LLM-driven
+    /// modules flip this to `.llm` via `setCommitAuthor` BEFORE
+    /// injecting a suggested command so the resulting commit lands
+    /// with the right author tag. Resets to `.user` after every
+    /// `clearLastCommitted` (consuming the commit) and on `reset`
+    /// (Ctrl-C / Ctrl-D / unknown CSI).
+    pending_author: Author = .user,
+    /// Snapshot of `pending_author` at commit time — i.e. the author
+    /// the consumer in `onLineCommit` should attribute the recorded
+    /// line to. Read via `committedAuthor()`. Cleared by
+    /// `clearLastCommitted` alongside the committed buffer.
+    committed_author: Author = .user,
+
     pub fn current(self: *const LineState) []const u8 {
         return self.buffer[0..self.len];
     }
@@ -60,12 +100,33 @@ pub const LineState = struct {
     pub fn clearLastCommitted(self: *LineState) void {
         self.committed_len = 0;
         self.committed_was_uncertain = false;
+        self.committed_author = .user;
     }
 
     pub fn reset(self: *LineState) void {
         self.len = 0;
         self.uncertain = false;
         self.generation +%= 1;
+        // `pending_author` resets on reset (Ctrl-C / Ctrl-D / unknown
+        // CSI) — the user is starting a fresh line, so a previously-
+        // staged LLM author tag should be dropped. The LLM module
+        // re-flips to `.llm` if it triggers another suggestion.
+        self.pending_author = .user;
+    }
+
+    /// Upgrade the pending commit's author. Called by LLM-driven
+    /// modules (`src/modules/llm.zig`) BEFORE injecting a suggested
+    /// command so the resulting commit lands with `committed_author`
+    /// equal to `author` when Enter eventually fires.
+    pub fn setCommitAuthor(self: *LineState, author: Author) void {
+        self.pending_author = author;
+    }
+
+    /// Author of the line currently in `committed[0..committed_len]`,
+    /// or `.user` when nothing is committed. Modules read this from
+    /// `onLineCommit` to attribute the recorded line.
+    pub fn committedAuthor(self: *const LineState) Author {
+        return self.committed_author;
     }
 
     /// Force-write the committed buffer from an externally-observed
@@ -79,6 +140,8 @@ pub const LineState = struct {
         @memcpy(self.committed[0..n], content[0..n]);
         self.committed_len = n;
         self.committed_was_uncertain = false;
+        self.committed_author = self.pending_author;
+        self.pending_author = .user;
     }
 
     /// Replace the live input buffer from an externally-observed
@@ -203,13 +266,21 @@ pub const LineState = struct {
         // after applyInput. Overwrites any prior un-consumed snapshot —
         // if two Enters land in one read, only the latest non-empty
         // line is recorded, which matches what a human would expect.
+        //
+        // `pending_author` is also snapshotted here and reset, so a
+        // subsequent line starts fresh under `.user` even if the
+        // previous commit was tagged `.llm`. A module that wants the
+        // NEXT line tagged differently must re-call `setCommitAuthor`
+        // after this snapshot fires.
         if (self.len > 0) {
             @memcpy(self.committed[0..self.len], self.buffer[0..self.len]);
             self.committed_len = self.len;
             self.committed_was_uncertain = self.uncertain;
+            self.committed_author = self.pending_author;
         }
         self.len = 0;
         self.uncertain = false;
+        self.pending_author = .user;
         self.generation +%= 1;
     }
 };
@@ -466,4 +537,53 @@ test "syncFromCapture truncates oversized content to max_line" {
     @memset(&oversized, 'x');
     l.syncFromCapture(&oversized);
     try std.testing.expectEqual(@as(usize, max_line), l.len);
+}
+
+test "Author defaults to .user, persists across uneventful applyInput" {
+    var l = LineState{};
+    try std.testing.expectEqual(Author.user, l.pending_author);
+    try std.testing.expectEqual(Author.user, l.committedAuthor());
+
+    _ = l.applyInput("ls");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "setCommitAuthor stages the next commit's author; submit() snapshots it" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    try std.testing.expectEqual(Author.llm, l.pending_author);
+
+    _ = l.applyInput("ls\r");
+    // After commit: committed_author carries the staged author;
+    // pending_author resets so the NEXT line starts fresh.
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "clearLastCommitted resets committed_author to .user" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("ls\r");
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+
+    l.clearLastCommitted();
+    try std.testing.expectEqual(Author.user, l.committedAuthor());
+}
+
+test "reset() drops pending author (Ctrl-C / Ctrl-D / unknown CSI mid-line)" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+
+    // Ctrl-C — caller-facing reset.
+    _ = l.applyInput("partial\x03");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "setCommitted propagates pending_author to committed_author" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    l.setCommitted("echo hi");
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+    // And pending resets so the next line starts as .user.
+    try std.testing.expectEqual(Author.user, l.pending_author);
 }
