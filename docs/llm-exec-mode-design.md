@@ -185,8 +185,6 @@ pub const LlmExec = struct {
     api_base: []const u8 = "http://localhost:11434/v1",
     /// First model in this list is the default; Alt+M cycles through.
     models: []const []const u8 = &.{ "qwen3-coder" },
-    /// Default mode when user just presses Enter (we override with Alt-key).
-    /// Kept for future use; currently Enter is a no-op.
     /// Maximum conversation turns kept in memory.
     history_turns_max: u8 = 8,
     /// Total bytes of conversation budget; older turns dropped to fit.

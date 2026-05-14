@@ -347,19 +347,35 @@ pub fn Dispatcher(comptime modules: anytype) type {
         /// the llm module ignores ghost_accept, the history module
         /// ignores llm_exec_dialog).
         ///
-        /// Per-module errors are swallowed — same shape as
-        /// `dispatchDeleteHistoryMatch`. The proxy needs the call
-        /// to complete so the binding-bytes-swallow logic runs.
+        /// Returns true if ANY module reported it consumed the
+        /// action. The proxy uses that to decide whether to swallow
+        /// the binding bytes — when no module consumed (e.g. Alt+A
+        /// pressed outside AI mode, or the llm module isn't
+        /// configured), the bytes flow through to readline / the
+        /// inner program so meta-key shortcuts still work where the
+        /// user expects them.
+        ///
+        /// Per-module errors are LOGGED to stderr (silent swallow
+        /// would lose signal for future modules; the proxy can't
+        /// usefully recover from a module-level error here either
+        /// way) and treated as "not consumed". Same shape as
+        /// `dispatchDeleteHistoryMatch` except for the logging.
         pub fn dispatchAction(
             rts: *Runtimes,
             ctx: *Context,
             action: anytype,
-        ) void {
+        ) bool {
+            var consumed = false;
             inline for (modules, 0..) |M, i| {
                 if (comptime @hasDecl(M, "onAction")) {
-                    M.onAction(rts[i], ctx, action) catch {};
+                    if (M.onAction(rts[i], ctx, action)) |c| {
+                        if (c) consumed = true;
+                    } else |err| {
+                        std.debug.print("[atty] dispatchAction: module {s} failed: {t}\n", .{ M.name, err });
+                    }
                 }
             }
+            return consumed;
         }
     };
 }

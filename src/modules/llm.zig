@@ -483,6 +483,13 @@ pub fn configure(comptime cfg: Config) type {
         /// `#: `). Outside AI mode, the actions no-op silently so
         /// stray Alt-key presses don't surprise the user.
         ///
+        /// **Returns** true when the action was handled (proxy
+        /// swallows the binding bytes); false when not (proxy
+        /// lets the bytes flow through to readline / the inner
+        /// program — so e.g. Alt+a outside AI mode still hits
+        /// readline's "set-mark" or whatever the user has bound
+        /// there).
+        ///
         /// Per-action behaviour:
         /// - `llm_exec_single`: same as `#:<Enter>` — kick the
         ///   worker with the current line body, queue Ctrl+U for
@@ -491,42 +498,84 @@ pub fn configure(comptime cfg: Config) type {
         ///   lands.
         /// - `llm_exec_dialog` / `_auto`: TODO (dialog state
         ///   machine not yet wired). For now, latch a
-        ///   "coming soon" error so the user sees feedback.
+        ///   "coming soon" hint so the user sees feedback.
         /// - `llm_exec_cycle_model`: rotates `current_model_idx`
         ///   through the configured list. TODO until the model
         ///   list config arrives.
         /// - `llm_exec_toggle_help`: TODO — help overlay not yet
         ///   wired.
-        /// - `llm_exec_cancel`: clears any in-flight state,
-        ///   drains pending injection, exits AI mode. Safe to
-        ///   call at any time.
-        pub fn onAction(rt: *Runtime, ctx: *m.Context, action: keymap.Action) m.Error!void {
+        /// - `llm_exec_cancel`: clears any in-flight state, bumps
+        ///   the worker's req_gen so a late response is dropped,
+        ///   wipes the typed prompt via Ctrl+U injection, clears
+        ///   ai_mode_active. Works outside AI mode too (drains
+        ///   any leftover state).
+        pub fn onAction(rt: *Runtime, ctx: *m.Context, action: keymap.Action) m.Error!bool {
             switch (action) {
                 .llm_exec_single => {
-                    if (!rt.ai_mode_active) return;
+                    if (!rt.ai_mode_active) return false;
                     const line = ctx.line.current();
+                    const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
+                    // Empty body — user pressed Alt+A right after
+                    // typing `#: ` with no task. Latch a hint
+                    // (info-style, not error) so feedback is
+                    // visible. No worker call, no Ctrl+U; the
+                    // user keeps typing.
+                    if (body.len == 0) {
+                        latchHint(rt, "type your task after `#: ` then press Alt+A");
+                        return true; // consumed (we displayed feedback)
+                    }
                     _ = triggerSinglePrompt(rt, ctx, line, .queue_pending_injection);
+                    // Clear AI mode immediately — the line is
+                    // about to be wiped by Ctrl+U, so the prefix
+                    // won't match next time `onInput` recomputes
+                    // the flag. Without this, the verbose hint
+                    // would linger in the statusbar until the
+                    // user's next keystroke.
+                    rt.ai_mode_active = false;
+                    return true;
                 },
                 .llm_exec_dialog, .llm_exec_auto => {
-                    if (!rt.ai_mode_active) return;
-                    latchErr(rt, "exec dialog/auto coming in a follow-up commit — use Alt+A for now");
+                    if (!rt.ai_mode_active) return false;
+                    latchHint(rt, "exec dialog/auto coming in a follow-up commit — use Alt+A for now");
+                    return true;
                 },
                 .llm_exec_cycle_model => {
-                    if (!rt.ai_mode_active) return;
-                    latchErr(rt, "model cycling not yet wired — single model in use");
+                    if (!rt.ai_mode_active) return false;
+                    latchHint(rt, "model cycling not yet wired — single model in use");
+                    return true;
                 },
                 .llm_exec_toggle_help => {
-                    if (!rt.ai_mode_active) return;
-                    latchErr(rt, "help overlay coming in a follow-up commit");
+                    if (!rt.ai_mode_active) return false;
+                    latchHint(rt, "help overlay coming in a follow-up commit");
+                    return true;
                 },
                 .llm_exec_cancel => {
-                    // Cancel works outside AI mode too — drains any
-                    // pending state regardless. Cheap.
-                    rt.pending_injection_len = 0;
+                    // Bump req_gen so any in-flight worker
+                    // response is discarded as stale when it
+                    // lands. Without this, the worker would
+                    // happily inject the LLM-generated command
+                    // even after the user explicitly cancelled.
+                    rt.shared.mutex.lockUncancelable(ctx.io);
+                    rt.shared.req_gen +%= 1;
+                    rt.shared.res_done = false;
+                    rt.shared.res_len = 0;
+                    rt.shared.mutex.unlock(ctx.io);
+                    // Queue Ctrl+U so the typed `#: …` text gets
+                    // wiped from the shell prompt. Without this,
+                    // onInput would recompute ai_mode_active on
+                    // the very next keystroke from the still-
+                    // visible prefix and the user would land
+                    // right back in AI mode — surprising for an
+                    // explicit cancel.
+                    if (rt.ai_mode_active) {
+                        rt.pending_injection[0] = 0x15;
+                        rt.pending_injection_len = 1;
+                    }
                     rt.in_flight = false;
                     rt.ai_mode_active = false;
+                    return true;
                 },
-                else => {}, // not our action
+                else => return false, // not our action
             }
         }
 
@@ -707,8 +756,15 @@ pub fn configure(comptime cfg: Config) type {
             // glyph `prefix_signal_status_text` indicator so the
             // hint string is what shows once the user has typed
             // `#: `.
+            //
+            // `Esc cancel` is intentionally NOT advertised here —
+            // no Esc handler is wired yet on the proxy side and
+            // advertising a key that doesn't fire would mislead
+            // users. `Ctrl+Shift+X` (`llm_exec_cancel`) is the
+            // actual cancel binding; it's discoverable via Alt+H
+            // once the help overlay lands.
             if (rt.ai_mode_active) {
-                return "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Esc cancel";
+                return "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel";
             }
 
             // Legacy prefix signal — kept for users who set the

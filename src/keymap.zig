@@ -46,8 +46,13 @@ pub const Action = union(enum) {
     /// (line starts with `#: `) and presses the bound key (default
     /// Alt+A). Strips the `#: ` prefix from `line_state`, sends
     /// Ctrl+U to the shell, hands the task to the LLM module's
-    /// single-shot path. Existing `llm.zig` `#:`-on-Enter behaviour
-    /// is removed; everything is now explicit.
+    /// single-shot path.
+    ///
+    /// The legacy `#:<Enter>` trigger is also still wired (for
+    /// backwards compat) — both routes call the same
+    /// `triggerSinglePrompt` helper. Subsequent commits may
+    /// remove the Enter trigger in favour of the explicit-action
+    /// workflow.
     llm_exec_single,
     /// AI mode — dialog exec. LLM proposes a command + description,
     /// lands on the prompt with an indicator, user confirms with
