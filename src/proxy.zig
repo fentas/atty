@@ -316,7 +316,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         .is_tty = args.is_tty,
         .incognito = false,
         .subprocess = &subprocess_tracker,
-        .cursor_row = cursor_tracker.currentRow(),
+        // Null on non-TTY runs (CI capture, piped/redirected
+        // stdout). The slave's reported size is bogus there, so the
+        // tracker's row would be meaningless to consumers — matches
+        // the contract documented on `Context.cursor_row`.
+        .cursor_row = if (args.is_tty) cursor_tracker.currentRow() else null,
     };
 
     var pfds = [_]posix.pollfd{
@@ -916,7 +920,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 alt_screen.feed(output);
                 osc7_tracker.feed(output);
                 cursor_tracker.feed(output);
-                ctx.cursor_row = cursor_tracker.currentRow();
+                // Only surface the row to modules on real TTY runs
+                // — matches the null-on-non-TTY contract on
+                // `Context.cursor_row` and the startup gate above.
+                if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
 
                 // Walk the OSC 133 edge ring + OSC 7 capture ring
                 // INTERLEAVED by byte offset within the current
@@ -1156,7 +1163,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
                         cursor_tracker.setMaxRows(s.rows);
-                        ctx.cursor_row = cursor_tracker.currentRow();
+                        if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
                             // While an alt-screen TUI is running the

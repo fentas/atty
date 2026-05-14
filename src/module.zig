@@ -99,10 +99,28 @@ pub const Context = struct {
     /// by `cursor_tracker.zig`, fed every byte the shell writes to
     /// stdout. Modules can use it to decide overlay placement —
     /// e.g. a future dynamic statusbar that lives at the top when
-    /// the prompt is near the bottom and vice versa. Don't rely on
-    /// exact column accuracy: column isn't tracked, and the row is
-    /// approximate when the shell uses save/restore-cursor or its
-    /// own DECSTBM.
+    /// the prompt is near the bottom and vice versa.
+    ///
+    /// **Accuracy caveats — treat as approximate:**
+    /// - Column isn't tracked at all (statusbar reservation is a
+    ///   horizontal-band concept; the row alone suffices).
+    /// - **Soft-wrap drift**: a long printable line that exceeds
+    ///   `cols` auto-wraps in the terminal, advancing the cursor
+    ///   by one row without emitting any CSI or LF. The tracker
+    ///   doesn't see this and the row under-counts by however
+    ///   many wraps happened. Same applies to hard tabs that
+    ///   cross the right margin.
+    /// - Save / restore cursor (`\x1B[s` / `\x1B[u`, `\x1B 7` /
+    ///   `\x1B 8`) is not modelled. When the shell saves and
+    ///   restores, the tracker keeps its current value.
+    /// - Shell-side DECSTBM scrolling is also not modelled; if a
+    ///   future shell emits `\x1B[<t>;<b>r` and scrolls within
+    ///   it, the tracker keeps incrementing past the bottom of
+    ///   that region.
+    ///
+    /// Net: good enough for "is the prompt currently near the top
+    /// of the screen?" decisions. Don't use it for pixel-precise
+    /// cursor placement.
     cursor_row: ?u16 = null,
 
     /// Convenience wrapper around `formatCwd` — modules call this

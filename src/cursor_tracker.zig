@@ -25,6 +25,17 @@
 //!
 //! ## What is NOT tracked
 //!
+//! - **Auto-wrap (soft-wrap)**: when a printable line exceeds the
+//!   terminal's column count, the cursor advances by one row
+//!   AUTOMATICALLY without the shell emitting any CSI or `\n`.
+//!   We don't track columns, so we can't detect this — the row
+//!   under-counts by however many wraps happened. Same applies
+//!   to hard tabs that push past the right margin. This is the
+//!   biggest practical inaccuracy source: any bash session
+//!   running `ls -l` on a wide path or `cat`-ing a long line
+//!   will wrap. Consumers should treat the row as "where the
+//!   shell THINKS the cursor is" (modulo readline's view), not
+//!   "where the cursor actually is on screen".
 //! - Save / restore cursor (`\x1B[s` / `\x1B[u`, `\x1B 7` / `\x1B 8`).
 //!   When the shell saves and restores, this tracker doesn't know.
 //!   Acceptable: bash's readline doesn't use save/restore for prompt
