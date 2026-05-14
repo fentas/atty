@@ -1,0 +1,8 @@
+$ #:
+
+
+
+
+model: model-alpha
+
+atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-alpha · Alt+H help · Ctrl+Shift+X cancel

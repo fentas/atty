@@ -1,0 +1,40 @@
+# llm_alt_m_cycle_model — verify Alt+M cycles through models[] and
+# the new pick lands as a statusbar hint.
+#
+# Three models configured: model-alpha, -beta, -gamma. We type the
+# AI prefix (`#: `) to enter AI mode, then press Alt+M three times
+# and snapshot after each. The latched hint should rotate:
+#   alpha → beta → gamma → alpha (wrap)
+
+cols 120
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Enter AI mode so the action gate triggers.
+type "#: "
+sleep 200
+
+# First Alt+M — alpha is the startup default (idx 0), cycling
+# moves to beta (idx 1). Hint should show "model: model-beta".
+type "\x1bm"
+sleep 300
+snapshot first_cycle
+
+# Second Alt+M — beta → gamma.
+type "\x1bm"
+sleep 300
+snapshot second_cycle
+
+# Third Alt+M — gamma wraps back to alpha.
+type "\x1bm"
+sleep 300
+snapshot third_cycle_wrap
+
+# Give the shell + harness time to settle before exiting so the
+# exit_code assertion isn't racing the final snapshot's render.
+sleep 200
+type "exit\r"
+exit_code 0

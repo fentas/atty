@@ -45,7 +45,24 @@ pub const Config = struct {
     /// command.
     prefix: []const u8 = "#: ",
     /// LLM model identifier passed in the request body.
+    ///
+    /// **Selection precedence** (matches `triggerSinglePrompt`):
+    /// 1. If `cfg.models.len > 0` → use `cfg.models[idx]` where
+    ///    `idx = current_model_idx` when in range, else `0`
+    ///    (defensive fallback — `Alt+M` wraps so out-of-range
+    ///    shouldn't happen; if it does we use the first entry,
+    ///    NOT `cfg.model`).
+    /// 2. If `cfg.models` is empty → use this `cfg.model`.
+    ///
+    /// So this field is the SINGLE-MODEL fallback only — once
+    /// `cfg.models` is set, this value is unreachable. Kept for
+    /// backward compat with configs that pre-date `models[]`.
     model: []const u8 = "llama3:8b",
+    /// Configured model list — `Alt+M` cycles through this with
+    /// wrap-around. First entry is the default at startup.
+    /// Empty (default) → use the single `model` field above.
+    /// Example: `&.{ "qwen3-coder", "gpt-5-mini", "llama3:70b" }`.
+    models: []const []const u8 = &.{},
     /// Shell name for the user-prompt template. `null` → derive
     /// from `$SHELL` basename at attach time.
     shell: ?[]const u8 = null,
@@ -160,6 +177,22 @@ pub fn configure(comptime cfg: Config) type {
             req_buf: [cfg.max_prompt_bytes]u8 = undefined,
             req_len: usize = 0,
             req_pending: bool = false,
+            /// Selected model INDEX for the pending request.
+            /// Stored as an index (not a copy of the string) so we
+            /// can't truncate long model names AND there's no
+            /// length-zero sentinel confusion with an empty
+            /// `cfg.models[i]` (which would be a user-config bug
+            /// anyway). Filled by request-trigger sites (onInput /
+            /// onAction) under the same mutex that sets req_pending.
+            ///
+            /// Out-of-range sentinel: `model_idx == usize.max`
+            /// means "no models[] — fall back to cfg.model".
+            /// Worker resolves the slice from `cfg.models` at
+            /// read time. `cfg.*` strings are comptime/static so
+            /// the resolved slice's backing storage lives forever
+            /// — safe to use across the worker thread boundary
+            /// without a copy.
+            model_idx: usize = std.math.maxInt(usize),
             /// Monotonic counter — bumped on every prompt the proxy
             /// hands to the worker. The worker stamps each
             /// response with the generation it was serving; the
@@ -256,6 +289,22 @@ pub fn configure(comptime cfg: Config) type {
             // corresponding action. Enter in AI mode is swallowed
             // (no auto-fire). See `docs/llm-exec-mode-design.md`.
             ai_mode_active: bool = false,
+            /// Index into `cfg.models[]` for the currently-selected
+            /// model. Wraps around when `Alt+M` (`llm_exec_cycle_model`)
+            /// fires. Initialised to 0 at attach (first entry is
+            /// the default). Stays 0 forever when `cfg.models` is
+            /// empty; in that case the legacy `cfg.model` is used
+            /// instead.
+            current_model_idx: usize = 0,
+            /// Per-call format buffer for `statusText`. Used to
+            /// inject the current model name into the AI hint
+            /// when `cfg.models.len > 0` — `statusText` runs every
+            /// render tick, but the returned slice only needs to
+            /// outlive that single call, so a stable Runtime-owned
+            /// buffer is the right shape. 256 bytes ≈ the typical
+            /// statusbar width; longer hints are truncated by the
+            /// statusbar's own clamp.
+            status_buf: [256]u8 = undefined,
             /// Pending bytes for pollShellInput to surface. Used to
             /// route `\x15` (Ctrl+U) to the pty after onAction
             /// triggers a worker call — `onAction` can't synchronously
@@ -580,12 +629,64 @@ pub fn configure(comptime cfg: Config) type {
                 },
                 .llm_exec_cycle_model => {
                     if (!rt.ai_mode_active) return false;
-                    latchHint(rt, "model cycling not yet wired — single model in use");
+                    if (cfg.models.len == 0) {
+                        // Single-model config — nothing to cycle.
+                        // Honest feedback so users know why
+                        // Alt+M didn't do anything.
+                        latchHint(rt, "single-model config — set `models = &.{ ... }` to cycle");
+                        return true;
+                    }
+                    rt.current_model_idx = (rt.current_model_idx + 1) % cfg.models.len;
+                    // Latch a one-line hint with the new pick so
+                    // the user sees confirmation. Statusbar AI
+                    // hint will also reflect the new model on the
+                    // next tick (statusText appends the current
+                    // pick when models.len > 0).
+                    const new_model = cfg.models[rt.current_model_idx];
+                    var msg_buf: [128]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&msg_buf, "model: {s}", .{new_model}) catch new_model;
+                    latchHint(rt, msg);
                     return true;
                 },
                 .llm_exec_toggle_help => {
                     if (!rt.ai_mode_active) return false;
-                    latchHint(rt, "help overlay coming in a follow-up commit");
+                    // Help overlay — surface state that isn't in
+                    // the verbose AI hint: current model + how
+                    // many alternates are in the cycle, the
+                    // resolved endpoint, and a pointer at the
+                    // single way to actually cancel. Limited to
+                    // ~256 bytes; truncates gracefully on narrow
+                    // terms.
+                    //
+                    // BOTH cycle_info and the final message live in
+                    // `buf` so the cycle slice doesn't escape a
+                    // nested scope (a previous draft put cycle_info's
+                    // backing array inside a `blk` expression — the
+                    // slice outlived the array, classic stack-use-
+                    // after-scope hazard). One outer buffer, two
+                    // bufPrint calls into disjoint subslices.
+                    var buf: [256]u8 = undefined;
+                    const current: []const u8 = if (cfg.models.len > 0)
+                        cfg.models[rt.current_model_idx]
+                    else
+                        cfg.model;
+                    // Cycle info lives in the first 32 bytes of buf.
+                    const cycle_info: []const u8 = if (cfg.models.len > 1)
+                        std.fmt.bufPrint(buf[0..32], " ({d}/{d})", .{ rt.current_model_idx + 1, cfg.models.len }) catch ""
+                    else
+                        "";
+                    const endpoint: []const u8 = if (rt.api_base.len > 0) rt.api_base else "(inert — no endpoint)";
+                    // Message goes into the remaining bytes. cycle_info
+                    // is referenced before its underlying storage is
+                    // overwritten — bufPrint copies the formatted
+                    // string verbatim, so this read-then-write order
+                    // is safe.
+                    const msg = std.fmt.bufPrint(buf[32..], "model: {s}{s} · endpoint: {s} · Ctrl+Shift+X cancel · Ctrl+Shift+I incognito", .{ current, cycle_info, endpoint }) catch {
+                        // Truncated; render at least the model name.
+                        latchHint(rt, current);
+                        return true;
+                    };
+                    latchHint(rt, msg);
                     return true;
                 },
                 .llm_exec_cancel => {
@@ -660,6 +761,18 @@ pub fn configure(comptime cfg: Config) type {
                 return .forward;
             }
 
+            // Resolve the model INDEX to stage. Worker reads
+            // `cfg.models[idx]` directly when idx is in-range, else
+            // falls back to `cfg.model`. Out-of-range
+            // `current_model_idx` (shouldn't happen — Alt+M wraps —
+            // but defensive) clamps to 0.
+            const idx_to_send: usize = if (cfg.models.len == 0)
+                std.math.maxInt(usize) // sentinel: "no list, use cfg.model"
+            else if (rt.current_model_idx < cfg.models.len)
+                rt.current_model_idx
+            else
+                0;
+
             // Hand the prompt to the worker. Same locking + req-gen
             // bump as before — see the original onInput comment for
             // the stale-response guard rationale.
@@ -667,6 +780,7 @@ pub fn configure(comptime cfg: Config) type {
             defer rt.shared.mutex.unlock(ctx.io);
             @memcpy(rt.shared.req_buf[0..body.len], body);
             rt.shared.req_len = body.len;
+            rt.shared.model_idx = idx_to_send;
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
@@ -836,6 +950,21 @@ pub fn configure(comptime cfg: Config) type {
             // actual cancel binding; it's discoverable via Alt+H
             // once the help overlay lands.
             if (rt.ai_mode_active) {
+                // With a configured `models[]` list, surface the
+                // current pick inline so `Alt+M` cycling has
+                // immediate visible feedback in the statusbar
+                // (not just a transient latched hint). When the
+                // user has only the legacy `cfg.model` (no list),
+                // the static hint is fine — no point baking the
+                // single name into the bar.
+                if (cfg.models.len > 0) {
+                    const pick = cfg.models[rt.current_model_idx];
+                    return std.fmt.bufPrint(
+                        &rt.status_buf,
+                        "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M {s} · Alt+H help · Ctrl+Shift+X cancel",
+                        .{pick},
+                    ) catch "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel";
+                }
                 return "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel";
             }
 
@@ -908,9 +1037,22 @@ pub fn configure(comptime cfg: Config) type {
                 }
                 prompt_len = shared.req_len;
                 @memcpy(prompt_local[0..prompt_len], shared.req_buf[0..prompt_len]);
+                // Read the request-time model INDEX under the same
+                // lock. Trigger sites set `model_idx` to either a
+                // valid `cfg.models[]` index, or `usize.max` as the
+                // "no list, use cfg.model" sentinel. We resolve the
+                // slice AFTER releasing the lock — `cfg.models` is
+                // comptime-static, the resolved slice's storage
+                // outlives the worker thread.
+                const idx = shared.model_idx;
                 shared.req_pending = false;
                 serving_gen = shared.req_gen;
                 shared.mutex.unlock(io);
+
+                const model_for_request: []const u8 = if (idx < cfg.models.len)
+                    cfg.models[idx]
+                else
+                    cfg.model;
 
                 // Fire the HTTP request OUTSIDE the lock — it may
                 // block for many seconds.
@@ -925,6 +1067,7 @@ pub fn configure(comptime cfg: Config) type {
                     shell_name,
                     context_blob,
                     prompt_local[0..prompt_len],
+                    model_for_request,
                     &response_buf,
                     &explanation_local,
                     &error_local,
@@ -992,6 +1135,7 @@ pub fn configure(comptime cfg: Config) type {
             shell_name: []const u8,
             context_blob: []const u8,
             prompt: []const u8,
+            model: []const u8,
             out: []u8,
             explanation_out: []u8,
             error_out: []u8,
@@ -999,7 +1143,7 @@ pub fn configure(comptime cfg: Config) type {
             const url = try std.fmt.allocPrint(gpa, "{s}/chat/completions", .{api_base});
             defer gpa.free(url);
 
-            const body = try buildRequestBody(gpa, cfg.model, effective_system_prompt, shell_name, context_blob, prompt);
+            const body = try buildRequestBody(gpa, model, effective_system_prompt, shell_name, context_blob, prompt);
             defer gpa.free(body);
 
             var auth_buf: [256]u8 = undefined;
