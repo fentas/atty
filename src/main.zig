@@ -68,8 +68,16 @@ const shell_init_osc133_bash =
     \\# manager don't pay re-wrapping cost.
     \\__atty_osc133_d() { local __code=$?; printf '\033]133;D;%s\007' "$__code"; }
     \\__atty_osc133_wrap_ps1() {
+    \\    # Skip ONLY when both `;A` and `;B` are already in PS1
+    \\    # (in order) — that's atty's wrap signature. A partial
+    \\    # integration that injected `;A` alone (Ghostty's
+    \\    # `shell-integration-features = osc-133` does this for
+    \\    # some shells) would otherwise short-circuit us and atty
+    \\    # would never get its `;B` input-region marker, which is
+    \\    # what the OSC 133 tracker actually keys on for accurate
+    \\    # input capture.
     \\    case "$PS1" in
-    \\        *$'\033]133;A\007'*) return ;;
+    \\        *$'\033]133;A\007'*$'\033]133;B\007'*) return ;;
     \\    esac
     \\    PS1=$'\\[\033]133;A\007\\]'"${PS1}"$'\\[\033]133;B\007\\]'
     \\}

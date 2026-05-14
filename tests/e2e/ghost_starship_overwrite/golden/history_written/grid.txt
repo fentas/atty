@@ -1,7 +1,7 @@
-__fake_starship_precmd() { PS1='$ '; }
-PROMPT_COMMAND='__atty_osc133_d;__fake_starship_precmd;__att
-y_osc133_wrap_ps1'
-clear
+starship-survived-overwrite
+$ echo starship-survived-
+starship-survived-
+$ cat /tmp/atty-e2e-ghost-starship-overwrite
 echo starship-survived-overwrite
 echo starship-survived-
 cat /tmp/atty-e2e-ghost-starship-overwrite

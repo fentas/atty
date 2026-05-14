@@ -18,6 +18,12 @@ timeout_ms 5000
 spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
 
+# Reset the scenario-private history file so re-runs on the same
+# host don't accumulate prior commits — the cat snapshot below
+# asserts on exact file contents.
+type "rm -f /tmp/atty-e2e-ghost-starship-overwrite\r"
+wait_for "$"
+
 # Mirror the shipped `atty init bash` snippet, with the new
 # wrap-via-PROMPT_COMMAND mechanism.
 type "__atty_osc133_d() { local __code=$?; printf '\\033]133;D;%s\\007' \"$__code\"; }\r"

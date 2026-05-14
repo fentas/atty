@@ -1050,8 +1050,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         // play that would explain that is a
                         // global DECSTBM. Force the reset so we
                         // remove all doubt.
+                        //
+                        // Wrap in DECSC/DECRC (`\x1B[s` / `\x1B[u`)
+                        // because `CSI r` with no parameters resets
+                        // the scroll region AND homes the cursor on
+                        // every VT/xterm-compatible terminal. The
+                        // TUI may have already positioned its
+                        // cursor inside the same chunk that
+                        // contained `?1049h`; without save/restore
+                        // we'd snap it back to (1,1) and corrupt
+                        // its first frame. `StatusBar.reactivate`
+                        // uses the same wrap on the exit path for
+                        // the symmetric reason.
                         if (statusbar != null) {
-                            _ = writeAll(posix.STDOUT_FILENO, "\x1B[r") catch {};
+                            _ = writeAll(posix.STDOUT_FILENO, "\x1B[s\x1B[r\x1B[u") catch {};
                         }
                     } else {
                         // EXIT (`?1049l`): restore DECSTBM + clear
