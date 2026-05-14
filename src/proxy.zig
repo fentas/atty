@@ -1035,13 +1035,31 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (alt_transitioned) {
                     // Slave size is always FULL (see startup
                     // comment) — no per-transition resize needed.
-                    // On EXIT (`?1049l`) we still need to restore
-                    // DECSTBM + clear the reserved rows, because
-                    // the alt-screen TUI may have emitted `\x1B[r`
-                    // on its own buffer and on terminals where
-                    // DECSTBM is global that propagates to the
-                    // primary screen.
-                    if (!alt_now_active) {
+                    if (alt_now_active) {
+                        // ENTER: explicitly reset DECSTBM so the
+                        // inner TUI's drawing isn't clipped by the
+                        // statusbar's reserved scroll region. Most
+                        // terminals (xterm, kitty, alacritty) give
+                        // the alt-screen buffer its own DECSTBM
+                        // defaulting to (1, rows), so this is a
+                        // no-op. Ghostty's behaviour is less
+                        // documented and we've seen LazyVim's
+                        // dashboard render as if it lived in a
+                        // box of `effectiveRows()` instead of
+                        // `rows` — the only mechanism atty has in
+                        // play that would explain that is a
+                        // global DECSTBM. Force the reset so we
+                        // remove all doubt.
+                        if (statusbar != null) {
+                            _ = writeAll(posix.STDOUT_FILENO, "\x1B[r") catch {};
+                        }
+                    } else {
+                        // EXIT (`?1049l`): restore DECSTBM + clear
+                        // the reserved rows, because the alt-screen
+                        // TUI may have emitted `\x1B[r` on its own
+                        // buffer and on terminals where DECSTBM is
+                        // global that propagates to the primary
+                        // screen.
                         if (statusbar) |*sb| {
                             var w2: std.Io.Writer = .fixed(&out_buf);
                             sb.reactivate(&w2) catch {};
