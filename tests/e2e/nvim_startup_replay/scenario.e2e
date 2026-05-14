@@ -24,8 +24,11 @@ type "cat $ATTY_SCENARIO_DIR/../fixtures/nvim-startup-4k.bin\r"
 sleep 600
 snapshot nvim_initial_frame
 
-# Don't exit — the fixture left the terminal in alt-screen mode in
-# the harness's view (even though vt-grid ignores ?1049h, some
-# other state might be stale). Just kill the session.
+# Cleanly exit bash so the harness can collect the exit code.
+# The fixture left the terminal in alt-screen mode in the
+# harness's view (even though vt-grid ignores ?1049h, residual
+# state from the captured nvim run might have leaked); the exit
+# itself unwinds the shell normally and the harness shutdown
+# tears down the rest.
 type "exit\r"
 exit_code 0
