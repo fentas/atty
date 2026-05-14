@@ -41,6 +41,55 @@ pub const Action = union(enum) {
     /// Esc+1..Esc+9 (legacy ESC+digit; doubles as Alt+digit on
     /// non-kitty terminals).
     ghost_pick: u8,
+
+    /// AI mode — single-prompt. Fires when the user is in AI mode
+    /// (line starts with `#: `) and presses the bound key (default
+    /// Alt+A). The module:
+    /// - reads the task body from `line_state.current()` (after the
+    ///   prefix), trimmed of surrounding whitespace
+    /// - signals the worker thread with the task
+    /// - queues `\x15` (Ctrl+U) on `pending_injection` so the next
+    ///   `pollShellInput` tick drains it to the shell, which wipes
+    ///   the typed `#: …` text. The LLM response is then injected
+    ///   when the worker finishes.
+    /// - clears `ai_mode_active` (the line is about to be wiped)
+    ///
+    /// The legacy `#:<Enter>` trigger is also still wired for
+    /// backwards compat — both routes call the same
+    /// `triggerSinglePrompt` helper. The only difference is how
+    /// Ctrl+U gets surfaced: the Enter path returns
+    /// `.replace_commit = "\x15"` from `onInput` (the proxy
+    /// substitutes the Enter), the Alt+A path queues it on
+    /// `pending_injection` (since `onAction` has no return-value
+    /// channel to the proxy). Subsequent commits may remove the
+    /// Enter trigger in favour of the explicit-action workflow.
+    llm_exec_single,
+    /// AI mode — dialog exec. LLM proposes a command + description,
+    /// lands on the prompt with an indicator, user confirms with
+    /// Enter or cancels. Command's output is fed back to the LLM,
+    /// which decides the next step (command, question, or done).
+    /// Loop continues until done or `llm_exec_cancel`. Default
+    /// binding: Alt+S. Requires OSC 133 (`;C`/`;D`) for output
+    /// capture — fails hard with a statusbar message if absent.
+    llm_exec_dialog,
+    /// AI mode — auto exec. Same as dialog but auto-confirms each
+    /// command after a brief visible delay
+    /// (`config.llm_exec.auto_delay_ms`). Default binding:
+    /// Alt+Shift+S.
+    llm_exec_auto,
+    /// AI mode — cycle through the configured `models` list.
+    /// Current pick surfaces in the statusbar. Default Alt+M.
+    llm_exec_cycle_model,
+    /// AI mode — open/close the help overlay listing keys + current
+    /// state. Default Alt+H.
+    llm_exec_toggle_help,
+    /// Cancel a running exec loop (dialog or auto). Returns to the
+    /// shell prompt at a clean state, clears any captured output
+    /// and partially-generated suggestions. Default Ctrl+Shift+X.
+    /// Works while exec is running OR while AI mode is just entered
+    /// but no action has fired yet (in which case it's equivalent
+    /// to Esc).
+    llm_exec_cancel,
 };
 
 pub const Binding = struct {

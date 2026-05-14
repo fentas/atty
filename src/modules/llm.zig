@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const m = @import("../module.zig");
+const keymap = @import("../keymap.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
@@ -246,6 +247,24 @@ pub fn configure(comptime cfg: Config) type {
             cursor_signal_active: bool = false,
             /// True while a prompt is in flight.
             in_flight: bool = false,
+
+            // ── AI mode state (the "explicit-actions" workflow) ──
+            //
+            // User types `#: ` (the prefix) → ai_mode_active flips
+            // true → statusbar swaps to the AI hint → user presses
+            // one of Alt+A / Alt+S / Alt+Shift+S to fire the
+            // corresponding action. Enter in AI mode is swallowed
+            // (no auto-fire). See `docs/llm-exec-mode-design.md`.
+            ai_mode_active: bool = false,
+            /// Pending bytes for pollShellInput to surface. Used to
+            /// route `\x15` (Ctrl+U) to the pty after onAction
+            /// triggers a worker call — `onAction` can't synchronously
+            /// modify the stdin path, so it queues the kill-line byte
+            /// here and the next pollShellInput tick drains it
+            /// AHEAD of the response. The pending injection always
+            /// fits in 16 bytes (a Ctrl+U or a short ESC sequence).
+            pending_injection: [16]u8 = undefined,
+            pending_injection_len: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -424,6 +443,17 @@ pub fn configure(comptime cfg: Config) type {
         // ---- hooks --------------------------------------------------------
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
+            // Observe the line state to maintain `ai_mode_active`.
+            // Runs on EVERY keystroke (cheap — just a prefix
+            // check). When the user types `#: ` the flag flips to
+            // true; the statusText hook reads the flag and swaps
+            // the bar's text to the AI mode hint. Backspacing the
+            // prefix flips it back. Mode is observational only;
+            // the action keys (Alt+A / Alt+S / Alt+Shift+S) are
+            // what actually trigger LLM work — see `onAction`
+            // below + `docs/llm-exec-mode-design.md`.
+            rt.ai_mode_active = std.mem.startsWith(u8, ctx.line.current(), cfg.prefix);
+
             const is_enter = blk: {
                 for (input) |b| if (b == 0x0D or b == 0x0A) break :blk true;
                 break :blk false;
@@ -435,36 +465,204 @@ pub fn configure(comptime cfg: Config) type {
             const line = ctx.line.lastCommitted() orelse ctx.line.current();
             if (!std.mem.startsWith(u8, line, cfg.prefix)) return .forward;
 
+            // Enter in AI mode is intentionally a no-op for
+            // dialog/auto modes (you must explicitly pick an action
+            // key — security against accidental LLM calls). For the
+            // single-shot single-prompt path, we KEEP the legacy
+            // `#:<Enter>` trigger here so existing user muscle
+            // memory still works alongside the new `Alt+A`. Both
+            // routes call `triggerSinglePrompt` so the behaviour is
+            // identical.
+            const result = triggerSinglePrompt(rt, ctx, line, .replace_commit_on_enter);
+            // Mirror the Alt+A eager-clear of `ai_mode_active`.
+            // The shell wipes the line via the returned
+            // `.replace_commit = "\x15"`, so the prefix is gone
+            // from line_state on the next keystroke. Clearing
+            // ai_mode_active now means the verbose statusbar hint
+            // disappears immediately, not on the next keypress —
+            // same flicker-free behaviour the Alt+A path has.
+            // Gated on api_base.len for the same reason: inert
+            // mode keeps the user in AI mode so they can fix
+            // config + retry.
+            if (rt.api_base.len != 0 and result == .replace_commit) {
+                rt.ai_mode_active = false;
+            }
+            return result;
+        }
+
+        /// Dispatch site for the keymap actions `llm_exec_*`. The
+        /// proxy calls this for every binding match; the module
+        /// gates each action on `ai_mode_active` (i.e. the user is
+        /// currently inside an AI prompt — the line starts with
+        /// `#: `). Outside AI mode, the actions no-op silently so
+        /// stray Alt-key presses don't surprise the user.
+        ///
+        /// **Returns** true when the action was handled (proxy
+        /// swallows the binding bytes); false when not (proxy
+        /// lets the bytes flow through to readline / the inner
+        /// program — so e.g. Alt+a outside AI mode still hits
+        /// readline's "set-mark" or whatever the user has bound
+        /// there).
+        ///
+        /// Per-action behaviour:
+        /// - `llm_exec_single`: same as `#:<Enter>` — kick the
+        ///   worker with the current line body, queue Ctrl+U for
+        ///   the next `pollShellInput` tick to wipe the typed
+        ///   `#: …` text. The LLM response gets injected when it
+        ///   lands.
+        /// - `llm_exec_dialog` / `_auto`: TODO (dialog state
+        ///   machine not yet wired). For now, latch a
+        ///   "coming soon" hint so the user sees feedback.
+        /// - `llm_exec_cycle_model`: rotates `current_model_idx`
+        ///   through the configured list. TODO until the model
+        ///   list config arrives.
+        /// - `llm_exec_toggle_help`: TODO — help overlay not yet
+        ///   wired.
+        /// - `llm_exec_cancel`: clears any in-flight state, bumps
+        ///   the worker's req_gen so a late response is dropped,
+        ///   wipes the typed prompt via Ctrl+U injection, clears
+        ///   ai_mode_active. Works outside AI mode too (drains
+        ///   any leftover state).
+        pub fn onAction(rt: *Runtime, ctx: *m.Context, action: keymap.Action) m.Error!bool {
+            switch (action) {
+                .llm_exec_single => {
+                    if (!rt.ai_mode_active) return false;
+                    const line = ctx.line.current();
+                    const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
+                    // Empty body — user pressed Alt+A right after
+                    // typing `#: ` with no task. Info hint, no
+                    // worker call, no Ctrl+U; user keeps typing.
+                    if (body.len == 0) {
+                        latchHint(rt, "type your task after `#: ` then press Alt+A");
+                        return true; // consumed (we displayed feedback)
+                    }
+                    // Over-length body — explicit hint instead of
+                    // a silent no-op. Without this, `trigger
+                    // SinglePrompt`'s internal `body.len >
+                    // max_prompt_bytes` branch would return
+                    // `.forward` without queuing Ctrl+U or
+                    // latching feedback, and the Alt+A press
+                    // would visibly do nothing.
+                    if (body.len > cfg.max_prompt_bytes) {
+                        latchHint(rt, "prompt too long — shorten the task and try again");
+                        return true;
+                    }
+                    _ = triggerSinglePrompt(rt, ctx, line, .queue_pending_injection);
+                    // Clear AI mode immediately — the line is
+                    // about to be wiped by Ctrl+U, so the prefix
+                    // won't match next time `onInput` recomputes
+                    // the flag. Without this, the verbose hint
+                    // would linger in the statusbar until the
+                    // user's next keystroke.
+                    //
+                    // BUT only when the worker actually got the
+                    // prompt. In inert mode (no api_base resolved
+                    // at attach), `triggerSinglePrompt` latches
+                    // the "no endpoint" error and returns without
+                    // queuing Ctrl+U — so the typed `#: …` text
+                    // stays on the prompt. If we cleared
+                    // ai_mode_active here, the very next
+                    // keystroke would see the prefix still on
+                    // line_state.current() and flip the flag
+                    // back to true, producing a visible one-
+                    // tick flicker in the statusbar hint. Inert
+                    // mode is the user's signal to fix their
+                    // config + re-try, so leave them IN AI mode
+                    // — the error notification points at the
+                    // fix.
+                    if (rt.api_base.len != 0) rt.ai_mode_active = false;
+                    return true;
+                },
+                .llm_exec_dialog, .llm_exec_auto => {
+                    if (!rt.ai_mode_active) return false;
+                    latchHint(rt, "exec dialog/auto coming in a follow-up commit — use Alt+A for now");
+                    return true;
+                },
+                .llm_exec_cycle_model => {
+                    if (!rt.ai_mode_active) return false;
+                    latchHint(rt, "model cycling not yet wired — single model in use");
+                    return true;
+                },
+                .llm_exec_toggle_help => {
+                    if (!rt.ai_mode_active) return false;
+                    latchHint(rt, "help overlay coming in a follow-up commit");
+                    return true;
+                },
+                .llm_exec_cancel => {
+                    // Only claim consumed when there's actual
+                    // state to clear — otherwise the user's
+                    // Ctrl+Shift+X bytes flow through to any
+                    // inner program (vim / emacs / less) that
+                    // might bind them. Without this gate every
+                    // stray Ctrl+Shift+X in a normal shell got
+                    // eaten by atty.
+                    const had_work = rt.in_flight or rt.ai_mode_active or rt.pending_injection_len > 0;
+                    if (!had_work) return false;
+
+                    // Bump req_gen so any in-flight worker
+                    // response is discarded as stale when it
+                    // lands. Without this, the worker would
+                    // happily inject the LLM-generated command
+                    // even after the user explicitly cancelled.
+                    rt.shared.mutex.lockUncancelable(ctx.io);
+                    rt.shared.req_gen +%= 1;
+                    rt.shared.res_done = false;
+                    rt.shared.res_len = 0;
+                    rt.shared.mutex.unlock(ctx.io);
+                    // Queue Ctrl+U so the typed `#: …` text gets
+                    // wiped from the shell prompt. Without this,
+                    // onInput would recompute ai_mode_active on
+                    // the very next keystroke from the still-
+                    // visible prefix and the user would land
+                    // right back in AI mode — surprising for an
+                    // explicit cancel.
+                    if (rt.ai_mode_active) {
+                        queueInjection(rt, "\x15");
+                    } else {
+                        // Cancel fired with no AI prefix visible —
+                        // could be the "in_flight after Alt+A
+                        // already cleared the prefix" path. Drop
+                        // any already-queued pending_injection
+                        // so the explicit "clear all pending
+                        // state" semantic is honoured. queueing
+                        // a fresh Ctrl+U above already overwrites,
+                        // but this branch makes the intent clear
+                        // for the no-active-AI case.
+                        rt.pending_injection_len = 0;
+                    }
+                    rt.in_flight = false;
+                    rt.ai_mode_active = false;
+                    return true;
+                },
+                else => return false, // not our action
+            }
+        }
+
+        /// Trigger source — affects whether we return `.replace_commit`
+        /// (the legacy `#:<Enter>` path) or queue the Ctrl+U on
+        /// `pending_injection` (the `Alt+A` action path, which has no
+        /// return-value channel to the proxy).
+        const TriggerKind = enum { replace_commit_on_enter, queue_pending_injection };
+
+        fn triggerSinglePrompt(
+            rt: *Runtime,
+            ctx: *m.Context,
+            line: []const u8,
+            kind: TriggerKind,
+        ) m.Action {
             const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
             if (body.len == 0 or body.len > cfg.max_prompt_bytes) return .forward;
             if (rt.api_base.len == 0) {
-                // Inert mode — the user has the module configured but
-                // no endpoint resolved at attach time. Silently
-                // forwarding looks like a broken feature ("nothing
-                // happens"), so latch an error notification that the
-                // next `provideErrorText` tick will surface above
-                // the status bar (muted red + ⚠ so it pops). We
-                // still .forward so the typed `#: …` reaches the
-                // shell — bash/zsh treat it as a comment, no harm
-                // done, and the user doesn't lose what they typed.
-                //
-                // Message is comptime-built from the configured env
-                // var names + a hint about `Config.api_base` so
-                // users who renamed `api_base_env` see THEIR names,
-                // not the literal `$LLM_API_BASE`.
+                // Inert mode — the user has the module configured
+                // but no endpoint resolved at attach time. Latch
+                // the muted-red ⚠ error notification.
                 latchErr(rt, inert_error_msg);
                 return .forward;
             }
 
-            // Hand the prompt to the worker. Bump `req_gen` so a
-            // late-arriving response from a previous in-flight
-            // request gets discarded by pollShellInput (the
-            // stale-response guard — pressing Enter twice in
-            // quick succession shouldn't surface the first
-            // request's command in place of the second's). Also
-            // clear any cached response right here so the proxy
-            // can't see stale data while the new worker call is
-            // in flight.
+            // Hand the prompt to the worker. Same locking + req-gen
+            // bump as before — see the original onInput comment for
+            // the stale-response guard rationale.
             rt.shared.mutex.lockUncancelable(ctx.io);
             defer rt.shared.mutex.unlock(ctx.io);
             @memcpy(rt.shared.req_buf[0..body.len], body);
@@ -476,21 +674,36 @@ pub fn configure(comptime cfg: Config) type {
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
 
-            // `.replace_commit = "\x15"` swaps the Enter for Ctrl+U
-            // (unix-line-discard). readline kills the typed
-            // `#: …` immediately — the user sees the line vanish
-            // while we wait. The LLM response will be injected
-            // via pollShellInput once it arrives.
-            //
-            // `_commit` (vs plain `.replace`) tells the proxy to
-            // ALSO fire onLineCommit on the typed `#: <prompt>` so
-            // atuin / history record it. That gives ghost-suggest
-            // the prompt next time the user starts typing `#: l…`
-            // — same recall power as any normal command.
-            return .{ .replace_commit = "\x15" };
+            switch (kind) {
+                .replace_commit_on_enter => return .{ .replace_commit = "\x15" },
+                .queue_pending_injection => {
+                    // onAction can't return an Action that the
+                    // proxy injects. Queue the Ctrl+U on
+                    // `pending_injection` so the next
+                    // pollShellInput tick (~50ms) surfaces it
+                    // ahead of any LLM response. Same visible
+                    // effect: line gets wiped, response gets
+                    // injected when ready.
+                    queueInjection(rt, "\x15");
+                    return .forward;
+                },
+            }
         }
 
         pub fn pollShellInput(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            // Drain `pending_injection` ahead of the worker's
+            // response. Used by the `onAction` path (Alt+A) to
+            // route `\x15` (Ctrl+U) to the pty so the typed
+            // `#: …` is wiped — onAction has no return-value
+            // channel to the proxy. One-shot; cleared on read.
+            if (rt.pending_injection_len > 0) {
+                const n = rt.pending_injection_len;
+                @memcpy(rt.inject_buf[0..n], rt.pending_injection[0..n]);
+                rt.inject_len = n;
+                rt.pending_injection_len = 0;
+                return rt.inject_buf[0..n];
+            }
+
             rt.shared.mutex.lockUncancelable(ctx.io);
             defer rt.shared.mutex.unlock(ctx.io);
             if (!rt.shared.res_done) return null;
@@ -548,6 +761,20 @@ pub fn configure(comptime cfg: Config) type {
             return rt.inject_buf[0..rt.inject_len];
         }
 
+        /// Queue bytes on `pending_injection` for the next
+        /// `pollShellInput` tick to drain. Single entry point for
+        /// every site that wants to inject bytes synchronously
+        /// from a hook that has no return-value channel (i.e.
+        /// `onAction`). The compile-time assert pins the
+        /// invariant — `pending_injection` is fixed at 16 bytes
+        /// for the Ctrl+U / short-CSI use case; longer sequences
+        /// need to grow the buffer first.
+        fn queueInjection(rt: *Runtime, bytes: []const u8) void {
+            std.debug.assert(bytes.len <= rt.pending_injection.len);
+            @memcpy(rt.pending_injection[0..bytes.len], bytes);
+            rt.pending_injection_len = bytes.len;
+        }
+
         /// Synchronously latch a hint string on the Runtime so the
         /// next `provideHintText` tick surfaces it. For informational
         /// content (LLM explanation of the injected command).
@@ -594,11 +821,33 @@ pub fn configure(comptime cfg: Config) type {
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             if (rt.in_flight) return "\u{1F9E0} thinking…";
-            // Show a signal while the user is mid-typing a prompt
-            // whose first bytes match the configured prefix. Helps
-            // confirm "atty saw this is for the LLM" before the
-            // user even hits Enter. Suppressed during in-flight so
-            // we don't fight the thinking… spinner for real estate.
+
+            // AI mode hint: when the line starts with the prefix,
+            // surface the action keys so users discover the new
+            // workflow. Takes precedence over the older single-
+            // glyph `prefix_signal_status_text` indicator so the
+            // hint string is what shows once the user has typed
+            // `#: `.
+            //
+            // `Esc cancel` is intentionally NOT advertised here —
+            // no Esc handler is wired yet on the proxy side and
+            // advertising a key that doesn't fire would mislead
+            // users. `Ctrl+Shift+X` (`llm_exec_cancel`) is the
+            // actual cancel binding; it's discoverable via Alt+H
+            // once the help overlay lands.
+            if (rt.ai_mode_active) {
+                return "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel";
+            }
+
+            // Legacy prefix signal — kept for users who set the
+            // older `prefix_signal_status_text` to something custom
+            // and don't want the verbose AI hint. Reachable only
+            // when `ai_mode_active` is false (above branch took
+            // precedence), which today is the same condition as
+            // "prefix not matched" since the flag is wired to the
+            // same check. Keeping the code path so a future change
+            // (e.g. a config knob to suppress the verbose hint)
+            // doesn't break custom users.
             if (cfg.prefix_signal_status) {
                 const line = ctx.line.current();
                 if (std.mem.startsWith(u8, line, cfg.prefix)) {

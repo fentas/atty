@@ -1,0 +1,30 @@
+# llm_ai_mode_hint — statusbar swaps to AI hint when `#: ` typed.
+#
+# Pre-fix the statusbar showed `atty` (base_text). Post-fix, the
+# llm module's statusText hook returns the AI mode hint once
+# `Runtime.ai_mode_active` flips true (which it does in onInput
+# the moment line_state.current() starts with `#: `).
+#
+# We test both directions:
+#   1. Type `#: ` → hint appears
+#   2. Backspace the prefix → hint goes away, base text returns
+
+cols 100
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Type the AI mode prefix.
+type "#: "
+sleep 300
+snapshot ai_mode_active
+
+# Backspace the prefix away.
+type "\x7f\x7f\x7f"
+sleep 300
+snapshot ai_mode_inactive
+
+type "exit\r"
+exit_code 0

@@ -99,6 +99,23 @@ pub const Keymap = struct {
         .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match },
+
+        // LLM exec mode — action keys live INSIDE "AI mode" (when
+        // line_state starts with `#: `). The llm_exec module gates
+        // on its own internal `ai_mode` flag, so these bindings
+        // fire at any time but no-op outside AI mode. See
+        // `docs/llm-exec-mode-design.md` for the full design.
+        .{ .bytes = atty.keymap.key("Alt+a"), .action = .llm_exec_single },
+        .{ .bytes = atty.keymap.key("Alt+s"), .action = .llm_exec_dialog },
+        // Alt+Shift+s → terminals emit Alt+S (capital), encoded
+        // as ESC + S by the metaSendsEscape convention.
+        .{ .bytes = atty.keymap.key("Alt+S"), .action = .llm_exec_auto },
+        .{ .bytes = atty.keymap.key("Alt+m"), .action = .llm_exec_cycle_model },
+        .{ .bytes = atty.keymap.key("Alt+h"), .action = .llm_exec_toggle_help },
+        // Cancel works everywhere — not gated on AI mode (a
+        // running exec loop can extend past the AI-mode entry
+        // and the cancel is the safety lever for it).
+        .{ .bytes = atty.keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel },
         // Ghost pick — kitty kbd CSI-u + Esc+digit legacy fallback.
         // No-ops when `ghost.list_count == 0` (default) or N exceeds
         // the rendered list length.

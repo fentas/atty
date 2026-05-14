@@ -683,6 +683,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // them as mojibake or digit-argument.
                             if (!did_pick) swallow_after_binding = true;
                         },
+                        .llm_exec_single,
+                        .llm_exec_dialog,
+                        .llm_exec_auto,
+                        .llm_exec_cycle_model,
+                        .llm_exec_toggle_help,
+                        .llm_exec_cancel,
+                        => {
+                            // Hand the action to the llm module via
+                            // the generic onAction dispatch. Module
+                            // returns true iff it consumed the
+                            // action (e.g. AI mode active for the
+                            // exec_* actions). Only swallow when
+                            // consumed — otherwise the meta-key
+                            // bytes flow through to readline /
+                            // inner programs that may bind them
+                            // (emacs, less, vim, …).
+                            if (D.dispatchAction(&runtimes, &ctx, act)) {
+                                swallow_after_binding = true;
+                            }
+                        },
                     }
                 }
                 // Kitty keyboard protocol cleanup. With the
