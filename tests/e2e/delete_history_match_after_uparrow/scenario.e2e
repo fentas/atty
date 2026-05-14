@@ -60,21 +60,23 @@ sleep 300
 type "\x1b[100;6u"
 sleep 400
 
-# Verify the deletion via two output-only markers:
+# Verify the deletion via three output-only sync points:
 #
 #   • `HIT-COUNT=$(grep -c "echo $TGT" …)` — bash's readline echoes
 #     the typed line verbatim, so the literal text the harness sees
-#     during the type-then-echo phase contains `$(grep …)`, NOT the
-#     computed `HIT-COUNT=0` (or `=1`). Same trick for `$TGT`: the
-#     pattern in the recorded line is `"echo $TGT"` literally, so
-#     the grep can't self-match its own recorded entry — only the
-#     ORIGINAL `echo UPARROW-TARGET-99999` line.
-#   • `printf '\x44ONE\n'` — the typed bytes spell `\x44ONE` (six
-#     ASCII chars), but printf interprets `\x44` as the byte `D`
-#     so OUTPUT lands as `DONE`. `wait_for "DONE"` therefore blocks
-#     until printf actually runs AND its newline has flushed,
-#     giving bash time to redraw the next prompt before the
-#     snapshot captures.
+#     contains `$(grep …)`, NOT the computed `HIT-COUNT=0` (or
+#     `HIT-COUNT=1`). Same trick for `$TGT`: the recorded grep line
+#     carries `"echo $TGT"` literally, so the grep can't self-match
+#     its own entry — only the ORIGINAL `echo UPARROW-TARGET-99999`.
+#   • `printf '\x44ONE\n'` — the typed bytes spell `\x44ONE` (seven
+#     ASCII chars), but printf interprets `\x44` as the byte `D` so
+#     OUTPUT lands as `DONE`. `wait_for "DONE"` blocks until printf
+#     has actually run — its output cannot leak via the readline
+#     echo of the typed bytes.
+#   • A second chained command `printf 'P\x4FST-DONE\n'` emits
+#     `POST-DONE` for the same reason; waiting on it (below) blocks
+#     until the verification command has finished + bash redrew the
+#     prompt + accepted the second command + ran it.
 #
 # Snapshot pins `HIT-COUNT=0` (delete fired). A regression that
 # leaves the entry would emit `HIT-COUNT=1` here — the snapshot
