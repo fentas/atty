@@ -48,9 +48,10 @@ pub const Config = struct {
     ///
     /// **Selection precedence** (matches `triggerSinglePrompt`):
     /// 1. If `cfg.models.len > 0` → use `cfg.models[idx]` where
-    ///    `idx = current_model_idx` clamped to `cfg.models.len-1`
-    ///    (out-of-range falls back to `cfg.models[0]`, NOT
-    ///    `cfg.model`).
+    ///    `idx = current_model_idx` when in range, else `0`
+    ///    (defensive fallback — `Alt+M` wraps so out-of-range
+    ///    shouldn't happen; if it does we use the first entry,
+    ///    NOT `cfg.model`).
     /// 2. If `cfg.models` is empty → use this `cfg.model`.
     ///
     /// So this field is the SINGLE-MODEL fallback only — once
