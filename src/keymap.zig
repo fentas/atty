@@ -44,15 +44,25 @@ pub const Action = union(enum) {
 
     /// AI mode — single-prompt. Fires when the user is in AI mode
     /// (line starts with `#: `) and presses the bound key (default
-    /// Alt+A). Strips the `#: ` prefix from `line_state`, sends
-    /// Ctrl+U to the shell, hands the task to the LLM module's
-    /// single-shot path.
+    /// Alt+A). The module:
+    /// - reads the task body from `line_state.current()` (after the
+    ///   prefix), trimmed of surrounding whitespace
+    /// - signals the worker thread with the task
+    /// - queues `\x15` (Ctrl+U) on `pending_injection` so the next
+    ///   `pollShellInput` tick drains it to the shell, which wipes
+    ///   the typed `#: …` text. The LLM response is then injected
+    ///   when the worker finishes.
+    /// - clears `ai_mode_active` (the line is about to be wiped)
     ///
-    /// The legacy `#:<Enter>` trigger is also still wired (for
-    /// backwards compat) — both routes call the same
-    /// `triggerSinglePrompt` helper. Subsequent commits may
-    /// remove the Enter trigger in favour of the explicit-action
-    /// workflow.
+    /// The legacy `#:<Enter>` trigger is also still wired for
+    /// backwards compat — both routes call the same
+    /// `triggerSinglePrompt` helper. The only difference is how
+    /// Ctrl+U gets surfaced: the Enter path returns
+    /// `.replace_commit = "\x15"` from `onInput` (the proxy
+    /// substitutes the Enter), the Alt+A path queues it on
+    /// `pending_injection` (since `onAction` has no return-value
+    /// channel to the proxy). Subsequent commits may remove the
+    /// Enter trigger in favour of the explicit-action workflow.
     llm_exec_single,
     /// AI mode — dialog exec. LLM proposes a command + description,
     /// lands on the prompt with an indicator, user confirms with

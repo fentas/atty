@@ -355,11 +355,16 @@ pub fn Dispatcher(comptime modules: anytype) type {
         /// inner program so meta-key shortcuts still work where the
         /// user expects them.
         ///
-        /// Per-module errors are LOGGED to stderr (silent swallow
-        /// would lose signal for future modules; the proxy can't
-        /// usefully recover from a module-level error here either
-        /// way) and treated as "not consumed". Same shape as
-        /// `dispatchDeleteHistoryMatch` except for the logging.
+        /// Per-module errors are SILENTLY swallowed and treated as
+        /// "not consumed". We deliberately don't log to stderr
+        /// here: in a PTY proxy, stderr is the user's actual
+        /// terminal screen, and writing raw `[atty] …` diagnostic
+        /// text would corrupt the rendered grid (overlap with the
+        /// status bar / ghost overlays, scroll mid-frame). Same
+        /// reasoning the rest of the codebase already follows —
+        /// no production code path uses `std.debug.print`.
+        /// Future: route errors through a debug-trace facility
+        /// behind an env var when one exists.
         pub fn dispatchAction(
             rts: *Runtimes,
             ctx: *Context,
@@ -368,11 +373,8 @@ pub fn Dispatcher(comptime modules: anytype) type {
             var consumed = false;
             inline for (modules, 0..) |M, i| {
                 if (comptime @hasDecl(M, "onAction")) {
-                    if (M.onAction(rts[i], ctx, action)) |c| {
-                        if (c) consumed = true;
-                    } else |err| {
-                        std.debug.print("[atty] dispatchAction: module {s} failed: {t}\n", .{ M.name, err });
-                    }
+                    const result = M.onAction(rts[i], ctx, action) catch false;
+                    if (result) consumed = true;
                 }
             }
             return consumed;

@@ -516,13 +516,22 @@ pub fn configure(comptime cfg: Config) type {
                     const line = ctx.line.current();
                     const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
                     // Empty body — user pressed Alt+A right after
-                    // typing `#: ` with no task. Latch a hint
-                    // (info-style, not error) so feedback is
-                    // visible. No worker call, no Ctrl+U; the
-                    // user keeps typing.
+                    // typing `#: ` with no task. Info hint, no
+                    // worker call, no Ctrl+U; user keeps typing.
                     if (body.len == 0) {
                         latchHint(rt, "type your task after `#: ` then press Alt+A");
                         return true; // consumed (we displayed feedback)
+                    }
+                    // Over-length body — explicit hint instead of
+                    // a silent no-op. Without this, `trigger
+                    // SinglePrompt`'s internal `body.len >
+                    // max_prompt_bytes` branch would return
+                    // `.forward` without queuing Ctrl+U or
+                    // latching feedback, and the Alt+A press
+                    // would visibly do nothing.
+                    if (body.len > cfg.max_prompt_bytes) {
+                        latchHint(rt, "prompt too long — shorten the task and try again");
+                        return true;
                     }
                     _ = triggerSinglePrompt(rt, ctx, line, .queue_pending_injection);
                     // Clear AI mode immediately — the line is
