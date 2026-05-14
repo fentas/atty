@@ -254,13 +254,19 @@ pub const LineState = struct {
     }
 
     fn backspace(self: *LineState) void {
-        if (self.len == 0) return;
+        // Empty-buffer no-op: still drop any staged `pending_author`.
+        // The invariant is "line-editing intent on an empty buffer
+        // means the user is starting fresh" — without this the
+        // sequence `setCommitAuthor(.llm)` + Ctrl-H (with empty
+        // buffer) + new typing would leak the .llm tag onto a
+        // user-typed line. Editing a non-empty buffer keeps the
+        // staged author until / unless the edit reduces `len` to
+        // zero (handled by the second drop below).
+        if (self.len == 0) {
+            self.pending_author = .user;
+            return;
+        }
         self.len -= 1;
-        // Reaching an empty buffer is the user telling us they've
-        // cleaned house — drop the uncertain flag so ghost suggestions
-        // come back, AND drop any staged `pending_author`. After
-        // wiping an LLM-staged suggestion, the next thing the user
-        // types is theirs, not the model's.
         if (self.len == 0) {
             self.uncertain = false;
             self.pending_author = .user;
@@ -269,18 +275,31 @@ pub const LineState = struct {
     }
 
     fn killLine(self: *LineState) void {
-        if (self.len == 0) return;
+        // Empty-buffer Ctrl-U is a no-op for `len`/`uncertain`, but
+        // we still drop a staged `pending_author` for the same
+        // reason as `backspace` — line-editing on an empty buffer
+        // signals the user is starting fresh.
+        if (self.len == 0) {
+            self.pending_author = .user;
+            return;
+        }
         self.len = 0;
         self.uncertain = false;
-        // Drop the staged author too — Ctrl-U after an LLM
-        // suggestion means the user wiped it; whatever they type
-        // next is theirs, not the model's.
         self.pending_author = .user;
         self.generation +%= 1;
     }
 
     fn killWord(self: *LineState) void {
-        if (self.len == 0) return;
+        // Empty-buffer Ctrl-W: drop staged author (no-op intent
+        // signals "user starting fresh", see `backspace`). The
+        // non-empty path preserves the staged author when the kill
+        // leaves the buffer non-empty (still represents the
+        // LLM-staged line, just edited) and drops it only when the
+        // kill empties the buffer.
+        if (self.len == 0) {
+            self.pending_author = .user;
+            return;
+        }
         // Skip trailing spaces, then the word characters.
         var end = self.len;
         while (end > 0 and self.buffer[end - 1] == ' ') : (end -= 1) {}
@@ -666,6 +685,32 @@ test "Ctrl-W keeps pending author when the buffer is still non-empty afterward" 
     try std.testing.expect(l.len > 0);
     // The line still represents the LLM-staged suggestion — leave it.
     try std.testing.expectEqual(Author.llm, l.pending_author);
+}
+
+test "Ctrl-U on an empty buffer still drops a staged pending_author" {
+    // Pins the empty-buffer-early-return path: a user can stage
+    // `.llm` then immediately hit Ctrl-U before any chars arrive;
+    // the no-op edit must still clear the tag so the next
+    // user-typed line isn't mis-attributed.
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    _ = l.applyInput("\x15");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Ctrl-W on an empty buffer still drops a staged pending_author" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("\x17");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Backspace on an empty buffer still drops a staged pending_author" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("\x7f");
+    try std.testing.expectEqual(Author.user, l.pending_author);
 }
 
 test "submit-then-setCommitted preserves the snapshotted author" {
