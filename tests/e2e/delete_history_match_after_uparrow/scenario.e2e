@@ -60,40 +60,28 @@ sleep 300
 type "\x1b[100;6u"
 sleep 400
 
-# Verify the file no longer contains the entry. Pre-fix it would
-# still be there because the handler skipped on uncertain.
+# Verify the deletion via two output-only markers:
 #
-# Why grep through a shell variable instead of `cat`-ing the whole
-# file:
-#   • The file accumulates atty's other recorded commands (rm, PS1,
-#     …) across test runs — the recorded `rm` is appended BEFORE
-#     bash actually runs it, so the file persists with stale
-#     entries even though the scenario starts with an `rm -f`. The
-#     exact order also races with how fast bash flushes vs atty's
-#     history-write timing. A full snapshot is unavoidably brittle.
-#   • The grep command line itself gets recorded into the same
-#     file. Naively `grep -c UPARROW-TARGET-99999` would match its
-#     OWN recorded line and never report 0 — false negative on the
-#     deletion. Using `grep "echo $TGT"` makes the recorded grep
-#     line contain literal `$TGT`, not the expanded sentinel, so
-#     the pattern only matches the ORIGINAL recorded entry.
-# `HIT-COUNT=0` means the delete fired; `HIT-COUNT=1` means it
-# didn't.
-type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow)\r"
-# Wait for the COMPUTED `HIT-COUNT=0` literal — the typed command
-# contains `HIT-COUNT=$(grep …)` (with the `$(…)` substitution
-# form), NOT `HIT-COUNT=0`, so this pattern only matches the
-# actual command OUTPUT after bash has run the grep + substitution.
-# A previous draft used a fixed sentinel like `CHECK-DONE` but
-# bash's readline echoes the typed command verbatim — including
-# the literal text `CHECK-DONE` — so `wait_for "CHECK-DONE"` was
-# satisfied by the echoed input line BEFORE grep ran, capturing
-# the snapshot mid-command.
+#   • `HIT-COUNT=$(grep -c "echo $TGT" …)` — bash's readline echoes
+#     the typed line verbatim, so the literal text the harness sees
+#     during the type-then-echo phase contains `$(grep …)`, NOT the
+#     computed `HIT-COUNT=0` (or `=1`). Same trick for `$TGT`: the
+#     pattern in the recorded line is `"echo $TGT"` literally, so
+#     the grep can't self-match its own recorded entry — only the
+#     ORIGINAL `echo UPARROW-TARGET-99999` line.
+#   • `printf '\x44ONE\n'` — the typed bytes spell `\x44ONE` (six
+#     ASCII chars), but printf interprets `\x44` as the byte `D`
+#     so OUTPUT lands as `DONE`. `wait_for "DONE"` therefore blocks
+#     until printf actually runs AND its newline has flushed,
+#     giving bash time to redraw the next prompt before the
+#     snapshot captures.
 #
-# If the delete didn't fire, the grep would emit `HIT-COUNT=1` and
-# this wait would time out, failing the scenario — which is the
-# correct failure mode for a regression.
-wait_for "HIT-COUNT=0"
+# Snapshot pins `HIT-COUNT=0` (delete fired). A regression that
+# leaves the entry would emit `HIT-COUNT=1` here — the snapshot
+# would still capture deterministically (printf still runs), but
+# the grid diff would fail the test.
+type "TGT='UPARROW-TARGET-99999'; echo HIT-COUNT=$(grep -c \"echo $TGT\" /tmp/atty-e2e-delete-uparrow); printf '\\x44ONE\\n'\r"
+wait_for "DONE"
 snapshot history_after_delete
 
 # Clean exit.
