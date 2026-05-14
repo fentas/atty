@@ -259,6 +259,24 @@ pub const Osc133 = struct {
                 // signal we get; for full emitters, `;B` follows
                 // shortly and switches us into strict input capture.
                 //
+                // **If we were in `.in_command`, synthesize a
+                // `.cmd_end` edge first.** Partial emitters that
+                // never send `;D` (Ghostty) close commands by
+                // emitting the NEXT prompt's `;A` directly after
+                // the command output. Without this synthesis the
+                // subprocess tracker would never pop the frame
+                // pushed on `;C` — the stack would leak `.none`
+                // frames for ordinary commands and, worse, leave a
+                // recognised ssh / kubectl / sudo frame "active"
+                // after the user is back at the local prompt,
+                // mis-attributing every subsequent command.
+                //
+                // Gated on `.in_command` so full emitters (which
+                // arrive at `;A` from `.idle` after `;D`) don't
+                // synthesize a second pop.
+                if (self.phase == .in_command) {
+                    self.pushEdge(.cmd_end);
+                }
                 // **Clear `self.input` too** — without this, a
                 // sequence `;B…ls…;C…;D…;A` (the previous command
                 // committed, command ran, returned to a new
@@ -424,6 +442,57 @@ test "Osc133.inInputPhase: ;A alone (Ghostty-style partial integration) puts us 
     defer o.deinit();
     o.feed("\x1b]133;A\x07$ ");
     try testing.expect(o.inInputPhase());
+}
+
+test "Osc133: partial emitter ;A after ;C synthesizes a .cmd_end edge" {
+    // Regression: Ghostty-style partial emitters send `;A` + `;C`
+    // but no `;D`. Without synthesizing the close-edge here, the
+    // subprocess tracker would never pop the frame pushed on `;C`
+    // — stack leaks `.none` frames per command, and worse, a
+    // recognised ssh / kubectl / sudo frame stays "active" after
+    // the user is back at the local prompt, mis-attributing every
+    // subsequent command's `--cwd`.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07$ ls\x1b]133;C\x07");
+    // First ;A: idle → .at_prompt, no edge. First ;C: push cmd_start.
+    {
+        const edges = o.drainEdges();
+        try testing.expectEqual(@as(usize, 1), edges.len);
+        try testing.expectEqual(Osc133.Edge.cmd_start, edges[0]);
+    }
+    // Now the partial emitter skips ;D and goes straight to next ;A:
+    o.feed("output from ls\x1b]133;A\x07");
+    {
+        // Synthesized cmd_end fires here so the tracker's stack
+        // can pop the frame.
+        const edges = o.drainEdges();
+        try testing.expectEqual(@as(usize, 1), edges.len);
+        try testing.expectEqual(Osc133.Edge.cmd_end, edges[0]);
+    }
+    try testing.expect(o.inInputPhase()); // .at_prompt again
+}
+
+test "Osc133: full emitter ;A after ;D does NOT double-synthesize cmd_end" {
+    // Full emitters emit `;D` then `;A`. The `;D` already pushed
+    // cmd_end; the `;A` must NOT synthesize a second one or the
+    // proxy's subprocess Tracker would over-pop.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07out\x1b]133;D\x07");
+    {
+        const edges = o.drainEdges();
+        try testing.expectEqual(@as(usize, 2), edges.len);
+        try testing.expectEqual(Osc133.Edge.cmd_start, edges[0]);
+        try testing.expectEqual(Osc133.Edge.cmd_end, edges[1]);
+    }
+    // Now the next ;A arrives — we were in .idle (post-;D), so
+    // NO synthesis should fire.
+    o.feed("\x1b]133;A\x07");
+    {
+        const edges = o.drainEdges();
+        try testing.expectEqual(@as(usize, 0), edges.len);
+    }
 }
 
 test "Osc133: B → typed → C → D → A leaves currentInput() empty (not stale)" {
