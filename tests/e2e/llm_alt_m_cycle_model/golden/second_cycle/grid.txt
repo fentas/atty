@@ -5,4 +5,4 @@ $ #:
 
 model: model-gamma
 
-atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel
+atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-gamma · Alt+H help · Ctrl+Shift+X cancel

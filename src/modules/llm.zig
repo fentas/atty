@@ -279,6 +279,15 @@ pub fn configure(comptime cfg: Config) type {
             /// empty; in that case the legacy `cfg.model` is used
             /// instead.
             current_model_idx: usize = 0,
+            /// Per-call format buffer for `statusText`. Used to
+            /// inject the current model name into the AI hint
+            /// when `cfg.models.len > 0` — `statusText` runs every
+            /// render tick, but the returned slice only needs to
+            /// outlive that single call, so a stable Runtime-owned
+            /// buffer is the right shape. 256 bytes ≈ the typical
+            /// statusbar width; longer hints are truncated by the
+            /// statusbar's own clamp.
+            status_buf: [256]u8 = undefined,
             /// Pending bytes for pollShellInput to surface. Used to
             /// route `\x15` (Ctrl+U) to the pty after onAction
             /// triggers a worker call — `onAction` can't synchronously
@@ -629,20 +638,33 @@ pub fn configure(comptime cfg: Config) type {
                     // many alternates are in the cycle, the
                     // resolved endpoint, and a pointer at the
                     // single way to actually cancel. Limited to
-                    // ~150 chars so it fits a typical 100-col
-                    // statusbar (truncates gracefully on narrow
-                    // terms).
+                    // ~256 bytes; truncates gracefully on narrow
+                    // terms.
+                    //
+                    // BOTH cycle_info and the final message live in
+                    // `buf` so the cycle slice doesn't escape a
+                    // nested scope (a previous draft put cycle_info's
+                    // backing array inside a `blk` expression — the
+                    // slice outlived the array, classic stack-use-
+                    // after-scope hazard). One outer buffer, two
+                    // bufPrint calls into disjoint subslices.
                     var buf: [256]u8 = undefined;
                     const current: []const u8 = if (cfg.models.len > 0)
                         cfg.models[rt.current_model_idx]
                     else
                         cfg.model;
-                    const cycle_info: []const u8 = if (cfg.models.len > 1) blk: {
-                        var cb: [32]u8 = undefined;
-                        break :blk std.fmt.bufPrint(&cb, " ({d}/{d})", .{ rt.current_model_idx + 1, cfg.models.len }) catch "";
-                    } else "";
+                    // Cycle info lives in the first 32 bytes of buf.
+                    const cycle_info: []const u8 = if (cfg.models.len > 1)
+                        std.fmt.bufPrint(buf[0..32], " ({d}/{d})", .{ rt.current_model_idx + 1, cfg.models.len }) catch ""
+                    else
+                        "";
                     const endpoint: []const u8 = if (rt.api_base.len > 0) rt.api_base else "(inert — no endpoint)";
-                    const msg = std.fmt.bufPrint(&buf, "model: {s}{s} · endpoint: {s} · Ctrl+Shift+X cancel · Ctrl+Shift+I incognito", .{ current, cycle_info, endpoint }) catch {
+                    // Message goes into the remaining bytes. cycle_info
+                    // is referenced before its underlying storage is
+                    // overwritten — bufPrint copies the formatted
+                    // string verbatim, so this read-then-write order
+                    // is safe.
+                    const msg = std.fmt.bufPrint(buf[32..], "model: {s}{s} · endpoint: {s} · Ctrl+Shift+X cancel · Ctrl+Shift+I incognito", .{ current, cycle_info, endpoint }) catch {
                         // Truncated; render at least the model name.
                         latchHint(rt, current);
                         return true;
@@ -914,6 +936,21 @@ pub fn configure(comptime cfg: Config) type {
             // actual cancel binding; it's discoverable via Alt+H
             // once the help overlay lands.
             if (rt.ai_mode_active) {
+                // With a configured `models[]` list, surface the
+                // current pick inline so `Alt+M` cycling has
+                // immediate visible feedback in the statusbar
+                // (not just a transient latched hint). When the
+                // user has only the legacy `cfg.model` (no list),
+                // the static hint is fine — no point baking the
+                // single name into the bar.
+                if (cfg.models.len > 0) {
+                    const pick = cfg.models[rt.current_model_idx];
+                    return std.fmt.bufPrint(
+                        &rt.status_buf,
+                        "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M {s} · Alt+H help · Ctrl+Shift+X cancel",
+                        .{pick},
+                    ) catch "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel";
+                }
                 return "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel";
             }
 

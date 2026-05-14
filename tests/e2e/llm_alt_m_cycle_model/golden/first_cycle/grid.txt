@@ -5,4 +5,4 @@ $ #:
 
 model: model-beta
 
-atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel
+atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-beta · Alt+H help · Ctrl+Shift+X cancel
