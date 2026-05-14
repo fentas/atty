@@ -139,8 +139,27 @@ pub const Osc133 = struct {
     /// emits only `;A` and `;C`, never `;B` or `;D`, so a stricter
     /// `phase == .in_input` gate suppressed ghost text for the
     /// entire shell session.
+    ///
+    /// **Do NOT use this to gate `syncFromCapture`** — that path
+    /// overwrites `line_state` from `currentInput()`, and
+    /// `currentInput()` is empty in `.at_prompt` (capture only
+    /// activates after `;B`). For partial emitters that means
+    /// every iteration would clobber the user's keystroke-tracked
+    /// buffer with the empty capture. Use `captureActive()` for
+    /// that gate.
     pub fn inInputPhase(self: *const Osc133) bool {
         return self.phase == .in_input or self.phase == .at_prompt;
+    }
+
+    /// True iff byte capture for `currentInput()` is currently
+    /// active. Distinct from `inInputPhase()` because we want
+    /// gates that ask "user is at the prompt" (ghost text,
+    /// recording) to fire for partial emitters too, but the
+    /// `syncFromCapture` gate must only fire when `currentInput()`
+    /// reflects ground-truth shell-drawn content — which is only
+    /// the case between `;B` and `;C`.
+    pub fn captureActive(self: *const Osc133) bool {
+        return self.phase == .in_input;
     }
 
     /// Feed master-output bytes. Idempotent + safe across partial
@@ -361,6 +380,32 @@ test "Osc133: 133;C transitions to in_command — subsequent bytes don't update 
     // Command output bytes flow but we stop capturing.
     o.feed("file1 file2 file3");
     try testing.expectEqualStrings("ls", o.currentInput());
+}
+
+test "Osc133.captureActive: TRUE only between ;B and ;C, FALSE for .at_prompt" {
+    // Regression: the proxy's `syncFromCapture` path must NOT fire
+    // when capture isn't active, otherwise an empty `currentInput()`
+    // (which is what `.at_prompt` always returns — capture hasn't
+    // started yet) would clobber the keystroke-derived line_state
+    // buffer on every iteration, killing ghost text for partial
+    // emitters. `captureActive()` is the dedicated narrower gate.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    // No markers yet: not active, not capturing.
+    try testing.expect(!o.captureActive());
+    o.feed("\x1b]133;A\x07");
+    // .at_prompt: inInputPhase TRUE (ghost text fires) but
+    // captureActive FALSE (sync stays off).
+    try testing.expect(o.inInputPhase());
+    try testing.expect(!o.captureActive());
+    o.feed("\x1b]133;B\x07");
+    // .in_input: BOTH gates fire.
+    try testing.expect(o.inInputPhase());
+    try testing.expect(o.captureActive());
+    o.feed("\x1b]133;C\x07");
+    // .in_command: NEITHER fires.
+    try testing.expect(!o.inInputPhase());
+    try testing.expect(!o.captureActive());
 }
 
 test "Osc133.inInputPhase: ;A alone (Ghostty-style partial integration) puts us in input phase" {

@@ -949,7 +949,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // `git credential`) runs post-`;C`, so the tracker
                 // is `.in_command` for the duration and the sync
                 // doesn't fire.
-                if (osc133_tracker.inInputPhase()) {
+                // Gate on `captureActive()` (strict `.in_input`), NOT
+                // the broader `inInputPhase()` (which also covers
+                // `.at_prompt`). In `.at_prompt`, byte capture
+                // hasn't started — `currentInput()` is empty —
+                // and `syncFromCapture("")` would clobber the
+                // user's keystroke-tracked buffer every poll
+                // iteration. Partial emitters that never send `;B`
+                // stay in `.at_prompt` permanently, so the strict
+                // gate is the only way ghost text can survive
+                // there.
+                if (osc133_tracker.captureActive()) {
                     line_state.syncFromCapture(osc133_tracker.currentInput());
                 }
 
