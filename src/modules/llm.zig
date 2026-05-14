@@ -473,7 +473,21 @@ pub fn configure(comptime cfg: Config) type {
             // memory still works alongside the new `Alt+A`. Both
             // routes call `triggerSinglePrompt` so the behaviour is
             // identical.
-            return triggerSinglePrompt(rt, ctx, line, .replace_commit_on_enter);
+            const result = triggerSinglePrompt(rt, ctx, line, .replace_commit_on_enter);
+            // Mirror the Alt+A eager-clear of `ai_mode_active`.
+            // The shell wipes the line via the returned
+            // `.replace_commit = "\x15"`, so the prefix is gone
+            // from line_state on the next keystroke. Clearing
+            // ai_mode_active now means the verbose statusbar hint
+            // disappears immediately, not on the next keypress —
+            // same flicker-free behaviour the Alt+A path has.
+            // Gated on api_base.len for the same reason: inert
+            // mode keeps the user in AI mode so they can fix
+            // config + retry.
+            if (rt.api_base.len != 0 and result == .replace_commit) {
+                rt.ai_mode_active = false;
+            }
+            return result;
         }
 
         /// Dispatch site for the keymap actions `llm_exec_*`. The
@@ -604,6 +618,17 @@ pub fn configure(comptime cfg: Config) type {
                     // explicit cancel.
                     if (rt.ai_mode_active) {
                         queueInjection(rt, "\x15");
+                    } else {
+                        // Cancel fired with no AI prefix visible —
+                        // could be the "in_flight after Alt+A
+                        // already cleared the prefix" path. Drop
+                        // any already-queued pending_injection
+                        // so the explicit "clear all pending
+                        // state" semantic is honoured. queueing
+                        // a fresh Ctrl+U above already overwrites,
+                        // but this branch makes the intent clear
+                        // for the no-active-AI case.
+                        rt.pending_injection_len = 0;
                     }
                     rt.in_flight = false;
                     rt.ai_mode_active = false;

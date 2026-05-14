@@ -792,6 +792,8 @@ const Recorder = struct {
     pub const Runtime = struct {
         committed: std.ArrayList(u8) = .empty,
         deleted: std.ArrayList(u8) = .empty,
+        actions_seen: usize = 0,
+        consume_next: bool = true,
     };
     pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
         return .{};
@@ -807,6 +809,22 @@ const Recorder = struct {
     pub fn deleteHistoryMatch(rt: *Runtime, _: *Context, line: []const u8) Error!void {
         rt.deleted.appendSlice(testing.allocator, line) catch return Error.OutOfMemory;
         rt.deleted.append(testing.allocator, '\n') catch return Error.OutOfMemory;
+    }
+    pub fn onAction(rt: *Runtime, _: *Context, _: anytype) Error!bool {
+        rt.actions_seen += 1;
+        return rt.consume_next;
+    }
+};
+
+const FailingActor = struct {
+    pub const name = "failing-actor";
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn onAction(_: *Runtime, _: *Context, _: anytype) Error!bool {
+        return Error.ModuleFailed;
     }
 };
 
@@ -900,6 +918,76 @@ test "dispatchDeleteHistoryMatch isolates per-module errors (later modules still
     // Recorder (second module) still got the request — that's
     // the whole point of the fix.
     try testing.expectEqualStrings("secret-cmd\n", rts[1].deleted.items);
+}
+
+test "dispatchAction fans out to every onAction-implementing module" {
+    // Two recorders both implement onAction. The walker must
+    // call both so a module further down the chain can observe
+    // (and possibly act on) an action even if an earlier module
+    // already consumed it. Matches the fan-out semantics of
+    // dispatchDeleteHistoryMatch.
+    const D = D_RecorderPair;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    _ = D.dispatchAction(&rts, &ctx, .ghost_accept);
+
+    try testing.expectEqual(@as(usize, 1), rts[0].actions_seen);
+    try testing.expectEqual(@as(usize, 1), rts[1].actions_seen);
+}
+
+test "dispatchAction returns true when ANY module consumes the action" {
+    // First module consumes, second doesn't. The walker must
+    // still return true overall — the consumed-OR semantic is
+    // what the proxy uses to decide whether to swallow the
+    // binding bytes.
+    const D = D_RecorderPair;
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+    rts[0].consume_next = true;
+    rts[1].consume_next = false;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    try testing.expect(D.dispatchAction(&rts, &ctx, .ghost_accept));
+
+    // And the reverse: no module consumes → false (proxy lets
+    // the bytes flow through to readline / inner programs).
+    rts[0].consume_next = false;
+    rts[1].consume_next = false;
+    try testing.expect(!D.dispatchAction(&rts, &ctx, .ghost_accept));
+}
+
+test "dispatchAction isolates per-module errors (later modules still fire)" {
+    // First module errors out of onAction. The walker must
+    // swallow the error AND still call the second module's
+    // hook — the proxy needs all modules to get a chance to
+    // observe the action, and a single module's failure must
+    // not block the rest. Matches the same isolation guarantee
+    // as dispatchDeleteHistoryMatch.
+    const D = Dispatcher(.{ FailingActor, Recorder });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    // FailingActor's onAction returns ModuleFailed. The walker
+    // must NOT propagate it; Recorder (second) still gets the
+    // action.
+    _ = D.dispatchAction(&rts, &ctx, .ghost_accept);
+
+    try testing.expectEqual(@as(usize, 1), rts[1].actions_seen);
 }
 
 test "dispatchDeleteHistoryMatch fires EVERY implementer, not just the first one" {
