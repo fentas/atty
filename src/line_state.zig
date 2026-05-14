@@ -28,21 +28,14 @@ pub const max_line = 4096;
 
 /// Who typed the line that's about to be committed?
 ///
-/// Two answers today: `.user` (human at the prompt — the default)
-/// or `.llm` (an LLM-driven module injected the line, set via
-/// `LineState.setCommitAuthor(.llm)` BEFORE the injection).
-/// Recording and policy modules read the snapshot at commit time
-/// via `committedAuthor()` so they can tag entries or apply
-/// different rules per author.
-///
-/// Author state lives here rather than on `Context` because an
-/// async LLM round-trip can span many dispatch cycles between
-/// flipping the author and the actual commit; per-dispatch
-/// Context storage would lose the staging.
+/// Author state lives on `LineState` rather than a per-dispatch
+/// type because staging happens potentially many dispatch cycles
+/// before the commit — anything that holds it only for one tick
+/// would lose the tag.
 pub const Author = enum {
-    /// Human typed at the local prompt. Default for every line.
+    /// Default. Human typed at the local prompt.
     user,
-    /// Line was injected by an LLM-driven module.
+    /// Line was injected programmatically.
     llm,
 };
 

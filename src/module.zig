@@ -38,11 +38,8 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// Author of a committed line — re-export so modules using the
-/// framework surface as `module.Author` don't have to know about
-/// `line_state.zig` directly. The state lives in `LineState`
-/// (which survives across dispatch cycles) and is exposed via
-/// `ctx.line.committedAuthor()` + `ctx.line.setCommitAuthor(...)`.
+/// Re-export of `line_state.Author` to keep all module-framework
+/// types reachable through this file.
 pub const Author = @import("line_state.zig").Author;
 
 /// What a module decides about a keystroke.
