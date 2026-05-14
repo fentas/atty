@@ -12,7 +12,6 @@
 
 const std = @import("std");
 const m = @import("../module.zig");
-const ansi = @import("../ansi.zig");
 const style_mod = @import("../style.zig");
 
 /// How a rule decides whether the committed line is a hit. `prefix` and

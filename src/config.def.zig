@@ -31,7 +31,10 @@ const atty = @import("atty");
 //         //     //   .warn          banner + forward (audit, no friction)
 //         //     // .authors restricts a rule to user-typed or llm-injected
 //         //     // commits (default = both).
-//         //     .{ .name = "rm-rf-root", .match = .{ .substring = "rm -rf /" },
+//         //     // `.glob` anchors to both ends — only the literal
+//         //     // `rm -rf /` matches, so `rm -rf /home/x` falls
+//         //     // through to a broader rule below.
+//         //     .{ .name = "rm-rf-root", .match = .{ .glob = "rm -rf /" },
 //         //        .reason = "rm -rf on root", .behavior = .block },
 //         //     .{ .name = "rm-rf-llm", .match = .{ .substring = "rm -rf" },
 //         //        .reason = "rm -rf (llm)",
