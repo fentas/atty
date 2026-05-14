@@ -82,6 +82,8 @@ extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
 const lib = @import("_lib.zig");
 const nowMs = lib.nowMs;
 
+const format = @import("history/format.zig");
+
 fn unixTs() i64 {
     var ts: std.posix.timespec = undefined;
     // CLOCK_REALTIME = 0
@@ -249,12 +251,11 @@ pub fn configure(comptime cfg: Config) type {
         /// Strip the zsh extended-history prefix (`: <ts>:<dur>;`) if
         /// present, otherwise return the line as-is. bash lines have
         /// no prefix.
-        fn parseHistoryLine(line: []const u8) []const u8 {
-            const trimmed = std.mem.trimEnd(u8, line, "\r");
-            if (trimmed.len < 4 or trimmed[0] != ':' or trimmed[1] != ' ') return trimmed;
-            const semi = std.mem.indexOfScalar(u8, trimmed, ';') orelse return trimmed;
-            return trimmed[semi + 1 ..];
-        }
+        /// Re-export of the pure line parser from `history/format.zig`.
+        /// Lives there because it's cfg-agnostic; surfaced here so
+        /// internal callers + existing tests keep their `H.parseHistoryLine`
+        /// call sites unchanged.
+        pub const parseHistoryLine = format.parseHistoryLine;
 
         // ---- file write -------------------------------------------------
 
@@ -271,22 +272,15 @@ pub fn configure(comptime cfg: Config) type {
             // write is a single atomic syscall (≤ PIPE_BUF = 4096
             // bytes; max_line caps us at that).
             var buf: [cfg.max_line + 64]u8 = undefined;
-            const out = formatHistoryLine(&buf, line, rt.format, unixTs()) orelse return;
+            const out = format.formatHistoryLine(&buf, line, rt.format, unixTs()) orelse return;
             _ = std.c.write(fd, out.ptr, out.len);
         }
 
-        /// Pure formatting helper — separable from the file I/O so it
-        /// can be unit-tested without touching disk.
-        fn formatHistoryLine(buf: []u8, line: []const u8, format: Format, ts: i64) ?[]const u8 {
-            var w = std.Io.Writer.fixed(buf);
-            switch (format) {
-                .zsh_extended => w.print(": {d}:0;", .{ts}) catch return null,
-                else => {},
-            }
-            w.writeAll(line) catch return null;
-            w.writeByte('\n') catch return null;
-            return w.buffered();
-        }
+        /// Re-export of the pure line formatter from `history/format.zig`.
+        /// Same rationale as `parseHistoryLine` — cfg-agnostic, lives in
+        /// the sibling file, surfaced here for legacy call sites and
+        /// tests.
+        pub const formatHistoryLine = format.formatHistoryLine;
 
         // ---- hooks ------------------------------------------------------
 
@@ -449,21 +443,19 @@ pub fn configure(comptime cfg: Config) type {
 
 const testing = std.testing;
 
+// Pull in the format-helper tests via the sibling file so
+// `unit_tests.zig`'s single `_ = @import("modules/history.zig")`
+// line discovers them.
+test {
+    _ = format;
+}
+
 test "configure exposes Runtime + hooks" {
     const H = configure(.{});
     try testing.expect(@hasDecl(H, "Runtime"));
     try testing.expect(@hasDecl(H, "onLineCommit"));
     try testing.expect(@hasDecl(H, "provideGhostText"));
     try testing.expectEqualStrings("history", H.name);
-}
-
-test "parseHistoryLine strips zsh extended prefix" {
-    const H = configure(.{});
-    try testing.expectEqualStrings("ls -la", H.parseHistoryLine(": 1700000000:0;ls -la"));
-    try testing.expectEqualStrings("echo hi", H.parseHistoryLine("echo hi"));
-    try testing.expectEqualStrings("", H.parseHistoryLine(""));
-    // Lines without the colon prefix are returned as-is.
-    try testing.expectEqualStrings(":not-extended", H.parseHistoryLine(":not-extended"));
 }
 
 test "ring evicts oldest at capacity" {
@@ -502,28 +494,6 @@ test "findSuggestion returns the most recent prefix match" {
 
     const got = H.findSuggestion(&rt, "git ") orelse return error.TestFailed;
     try testing.expectEqualStrings("git push origin", got);
-}
-
-test "formatHistoryLine emits zsh extended prefix" {
-    const H = configure(.{});
-    var buf: [128]u8 = undefined;
-    const out = H.formatHistoryLine(&buf, "ls -la", .zsh_extended, 1_700_000_000).?;
-    try testing.expectEqualStrings(": 1700000000:0;ls -la\n", out);
-}
-
-test "formatHistoryLine bash + plain emit bare lines" {
-    const H = configure(.{});
-    var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("git status\n", H.formatHistoryLine(&buf, "git status", .bash, 0).?);
-    try testing.expectEqualStrings("ls\n", H.formatHistoryLine(&buf, "ls", .plain, 0).?);
-}
-
-test "formatHistoryLine round-trips through parseHistoryLine" {
-    const H = configure(.{});
-    var buf: [128]u8 = undefined;
-    const formatted = H.formatHistoryLine(&buf, "echo hi", .zsh_extended, 42).?;
-    const without_nl = std.mem.trimEnd(u8, formatted, "\n");
-    try testing.expectEqualStrings("echo hi", H.parseHistoryLine(without_nl));
 }
 
 test "onLineCommit pushes into the ring" {
