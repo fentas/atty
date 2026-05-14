@@ -624,7 +624,30 @@ pub fn configure(comptime cfg: Config) type {
                 },
                 .llm_exec_toggle_help => {
                     if (!rt.ai_mode_active) return false;
-                    latchHint(rt, "help overlay coming in a follow-up commit");
+                    // Help overlay — surface state that isn't in
+                    // the verbose AI hint: current model + how
+                    // many alternates are in the cycle, the
+                    // resolved endpoint, and a pointer at the
+                    // single way to actually cancel. Limited to
+                    // ~150 chars so it fits a typical 100-col
+                    // statusbar (truncates gracefully on narrow
+                    // terms).
+                    var buf: [256]u8 = undefined;
+                    const current: []const u8 = if (cfg.models.len > 0)
+                        cfg.models[rt.current_model_idx]
+                    else
+                        cfg.model;
+                    const cycle_info: []const u8 = if (cfg.models.len > 1) blk: {
+                        var cb: [32]u8 = undefined;
+                        break :blk std.fmt.bufPrint(&cb, " ({d}/{d})", .{ rt.current_model_idx + 1, cfg.models.len }) catch "";
+                    } else "";
+                    const endpoint: []const u8 = if (rt.api_base.len > 0) rt.api_base else "(inert — no endpoint)";
+                    const msg = std.fmt.bufPrint(&buf, "model: {s}{s} · endpoint: {s} · Ctrl+Shift+X cancel · Ctrl+Shift+I incognito", .{ current, cycle_info, endpoint }) catch {
+                        // Truncated; render at least the model name.
+                        latchHint(rt, current);
+                        return true;
+                    };
+                    latchHint(rt, msg);
                     return true;
                 },
                 .llm_exec_cancel => {
