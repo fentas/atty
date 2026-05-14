@@ -1,0 +1,65 @@
+# ghost_starship_overwrite — verifies ghost + history survive a
+# Starship-style prompt manager that overwrites PS1 on every cycle.
+#
+# Mimics what `starship init bash` does: a precmd hook in
+# PROMPT_COMMAND sets `PS1="$(...)"` each prompt redraw. With the
+# old shipped init (one-shot PS1 wrap at eval time), the second
+# prompt onward had no `;A` / `;B` markers, atty's `inSubprocess`
+# gate suspended renderGhost, and history.onLineCommit was dropped.
+#
+# Post-fix: `__atty_osc133_wrap_ps1` is also in PROMPT_COMMAND,
+# ordered AFTER `__fake_starship_precmd`, so it re-wraps the
+# manager's PS1 on every cycle. The wrap is idempotent.
+
+cols 60
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Mirror the shipped `atty init bash` snippet, with the new
+# wrap-via-PROMPT_COMMAND mechanism.
+type "__atty_osc133_d() { local __code=$?; printf '\\033]133;D;%s\\007' \"$__code\"; }\r"
+wait_for "$"
+type "__atty_osc133_wrap_ps1() { case \"$PS1\" in *$'\\033]133;A\\007'*) return ;; esac; PS1=$'\\[\\033]133;A\\007\\]'\"${PS1}\"$'\\[\\033]133;B\\007\\]'; }\r"
+wait_for "$"
+
+# Simulate Starship: a precmd that OVERWRITES PS1 on every cycle.
+# After this fires, atty's `;A`/`;B` markers in PS1 are gone unless
+# the wrap function re-applies them.
+type "__fake_starship_precmd() { PS1='$ '; }\r"
+wait_for "$"
+
+# PROMPT_COMMAND ordering: ;D (last cmd done) → fake starship (sets
+# bare PS1) → wrap (re-applies markers). Same order the real init
+# script produces when sourced AFTER Starship's init.
+type "PROMPT_COMMAND='__atty_osc133_d;__fake_starship_precmd;__atty_osc133_wrap_ps1'\r"
+wait_for "$"
+type "clear\r"
+wait_for "$"
+sleep 200
+
+# Record an entry. If `;B` is on PS1 (via the wrap), history's
+# onLineCommit fires because `inInputPhase()` is true at Enter.
+# Without the wrap (pre-fix), `inInputPhase()` is false and the
+# commit is dropped.
+type "echo starship-survived-overwrite\r"
+wait_for "starship-survived-overwrite"
+sleep 300
+
+# Type a prefix — ghost overlay must paint.
+type "echo starship-survived-"
+sleep 500
+snapshot ghost_visible
+
+key Enter
+sleep 200
+
+# Confirm the file was written too.
+type "cat /tmp/atty-e2e-ghost-starship-overwrite\r"
+sleep 400
+snapshot history_written
+
+type "exit\r"
+exit_code 0
