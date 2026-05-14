@@ -580,11 +580,35 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             if (statusbar) |*sb| sb.last_valid = false;
                         },
                         .delete_history_match => {
-                            const current = line_state.current();
-                            if (!line_state.uncertain and current.len > 0) {
+                            // Pick the deletion target. Prefer the
+                            // keystroke-tracked `line_state.current()`
+                            // (works for any shell, no integration
+                            // needed). When the buffer is `uncertain`
+                            // — typically because the user just hit
+                            // Up arrow to recall an entry and the
+                            // master-read with the echoed line
+                            // hasn't been drained yet (atty's poll
+                            // processes stdin BEFORE master, so a
+                            // fast Up→Ctrl+Shift+D sequence races
+                            // ahead of `syncFromCapture`) — fall
+                            // back to the OSC 133 capture stream
+                            // when it's active. That's the trusted
+                            // ground truth for what's on the prompt
+                            // right now, even before line_state
+                            // catches up.
+                            const target: []const u8 = blk: {
+                                if (!line_state.uncertain) {
+                                    break :blk line_state.current();
+                                }
+                                if (osc133_tracker.captureActive()) {
+                                    break :blk osc133_tracker.currentInput();
+                                }
+                                break :blk "";
+                            };
+                            if (target.len > 0) {
                                 // Fire the deletion across modules that
                                 // implement the hook.
-                                D.dispatchDeleteHistoryMatch(&runtimes, &ctx, current) catch {};
+                                D.dispatchDeleteHistoryMatch(&runtimes, &ctx, target) catch {};
                                 // Clear the shell prompt: send Ctrl+U
                                 // (NAK / kill-line). Bash, zsh, dash
                                 // and friends all bind it to
@@ -601,7 +625,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                     const msg = std.fmt.bufPrint(
                                         &buf,
                                         "🗑 deleted: {s}",
-                                        .{current},
+                                        .{target},
                                     ) catch buf[0..0];
                                     sb.setTransient(msg, 3_000);
                                 }
