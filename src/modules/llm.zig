@@ -1602,12 +1602,11 @@ pub fn configure(comptime cfg: Config) type {
             else
                 cfg.model;
 
-            // In fixture mode the worker discards the body entirely
-            // (it returns the next canned response regardless of
-            // request shape). Skip the JSON serialization to keep
-            // fixture-driven e2e ticks fast and to mirror the
-            // worker-side short-circuit.
-            const body_len: usize = if (cfg.fixture_responses.len > 0) 0 else blk: {
+            // Build the JSON body OUTSIDE the mutex (allocator work,
+            // potentially expensive). In fixture mode the worker
+            // discards the body entirely, so skip the serialization
+            // altogether.
+            const built_body: ?[]u8 = if (cfg.fixture_responses.len > 0) null else blk: {
                 const body = try buildDialogRequestBody(
                     rt.allocator,
                     model_for_request,
@@ -1616,17 +1615,13 @@ pub fn configure(comptime cfg: Config) type {
                     rt.context_blob,
                     rt.turns[0..rt.turns_len],
                 );
-                defer rt.allocator.free(body);
-                if (body.len > cfg.body_buf_bytes) return error.BodyTooLarge;
-                // Copy under the mutex below, not here — keep this
-                // block side-effect-free so the early-return on
-                // BodyTooLarge doesn't leave the shared buffer in
-                // a half-written state.
-                rt.shared.mutex.lockUncancelable(ctx.io);
-                @memcpy(rt.shared.body_buf[0..body.len], body);
-                rt.shared.mutex.unlock(ctx.io);
-                break :blk body.len;
+                if (body.len > cfg.body_buf_bytes) {
+                    rt.allocator.free(body);
+                    return error.BodyTooLarge;
+                }
+                break :blk body;
             };
+            defer if (built_body) |b| rt.allocator.free(b);
 
             const idx_to_send: usize = if (cfg.models.len == 0)
                 std.math.maxInt(usize)
@@ -1635,9 +1630,19 @@ pub fn configure(comptime cfg: Config) type {
             else
                 0;
 
+            // SINGLE critical section: body copy + metadata stamp
+            // happen under one lock so the worker never sees a half-
+            // written request (e.g. fresh body bytes with stale
+            // `body_len`). Mirrors the single-mode trigger path's
+            // copy-and-stamp-together shape.
             rt.shared.mutex.lockUncancelable(ctx.io);
             defer rt.shared.mutex.unlock(ctx.io);
-            rt.shared.body_len = body_len;
+            if (built_body) |b| {
+                @memcpy(rt.shared.body_buf[0..b.len], b);
+                rt.shared.body_len = b.len;
+            } else {
+                rt.shared.body_len = 0;
+            }
             rt.shared.model_idx = idx_to_send;
             rt.shared.req_kind = .dialog;
             rt.shared.req_pending = true;
@@ -1651,12 +1656,16 @@ pub fn configure(comptime cfg: Config) type {
 
         /// Reset all dialog state — used by both `abortDialog` and
         /// the `llm_exec_cancel` action. Bumps `req_gen` so any
-        /// in-flight worker response is discarded as stale; queues
-        /// Ctrl+U so any text on the prompt (suggested command or
-        /// `#: …` prefix) gets wiped.
+        /// in-flight worker response is discarded as stale; clears
+        /// `req_pending` so a queued-but-not-yet-picked-up request
+        /// doesn't fire AFTER the cancel (which would otherwise
+        /// burn a wasted API call AND advance `shared.fixture_idx`,
+        /// desynchronising the fixture cursor across cancel-aware
+        /// e2e scenarios).
         fn dialogReset(rt: *Runtime, ctx: *m.Context) void {
             rt.shared.mutex.lockUncancelable(ctx.io);
             rt.shared.req_gen +%= 1;
+            rt.shared.req_pending = false;
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
             rt.shared.mutex.unlock(ctx.io);
@@ -2076,9 +2085,20 @@ pub fn configure(comptime cfg: Config) type {
             var client: std.http.Client = .{ .allocator = gpa, .io = io };
             defer client.deinit();
 
+            // Heap-allocate the response buffer — at the default
+            // cfg.max_response_bytes=4KiB this is 64 KiB which is
+            // a substantial stack frame inside the worker thread.
+            // Scales with the comptime knob, so a user raising
+            // max_response_bytes shouldn't silently push the worker
+            // thread close to its stack limit.
             const response_cap = cfg.max_response_bytes * 16;
-            var response_buf: [response_cap]u8 = undefined;
-            var response_writer: std.Io.Writer = .fixed(&response_buf);
+            const response_buf = gpa.alloc(u8, response_cap) catch return RequestResult{
+                .cmd_len = 0,
+                .exp_len = 0,
+                .err_len = writeStatic(error_out, "out of memory allocating response buffer"),
+            };
+            defer gpa.free(response_buf);
+            var response_writer: std.Io.Writer = .fixed(response_buf);
 
             const fetched = client.fetch(.{
                 .location = .{ .url = url },
@@ -2231,12 +2251,14 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         /// Parse a dialog response (the raw assistant content
-        /// returned by `extractRawContent`). Uses an arena-backed
-        /// `std.json.parseFromSlice` so the parsed slices are freed
-        /// in one shot before this function returns; the caller
-        /// receives the fields copied into fixed-size buffers on
-        /// the returned struct. `ignore_unknown_fields` is on so a
-        /// model emitting extra keys doesn't error out the loop.
+        /// returned by `extractRawContent`). `std.json.parseFromSlice`
+        /// owns an internal arena which is released by
+        /// `parsed.deinit()` — we copy out the fields we care about
+        /// into fixed-size buffers on the returned struct BEFORE
+        /// `deinit` fires, so the slices we hand back point at the
+        /// caller's `out` storage, not at arena-owned memory.
+        /// `ignore_unknown_fields` is on so a model emitting extra
+        /// keys doesn't error out the loop.
         pub fn parseDialogResponse(
             allocator: std.mem.Allocator,
             raw: []const u8,
