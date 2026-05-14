@@ -264,9 +264,17 @@ pub fn configure(comptime cfg: Config) type {
 
             // applyInput ran first, so the committed line lives in
             // lastCommitted(); fall back to current() when the proxy
-            // hasn't wired OSC 133 (recalled-line gap).
-            const line = ctx.line.lastCommitted() orelse ctx.line.current();
-            const author = ctx.line.committedAuthor();
+            // hasn't wired OSC 133 (recalled-line gap). Author must
+            // come from the same source: committed_author for the
+            // post-submit snapshot, pending_author for the live
+            // buffer fallback — otherwise a stale committed_author
+            // can mislabel a fallback line.
+            const committed = ctx.line.lastCommitted();
+            const line = committed orelse ctx.line.current();
+            const author = if (committed != null)
+                ctx.line.committedAuthor()
+            else
+                ctx.line.pending_author;
 
             if (rt.armed) {
                 rt.armed = false;
@@ -315,12 +323,38 @@ pub fn configure(comptime cfg: Config) type {
                 .user => "user",
                 .llm => "llm",
             };
-            var buf: [512]u8 = undefined;
+            // The line is rendered as part of the banner. We bound
+            // it so a 4 KiB pasted command can't blow past the
+            // banner buffer and silently swallow the warning —
+            // .block in particular would otherwise replace Enter
+            // with Ctrl+U and leave the user with no explanation.
+            const max_line_in_banner: usize = 512;
+            const trunc_line = if (line.len > max_line_in_banner)
+                line[0..max_line_in_banner]
+            else
+                line;
+            const ellipsis: []const u8 = if (line.len > max_line_in_banner) " …" else "";
+            var buf: [1024]u8 = undefined;
             const msg = std.fmt.bufPrint(
                 &buf,
-                "\r\n{f}atty guardrail: {s} [{s}]{s}\r\n        line: {s}\r\n        {s}\r\n",
-                .{ cfg.warning_style, rule.reason, author_tag, style_mod.reset, line, trailer },
-            ) catch return;
+                "\r\n{f}atty guardrail: {s} [{s}]{s}\r\n        line: {s}{s}\r\n        {s}\r\n",
+                .{ cfg.warning_style, rule.reason, author_tag, style_mod.reset, trunc_line, ellipsis, trailer },
+            ) catch {
+                // Worst-case fallback: a single short line so the
+                // user at least sees that *something* tripped.
+                var fallback: [128]u8 = undefined;
+                const short = std.fmt.bufPrint(
+                    &fallback,
+                    "\r\natty guardrail: {s} [{s}] — {s}\r\n",
+                    .{ rule.name, author_tag, trailer },
+                ) catch return;
+                if (rt.sink_fn) |f| {
+                    f(rt.sink_ctx.?, short) catch {};
+                    return;
+                }
+                _ = std.c.write(std.posix.STDERR_FILENO, short.ptr, short.len);
+                return;
+            };
             if (rt.sink_fn) |f| {
                 f(rt.sink_ctx.?, msg) catch {};
                 return;
