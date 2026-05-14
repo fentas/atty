@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const LineState = @import("line_state.zig").LineState;
+const subprocess_mod = @import("subprocess.zig");
 
 pub const Error = error{
     ModuleFailed,
@@ -82,4 +83,125 @@ pub const Context = struct {
     /// (ghost text keeps working) matches what most fish/zsh users
     /// expect; incognito is about not *recording*, not about hiding.
     incognito: bool = false,
+    /// The subprocess the user is currently inside, if any. Driven
+    /// by the proxy's OSC 133 `;C` / `;D` handling — at `;C` we parse
+    /// the just-committed line for recognised launchers (ssh / mosh
+    /// / sudo bash / kubectl exec / docker exec / lxc exec / su) and
+    /// push a frame; at `;D` we pop. Modules that record committed
+    /// lines (atuin, history) read this via `subprocessCwd()` so
+    /// they can encode the remote target into the `--cwd` they ship
+    /// to their backing store, e.g. `ssh://user@host/remote-cwd`.
+    /// Null = nothing pushed yet OR we're at the local prompt.
+    subprocess: ?*const subprocess_mod.Tracker = null,
+
+    /// Convenience wrapper around `formatCwd` — modules call this
+    /// from `onLineCommit` when they want a `--cwd` string that
+    /// reflects the user's current location. When subprocess is
+    /// null OR `currentKind() == .none`, returns `fallback` verbatim
+    /// (typically the shell's real cwd, or the empty string).
+    /// Otherwise returns an encoded URI scoped to the subprocess.
+    ///
+    /// `out` is caller-owned scratch — should be at least
+    /// `subprocess_mod.max_cwd_bytes` (1024) to avoid silent
+    /// truncation in the worst case (full-length frame name +
+    /// remote cwd + URI scheme). The returned slice points into
+    /// `out`.
+    pub fn subprocessCwd(
+        self: *const Context,
+        out: []u8,
+        fallback: []const u8,
+    ) []const u8 {
+        const tr = self.subprocess orelse return fallback;
+        const top = tr.current() orelse return fallback;
+        if (top.kind == .none) return fallback;
+        return subprocess_mod.formatCwd(top, out, fallback);
+    }
 };
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+const testing = std.testing;
+
+test "subprocessCwd: null tracker → fallback" {
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    var ctx = Context{
+        .allocator = testing.allocator,
+        .io = undefined,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("/home/me", ctx.subprocessCwd(&buf, "/home/me"));
+}
+
+test "subprocessCwd: empty tracker → fallback" {
+    var tr = subprocess_mod.Tracker.init();
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    var ctx = Context{
+        .allocator = testing.allocator,
+        .io = undefined,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .subprocess = &tr,
+    };
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("/home/me", ctx.subprocessCwd(&buf, "/home/me"));
+}
+
+test "subprocessCwd: ssh frame → ssh:// URI" {
+    var tr = subprocess_mod.Tracker.init();
+    tr.onCommandStart("ssh foo@bar", testing.allocator, null);
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    var ctx = Context{
+        .allocator = testing.allocator,
+        .io = undefined,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .subprocess = &tr,
+    };
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("ssh://foo@bar/?", ctx.subprocessCwd(&buf, "/home/me"));
+}
+
+test "subprocessCwd: ssh frame with OSC 7 cwd → ssh://host/path (no double slash)" {
+    var tr = subprocess_mod.Tracker.init();
+    tr.onCommandStart("ssh foo@bar", testing.allocator, null);
+    tr.onRemoteCwd("file://bar/srv/app");
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    var ctx = Context{
+        .allocator = testing.allocator,
+        .io = undefined,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .subprocess = &tr,
+    };
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("ssh://foo@bar/srv/app", ctx.subprocessCwd(&buf, "/home/me"));
+}
+
+test "subprocessCwd: kind=.none frame falls back" {
+    var tr = subprocess_mod.Tracker.init();
+    tr.onCommandStart("ls -la", testing.allocator, null);
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    var ctx = Context{
+        .allocator = testing.allocator,
+        .io = undefined,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .subprocess = &tr,
+    };
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("/home/me", ctx.subprocessCwd(&buf, "/home/me"));
+}

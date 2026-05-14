@@ -136,3 +136,57 @@ const atty = @import("atty");
 //     .base_text = "atty",                            // proxy-level prefix
 //     .incognito_style = .{ .dim = true, .fg = 1 },   // muted red 🔒 segment
 // };
+
+// ───── Subprocess context ──────────────────────────────────────────────────
+//
+// At every OSC 133 `;C` transition (requires shell integration:
+// Ghostty's `shell-integration-features = osc-133`, ble.sh,
+// zsh4humans, or VS Code's snippet), atty inspects the line you
+// just committed. If it matches `ssh` / `mosh` / `kubectl exec` /
+// `docker exec` / `lxc exec` / `incus exec` / `sudo bash|-s|-i` /
+// `su`, atty pushes a frame onto an in-memory stack and tags
+// subsequent recorded commits with an encoded `--cwd`. Unresolved
+// path segments emit `?` rather than asserting a value we can't
+// verify (atty doesn't read kubeconfig or capture local cwd via
+// OSC 7 at depth==0 yet — both are known follow-ups):
+//
+//   ssh://user@host/<remote-cwd-or-?>
+//   k8s://<context-or-?>/<ns-or-?>/<pod>/<remote-cwd-or-?>
+//   docker://<container>/<remote-cwd-or-?>
+//   container://<name>/<remote-cwd-or-?>
+//   sudo:?          (today; sudo:<local-cwd> after local OSC 7 lands)
+//   su:?            (bare su, no user)
+//   su:<user>:?     (su with user, same TODO for local cwd)
+//
+// atuin's Ctrl+R `[ DIRECTORY ]` filter then scopes searches per
+// remote target. Stack pops on `;D` so nested ssh chains work.
+// History module ignores subprocess-typed commits — your
+// `~/.bash_history` / `~/.zsh_history` stays free of unrunnable
+// lines.
+//
+// pub const subprocess: atty.Subprocess = .{
+//     // Fork `ssh -G <args>` to resolve aliases / Match blocks /
+//     // ProxyJump from ~/.ssh/config. Disable if ssh isn't on
+//     // $PATH, you don't want the (typically <100ms) latency, or
+//     // you don't use ssh aliases.
+//     // .use_ssh_g = true,
+//     //
+//     // Path to ssh used for -G resolution.
+//     // .ssh_binary = "ssh",
+//     //
+//     // `→ ssh:user@host` segment in the status bar while
+//     // a recognised subprocess is active.
+//     // .show_in_statusbar = true,
+//     //
+//     // Style of the subprocess statusbar segment.
+//     // .segment_style = .{ .dim = true, .fg = 6 },
+//     //
+//     // Per-target incognito list — commands typed at matching
+//     // targets are dropped (same as a manual Ctrl+Shift+I). Match
+//     // is on the resolved frame name (e.g. "prod@bastion",
+//     // "prod/apps/db", "nginx", "sudo").
+//     // .incognito_targets = &.{
+//     //     "prod@bastion.example.com",
+//     //     "prod/apps/db",
+//     // },
+// };

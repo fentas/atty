@@ -276,6 +276,115 @@ ble.sh, zsh4humans, VS Code's shell-integration, fig all emit by
 default or via a flag. Vanilla bash/zsh without any integration
 don't — atty stays on keystroke tracking, no regression.
 
+## Subprocess-context tracking (auto-detect)
+
+The keystroke model is also blind to *which* shell the user is
+actually typing into: at the local prompt, inside `ssh remote`,
+inside `sudo bash`, inside `kubectl exec -it pod -- bash`, inside
+`vim`, inside `psql>`. All of these produce the same Enter from
+atty's POV — bytes flow through the same PTY master and
+`dispatchLineCommit` fires for every one. Without further signal,
+atty's modules would either record every Enter (polluting the
+local history with vim edit-mode lines + remote SSH commands tagged
+as local) or drop them all (losing the cross-host history the user
+wants).
+
+`src/subprocess.zig` closes that gap. It maintains a fixed-size
+stack (depth ≤ 8) of `Frame` records, each describing one
+foreground subprocess. The stack is driven by OSC 133's `;C` /
+`;D` transition edges:
+
+  * **`;C` (entering command)** — peek at the line the user just
+    committed. The parser recognises `ssh` / `mosh` / `kubectl exec`
+    / `docker exec` / `lxc exec` / `incus exec` / `sudo bash|-s|-i`
+    / `su`. For `ssh` specifically, atty forks `ssh -G <args>` so
+    the *real* ssh client resolves aliases, Match blocks, ProxyJump,
+    `-F` files — using ssh's own parser rather than re-implementing
+    one in Zig. The resolved target (`user@host`, `ctx/ns/pod`,
+    `container`, `sudo`, …) is pushed onto the stack with `kind`
+    set accordingly. Unrecognised commands push a `.none` frame so
+    the matching `;D` always pops something — the stack invariant
+    is `depth(;C) == depth(;D) + 1`.
+  * **`;D` (command finished)** — pop. The popped frame is reset so
+    a stale name can't leak via `currentKind()`.
+
+`src/osc7.zig` parses OSC 7 `\x1b]7;file://host/path\x07` reports
+from any integration that emits them (Ghostty, VS Code, ble.sh,
+zsh4humans, kitty, …) and feeds the captured path into the top
+frame's `cwd`. When the remote shell is also integrated, atty
+records the *real* remote cwd; otherwise it falls back to `?`.
+
+**Encoding.** Modules call `ctx.subprocessCwd(out, fallback)` to
+get a URI-shaped scope string suitable for atuin's `--cwd` flag:
+
+| Frame kind | Encoded cwd | Notes |
+|---|---|---|
+| `.ssh` | `ssh://user@host/<remote-cwd-or-?>` | `<remote-cwd>` filled in from OSC 7 if remote shell emits it; `?` otherwise |
+| `.kubectl_exec` | `k8s://<context-or-?>/<ns-or-?>/<pod>/<remote-cwd-or-?>` | context/ns come from CLI flags only — atty doesn't read kubeconfig |
+| `.docker_exec` | `docker://<container>/<remote-cwd-or-?>` | |
+| `.container_exec` | `container://<name>/<remote-cwd-or-?>` | |
+| `.elevation` | `sudo:?` *(today)* / `sudo:<local-cwd>` *(after local OSC 7)* | atty doesn't yet capture local cwd at depth==0; the `?` placeholder is the current value |
+| `.su` | `su:?` / `su:<user>:?` *(today)* / `su:<user>:<local-cwd>` *(after local OSC 7)* | same TODO as `.elevation` |
+| `.none` | `<fallback>` | caller's value — atuin module passes `""` today, so atuin's own cwd resolution applies |
+
+atuin's `--cwd` is a free-form string, so `[ DIRECTORY ]` mode on
+Ctrl+R naturally scopes per remote target without atuin patches.
+Local commands fall back to atuin's own cwd resolution (atty
+doesn't yet capture the local shell's cwd via OSC 7 at depth==0
+— that's a known TODO; see the behaviour matrix below).
+
+**Behaviour matrix.** With local + remote shell integration both
+sourced (the "clean" mode):
+
+| Where the user is | atty records? | tagged as |
+|---|---|---|
+| Local prompt | yes | atuin's default `cwd` (NOT shell's real cwd — TODO: capture local OSC 7) |
+| `ssh remote` prompt | yes | `ssh://user@host/…` (remote cwd from OSC 7 if remote integration emits it) |
+| `sudo bash` shell | yes | `sudo:<atuin's default cwd>` |
+| `kubectl exec` shell | yes | `k8s://…` |
+| Inside `vim` / `less` / `psql` | no (kind=`.none`) | — |
+| Inside alt-screen TUI (k9s, htop) | no (alt-screen gate) | — |
+
+The gate that distinguishes "at a prompt" from "inside an
+unrecognised command running inside a subprocess" is the OSC 133
+`;C` / `;D` edges *from the remote shell*. When the remote shell
+also emits markers, every prompt fires a fresh `;A;B`, the `.none`
+frame pushed for the running command pops at the matching `;D`, and
+the gate has clean phase info.
+
+**Without remote integration** the local tracker stays in
+`.in_command` phase for the *entire* ssh / sudo / kubectl session.
+We can't distinguish "at the remote prompt" from "inside a remote
+command" — there's no signal coming back through the PTY tunnel.
+atty records everything in this mode, tagged with the recognised
+launcher's URI:
+
+| Without remote integration | atty records? | tagged as |
+|---|---|---|
+| `ssh remote` typed lines | yes | `ssh://user@host/…` |
+| `psql` queries inside ssh | yes (noise) | `ssh://user@host/…` |
+| `cat <<EOF` heredoc body inside ssh | yes (noise) | `ssh://user@host/…` |
+| `vim` alt-screen TUI inside ssh | no (alt-screen gate) | — |
+
+This is a deliberate trade vs. the alternative "gate strictly on
+local OSC 133 input phase" — that would drop ALL remote commands
+in this mode and undo the cross-host history feature for users
+who don't run their own software on remote hosts. The noise from
+REPL-style apps is the cost; configure `incognito_targets` to
+suppress recording on hosts where you care most.
+
+Local integration (Ghostty's `osc-133` flag, ble.sh, zsh4humans,
+VS Code's snippet, or `eval "$(atty init bash)"`) is required for
+the subprocess machinery to fire at all. Without it, atty stays
+on the keystroke-only path and the only gate is the alt-screen
+detection.
+
+**Statusbar segment.** When `Config.subprocess.show_in_statusbar`
+is true (default), the bar shows `→ ssh:user@host` (or
+`→ k8s:ctx/ns/pod`, etc.) while a recognised launcher is on the
+stack. The arrow + cyan styling distinguish it from the static
+base text and module contributions.
+
 ## Config resolution
 
 Same shape as dwm's `config.def.h` / `config.h` split, plus a tiny

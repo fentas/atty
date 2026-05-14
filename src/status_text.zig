@@ -28,9 +28,9 @@ pub fn writeSegment(w: *std.Io.Writer, any: *bool, text: []const u8) std.Io.Writ
     any.* = true;
 }
 
-/// Convenience: one-shot assembly with the three known segments. The
-/// incognito segment is formatted with its own SGR (caller passes
-/// the styles).
+/// Convenience: one-shot assembly with the known segments. The
+/// incognito + subprocess segments are formatted with their own SGRs
+/// (caller passes the styles).
 pub const AssembleArgs = struct {
     /// Output writer.
     w: *std.Io.Writer,
@@ -39,9 +39,16 @@ pub const AssembleArgs = struct {
     incognito: bool,
     /// Style applied to the 🔒 segment.
     incognito_style: Style,
-    /// Style of the surrounding bar — re-applied after the incognito
-    /// segment's reset so the next text picks up the bar style again.
+    /// Style of the surrounding bar — re-applied after the incognito /
+    /// subprocess segments' resets so the next text picks up the bar
+    /// style again.
     bar_style: Style,
+    /// Subprocess target — when non-empty, renders as
+    /// "→ <subprocess_text>" between the incognito segment and the
+    /// base text. Empty (default) omits the segment.
+    subprocess_text: []const u8 = "",
+    /// Style applied to the subprocess segment.
+    subprocess_style: Style = .{},
     /// Configured base text (may be empty).
     base_text: []const u8,
     /// Pre-gathered module contributions (may be empty).
@@ -63,6 +70,33 @@ pub fn assemble(args: AssembleArgs) std.Io.Writer.Error!void {
             args.bar_style,
         });
         try writeSegment(args.w, &any, sw.buffered());
+    }
+    if (args.subprocess_text.len > 0) {
+        // `subprocess_text` is up to ~192 bytes from the proxy
+        // (`subp_buf`); adding the per-segment SGR (`subprocess_style`
+        // + reset + bar_style reapply) plus the arrow glyph leaves
+        // ~64 bytes of headroom in a 256-byte buffer — borderline.
+        // 384 bytes guarantees a complete sequence even when both
+        // styles are maximally verbose (truecolor fg/bg + every
+        // attribute bit set). If formatting STILL fails (impossible
+        // in practice with the bounded inputs above, but defended
+        // against by Copilot's "either fully well-formed or
+        // omitted" suggestion), we drop the segment entirely rather
+        // than risk emitting a partial style escape that bleeds
+        // into the next segment.
+        var seg_buf: [384]u8 = undefined;
+        var sw: std.Io.Writer = .fixed(&seg_buf);
+        if (sw.print("{f}\u{2192} {s}{s}{f}", .{
+            args.subprocess_style,
+            args.subprocess_text,
+            style_mod.reset,
+            args.bar_style,
+        })) {
+            try writeSegment(args.w, &any, sw.buffered());
+        } else |_| {
+            // Partial output — omit. Better a missing segment than
+            // a half-emitted SGR leaking style into subsequent text.
+        }
     }
     try writeSegment(args.w, &any, args.base_text);
     try writeSegment(args.w, &any, args.module_text);
@@ -178,4 +212,100 @@ test "assemble incognito alone produces no trailing separator" {
     const out = buf[0..w.end];
     try testing.expect(std.mem.indexOf(u8, out, "incognito") != null);
     try testing.expect(std.mem.indexOf(u8, out, separator) == null);
+}
+
+test "assemble: subprocess segment alone renders with arrow glyph" {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try assemble(.{
+        .w = &w,
+        .incognito = false,
+        .incognito_style = .{},
+        .bar_style = .{},
+        .subprocess_text = "ssh:foo@bar",
+        .subprocess_style = .{ .dim = true, .fg = 6 },
+        .base_text = "",
+        .module_text = "",
+    });
+    const out = buf[0..w.end];
+    // Right-arrow glyph + the text.
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2192} ssh:foo@bar") != null);
+    // No separator (only one segment).
+    try testing.expect(std.mem.indexOf(u8, out, separator) == null);
+}
+
+test "assemble: empty subprocess_text omits the segment entirely" {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try assemble(.{
+        .w = &w,
+        .incognito = false,
+        .incognito_style = .{},
+        .bar_style = .{},
+        .subprocess_text = "", // empty — should be skipped
+        .subprocess_style = .{ .dim = true, .fg = 6 },
+        .base_text = "atty",
+        .module_text = "",
+    });
+    const out = buf[0..w.end];
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2192}") == null);
+    try testing.expectEqualStrings("atty", out);
+}
+
+test "assemble: subprocess segment ordering — between incognito and base, with separators" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try assemble(.{
+        .w = &w,
+        .incognito = true,
+        .incognito_style = .{ .dim = true, .fg = 1 },
+        .bar_style = .{ .dim = true },
+        .subprocess_text = "ssh:foo@bar",
+        .subprocess_style = .{ .dim = true, .fg = 6 },
+        .base_text = "atty",
+        .module_text = "atuin",
+    });
+    const out = buf[0..w.end];
+    // All four segments present.
+    try testing.expect(std.mem.indexOf(u8, out, "incognito") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2192} ssh:foo@bar") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "atuin") != null);
+    // Ordering: incognito → subprocess → base → module.
+    const inc_at = std.mem.indexOf(u8, out, "incognito").?;
+    const sub_at = std.mem.indexOf(u8, out, "\u{2192}").?;
+    const base_at = std.mem.indexOf(u8, out, "atty").?;
+    const mod_at = std.mem.indexOf(u8, out, "atuin").?;
+    try testing.expect(inc_at < sub_at);
+    try testing.expect(sub_at < base_at);
+    try testing.expect(base_at < mod_at);
+    // Exactly three separators between four segments.
+    var sep_count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOf(u8, out[i..], separator)) |idx| : (i += idx + separator.len) sep_count += 1;
+    try testing.expectEqual(@as(usize, 3), sep_count);
+}
+
+test "assemble: subprocess segment style is applied with a reset after" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try assemble(.{
+        .w = &w,
+        .incognito = false,
+        .incognito_style = .{},
+        .bar_style = .{ .dim = true },
+        .subprocess_text = "ssh:host",
+        .subprocess_style = .{ .dim = true, .fg = 6 },
+        .base_text = "atty",
+        .module_text = "",
+    });
+    const out = buf[0..w.end];
+    // The subprocess SGR uses fg=6.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[38;5;6m") != null);
+    // The reset comes BEFORE the next segment's separator so
+    // the separator picks up the bar's style, not the subprocess
+    // segment's. (Reset is `\x1B[0m`.)
+    const sub_at = std.mem.indexOf(u8, out, "\u{2192}").?;
+    const reset_after = std.mem.indexOf(u8, out[sub_at..], "\x1B[0m");
+    try testing.expect(reset_after != null);
 }

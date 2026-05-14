@@ -41,6 +41,8 @@ const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
+const Osc7 = @import("osc7.zig").Osc7;
+const subprocess_mod = @import("subprocess.zig");
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -194,6 +196,88 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // slave PTY size + suspend / resume statusbar painting.
     var alt_screen = AltScreen.init();
 
+    // OSC 7 cwd reports — emitted by Ghostty's shell-integration,
+    // VS Code's snippet, ble.sh, zsh4humans, kitty's integration,
+    // many ad-hoc PROMPT_COMMAND snippets. When the user is in
+    // `ssh remote` and the remote shell sources any of them, the
+    // OSC 7 bytes flow back through atty's master stream — we
+    // capture the path and feed it into the subprocess tracker so
+    // recorded commits get the *real* remote cwd, not just a `?`.
+    var osc7_tracker = Osc7.init();
+
+    // Subprocess-context tracker — at every OSC 133 `;C` we peek
+    // at the line the user just committed and decide whether they
+    // launched a recognised shell-context wrapper (ssh / mosh /
+    // sudo bash / kubectl exec / docker exec / lxc exec / su).
+    // The resulting stack feeds `dispatchLineCommit` so atuin /
+    // history can encode the remote target into the recorded
+    // entry's `--cwd` (e.g. `ssh://user@host/path`). Sub-prompts
+    // inside the launched subprocess are still recorded (we drop
+    // the blanket-suppress that PR #15 introduced specifically for
+    // recognized launchers); typed text inside an unrecognised
+    // subprocess (vim, less, psql, …) continues to be dropped.
+    var subprocess_tracker = subprocess_mod.Tracker{
+        .ssh_binary = config.subprocess.ssh_binary,
+        .use_ssh_g = config.subprocess.use_ssh_g,
+    };
+
+    // FIFO of committed lines waiting for a matching `;C` to
+    // attribute them.
+    //
+    // Why a FIFO and not a single slot: the stdin path runs
+    // `dispatchLineCommit` + `clearLastCommitted` the moment the
+    // user presses Enter, while the shell's `;C` marker doesn't
+    // arrive until later in the master-output stream (after the
+    // shell echoes, runs PROMPT_COMMAND, etc.). A single-slot
+    // stash was enough for the typical case (one Enter, one ;C).
+    // But a multi-line paste (or rapid back-to-back commits)
+    // pushes several Enter bytes in one stdin read; the SHELL
+    // then emits ;C per command — possibly multiple in one
+    // master-output read. Without a FIFO each ;C would consume
+    // the LATEST commit (overwriting), so the first commands
+    // would be tagged with the LAST committed line's parse —
+    // wrong attribution.
+    //
+    // Capacity 8 covers the realistic paste case; commits that
+    // overflow get dropped from the head (oldest first) so the
+    // tail stays current. Per-entry buffer 1 KiB is generous —
+    // `ssh foo@bar -i ~/.ssh/key …` stays well under, and
+    // truncation only loses tokens past the head (the parser
+    // only needs the first token to classify).
+    const max_pending_launches = 8;
+    const max_launch_line = 1024;
+    const PendingLaunches = struct {
+        buf: [max_pending_launches][max_launch_line]u8 = undefined,
+        lens: [max_pending_launches]usize = .{0} ** max_pending_launches,
+        head: usize = 0,
+        count: usize = 0,
+
+        fn push(self: *@This(), line: []const u8) void {
+            // Drop the oldest if we're at capacity. Drops are
+            // unlikely (8 simultaneous pending commits) but a
+            // pathological paste could trigger it.
+            if (self.count == max_pending_launches) {
+                self.head = (self.head + 1) % max_pending_launches;
+                self.count -= 1;
+            }
+            const slot = (self.head + self.count) % max_pending_launches;
+            const n = @min(line.len, max_launch_line);
+            @memcpy(self.buf[slot][0..n], line[0..n]);
+            self.lens[slot] = n;
+            self.count += 1;
+        }
+
+        fn pop(self: *@This()) []const u8 {
+            if (self.count == 0) return "";
+            const n = self.lens[self.head];
+            const out = self.buf[self.head][0..n];
+            self.head = (self.head + 1) % max_pending_launches;
+            self.count -= 1;
+            return out;
+        }
+    };
+    var pending_launches: PendingLaunches = .{};
+
     var ctx = module.Context{
         .allocator = allocator,
         .io = io,
@@ -201,6 +285,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         .scratch = &scratch,
         .is_tty = args.is_tty,
         .incognito = false,
+        .subprocess = &subprocess_tracker,
     };
 
     var pfds = [_]posix.pollfd{
@@ -557,13 +642,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 _ = line_state.applyInput(input);
 
                 // If the user pressed Enter AND the OSC 133 tracker
-                // is active (shell emits prompt-zone markers), the
-                // marker stream's captured input is the ground truth
-                // for what's about to be committed — including any
-                // text the shell put there via history recall /
+                // is in INPUT phase (between `;B` and `;C` — i.e.
+                // we know we're at a real shell prompt), the marker
+                // stream's captured input is the ground truth for
+                // what's about to be committed — including any text
+                // the shell put there via history recall /
                 // completion / paste that line_state's keystroke
                 // tracking can't observe. Override.
-                if (osc133_tracker.active and containsEnter(input) and osc133_tracker.currentInput().len > 0) {
+                //
+                // Gating on `inInputPhase()` (not just `active`) is
+                // critical: `currentInput()` reflects whatever was
+                // captured between the LAST `;B` and now, so in
+                // command phase (post-`;C`, e.g. inside ssh without
+                // remote integration) it's the *previous* prompt's
+                // content. Without the gate, every Enter during
+                // command phase would set lastCommitted to the
+                // stale prompt text → recording the same line over
+                // and over.
+                if (osc133_tracker.inInputPhase() and containsEnter(input) and osc133_tracker.currentInput().len > 0) {
                     line_state.setCommitted(osc133_tracker.currentInput());
                 }
 
@@ -597,26 +693,131 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // commit. The behaviour difference vs. plain
                 // `.replace` is only that we look at the original
                 // bytes (not the replacement) for the Enter test.
-                const shell_saw_enter = switch (action) {
+                // Two related signals from the action:
+                //
+                //   - `recording_should_fire`: should `dispatchLineCommit`
+                //     run? True for `.forward` / `.replace` whose
+                //     forwarded bytes contain Enter, AND true for
+                //     `.replace_commit` (the LLM module opt-in:
+                //     fire commit even though we're swapping the
+                //     line for Ctrl+U).
+                //   - `shell_will_execute`: will the SHELL emit a
+                //     `;C` for this line? True ONLY when the bytes
+                //     actually forwarded to the PTY contain Enter.
+                //     False for `.replace_commit` (it forwards
+                //     `\x15`, no Enter → no `;C`).
+                //
+                // The split matters for `pending_launches`: pushing
+                // when `recording_should_fire` but `!shell_will_execute`
+                // would enqueue a commit that no `;C` will ever
+                // pop, so the NEXT real `;C` (from an unrelated
+                // command) would pop the stale entry and
+                // mis-classify the subprocess kind.
+                const recording_should_fire = switch (action) {
                     .forward => containsEnter(input),
                     .swallow => false,
                     .replace => |bytes| containsEnter(bytes),
                     .replace_commit => containsEnter(input),
                 };
+                const shell_will_execute = switch (action) {
+                    .forward => containsEnter(input),
+                    .swallow => false,
+                    .replace => |bytes| containsEnter(bytes),
+                    .replace_commit => |bytes| containsEnter(bytes),
+                };
+                // Legacy alias — older code paths in this file use
+                // the original name for the recording-side gate.
+                const shell_saw_enter = recording_should_fire;
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
-                    // Suppress when we're inside a subprocess. Catches
-                    // Enter pressed inside vim / nano / k9s / less /
-                    // psql / etc. (alt-screen TUIs) and inside ssh /
-                    // sudo / kubectl exec / etc. when shell integration
-                    // is sourced (OSC 133 in command phase). Without
-                    // this gate, every Enter inside any sub-app pollutes
-                    // the local shell's history + atuin index.
-                    const in_subproc = inSubprocess(&alt_screen, &osc133_tracker);
+                    // Stash the line for the upcoming `;C` edge in
+                    // the master-output handler. shell_saw_enter
+                    // gates this — if the shell never saw Enter
+                    // (`.swallow`, guardrail block) it can't fire
+                    // a `;C` either, so we don't push. Each
+                    // recording-eligible line is APPENDED to the
+                    // FIFO; the next `;C` edge pops the oldest
+                    // entry, so multi-commit chunks (a paste of
+                    // several lines) attribute each `;C` to the
+                    // matching commit in stdin order. Overflow at
+                    // capacity (8) drops the head, not this tail —
+                    // the tail entry is always current.
+                    //
+                    // Additional gate: only push when OSC 133 says
+                    // we're actually at a SHELL prompt
+                    // (`inInputPhase()`). Without this, Enters typed
+                    // into non-shell interactive prompts (ssh's
+                    // hostkey "yes/no", sudo's password prompt,
+                    // `read` builtins from a shell script, …) would
+                    // pile up in the FIFO waiting for a `;C` that
+                    // never comes; the next real `;C` would then
+                    // pop the stale entry and misattribute the
+                    // subprocess kind. Also covers the
+                    // no-local-integration case (phase stays
+                    // `.idle` forever): we don't push, the FIFO
+                    // stays empty, and `;C` (which won't fire
+                    // anyway) gets `""` from `.pop()` — same as
+                    // before.
+                    // Push to the FIFO requires BOTH:
+                    //   - `shell_will_execute` — the bytes the shell
+                    //     actually receives contain Enter, so a `;C`
+                    //     will follow. Without this, `.replace_commit`
+                    //     would enqueue commits that no `;C` ever
+                    //     consumes, and the next real `;C` would pop
+                    //     the wrong line (mis-classifying its frame).
+                    //   - `inInputPhase()` — we're at a real prompt
+                    //     (non-shell interactive prompts like ssh
+                    //     hostkey "yes/no" don't fire `;C` either).
+                    if (shell_will_execute and osc133_tracker.inInputPhase()) {
+                        pending_launches.push(committed);
+                    }
+                    // Decide whether to record this commit. Three
+                    // gating signals:
+                    //
+                    //  1. alt-screen TUI active (vim, k9s, less, …)
+                    //     — never record; we can't tell what's a
+                    //     command and the gate works without shell
+                    //     integration.
+                    //  2. OSC 133 says we're in command phase AND
+                    //     the top of the subprocess stack is `.none`
+                    //     — we're inside an unrecognised subprocess
+                    //     (psql, nano, mysql -p, …); same drop.
+                    //  3. OSC 133 says we're in command phase AND
+                    //     the top of the stack is a recognised
+                    //     launcher (ssh, sudo bash, kubectl exec, …)
+                    //     — RECORD. The atuin / history modules
+                    //     consult `ctx.subprocessCwd(…)` so the
+                    //     entry is tagged with the remote target
+                    //     (`ssh://user@host/…`, `k8s://…`, etc.)
+                    //     rather than masquerading as a local one.
+                    const drop_for_alt = alt_screen.active;
+                    const drop_for_unknown_subproc =
+                        osc133_tracker.active and
+                        !osc133_tracker.inInputPhase() and
+                        subprocess_tracker.currentKind() == .none;
+                    // Per-target incognito: when the current
+                    // subprocess frame's name matches a configured
+                    // target, treat it like the user pressed
+                    // Ctrl+Shift+I. Same drop, no statusbar surprise
+                    // (the segment still shows the target so the
+                    // user knows where they are; the 🔒 indicator
+                    // doesn't appear because this is config-driven,
+                    // not user-toggled).
+                    const drop_for_target_incognito = blk: {
+                        if (subprocess_tracker.current()) |f| {
+                            if (f.kind != .none) {
+                                for (config.subprocess.incognito_targets) |needle| {
+                                    if (std.mem.eql(u8, f.name(), needle)) break :blk true;
+                                }
+                            }
+                        }
+                        break :blk false;
+                    };
+                    const drop_recording = drop_for_alt or drop_for_unknown_subproc or drop_for_target_incognito;
                     if (!line_state.committed_was_uncertain and
                         !incognito_on and
                         !leading_space and
-                        !in_subproc and
+                        !drop_recording and
                         shell_saw_enter)
                     {
                         D.dispatchLineCommit(&runtimes, &ctx, committed) catch {};
@@ -654,6 +855,49 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // dormant otherwise.
                 osc133_tracker.feed(output);
                 alt_screen.feed(output);
+                osc7_tracker.feed(output);
+
+                // Walk the OSC 133 edge ring + OSC 7 capture ring
+                // INTERLEAVED by byte offset within the current
+                // `output` chunk. 2-pointer merge: whichever event
+                // has the smaller offset fires next. Order matters
+                // because applying OSC 7 after a push in the same
+                // chunk lands it on the wrong (child) frame; before
+                // a push lands it on the parent.
+                //
+                // Per-byte offset stamping on both trackers lets us
+                // replay events in source order without merging
+                // per-byte during the feed itself.
+                const edges = osc133_tracker.drainEdges();
+                var ei: usize = 0;
+                var ci: usize = 0;
+                while (ei < edges.len or ci < osc7_tracker.count) {
+                    const edge_off: u32 = if (ei < edges.len) osc133_tracker.edgeOffset(ei) else std.math.maxInt(u32);
+                    const cwd_off: u32 = if (ci < osc7_tracker.count) osc7_tracker.offsetAt(ci) else std.math.maxInt(u32);
+                    if (cwd_off <= edge_off) {
+                        subprocess_tracker.onRemoteCwd(osc7_tracker.path(ci));
+                        ci += 1;
+                    } else {
+                        switch (edges[ei]) {
+                            .cmd_start => {
+                                // ;C — pop the next pending launch line
+                                // (FIFO order matches the Enter order
+                                // on stdin) and feed it to the
+                                // subprocess tracker. We CAN'T use
+                                // `line_state.lastCommitted()` — by the
+                                // time the shell emits `;C`, the stdin
+                                // path has already run
+                                // `clearLastCommitted()` — and if
+                                // multiple ;C edges fire in one chunk
+                                // we need the corresponding commits,
+                                // not the most recent one.
+                                subprocess_tracker.onCommandStart(pending_launches.pop(), allocator, io);
+                            },
+                            .cmd_end => subprocess_tracker.onCommandEnd(),
+                        }
+                        ei += 1;
+                    }
+                }
 
                 // Alt-screen transition: an interactive full-screen
                 // TUI just entered (?1049h, ?47h, ?1047h) or exited
@@ -939,16 +1183,49 @@ fn renderStatus(
     var mw: std.Io.Writer = .fixed(&mod_buf);
     D.gatherStatus(rts, ctx, &mw) catch {};
 
-    // Then ask the pure assembler to join incognito + base + modules
-    // with " │ " separators, skipping empty segments. Pure logic +
-    // own tests live in src/status_text.zig.
-    var text_buf: [256]u8 = undefined;
+    // Subprocess segment — only rendered when configured on AND a
+    // recognised launcher is on the top of the tracker stack. The
+    // segment text is short — kind prefix + frame name — so a small
+    // local buffer is sufficient.
+    var subp_buf: [192]u8 = undefined;
+    var subp_text: []const u8 = "";
+    if (config.subprocess.show_in_statusbar) {
+        if (ctx.subprocess) |tr| {
+            // Walk past any `.none` frames sitting on top — those are
+            // pushed for every unrecognised command running INSIDE a
+            // recognised subprocess (e.g. running `ls` inside an ssh
+            // session pushes `.none(ls)` on top of `ssh:remote`). If
+            // we used `tr.current()` the segment would flicker every
+            // time a command runs in the remote shell.
+            if (tr.currentRecognized()) |frame| {
+                const prefix: []const u8 = switch (frame.kind) {
+                    .ssh => "ssh:",
+                    .kubectl_exec => "k8s:",
+                    .docker_exec => "docker:",
+                    .container_exec => "container:",
+                    .elevation => "",
+                    .su => "",
+                    .none => unreachable,
+                };
+                var sw: std.Io.Writer = .fixed(&subp_buf);
+                sw.print("{s}{s}", .{ prefix, frame.name() }) catch {};
+                subp_text = subp_buf[0..sw.end];
+            }
+        }
+    }
+
+    // Then ask the pure assembler to join incognito + subprocess +
+    // base + modules with " │ " separators, skipping empty segments.
+    // Pure logic + own tests live in src/status_text.zig.
+    var text_buf: [512]u8 = undefined;
     var tw: std.Io.Writer = .fixed(&text_buf);
     status_text.assemble(.{
         .w = &tw,
         .incognito = incognito,
         .incognito_style = config.statusbar.incognito_style,
         .bar_style = config.statusbar.style,
+        .subprocess_text = subp_text,
+        .subprocess_style = config.subprocess.segment_style,
         .base_text = config.statusbar.base_text,
         .module_text = mod_buf[0..mw.end],
     }) catch {};

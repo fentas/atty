@@ -14,6 +14,8 @@ test {
     _ = @import("ghost_list.zig");
     _ = @import("osc133.zig");
     _ = @import("altscreen.zig");
+    _ = @import("subprocess.zig");
+    _ = @import("osc7.zig");
     _ = @import("pty.zig");
     _ = @import("terminal.zig");
     _ = @import("keymap.zig");
