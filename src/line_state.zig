@@ -108,17 +108,19 @@ pub const LineState = struct {
         self.len = 0;
         self.uncertain = false;
         self.generation +%= 1;
-        // `pending_author` resets on reset (Ctrl-C / Ctrl-D / unknown
-        // CSI) — the user is starting a fresh line, so a previously-
-        // staged LLM author tag should be dropped. The LLM module
-        // re-flips to `.llm` if it triggers another suggestion.
+        // reset() handles the explicit abort signals (Ctrl-C, Ctrl-D,
+        // Ctrl-G) — drop the staged author too because the user is
+        // starting a fresh line and any previously-staged LLM tag
+        // should NOT apply. (CSI / Tab / other unmodelled bytes
+        // don't pass through here — applyInput routes them through
+        // markUncertain() which drops pending_author on its own.)
         self.pending_author = .user;
     }
 
-    /// Upgrade the pending commit's author. Called by LLM-driven
-    /// modules (`src/modules/llm.zig`) BEFORE injecting a suggested
-    /// command so the resulting commit lands with `committed_author`
-    /// equal to `author` when Enter eventually fires.
+    /// Stage the author for the commit that's about to happen.
+    /// Must be called BEFORE the keystrokes that produce the commit
+    /// (Enter / OSC 133 capture) so submit() / setCommitted() can
+    /// snapshot it into `committed_author`.
     pub fn setCommitAuthor(self: *LineState, author: Author) void {
         self.pending_author = author;
     }
@@ -650,6 +652,25 @@ test "backspace to empty drops pending author" {
     _ = l.applyInput("ab\x7f\x7f");
     try std.testing.expectEqual(@as(usize, 0), l.len);
     try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Ctrl-W (kill last word) drops pending author when it empties the buffer" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    // Single word, Ctrl-W wipes it → buffer empty → author drops.
+    _ = l.applyInput("staged\x17");
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Ctrl-W keeps pending author when the buffer is still non-empty afterward" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    // Two words; Ctrl-W kills only the last, buffer still has "ls ".
+    _ = l.applyInput("ls suggested\x17");
+    try std.testing.expect(l.len > 0);
+    // The line still represents the LLM-staged suggestion — leave it.
+    try std.testing.expectEqual(Author.llm, l.pending_author);
 }
 
 test "setCommitted preserves the author submit() snapshotted (OSC 133 override path)" {
