@@ -26,6 +26,19 @@ const std = @import("std");
 
 pub const max_line = 4096;
 
+/// Who typed the line that's about to be committed?
+///
+/// Author state lives on `LineState` rather than a per-dispatch
+/// type because staging happens potentially many dispatch cycles
+/// before the commit — anything that holds it only for one tick
+/// would lose the tag.
+pub const Author = enum {
+    /// Default. Human typed at the local prompt.
+    user,
+    /// Line was injected programmatically.
+    llm,
+};
+
 pub const LineState = struct {
     buffer: [max_line]u8 = undefined,
     len: usize = 0,
@@ -45,6 +58,18 @@ pub const LineState = struct {
     committed_len: usize = 0,
     committed_was_uncertain: bool = false,
 
+    /// Author of the line currently being typed (pending).
+    /// Reset to `.user` whenever the buffer's content is no longer
+    /// attributable to a previously-staged author: on `submit()`
+    /// (after the snapshot to committed_author), on `reset()`, on
+    /// `markUncertain()`, and on `backspace` / `killLine` /
+    /// `killWord` that empty the buffer.
+    pending_author: Author = .user,
+    /// Snapshot of `pending_author` at commit time. Lives until the
+    /// next `clearLastCommitted()` or until `setCommitted("")`
+    /// explicitly clears the commit slot.
+    committed_author: Author = .user,
+
     pub fn current(self: *const LineState) []const u8 {
         return self.buffer[0..self.len];
     }
@@ -60,12 +85,36 @@ pub const LineState = struct {
     pub fn clearLastCommitted(self: *LineState) void {
         self.committed_len = 0;
         self.committed_was_uncertain = false;
+        self.committed_author = .user;
     }
 
     pub fn reset(self: *LineState) void {
         self.len = 0;
         self.uncertain = false;
         self.generation +%= 1;
+        // reset() handles the explicit abort signals (Ctrl-C, Ctrl-D,
+        // Ctrl-G) — drop the staged author too because the user is
+        // starting a fresh line and any previously-staged LLM tag
+        // should NOT apply. (CSI / Tab / other unmodelled bytes
+        // don't pass through here — applyInput routes them through
+        // markUncertain() which drops pending_author on its own.)
+        self.pending_author = .user;
+    }
+
+    /// Stage the author for the next `submit()` to snapshot into
+    /// `committed_author`. Must be called BEFORE the Enter that
+    /// produces the commit. `setCommitted()` deliberately does NOT
+    /// honour `pending_author` in the non-empty case — it preserves
+    /// whatever `committed_author` was last set to (typically by
+    /// the preceding `submit()`).
+    pub fn setCommitAuthor(self: *LineState, author: Author) void {
+        self.pending_author = author;
+    }
+
+    /// Author of the line currently in `committed[0..committed_len]`,
+    /// or `.user` when nothing is committed.
+    pub fn committedAuthor(self: *const LineState) Author {
+        return self.committed_author;
     }
 
     /// Force-write the committed buffer from an externally-observed
@@ -79,6 +128,11 @@ pub const LineState = struct {
         @memcpy(self.committed[0..n], content[0..n]);
         self.committed_len = n;
         self.committed_was_uncertain = false;
+        // Non-empty content overrides the BUFFER only; `committed_author`
+        // is unchanged (it's owned exclusively by `submit()`). An empty
+        // payload is the explicit "no commit" signal — drop the author
+        // too so `committedAuthor()` doesn't return stale state.
+        if (n == 0) self.committed_author = .user;
     }
 
     /// Replace the live input buffer from an externally-observed
@@ -123,8 +177,13 @@ pub const LineState = struct {
                     if (c >= 0x40 and c <= 0x7E) break;
                 }
                 // Treat any CSI as uncertainty — most likely a cursor
-                // movement or history navigation we don't model.
-                self.uncertain = true;
+                // movement or history navigation we don't model. We
+                // also drop `pending_author` here: a CSI we don't
+                // model could be Arrow-Up (history recall) which
+                // replaces the buffer with content we haven't seen,
+                // and a staged `.llm` author on that line would be
+                // wrong. Caller re-stages if it still wants the tag.
+                self.markUncertain();
                 i = j + 1;
                 continue;
             }
@@ -141,20 +200,30 @@ pub const LineState = struct {
                 // Ctrl-W — kill previous word
                 0x17 => self.killWord(),
                 // Tab — completion is shell-driven; we lose track.
-                0x09 => self.uncertain = true,
+                0x09 => self.markUncertain(),
                 // Any other control byte we don't model. The ranges are
                 // carefully carved around the codes we *do* handle above.
                 0x00, 0x01, 0x02, 0x05, 0x06, 0x0B, 0x0C, 0x0E...0x14, 0x16, 0x18, 0x19, 0x1A, 0x1C...0x1F => {
-                    self.uncertain = true;
+                    self.markUncertain();
                 },
                 // Lone ESC (no '[' follower).
-                0x1B => self.uncertain = true,
+                0x1B => self.markUncertain(),
                 // Printable.
                 else => self.append(b),
             }
             i += 1;
         }
         return self.generation != start_gen or self.uncertain;
+    }
+
+    /// Set `uncertain = true` AND drop any staged `pending_author`.
+    /// We pair the two because every "unmodelled keystroke" path
+    /// (CSI, Tab, lone ESC, exotic control bytes) potentially
+    /// replaces the buffer with content we haven't seen — keeping
+    /// an `.llm` tag staged would mis-attribute the next commit.
+    fn markUncertain(self: *LineState) void {
+        self.uncertain = true;
+        self.pending_author = .user;
     }
 
     fn append(self: *LineState, b: u8) void {
@@ -168,32 +237,62 @@ pub const LineState = struct {
     }
 
     fn backspace(self: *LineState) void {
-        if (self.len == 0) return;
+        // Empty-buffer no-op: still drop any staged `pending_author`.
+        // The invariant is "line-editing intent on an empty buffer
+        // means the user is starting fresh" — without this the
+        // sequence `setCommitAuthor(.llm)` + Ctrl-H (with empty
+        // buffer) + new typing would leak the .llm tag onto a
+        // user-typed line. Editing a non-empty buffer keeps the
+        // staged author until / unless the edit reduces `len` to
+        // zero (handled by the second drop below).
+        if (self.len == 0) {
+            self.pending_author = .user;
+            return;
+        }
         self.len -= 1;
-        // Reaching an empty buffer is the user telling us they've
-        // cleaned house — drop the uncertain flag so ghost suggestions
-        // come back. If we'd been wrong about the *content* before, we
-        // can't be wrong about an empty buffer.
-        if (self.len == 0) self.uncertain = false;
+        if (self.len == 0) {
+            self.uncertain = false;
+            self.pending_author = .user;
+        }
         self.generation +%= 1;
     }
 
     fn killLine(self: *LineState) void {
-        if (self.len == 0) return;
+        // Empty-buffer Ctrl-U is a no-op for `len`/`uncertain`, but
+        // we still drop a staged `pending_author` for the same
+        // reason as `backspace` — line-editing on an empty buffer
+        // signals the user is starting fresh.
+        if (self.len == 0) {
+            self.pending_author = .user;
+            return;
+        }
         self.len = 0;
         self.uncertain = false;
+        self.pending_author = .user;
         self.generation +%= 1;
     }
 
     fn killWord(self: *LineState) void {
-        if (self.len == 0) return;
+        // Empty-buffer Ctrl-W: drop staged author (no-op intent
+        // signals "user starting fresh", see `backspace`). The
+        // non-empty path preserves the staged author when the kill
+        // leaves the buffer non-empty (still represents the
+        // LLM-staged line, just edited) and drops it only when the
+        // kill empties the buffer.
+        if (self.len == 0) {
+            self.pending_author = .user;
+            return;
+        }
         // Skip trailing spaces, then the word characters.
         var end = self.len;
         while (end > 0 and self.buffer[end - 1] == ' ') : (end -= 1) {}
         while (end > 0 and self.buffer[end - 1] != ' ') : (end -= 1) {}
         if (end != self.len) {
             self.len = end;
-            if (self.len == 0) self.uncertain = false;
+            if (self.len == 0) {
+                self.uncertain = false;
+                self.pending_author = .user;
+            }
             self.generation +%= 1;
         }
     }
@@ -203,13 +302,21 @@ pub const LineState = struct {
         // after applyInput. Overwrites any prior un-consumed snapshot —
         // if two Enters land in one read, only the latest non-empty
         // line is recorded, which matches what a human would expect.
+        //
+        // `pending_author` is also snapshotted here and reset, so a
+        // subsequent line starts fresh under `.user` even if the
+        // previous commit was tagged `.llm`. A module that wants the
+        // NEXT line tagged differently must re-call `setCommitAuthor`
+        // after this snapshot fires.
         if (self.len > 0) {
             @memcpy(self.committed[0..self.len], self.buffer[0..self.len]);
             self.committed_len = self.len;
             self.committed_was_uncertain = self.uncertain;
+            self.committed_author = self.pending_author;
         }
         self.len = 0;
         self.uncertain = false;
+        self.pending_author = .user;
         self.generation +%= 1;
     }
 };
@@ -466,4 +573,163 @@ test "syncFromCapture truncates oversized content to max_line" {
     @memset(&oversized, 'x');
     l.syncFromCapture(&oversized);
     try std.testing.expectEqual(@as(usize, max_line), l.len);
+}
+
+test "Author defaults to .user, persists across uneventful applyInput" {
+    var l = LineState{};
+    try std.testing.expectEqual(Author.user, l.pending_author);
+    try std.testing.expectEqual(Author.user, l.committedAuthor());
+
+    _ = l.applyInput("ls");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "setCommitAuthor stages the next commit's author; submit() snapshots it" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    try std.testing.expectEqual(Author.llm, l.pending_author);
+
+    _ = l.applyInput("ls\r");
+    // After commit: committed_author carries the staged author;
+    // pending_author resets so the NEXT line starts fresh.
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "clearLastCommitted resets committed_author to .user" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("ls\r");
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+
+    l.clearLastCommitted();
+    try std.testing.expectEqual(Author.user, l.committedAuthor());
+}
+
+test "reset() drops pending author (Ctrl-C / Ctrl-D / Ctrl-G)" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+
+    // Ctrl-C — caller-facing reset.
+    _ = l.applyInput("partial\x03");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "CSI sequences drop pending author (Arrow-Up history recall is unknown content)" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+
+    // Up arrow — shell will redraw with a recalled command we
+    // haven't observed. Can't keep the `.llm` tag on a buffer
+    // the user might commit as their own.
+    _ = l.applyInput("\x1b[A");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Tab / lone ESC / unmodelled control bytes drop pending author" {
+    inline for (.{ "\x09", "\x1b", "\x16" }) |seq| {
+        var l = LineState{};
+        l.setCommitAuthor(.llm);
+        _ = l.applyInput(seq);
+        try std.testing.expectEqual(Author.user, l.pending_author);
+    }
+}
+
+test "Ctrl-U (kill line) drops pending author so a fresh user command isn't mis-tagged" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("llm-staged content\x15");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "backspace to empty drops pending author" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    // Type two chars under .llm, then backspace both → empty.
+    _ = l.applyInput("ab\x7f\x7f");
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Ctrl-W (kill last word) drops pending author when it empties the buffer" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    // Single word, Ctrl-W wipes it → buffer empty → author drops.
+    _ = l.applyInput("staged\x17");
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Ctrl-W keeps pending author when the buffer is still non-empty afterward" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    // Two words; Ctrl-W kills only the last, buffer still has "ls ".
+    _ = l.applyInput("ls suggested\x17");
+    try std.testing.expect(l.len > 0);
+    // The line still represents the LLM-staged suggestion — leave it.
+    try std.testing.expectEqual(Author.llm, l.pending_author);
+}
+
+test "Ctrl-U on an empty buffer still drops a staged pending_author" {
+    // Pins the empty-buffer-early-return path: a user can stage
+    // `.llm` then immediately hit Ctrl-U before any chars arrive;
+    // the no-op edit must still clear the tag so the next
+    // user-typed line isn't mis-attributed.
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    _ = l.applyInput("\x15");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Ctrl-W on an empty buffer still drops a staged pending_author" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("\x17");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "Backspace on an empty buffer still drops a staged pending_author" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("\x7f");
+    try std.testing.expectEqual(Author.user, l.pending_author);
+}
+
+test "submit-then-setCommitted preserves the snapshotted author" {
+    // After `submit()` has snapshotted `pending_author` →
+    // `committed_author`, a subsequent non-empty `setCommitted`
+    // (buffer override) must NOT clobber the author.
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("ls\r");
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+
+    l.setCommitted("ls -la");
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+    try std.testing.expectEqualSlices(u8, "ls -la", l.lastCommitted().?);
+}
+
+test "setCommitted(\"\") resets committed_author (no-commit signal)" {
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    _ = l.applyInput("ls\r");
+    try std.testing.expectEqual(Author.llm, l.committedAuthor());
+
+    l.setCommitted(""); // explicit clear via the OSC 133 path
+    try std.testing.expectEqual(Author.user, l.committedAuthor());
+}
+
+test "setCommitted with non-empty content does not snapshot pending_author" {
+    // Pins the API contract: only `submit()` snapshots
+    // `pending_author` → `committed_author`. `setCommitted` is a
+    // buffer-only override; calling it with a non-empty payload
+    // leaves `committed_author` at whatever value it had
+    // (default `.user` here, since no `submit()` ran first) and
+    // leaves the staged `pending_author` intact.
+    var l = LineState{};
+    l.setCommitAuthor(.llm);
+    l.setCommitted("echo hi");
+    try std.testing.expectEqual(Author.user, l.committedAuthor());
+    try std.testing.expectEqual(Author.llm, l.pending_author);
 }

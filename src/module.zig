@@ -38,6 +38,8 @@ pub const Error = error{
     OutOfMemory,
 };
 
+pub const Author = @import("line_state.zig").Author;
+
 /// What a module decides about a keystroke.
 pub const Action = union(enum) {
     /// Pass the bytes through to the next module / the PTY.
