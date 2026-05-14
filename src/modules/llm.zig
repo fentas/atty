@@ -44,8 +44,16 @@ pub const Config = struct {
     /// so a missed dispatch is a silent no-op, not an executed
     /// command.
     prefix: []const u8 = "#: ",
-    /// LLM model identifier passed in the request body.
+    /// LLM model identifier passed in the request body. Used as
+    /// the default when `models` is empty AND the current
+    /// `current_model_idx` doesn't address a `models[]` entry.
+    /// Kept for backward compat with single-model configs.
     model: []const u8 = "llama3:8b",
+    /// Configured model list — `Alt+M` cycles through this with
+    /// wrap-around. First entry is the default at startup.
+    /// Empty (default) → use the single `model` field above.
+    /// Example: `&.{ "qwen3-coder", "gpt-5-mini", "llama3:70b" }`.
+    models: []const []const u8 = &.{},
     /// Shell name for the user-prompt template. `null` → derive
     /// from `$SHELL` basename at attach time.
     shell: ?[]const u8 = null,
@@ -160,6 +168,14 @@ pub fn configure(comptime cfg: Config) type {
             req_buf: [cfg.max_prompt_bytes]u8 = undefined,
             req_len: usize = 0,
             req_pending: bool = false,
+            /// Selected model for the pending request. Filled by
+            /// the request-trigger sites (onInput / onAction) from
+            /// `cfg.models[rt.current_model_idx]` (or `cfg.model`
+            /// when `models` is empty) under the same mutex that
+            /// sets req_pending. Worker reads it for buildRequestBody.
+            /// Bounded at 64 chars — model names are short ASCII.
+            model_buf: [64]u8 = undefined,
+            model_len: usize = 0,
             /// Monotonic counter — bumped on every prompt the proxy
             /// hands to the worker. The worker stamps each
             /// response with the generation it was serving; the
@@ -256,6 +272,13 @@ pub fn configure(comptime cfg: Config) type {
             // corresponding action. Enter in AI mode is swallowed
             // (no auto-fire). See `docs/llm-exec-mode-design.md`.
             ai_mode_active: bool = false,
+            /// Index into `cfg.models[]` for the currently-selected
+            /// model. Wraps around when `Alt+M` (`llm_exec_cycle_model`)
+            /// fires. Initialised to 0 at attach (first entry is
+            /// the default). Stays 0 forever when `cfg.models` is
+            /// empty; in that case the legacy `cfg.model` is used
+            /// instead.
+            current_model_idx: usize = 0,
             /// Pending bytes for pollShellInput to surface. Used to
             /// route `\x15` (Ctrl+U) to the pty after onAction
             /// triggers a worker call — `onAction` can't synchronously
@@ -580,7 +603,23 @@ pub fn configure(comptime cfg: Config) type {
                 },
                 .llm_exec_cycle_model => {
                     if (!rt.ai_mode_active) return false;
-                    latchHint(rt, "model cycling not yet wired — single model in use");
+                    if (cfg.models.len == 0) {
+                        // Single-model config — nothing to cycle.
+                        // Honest feedback so users know why
+                        // Alt+M didn't do anything.
+                        latchHint(rt, "single-model config — set `models = &.{ ... }` to cycle");
+                        return true;
+                    }
+                    rt.current_model_idx = (rt.current_model_idx + 1) % cfg.models.len;
+                    // Latch a one-line hint with the new pick so
+                    // the user sees confirmation. Statusbar AI
+                    // hint will also reflect the new model on the
+                    // next tick (statusText appends the current
+                    // pick when models.len > 0).
+                    const new_model = cfg.models[rt.current_model_idx];
+                    var msg_buf: [128]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&msg_buf, "model: {s}", .{new_model}) catch new_model;
+                    latchHint(rt, msg);
                     return true;
                 },
                 .llm_exec_toggle_help => {
@@ -660,6 +699,19 @@ pub fn configure(comptime cfg: Config) type {
                 return .forward;
             }
 
+            // Resolve the model: prefer `cfg.models[idx]` when
+            // configured, else fall back to the legacy single
+            // `cfg.model`. Truncated at the model_buf width
+            // (Shared.model_buf is 64 bytes — model names are short
+            // ASCII so the cap is academic).
+            const selected_model: []const u8 = blk: {
+                if (cfg.models.len > 0) {
+                    const idx = if (rt.current_model_idx < cfg.models.len) rt.current_model_idx else 0;
+                    break :blk cfg.models[idx];
+                }
+                break :blk cfg.model;
+            };
+
             // Hand the prompt to the worker. Same locking + req-gen
             // bump as before — see the original onInput comment for
             // the stale-response guard rationale.
@@ -667,6 +719,9 @@ pub fn configure(comptime cfg: Config) type {
             defer rt.shared.mutex.unlock(ctx.io);
             @memcpy(rt.shared.req_buf[0..body.len], body);
             rt.shared.req_len = body.len;
+            const m_n = @min(selected_model.len, rt.shared.model_buf.len);
+            @memcpy(rt.shared.model_buf[0..m_n], selected_model[0..m_n]);
+            rt.shared.model_len = m_n;
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
@@ -908,9 +963,18 @@ pub fn configure(comptime cfg: Config) type {
                 }
                 prompt_len = shared.req_len;
                 @memcpy(prompt_local[0..prompt_len], shared.req_buf[0..prompt_len]);
+                // Copy the request-time model under the same lock.
+                // Triggers (onInput / onAction) write model_len > 0
+                // before signalling; if the buffer somehow stayed
+                // empty we fall back to cfg.model.
+                var model_local: [64]u8 = undefined;
+                const model_n = shared.model_len;
+                if (model_n > 0) @memcpy(model_local[0..model_n], shared.model_buf[0..model_n]);
                 shared.req_pending = false;
                 serving_gen = shared.req_gen;
                 shared.mutex.unlock(io);
+
+                const model_for_request: []const u8 = if (model_n > 0) model_local[0..model_n] else cfg.model;
 
                 // Fire the HTTP request OUTSIDE the lock — it may
                 // block for many seconds.
@@ -925,6 +989,7 @@ pub fn configure(comptime cfg: Config) type {
                     shell_name,
                     context_blob,
                     prompt_local[0..prompt_len],
+                    model_for_request,
                     &response_buf,
                     &explanation_local,
                     &error_local,
@@ -992,6 +1057,7 @@ pub fn configure(comptime cfg: Config) type {
             shell_name: []const u8,
             context_blob: []const u8,
             prompt: []const u8,
+            model: []const u8,
             out: []u8,
             explanation_out: []u8,
             error_out: []u8,
@@ -999,7 +1065,7 @@ pub fn configure(comptime cfg: Config) type {
             const url = try std.fmt.allocPrint(gpa, "{s}/chat/completions", .{api_base});
             defer gpa.free(url);
 
-            const body = try buildRequestBody(gpa, cfg.model, effective_system_prompt, shell_name, context_blob, prompt);
+            const body = try buildRequestBody(gpa, model, effective_system_prompt, shell_name, context_blob, prompt);
             defer gpa.free(body);
 
             var auth_buf: [256]u8 = undefined;
