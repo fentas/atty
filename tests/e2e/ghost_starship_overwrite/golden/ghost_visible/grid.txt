@@ -1,0 +1,8 @@
+$ echo starship-survived-overwrite
+starship-survived-overwrite
+$ echo starship-survived-overwrite
+
+
+
+
+

@@ -1,0 +1,8 @@
+$ echo unique-record-12345
+unique-record-12345
+$ cat /tmp/atty-e2e-history-records-partial-osc133
+echo unique-record-12345
+cat /tmp/atty-e2e-history-records-partial-osc133
+$
+
+

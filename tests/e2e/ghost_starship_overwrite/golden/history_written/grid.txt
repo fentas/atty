@@ -1,0 +1,8 @@
+starship-survived-overwrite
+$ echo starship-survived-
+starship-survived-
+$ cat /tmp/atty-e2e-ghost-starship-overwrite
+echo starship-survived-overwrite
+echo starship-survived-
+cat /tmp/atty-e2e-ghost-starship-overwrite
+$

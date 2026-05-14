@@ -58,9 +58,31 @@ const shell_init_osc133_bash =
     \\# A/B to capture the user's typed line for accurate history
     \\# recall; without these it falls back to keystroke tracking,
     \\# which loses fidelity on completion and multi-line edits.
+    \\#
+    \\# `__atty_osc133_wrap_ps1` is run from PROMPT_COMMAND so it
+    \\# re-applies the `;A` / `;B` wrap on every cycle. Prompt
+    \\# managers like Starship overwrite PS1 inside their own
+    \\# precmd; a one-shot `PS1=…;A…;B…` at init time gets blown
+    \\# away on the first redraw. Idempotent: if the wrap is
+    \\# already on PS1 we return, so users without a prompt
+    \\# manager don't pay re-wrapping cost.
     \\__atty_osc133_d() { local __code=$?; printf '\033]133;D;%s\007' "$__code"; }
-    \\PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-}"
-    \\PS1=$'\\[\033]133;A\007\\]'"${PS1}"$'\\[\033]133;B\007\\]'
+    \\__atty_osc133_wrap_ps1() {
+    \\    # Skip ONLY when both `;A` and `;B` are already in PS1
+    \\    # (in order) — that's atty's wrap signature. A partial
+    \\    # integration that injected `;A` alone (Ghostty's
+    \\    # `shell-integration-features = osc-133` does this for
+    \\    # some shells) would otherwise short-circuit us and atty
+    \\    # would never get its `;B` input-region marker, which is
+    \\    # what the OSC 133 tracker actually keys on for accurate
+    \\    # input capture.
+    \\    case "$PS1" in
+    \\        *$'\033]133;A\007'*$'\033]133;B\007'*) return ;;
+    \\    esac
+    \\    PS1=$'\\[\033]133;A\007\\]'"${PS1}"$'\\[\033]133;B\007\\]'
+    \\}
+    \\PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-};__atty_osc133_wrap_ps1"
+    \\__atty_osc133_wrap_ps1
     \\
 ;
 

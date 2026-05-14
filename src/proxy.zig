@@ -135,9 +135,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
     if (args.is_tty) {
         if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-            var shell_size = s;
-            if (statusbar) |sb| shell_size.rows = sb.effectiveRows();
-            _ = pty.setSize(shell_size) catch {};
+            // Always hand the slave the FULL row count, not the
+            // statusbar's slimmed effectiveRows(). DECSTBM (set via
+            // `sb.activate`) constrains shell scrolling to the
+            // non-reserved rows, but the TIOCGWINSZ reply is what
+            // every inner program reads when sizing itself —
+            // including TUIs that the shell forks (nvim, lazygit,
+            // k9s, …). With a slim reply, the TUI queried size on
+            // startup, got `real - reserve_rows`, drew its UI
+            // centered for that smaller box, and stayed there even
+            // after our deferred resize-to-full + SIGWINCH (the
+            // dashboard plugin doesn't always redraw). Reporting
+            // the full size keeps the inner TUI correctly sized
+            // from the first byte it draws; bash sees the full
+            // size too, which is harmless (DECSTBM still guards
+            // the reserved zone from scroll, and `renderStatus`
+            // repaints over any prompt-edge bleed on every tick).
+            _ = pty.setSize(s) catch {};
         } else |_| {}
     }
 
@@ -615,13 +629,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 //   1. If the sequence has a legacy form, translate
                 //      and forward the legacy bytes (e.g. Ctrl+C
                 //      becomes \x03 — bash's line-abort).
-                //   2. If it doesn't (Ctrl+9, Ctrl+Shift+Right, …),
-                //      drop to avoid mojibake.
+                //   2. If it doesn't (Ctrl+9, Ctrl+Shift+Right, …)
+                //      AND we're NOT in alt-screen, drop to avoid
+                //      mojibake.
+                //   3. If it doesn't AND we ARE in alt-screen, pass
+                //      the raw CSI-u through. Alt-screen apps that
+                //      push their own kitty kbd flags (atuin via
+                //      crossterm's REPORT_ALL_KEYS, nvim, lazygit,
+                //      …) need every keystroke — including plain
+                //      letters — to arrive as `\x1b[<kc>u`. Dropping
+                //      "unmapped" CSI-u in that mode swallowed
+                //      regular typing inside atuin's Ctrl+R picker
+                //      and any TUI that opts into the report-all
+                //      flag. Bash itself never enters alt-screen,
+                //      so the at-the-prompt mojibake guard still
+                //      applies wherever it's needed.
                 var legacy_buf: [8]u8 = undefined;
                 if (!matched_binding and config.terminal.enable_kitty_keyboard and keymap.isCsiU(input)) {
                     if (keymap.csiUToLegacy(input, &legacy_buf)) |legacy| {
                         input = legacy;
-                    } else {
+                    } else if (!alt_screen.active) {
                         swallow_after_binding = true;
                     }
                 }
@@ -639,7 +666,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // row, no overlap. renderGhostList in the master
                 // path handles repaint/deactivate when content
                 // changes.
-                _ = line_state.applyInput(input);
+                //
+                // Skip `line_state.applyInput` while an alt-screen
+                // TUI is active. The keystrokes are going to that
+                // TUI, not to the shell prompt, so feeding them
+                // into line_state's prefix model is meaningless —
+                // and the CSI-u-passthrough path for REPORT_ALL_
+                // KEYS TUIs (atuin, lazygit, …) pushes raw CSI
+                // sequences for every plain letter, which
+                // applyInput would mark as `uncertain` and leave
+                // ghost text suppressed at the next shell prompt.
+                // The alt-screen-exit path resets line_state for
+                // the same reason: anything we accumulated during
+                // the TUI run is stale.
+                if (!alt_screen.active) {
+                    _ = line_state.applyInput(input);
+                }
 
                 // If the user pressed Enter AND the OSC 133 tracker
                 // is in INPUT phase (between `;B` and `;C` — i.e.
@@ -894,6 +936,39 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 subprocess_tracker.onCommandStart(pending_launches.pop(), allocator, io);
                             },
                             .cmd_end => subprocess_tracker.onCommandEnd(),
+                            .prompt_start_implicit_end => {
+                                // Partial-emitter implicit close
+                                // (Ghostty-style: `;A` instead of
+                                // `;D` between commands). Pop
+                                // trailing `.none` frames only —
+                                // those represent ordinary commands
+                                // that finished. A recognised
+                                // launcher frame underneath (ssh,
+                                // sudo, kubectl_exec, …) is the
+                                // long-running subprocess we're
+                                // STILL inside; popping it would
+                                // mis-attribute every subsequent
+                                // remote/elevated commit.
+                                //
+                                // Known limitation: when the user
+                                // actually exits a recognised
+                                // subprocess (e.g. ssh client
+                                // process terminates), the partial
+                                // emitter's next `;A` still won't
+                                // distinguish that from a remote
+                                // shell's `;A`, so the recognised
+                                // frame leaks. The user notices
+                                // because subsequent local
+                                // commands get attributed to the
+                                // dead ssh target. Documented as a
+                                // follow-up — needs an external
+                                // signal (process tree / FG pgid /
+                                // local-shell-specific marker) to
+                                // resolve.
+                                while (subprocess_tracker.currentKind() == .none and subprocess_tracker.depth > 0) {
+                                    subprocess_tracker.onCommandEnd();
+                                }
+                            },
                         }
                         ei += 1;
                     }
@@ -949,7 +1024,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // `git credential`) runs post-`;C`, so the tracker
                 // is `.in_command` for the duration and the sync
                 // doesn't fire.
-                if (osc133_tracker.inInputPhase()) {
+                // Gate on `captureActive()` (strict `.in_input`), NOT
+                // the broader `inInputPhase()` (which also covers
+                // `.at_prompt`). In `.at_prompt`, byte capture
+                // hasn't started — `currentInput()` is empty —
+                // and `syncFromCapture("")` would clobber the
+                // user's keystroke-tracked buffer every poll
+                // iteration. Partial emitters that never send `;B`
+                // stay in `.at_prompt` permanently, so the strict
+                // gate is the only way ghost text can survive
+                // there.
+                if (osc133_tracker.captureActive()) {
                     line_state.syncFromCapture(osc133_tracker.currentInput());
                 }
 
@@ -963,29 +1048,62 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // bytes (statusbar repaint) or signal the slave (resize
                 // + SIGWINCH).
                 if (alt_transitioned) {
-                    if (statusbar) |*sb| {
-                        if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                            var shell_size = s;
-                            if (!alt_now_active) {
-                                shell_size.rows = sb.effectiveRows();
-                                // Use the lighter `reactivate` here,
-                                // not `activate`. activate's ED 2
-                                // clears the whole screen + homes the
-                                // cursor — if the shell drew a prompt
-                                // immediately after `?1049l` in the
-                                // same `output` chunk, that prompt is
-                                // already on the primary screen and
-                                // ED 2 would wipe it. reactivate
-                                // restores DECSTBM + clears the
-                                // reserved rows around a save/restore-
-                                // cursor, leaving anything the shell
-                                // already drew untouched.
-                                var w2: std.Io.Writer = .fixed(&out_buf);
-                                sb.reactivate(&w2) catch {};
-                                if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
-                            }
-                            _ = pty.setSize(shell_size) catch {};
-                        } else |_| {}
+                    // Slave size is always FULL (see startup
+                    // comment) — no per-transition resize needed.
+                    if (alt_now_active) {
+                        // ENTER: explicitly reset DECSTBM so the
+                        // inner TUI's drawing isn't clipped by the
+                        // statusbar's reserved scroll region. Most
+                        // terminals (xterm, kitty, alacritty) give
+                        // the alt-screen buffer its own DECSTBM
+                        // defaulting to (1, rows), so this is a
+                        // no-op. Ghostty's behaviour is less
+                        // documented and we've seen LazyVim's
+                        // dashboard render as if it lived in a
+                        // box of `effectiveRows()` instead of
+                        // `rows` — the only mechanism atty has in
+                        // play that would explain that is a
+                        // global DECSTBM. Force the reset so we
+                        // remove all doubt.
+                        //
+                        // Wrap in DECSC/DECRC (`\x1B[s` / `\x1B[u`)
+                        // because `CSI r` with no parameters resets
+                        // the scroll region AND homes the cursor on
+                        // every VT/xterm-compatible terminal. The
+                        // TUI may have already positioned its
+                        // cursor inside the same chunk that
+                        // contained `?1049h`; without save/restore
+                        // we'd snap it back to (1,1) and corrupt
+                        // its first frame. `StatusBar.reactivate`
+                        // uses the same wrap on the exit path for
+                        // the symmetric reason.
+                        if (statusbar != null) {
+                            _ = writeAll(posix.STDOUT_FILENO, "\x1B[s\x1B[r\x1B[u") catch {};
+                        }
+                    } else {
+                        // EXIT (`?1049l`): restore DECSTBM + clear
+                        // the reserved rows, because the alt-screen
+                        // TUI may have emitted `\x1B[r` on its own
+                        // buffer and on terminals where DECSTBM is
+                        // global that propagates to the primary
+                        // screen.
+                        if (statusbar) |*sb| {
+                            var w2: std.Io.Writer = .fixed(&out_buf);
+                            sb.reactivate(&w2) catch {};
+                            if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+                        }
+                        // Clear line_state too. Any keystrokes
+                        // recorded before the TUI entered alt-
+                        // screen are stale (the user typed `nvim<CR>`
+                        // — that's gone), and the input path
+                        // skipped `applyInput` during the TUI run
+                        // so there's nothing valid in the buffer.
+                        // Without this, the previous prompt's
+                        // suffix can resurrect at the new prompt
+                        // and ghost text + line-commit detection
+                        // see a wrong prefix.
+                        line_state.reset();
+                        line_state.clearLastCommitted();
                     }
                 }
 
@@ -1018,23 +1136,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const sig: posix.SIG = @enumFromInt(sig_buf[i]);
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                        var shell_size = s;
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
                             // While an alt-screen TUI is running the
                             // statusbar is suspended and the app owns
                             // every row — don't re-paint the reserved
-                            // zone or slim the slave size. On exit
-                            // (?1049l) the master-output path runs
-                            // sb.activate again with the current size.
+                            // zone. On exit (?1049l) the master-
+                            // output path runs sb.activate again
+                            // with the current size.
                             if (!alt_screen.active) {
                                 var w: std.Io.Writer = .fixed(&out_buf);
                                 sb.activate(&w) catch {};
                                 try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
-                                shell_size.rows = sb.effectiveRows();
                             }
                         }
-                        _ = pty.setSize(shell_size) catch {};
+                        // Always pass the FULL size — slimming would
+                        // bake the statusbar reservation into the
+                        // slave's TIOCGWINSZ, breaking any inner TUI
+                        // that queries its size before our alt-screen
+                        // resize fires.
+                        _ = pty.setSize(s) catch {};
                     } else |_| {}
                 } else if (sig == posix.SIG.CHLD) {
                     var status: u32 = 0;
