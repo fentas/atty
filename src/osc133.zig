@@ -80,9 +80,27 @@ pub const Osc133 = struct {
         osc_esc, // saw 0x1B inside osc; awaiting '\' (ST)
     };
     pub const Phase = enum {
-        idle, // outside any prompt/command zone
-        in_input, // between ;B and ;C — capturing input
-        in_command, // between ;C and ;D — command running, ignore output
+        /// Outside any prompt / command zone. Initial state, and the
+        /// state after `;D`.
+        idle,
+        /// Prompt is drawing or open for input, but `;B` hasn't been
+        /// seen so we don't know where the user-input region begins.
+        /// `inInputPhase()` returns TRUE here so gates that ask "are
+        /// we at the prompt right now?" (ghost text, line_state
+        /// override, recording) fire correctly even for partial
+        /// emitters (Ghostty's default OSC 133 integration emits
+        /// only `;A` + `;C`, never `;B` / `;D`). Byte capture for
+        /// `currentInput()` does NOT activate here — PS1 bytes
+        /// drawn between `;A` and `;B` aren't user input.
+        at_prompt,
+        /// Between `;B` and `;C` — strict user-typing region. Byte
+        /// capture is active so `currentInput()` reflects what the
+        /// shell has drawn (history recall, completion expansion,
+        /// paste).
+        in_input,
+        /// Between `;C` and `;D` — command is running, ignore output
+        /// for input-capture purposes.
+        in_command,
     };
     /// Edge events the proxy consumes via `drainEdges()`. We only
     /// surface the two markers that drive subprocess-context push/pop;
@@ -108,15 +126,21 @@ pub const Osc133 = struct {
         return self.input.items;
     }
 
-    /// True iff the tracker is currently between a `;B` and a `;C`
-    /// marker — i.e. the user is editing a prompt and `currentInput()`
-    /// is the live, ground-truth contents of that prompt. The proxy
-    /// uses this to gate the continuous `line_state` sync: outside
-    /// `in_input` (during command execution, between commands, or
-    /// before any markers arrive), `currentInput()` is either stale
-    /// or empty and must not overwrite the keystroke-derived buffer.
+    /// True iff the user is currently at the prompt — either we've
+    /// passed `;A` (prompt is drawing or open for input) OR we've
+    /// passed `;B` (strict user-typing region). Both cases mean
+    /// "the user is at the prompt and may be typing." The proxy
+    /// uses this to gate ghost-text painting, the `line_state`
+    /// override path, and the subprocess `pending_launches` push.
+    ///
+    /// Returning true for `.at_prompt` is the key fix that makes
+    /// PR #15's ghost-text gate work with PARTIAL OSC 133 emitters
+    /// — Ghostty's default `shell-integration-features = osc-133`
+    /// emits only `;A` and `;C`, never `;B` or `;D`, so a stricter
+    /// `phase == .in_input` gate suppressed ghost text for the
+    /// entire shell session.
     pub fn inInputPhase(self: *const Osc133) bool {
-        return self.phase == .in_input;
+        return self.phase == .in_input or self.phase == .at_prompt;
     }
 
     /// Feed master-output bytes. Idempotent + safe across partial
@@ -207,7 +231,16 @@ pub const Osc133 = struct {
         if (body.len < 5) return;
         self.active = true;
         switch (body[4]) {
-            'A' => self.phase = .idle, // prompt drawing — input not yet open
+            'A' => {
+                // Prompt drawing / open. We're "at the prompt" but
+                // PS1 bytes haven't ended yet (no `;B`), so byte
+                // capture stays off. For partial emitters that
+                // never send `;B` (Ghostty's default integration),
+                // this is the closest "user is at the prompt"
+                // signal we get; for full emitters, `;B` follows
+                // shortly and switches us into strict input capture.
+                self.phase = .at_prompt;
+            },
             'B' => {
                 self.phase = .in_input;
                 self.input.clearRetainingCapacity();
@@ -319,18 +352,55 @@ test "Osc133: 133;C transitions to in_command — subsequent bytes don't update 
     try testing.expectEqualStrings("ls", o.currentInput());
 }
 
-test "Osc133.inInputPhase reflects the B → C transition" {
+test "Osc133.inInputPhase: ;A alone (Ghostty-style partial integration) puts us in input phase" {
+    // Regression: Ghostty's `shell-integration-features = osc-133` (the
+    // out-of-the-box flag) emits only `;A` and `;C` — no `;B` and no
+    // `;D`. With our previous mapping `;A → .idle`, `inInputPhase()`
+    // returned false for the *entire* lifetime of the shell session
+    // when running under Ghostty's built-in integration. PR #15's
+    // ghost-text gate (`inSubprocess(alt, osc) → drop`) then
+    // suppressed suggestions at the local prompt because
+    // `osc.active && !osc.inInputPhase()` was always true.
+    //
+    // Fix: `;A` puts us in input phase. A subsequent `;B` (if the
+    // emitter sends one) just stays in input phase, no harm done.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07$ ");
+    try testing.expect(o.inInputPhase());
+}
+
+test "Osc133: ;A without ;B doesn't capture prompt-drawing bytes" {
+    // After we treat `;A → input phase`, the byte-capture for
+    // `currentInput()` must NOT activate yet — those bytes are the
+    // shell drawing PS1, not user typing. The capture region only
+    // opens with `;B` (full emitters) or stays empty for partial
+    // emitters that never send `;B`. Both behaviours protect the
+    // line_state override path in proxy.zig from getting polluted
+    // by PS1 characters.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07[user@host ~]$ ");
+    try testing.expect(o.inInputPhase());
+    try testing.expectEqual(@as(usize, 0), o.currentInput().len);
+}
+
+test "Osc133.inInputPhase reflects the A → B → C → D transitions" {
     var o = Osc133.init(testing.allocator);
     defer o.deinit();
     // No marker yet: tracker is idle, not in input.
     try testing.expect(!o.inInputPhase());
     o.feed("\x1b]133;A\x07$ ");
-    // After A: still not in input (B hasn't fired).
-    try testing.expect(!o.inInputPhase());
+    // After A: AT THE PROMPT. inInputPhase returns true so ghost
+    // text / line_state override / pending_launches push gates
+    // fire correctly for partial emitters that never send `;B`.
+    try testing.expect(o.inInputPhase());
     o.feed("\x1b]133;B\x07");
+    // After B: strict input phase, byte capture active.
     try testing.expect(o.inInputPhase());
     o.feed("ls");
     try testing.expect(o.inInputPhase());
+    try testing.expectEqualStrings("ls", o.currentInput());
     o.feed("\x1b]133;C\x07");
     // After C: in_command, not in input — proxy must NOT sync
     // line_state from currentInput while we're in this phase,
