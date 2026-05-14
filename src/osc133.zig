@@ -529,8 +529,14 @@ test "Osc133: B → typed → C → D → A leaves currentInput() empty (not sta
     // Between B and C, "ls -la" was captured. After C/D it's not
     // cleared (we only clear on B). Now the next prompt fires `;A`:
     o.feed("\x1b]133;A\x07");
-    // .at_prompt + currentInput() empty → proxy's syncFromCapture
-    // is a no-op (it guards on len > 0), no stale paint.
+    // Pin the contract: after `;A`, `inInputPhase()` is true
+    // (.at_prompt) but `currentInput()` is empty. Any direct
+    // caller / test reading the tracker between feeds in
+    // `.at_prompt` must NOT see prior-command text. (The proxy's
+    // `syncFromCapture` path is already safe because round 2's
+    // `captureActive()` split gates it on strict `.in_input`, but
+    // we'd still expose stale state through `currentInput()` for
+    // other consumers if `;A` didn't clear.)
     try testing.expect(o.inInputPhase());
     try testing.expectEqual(@as(usize, 0), o.currentInput().len);
 }
