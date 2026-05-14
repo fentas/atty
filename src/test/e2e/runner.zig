@@ -264,6 +264,21 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     var timeout_ms: u32 = 5000;
     var extra_env: std.ArrayList(harness.KV) = .empty;
     defer extra_env.deinit(gpa);
+
+    // Resolve the scenario directory to an absolute path and expose
+    // it via `$ATTY_SCENARIO_DIR` so scenarios can reference
+    // fixture files (e.g. `cat $ATTY_SCENARIO_DIR/../fixtures/foo`).
+    // The harness's child gets `HOME=/tmp` and no useful default
+    // cwd anchor; without this, no scenario could load fixtures.
+    var path_buf: [4096]u8 = undefined;
+    const cwd_rc = std.c.getcwd(@ptrCast(&path_buf), path_buf.len);
+    const cwd_abs: ?[]const u8 = if (cwd_rc == null) null else std.mem.sliceTo(@as([*:0]const u8, @ptrCast(cwd_rc.?)), 0);
+    const scenario_dir_abs = if (cwd_abs) |c|
+        try std.fmt.allocPrint(gpa, "{s}/{s}", .{ c, sc.dir })
+    else
+        try gpa.dupe(u8, sc.dir);
+    defer gpa.free(scenario_dir_abs);
+    try extra_env.append(gpa, .{ .key = "ATTY_SCENARIO_DIR", .value = scenario_dir_abs });
     var spawn_argv: []const []const u8 = &.{};
     var spawn_seen = false;
     var first_cmd_after_spawn: usize = 0;

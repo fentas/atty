@@ -42,7 +42,6 @@ const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
 const CursorTracker = @import("cursor_tracker.zig").CursorTracker;
-const sync_output = @import("sync_output.zig");
 const Osc7 = @import("osc7.zig").Osc7;
 const subprocess_mod = @import("subprocess.zig");
 
@@ -430,27 +429,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
                 }
             }
-            // Synchronized output (DCS 2026) — wrap the per-tick
-            // overlay paint set so the terminal applies all updates
-            // atomically. Unsupported terminals ignore the private
-            // mode set/reset and render as before.
-            //
-            // CRITICAL: only emit the wrap when an overlay paint
-            // would actually run. An empty wrap (`?2026h` + `?2026l`
-            // with nothing between) is still TWO `\x1B[` writes to
-            // the terminal — and if those land mid-stream while an
-            // inner TUI's CSI sequence was split across two master
-            // reads (e.g. `\x1B[38;` then `5;207;255mFoo` on
-            // separate PTY chunks), the terminal aborts the in-
-            // progress sequence on the new `\x1B[`, and the trailing
-            // params render as literal text. The user observed this
-            // exact corruption inside LazyVim's dashboard. Skipping
-            // the wrap when we wouldn't render anything means the
-            // tick never inserts bytes between an inner TUI's
-            // split-CSI writes.
-            const tick_will_render = (!inSubprocess(&alt_screen, &osc133_tracker)) or
-                (statusbar != null and !alt_screen.active);
-            if (tick_will_render) writeAll(posix.STDOUT_FILENO, sync_output.begin) catch {};
             if (!inSubprocess(&alt_screen, &osc133_tracker)) {
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
@@ -458,7 +436,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             if (statusbar) |*sb| {
                 if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             }
-            if (tick_will_render) writeAll(posix.STDOUT_FILENO, sync_output.end) catch {};
             continue;
         }
 
@@ -1149,18 +1126,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
-                // Sync output: master-output overlay paint set is
-                // the hottest multi-region site (every chunk of
-                // shell output triggers a forced statusbar repaint
-                // + a ghost refresh). Wrap atomically — BUT only
-                // when an overlay paint would actually run. See the
-                // same gate in the tick-path block above for the
-                // exact failure mode (empty wrap aborts an inner
-                // TUI's split-across-reads CSI sequence and the
-                // params render as literal text).
-                const out_will_render = (!inSubprocess(&alt_screen, &osc133_tracker)) or
-                    (statusbar != null and !alt_screen.active);
-                if (out_will_render) writeAll(posix.STDOUT_FILENO, sync_output.begin) catch {};
                 if (!inSubprocess(&alt_screen, &osc133_tracker)) {
                     renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                     renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
@@ -1173,7 +1138,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     }
                 }
-                if (out_will_render) writeAll(posix.STDOUT_FILENO, sync_output.end) catch {};
             } else if (read_n == 0) {
                 child_alive = false;
             }

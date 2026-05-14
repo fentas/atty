@@ -1,0 +1,30 @@
+# nvim_startup_replay — pipe the captured nvim master-output bytes
+# through atty and snapshot the resulting grid. Any byte-stream
+# corruption introduced by atty (cursor_tracker CSI parsing, future
+# DSR filtering, sync output wraps, etc.) would show up as the
+# rendered grid drifting from the golden.
+#
+# We `cat` the fixture from outside atty's working directory because
+# the test harness runs the binary with HOME=/tmp; embed the path
+# via `$ATTY_REPO`, which the harness sets to the repo root.
+
+cols 80
+rows 24
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Replay the captured nvim startup. cat dumps the raw bytes
+# verbatim — bash performs no interpretation. atty's master read
+# may split the chunk anywhere; the e2e vt-grid renders the final
+# state.
+type "cat $ATTY_SCENARIO_DIR/../fixtures/nvim-startup-4k.bin\r"
+sleep 600
+snapshot nvim_initial_frame
+
+# Don't exit — the fixture left the terminal in alt-screen mode in
+# the harness's view (even though vt-grid ignores ?1049h, some
+# other state might be stale). Just kill the session.
+type "exit\r"
+exit_code 0

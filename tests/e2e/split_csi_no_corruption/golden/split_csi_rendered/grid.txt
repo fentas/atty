@@ -1,0 +1,12 @@
+$ f() { printf '\033[3'; sleep 0.5; printf '1m'; echo XYZ; printf '\033[0m'; }
+$ f
+XYZ
+$
+
+
+
+
+
+
+
+
