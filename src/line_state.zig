@@ -117,10 +117,12 @@ pub const LineState = struct {
         self.pending_author = .user;
     }
 
-    /// Stage the author for the commit that's about to happen.
-    /// Must be called BEFORE the keystrokes that produce the commit
-    /// (Enter / OSC 133 capture) so submit() / setCommitted() can
-    /// snapshot it into `committed_author`.
+    /// Stage the author for the next `submit()` to snapshot into
+    /// `committed_author`. Must be called BEFORE the Enter that
+    /// produces the commit. `setCommitted()` deliberately does NOT
+    /// honour `pending_author` in the non-empty case — it preserves
+    /// whatever `committed_author` was last set to (typically by
+    /// the preceding `submit()`).
     pub fn setCommitAuthor(self: *LineState, author: Author) void {
         self.pending_author = author;
     }
@@ -143,17 +145,10 @@ pub const LineState = struct {
         @memcpy(self.committed[0..n], content[0..n]);
         self.committed_len = n;
         self.committed_was_uncertain = false;
-        // Author is owned by `submit()` (the keystroke-derived commit
-        // path) — `setCommitted` is the OSC 133 override that
-        // refines the BUFFER content of the same commit. Touching
-        // `committed_author` here would clobber an `.llm` tag that
-        // submit() already snapshotted from `pending_author` before
-        // resetting it (proxy calls applyInput("\r") BEFORE
-        // setCommitted, so by the time we land here pending is
-        // already reset). Exception: when callers explicitly clear
-        // via `setCommitted("")`, the snapshot becomes "no commit"
-        // and the author should reset too — otherwise
-        // `committedAuthor()` would expose stale state.
+        // Non-empty content overrides the BUFFER only; `committed_author`
+        // is unchanged (it's owned exclusively by `submit()`). An empty
+        // payload is the explicit "no commit" signal — drop the author
+        // too so `committedAuthor()` doesn't return stale state.
         if (n == 0) self.committed_author = .user;
     }
 
@@ -673,17 +668,16 @@ test "Ctrl-W keeps pending author when the buffer is still non-empty afterward" 
     try std.testing.expectEqual(Author.llm, l.pending_author);
 }
 
-test "setCommitted preserves the author submit() snapshotted (OSC 133 override path)" {
-    // Simulates the proxy flow: applyInput("\r") fires submit (which
-    // snapshots pending → committed and resets pending), then proxy
-    // calls setCommitted with the OSC 133 capture. The override must
-    // keep the `.llm` author submit() already recorded.
+test "submit-then-setCommitted preserves the snapshotted author" {
+    // After `submit()` has snapshotted `pending_author` →
+    // `committed_author`, a subsequent non-empty `setCommitted`
+    // (buffer override) must NOT clobber the author.
     var l = LineState{};
     l.setCommitAuthor(.llm);
     _ = l.applyInput("ls\r");
     try std.testing.expectEqual(Author.llm, l.committedAuthor());
 
-    l.setCommitted("ls -la"); // OSC 133 capture refines the buffer
+    l.setCommitted("ls -la");
     try std.testing.expectEqual(Author.llm, l.committedAuthor());
     try std.testing.expectEqualSlices(u8, "ls -la", l.lastCommitted().?);
 }
@@ -698,19 +692,16 @@ test "setCommitted(\"\") resets committed_author (no-commit signal)" {
     try std.testing.expectEqual(Author.user, l.committedAuthor());
 }
 
-test "setCommitted called WITHOUT a prior submit leaves pending_author untouched" {
-    // The OSC 133 override path is the only legitimate caller, and
-    // it always runs AFTER applyInput("\r") → submit() has already
-    // snapshotted the author. A bare `setCommitted` (no prior
-    // submit) is a degenerate case — we leave `pending_author` as
-    // staged and the caller can call `submit()` itself or accept
-    // the default `.user` for `committed_author`.
+test "setCommitted with non-empty content does not snapshot pending_author" {
+    // Pins the API contract: only `submit()` snapshots
+    // `pending_author` → `committed_author`. `setCommitted` is a
+    // buffer-only override; calling it with a non-empty payload
+    // leaves `committed_author` at whatever value it had
+    // (default `.user` here, since no `submit()` ran first) and
+    // leaves the staged `pending_author` intact.
     var l = LineState{};
     l.setCommitAuthor(.llm);
     l.setCommitted("echo hi");
-    // committed_author stays .user (no submit() ran to snapshot
-    // pending → committed).
     try std.testing.expectEqual(Author.user, l.committedAuthor());
-    // pending stays staged — caller still owns it.
     try std.testing.expectEqual(Author.llm, l.pending_author);
 }
