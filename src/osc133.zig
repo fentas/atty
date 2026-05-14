@@ -102,14 +102,30 @@ pub const Osc133 = struct {
         /// for input-capture purposes.
         in_command,
     };
-    /// Edge events the proxy consumes via `drainEdges()`. We only
-    /// surface the two markers that drive subprocess-context push/pop;
-    /// `;A` / `;B` are still observed for the phase state machine
-    /// but don't need separate edges (the proxy only needs to know
-    /// when commands start + end).
+    /// Edge events the proxy consumes via `drainEdges()`. Three
+    /// variants — `;C` opens a command; `;D` explicitly closes it;
+    /// and an *implicit* close fires when `;A` arrives while we
+    /// were still in `.in_command` (partial OSC 133 emitters
+    /// skip `;D` entirely).
     pub const Edge = enum {
-        cmd_start, // ;C — push a subprocess frame
-        cmd_end, // ;D — pop the top frame
+        /// `;C` — push a subprocess frame.
+        cmd_start,
+        /// `;D` — explicit close. Always pops the top frame
+        /// regardless of kind (the shell told us the command
+        /// ended, full stop).
+        cmd_end,
+        /// `;A` arriving while phase was `.in_command` (Ghostty-
+        /// style partial emitters skip `;D` and just emit the
+        /// next prompt's `;A` directly after the command output).
+        /// The proxy treats this as "the command FINISHED" but
+        /// MUST NOT pop recognised launcher frames (ssh / sudo /
+        /// kubectl): a remote shell with its own OSC 133
+        /// integration will emit its OWN `;A` shortly after we
+        /// connect — that's NOT the local launcher exiting. The
+        /// proxy walks the stack from the top and pops trailing
+        /// `.none` frames only (ordinary local/remote commands
+        /// that finished); the recognised frame underneath stays.
+        prompt_start_implicit_end,
     };
 
     pub fn init(allocator: std.mem.Allocator) Osc133 {
@@ -259,33 +275,35 @@ pub const Osc133 = struct {
                 // signal we get; for full emitters, `;B` follows
                 // shortly and switches us into strict input capture.
                 //
-                // **If we were in `.in_command`, synthesize a
-                // `.cmd_end` edge first.** Partial emitters that
-                // never send `;D` (Ghostty) close commands by
-                // emitting the NEXT prompt's `;A` directly after
-                // the command output. Without this synthesis the
-                // subprocess tracker would never pop the frame
-                // pushed on `;C` — the stack would leak `.none`
-                // frames for ordinary commands and, worse, leave a
-                // recognised ssh / kubectl / sudo frame "active"
-                // after the user is back at the local prompt,
-                // mis-attributing every subsequent command.
+                // **If we were in `.in_command`, emit a
+                // `.prompt_start_implicit_end` edge.** Partial
+                // emitters skip `;D` and just send the next
+                // prompt's `;A` directly after the command output.
+                // The proxy treats this edge as "the in-progress
+                // command finished" — but it WON'T blindly pop the
+                // subprocess top: a remote shell with its own
+                // OSC 133 integration emits its OWN `;A` shortly
+                // after we connect, which is NOT the local ssh
+                // launcher exiting. The proxy walks down and pops
+                // trailing `.none` frames only. See `Edge` doc.
                 //
                 // Gated on `.in_command` so full emitters (which
                 // arrive at `;A` from `.idle` after `;D`) don't
-                // synthesize a second pop.
+                // emit a redundant implicit-end.
                 if (self.phase == .in_command) {
-                    self.pushEdge(.cmd_end);
+                    self.pushEdge(.prompt_start_implicit_end);
                 }
-                // **Clear `self.input` too** — without this, a
-                // sequence `;B…ls…;C…;D…;A` (the previous command
-                // committed, command ran, returned to a new
-                // prompt) would leave "ls" sitting in
-                // `currentInput()`. The proxy's `syncFromCapture`
-                // path trusts `.at_prompt` as "user is at prompt",
-                // so without the clear it would re-paint the
-                // previous command's text into `line_state` as if
-                // the user had just typed it.
+                // **Clear `self.input` too** — even though
+                // `syncFromCapture` is now gated on `captureActive()`
+                // (strict `.in_input`) and so won't repaint
+                // `line_state` from `.at_prompt`, callers that
+                // expose `currentInput()` directly (or tests that
+                // assert against it) must see an empty buffer in
+                // `.at_prompt`. Without the clear, a sequence
+                // `;B…ls…;C…;D…;A` leaves "ls" sitting in
+                // `currentInput()` even though the user is now at
+                // a fresh prompt — a stale read for anything that
+                // queries the tracker between feeds.
                 self.phase = .at_prompt;
                 self.input.clearRetainingCapacity();
             },
@@ -444,14 +462,16 @@ test "Osc133.inInputPhase: ;A alone (Ghostty-style partial integration) puts us 
     try testing.expect(o.inInputPhase());
 }
 
-test "Osc133: partial emitter ;A after ;C synthesizes a .cmd_end edge" {
+test "Osc133: partial emitter ;A after ;C emits prompt_start_implicit_end" {
     // Regression: Ghostty-style partial emitters send `;A` + `;C`
-    // but no `;D`. Without synthesizing the close-edge here, the
+    // but no `;D`. Without an implicit-end edge here, the
     // subprocess tracker would never pop the frame pushed on `;C`
-    // — stack leaks `.none` frames per command, and worse, a
-    // recognised ssh / kubectl / sudo frame stays "active" after
-    // the user is back at the local prompt, mis-attributing every
-    // subsequent command's `--cwd`.
+    // — stack leaks `.none` frames per command. The proxy's
+    // edge handler treats `.prompt_start_implicit_end` as
+    // "pop trailing `.none` frames only" so recognised launcher
+    // frames (ssh, sudo, kubectl) survive — a remote shell
+    // emitting its OWN `;A` after we connect MUST NOT pop the
+    // local launcher's frame.
     var o = Osc133.init(testing.allocator);
     defer o.deinit();
     o.feed("\x1b]133;A\x07$ ls\x1b]133;C\x07");
@@ -464,19 +484,19 @@ test "Osc133: partial emitter ;A after ;C synthesizes a .cmd_end edge" {
     // Now the partial emitter skips ;D and goes straight to next ;A:
     o.feed("output from ls\x1b]133;A\x07");
     {
-        // Synthesized cmd_end fires here so the tracker's stack
-        // can pop the frame.
         const edges = o.drainEdges();
         try testing.expectEqual(@as(usize, 1), edges.len);
-        try testing.expectEqual(Osc133.Edge.cmd_end, edges[0]);
+        try testing.expectEqual(Osc133.Edge.prompt_start_implicit_end, edges[0]);
     }
     try testing.expect(o.inInputPhase()); // .at_prompt again
 }
 
-test "Osc133: full emitter ;A after ;D does NOT double-synthesize cmd_end" {
+test "Osc133: full emitter ;A after ;D does NOT synthesize an implicit-end edge" {
     // Full emitters emit `;D` then `;A`. The `;D` already pushed
-    // cmd_end; the `;A` must NOT synthesize a second one or the
-    // proxy's subprocess Tracker would over-pop.
+    // .cmd_end; the `;A` MUST NOT emit a redundant
+    // .prompt_start_implicit_end or the proxy's subprocess Tracker
+    // would needlessly walk the stack again. (Harmless given the
+    // .none-only pop semantic, but emitting work for nothing.)
     var o = Osc133.init(testing.allocator);
     defer o.deinit();
     o.feed("\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07out\x1b]133;D\x07");

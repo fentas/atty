@@ -894,6 +894,39 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 subprocess_tracker.onCommandStart(pending_launches.pop(), allocator, io);
                             },
                             .cmd_end => subprocess_tracker.onCommandEnd(),
+                            .prompt_start_implicit_end => {
+                                // Partial-emitter implicit close
+                                // (Ghostty-style: `;A` instead of
+                                // `;D` between commands). Pop
+                                // trailing `.none` frames only —
+                                // those represent ordinary commands
+                                // that finished. A recognised
+                                // launcher frame underneath (ssh,
+                                // sudo, kubectl_exec, …) is the
+                                // long-running subprocess we're
+                                // STILL inside; popping it would
+                                // mis-attribute every subsequent
+                                // remote/elevated commit.
+                                //
+                                // Known limitation: when the user
+                                // actually exits a recognised
+                                // subprocess (e.g. ssh client
+                                // process terminates), the partial
+                                // emitter's next `;A` still won't
+                                // distinguish that from a remote
+                                // shell's `;A`, so the recognised
+                                // frame leaks. The user notices
+                                // because subsequent local
+                                // commands get attributed to the
+                                // dead ssh target. Documented as a
+                                // follow-up — needs an external
+                                // signal (process tree / FG pgid /
+                                // local-shell-specific marker) to
+                                // resolve.
+                                while (subprocess_tracker.currentKind() == .none and subprocess_tracker.depth > 0) {
+                                    subprocess_tracker.onCommandEnd();
+                                }
+                            },
                         }
                         ei += 1;
                     }
