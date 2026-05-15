@@ -1,0 +1,48 @@
+# llm_question_answer_roundtrip — LLM emits action=question, atty
+# latches the prompt, user types a free-form answer + Enter, atty
+# replaces Enter with Ctrl+U (no bash submit) and pushes the
+# answer as the next `.user` turn. Fixture step 3 returns done.
+#
+# Flow:
+#   1. Spawn bash with OSC 133-emitting PS1.
+#   2. Type `#: pick a folder` to enter AI mode.
+#   3. Alt+S → fixture step 1 returns action=question with prompt
+#      "which folder?" → hint latches, state = .awaiting_answer.
+#   4. Type a free-form answer "logs"\r. onInput intercepts:
+#      `.replace_commit = "\x15"` — Enter never reaches bash, but
+#      onLineCommit fires with the trimmed answer text.
+#   5. atty pushes "logs" as the next user turn + fires fixture
+#      step 2, which returns action=done with reason "got it".
+#   6. Snapshot shows "✓ done — got it" latched in the hint row.
+
+cols 100
+rows 10
+timeout_ms 8000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+type "PS1=$'\\[\\033]133;A\\007\\]$ ' && clear\r"
+wait_for "$"
+sleep 200
+
+# Enter AI mode.
+type "#: pick a folder"
+sleep 300
+
+# Alt+S — fixture returns the question.
+type "\x1bs"
+sleep 500
+snapshot question_latched
+
+# Type the answer. The chars echo through bash readline (visible
+# on screen), but the Enter is replaced with Ctrl+U so bash never
+# submits — instead onLineCommit fires and we send the answer to
+# the LLM as the next user turn.
+type "logs\r"
+sleep 700
+snapshot done_after_answer
+
+sleep 200
+type "exit\r"
+exit_code 0

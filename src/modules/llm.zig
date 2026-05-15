@@ -113,6 +113,11 @@ pub fn configure(comptime cfg: Config) type {
             /// push the observation as a turn and re-enter
             /// `.generating` with the follow-up request.
             observation_ready,
+            /// LLM replied with `action=question`. The prompt is
+            /// latched in the hint row; the user types their answer
+            /// at the shell prompt and Enter sends it as the next
+            /// `.user` turn. AI mode stays on while we wait.
+            awaiting_question_answer,
         };
 
         const DialogAction = enum { exec, question, done };
@@ -150,6 +155,11 @@ pub fn configure(comptime cfg: Config) type {
             description_len: usize = 0,
             reason_buf: [256]u8 = undefined,
             reason_len: usize = 0,
+            /// `action=question` payload — the prompt text. Surfaced
+            /// in the hint row; the user's free-form answer at the
+            /// shell prompt becomes the next `.user` turn.
+            question_buf: [cfg.max_response_bytes]u8 = undefined,
+            question_len: usize = 0,
 
             fn command(self: *const DialogResponse) []const u8 {
                 return self.command_buf[0..self.command_len];
@@ -159,6 +169,9 @@ pub fn configure(comptime cfg: Config) type {
             }
             fn reason(self: *const DialogResponse) []const u8 {
                 return self.reason_buf[0..self.reason_len];
+            }
+            fn question(self: *const DialogResponse) []const u8 {
+                return self.question_buf[0..self.question_len];
             }
         };
 
@@ -636,6 +649,16 @@ pub fn configure(comptime cfg: Config) type {
             };
             if (!is_enter) return .forward;
 
+            // Question-answer mode: the user's typed answer is for
+            // the LLM, not the shell. Replace the Enter with Ctrl+U
+            // (bash kills the readline buffer; the answer never runs
+            // as a command) AND commit the pre-replace line so
+            // onLineCommit fires with the answer text — our
+            // state-machine branch there pushes it as a `.user` turn.
+            if (rt.dialog_state == .awaiting_question_answer) {
+                return .{ .replace_commit = "\x15" };
+            }
+
             // Same lookup pattern as guardrail: applyInput already
             // ran, so the line we want is in lastCommitted.
             const line = ctx.line.lastCommitted() orelse ctx.line.current();
@@ -1075,6 +1098,39 @@ pub fn configure(comptime cfg: Config) type {
         /// returns to `.idle` (via dialogReset) and the user can
         /// retry from a clean state.
         pub fn onLineCommit(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
+            // Question-answer path: the user typed a free-form
+            // reply to the LLM's question. onInput already returned
+            // `.replace_commit = "\x15"`, so bash receives Ctrl+U
+            // (kills the buffer) instead of Enter — no command
+            // runs. We just push the answer as the next `.user`
+            // turn and fire the follow-up request.
+            if (rt.dialog_state == .awaiting_question_answer) {
+                const trimmed = std.mem.trim(u8, line, " \t");
+                if (trimmed.len == 0) {
+                    latchHint(rt, "empty answer — dialog cancelled");
+                    dialogReset(rt, ctx);
+                    rt.ai_mode_active = false;
+                    return;
+                }
+                const answer = rt.allocator.dupe(u8, trimmed) catch {
+                    abortDialog(rt, ctx, "out of memory recording answer");
+                    return;
+                };
+                pushTurn(rt, .user, answer) catch {
+                    rt.allocator.free(answer);
+                    abortDialog(rt, ctx, "out of memory recording answer");
+                    return;
+                };
+                fireDialogRequest(rt, ctx) catch |err| {
+                    abortDialog(rt, ctx, switch (err) {
+                        error.BodyTooLarge => "context too large — cancel and start a new task",
+                        error.OutOfMemory => "out of memory firing follow-up request",
+                        else => "internal error firing follow-up request",
+                    });
+                };
+                return;
+            }
+
             if (rt.dialog_state != .suggesting) return;
             const trimmed = std.mem.trim(u8, line, " \t");
             if (trimmed.len == 0) {
@@ -1313,10 +1369,22 @@ pub fn configure(comptime cfg: Config) type {
                     return null;
                 },
                 .question => {
-                    latchHint(rt, "question UI lands in a follow-up PR — cancel and retry without ambiguity");
-                    dialogReset(rt, ctx);
-                    rt.ai_mode_active = false;
-                    queueInjection(rt, "\x15");
+                    // Latch the prompt so the user sees what's
+                    // being asked, transition to a wait state, and
+                    // surface AI mode so the user's free-form reply
+                    // becomes the next `.user` turn (via
+                    // onLineCommit / fireDialogRequest). Auto-exec
+                    // disarms — the answer is the user's, not the
+                    // LLM's, so no auto-submit timer.
+                    const q = parsed.question();
+                    if (q.len > 0) {
+                        latchHint(rt, q);
+                    } else {
+                        latchHint(rt, "LLM asked a question without text — answer or cancel.");
+                    }
+                    rt.dialog_state = .awaiting_question_answer;
+                    rt.auto_exec_armed = false;
+                    rt.ai_mode_active = true;
                     return null;
                 },
             }
@@ -2222,10 +2290,11 @@ pub fn configure(comptime cfg: Config) type {
                 @memcpy(out.reason_buf[0..n], r[0..n]);
                 out.reason_len = n;
             }
-            // `question` is parsed but not surfaced in this PR —
-            // questions land in the Question UI follow-up. Caller
-            // checks `action == .question` and emits a "not yet
-            // wired" hint without inspecting the question text.
+            if (parsed.value.question) |q| {
+                const n = @min(q.len, out.question_buf.len);
+                @memcpy(out.question_buf[0..n], q[0..n]);
+                out.question_len = n;
+            }
         }
 
         /// Result of `extractResponse` — both halves of the model's
