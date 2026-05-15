@@ -3,6 +3,6 @@
 
 
 
-atty │ atuin │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ct
-atty │ atuin │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ct
-atty │ atuin
+shouldn't run
+atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift
+atty
