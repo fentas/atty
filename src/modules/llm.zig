@@ -962,23 +962,15 @@ pub fn configure(comptime cfg: Config) type {
             const tracking = rt.dialog_state == .executing or rt.dialog_state == .capturing_output;
             if (!tracking) return;
 
-            // `edgeOffset(i)` returns the byte index of the
-            // marker's TERMINATOR (BEL `0x07` or ST's `\`), not of
-            // its leading ESC. To slice OUT the OSC 133 marker from
-            // the captured observation, we advance the capture
-            // cursor PAST the terminator on `cmd_start`, and on
-            // `cmd_end` we walk backwards from the terminator to
-            // find the ESC that began the marker — capturing only
-            // the bytes BETWEEN markers.
-            //
-            // Multi-feed caveat: if a closing marker's ESC arrives
-            // in a different feed than its BEL, the backwards
-            // search won't find it inside this `output` slice and
-            // we conservatively capture up to the BEL position
-            // (over-capturing the marker prefix into the
-            // observation). This isn't optimal but it's bounded
-            // (≤ marker size) and uncommon — shells flush whole
-            // OSC sequences atomically in practice.
+            // `edgeOffset(i)` returns the byte index of the OSC
+            // marker's LEADING ESC. So `output[cursor..offset]`
+            // captures cleanly: everything BEFORE the marker is
+            // command output; the marker bytes themselves never
+            // enter the observation. After the edge fires we
+            // advance `cursor` past the marker (we don't know the
+            // exact terminator length here without re-parsing, so
+            // we conservatively forward-scan to the first BEL or
+            // ST tail and resume just past it).
             var cursor: u32 = 0;
             var capturing = rt.dialog_state == .capturing_output;
             for (edges, 0..) |edge, i| {
@@ -995,19 +987,7 @@ pub fn configure(comptime cfg: Config) type {
                         // dropped half. The reset below is gated on
                         // `!capturing` for exactly this reason.
                         if (capturing and offset > cursor) {
-                            var end_at: u32 = offset;
-                            if (offset <= output.len) {
-                                var j: usize = offset;
-                                while (j > cursor) : (j -= 1) {
-                                    if (output[j - 1] == 0x1B) {
-                                        end_at = @intCast(j - 1);
-                                        break;
-                                    }
-                                }
-                            }
-                            if (end_at > cursor) {
-                                appendCaptured(rt, output[cursor..@min(end_at, output.len)]);
-                            }
+                            appendCaptured(rt, output[cursor..@min(offset, output.len)]);
                         }
                         if (!capturing and rt.dialog_state == .executing) {
                             rt.dialog_state = .capturing_output;
@@ -1015,29 +995,12 @@ pub fn configure(comptime cfg: Config) type {
                             rt.captured_truncated = false;
                             capturing = true;
                         }
-                        // Start capturing AFTER the marker's
-                        // terminator byte.
-                        cursor = @min(offset + 1, @as(u32, @intCast(output.len)));
+                        cursor = advancePastMarker(output, offset);
                     },
                     .cmd_end, .prompt_start_implicit_end => {
                         if (capturing) {
-                            // Slice ENDS at the ESC that begins
-                            // the closing marker. Search backwards
-                            // from `offset` for the most recent
-                            // ESC byte within the current capture
-                            // window.
-                            var end_at: u32 = offset;
-                            if (offset <= output.len) {
-                                var j: usize = offset;
-                                while (j > cursor) : (j -= 1) {
-                                    if (output[j - 1] == 0x1B) {
-                                        end_at = @intCast(j - 1);
-                                        break;
-                                    }
-                                }
-                            }
-                            if (end_at > cursor) {
-                                appendCaptured(rt, output[cursor..@min(end_at, output.len)]);
+                            if (offset > cursor) {
+                                appendCaptured(rt, output[cursor..@min(offset, output.len)]);
                             }
                             capturing = false;
                             rt.dialog_state = .observation_ready;
@@ -1049,7 +1012,7 @@ pub fn configure(comptime cfg: Config) type {
                             // loop where the LLM round-trip is the
                             // dominant cost anyway.
                         }
-                        cursor = @min(offset + 1, @as(u32, @intCast(output.len)));
+                        cursor = advancePastMarker(output, offset);
                     },
                 }
             }
@@ -1394,6 +1357,28 @@ pub fn configure(comptime cfg: Config) type {
         /// Append bytes to `captured_output`, respecting the cap.
         /// On overflow, set `captured_truncated = true` so the
         /// observation turn surfaces a `[truncated]` suffix. Caller
+        /// Given a slice and the index of the LEADING ESC of an
+        /// OSC marker at `start`, return the index one past the
+        /// marker's terminator (BEL or ST `ESC \`). Bounded by
+        /// `slice.len`. Used by `onOutput` to resume capture
+        /// after the marker without re-parsing it.
+        fn advancePastMarker(slice: []const u8, start: u32) u32 {
+            const len: u32 = @intCast(slice.len);
+            if (start >= len) return len;
+            var i: usize = start;
+            while (i < slice.len) : (i += 1) {
+                if (slice[i] == 0x07) return @intCast(@min(i + 1, slice.len));
+                if (slice[i] == 0x1B and i + 1 < slice.len and slice[i + 1] == '\\') {
+                    return @intCast(@min(i + 2, slice.len));
+                }
+            }
+            // Terminator didn't arrive in this feed (rare; OSC
+            // sequences flush atomically in practice). Resume at
+            // end-of-slice so we don't double-capture marker
+            // bytes that arrive in the next feed.
+            return len;
+        }
+
         /// doesn't need to know the bound — bytes silently drop
         /// when the buffer is full.
         fn appendCaptured(rt: *Runtime, bytes: []const u8) void {

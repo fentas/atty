@@ -71,6 +71,14 @@ pub const Osc133 = struct {
     /// `feed()` invocation; the proxy reads it indirectly via the
     /// stamped offsets and otherwise ignores it.
     feed_byte_index: u32 = 0,
+    /// Byte index of the leading `ESC` of the OSC sequence
+    /// currently being parsed (state transition .ground → .esc).
+    /// Captured here so `pushEdge` can stamp the START of the
+    /// marker into `edge_offsets`, not its terminator — callers
+    /// need to slice the markup OUT cleanly and otherwise have
+    /// to walk backwards looking for an ESC, which is fragile
+    /// across feed boundaries.
+    osc_start_index: u32 = 0,
 
     const State = enum {
         ground, // regular input-byte processing (when in input phase)
@@ -196,6 +204,7 @@ pub const Osc133 = struct {
             .ground => {
                 if (b == 0x1B) {
                     self.state = .esc;
+                    self.osc_start_index = self.feed_byte_index;
                     return;
                 }
                 if (self.phase != .in_input) return;
@@ -326,7 +335,11 @@ pub const Osc133 = struct {
     fn pushEdge(self: *Osc133, edge: Edge) void {
         if (self.edge_count >= self.edges.len) return; // overflow — drop
         self.edges[self.edge_count] = edge;
-        self.edge_offsets[self.edge_count] = self.feed_byte_index;
+        // Stamp the START of the OSC marker (the leading ESC), not
+        // its terminator (BEL / ST). Lets callers cleanly slice the
+        // marker bytes OUT of the captured stream without an
+        // error-prone backwards walk across feed boundaries.
+        self.edge_offsets[self.edge_count] = self.osc_start_index;
         self.edge_count += 1;
     }
 
@@ -340,9 +353,14 @@ pub const Osc133 = struct {
         return out;
     }
 
-    /// Byte offset (within the most recent `feed()`) where edge
-    /// `idx` was emitted. Used by the proxy to interleave OSC 7
-    /// promotion with OSC 133 push/pop in source order.
+    /// Byte offset (within the most recent `feed()`) of the
+    /// leading `ESC` (`\x1b`) of the marker that produced edge
+    /// `idx`. Slicing `bytes[0..edgeOffset(i)]` yields pre-marker
+    /// content; `bytes[edgeOffset(i)..]` starts at the marker
+    /// itself. Used by the proxy to interleave OSC 7 promotion
+    /// with OSC 133 push/pop in source order, and by the LLM
+    /// module to extract command output between `;C` and `;D`
+    /// without manually walking back through terminator bytes.
     pub fn edgeOffset(self: *const Osc133, idx: usize) u32 {
         return self.edge_offsets[idx];
     }
