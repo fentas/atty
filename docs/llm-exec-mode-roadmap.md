@@ -25,9 +25,10 @@ file is the execution log.
 - **PR #25** — refactor(history): submodule folder — **merged: d692dfc**.
 - **PR #24** — fix(e2e): make delete_history_match_after_uparrow deterministic — **merged: e2ce456**.
 - **PR #26** — feat(line-state): author propagation (Wave 1 E) — **merged: e2dfacf** (6-round Copilot loop; rounds 4–6 were docstring-style only).
-- **PR #27** — feat(guardrail): author-aware Rule with AuthorMask + Behavior (Wave 2 F) — *open*, 10-round Copilot loop complete (13 findings addressed), awaiting user merge.
-- **PR #28** — refactor(llm): split pure parse helpers into submodule folder (Wave 2 A, first slice) — *open*, round 3/10 in flight (2 findings fixed so far).
-- **PR G** (feat/atuin-author-intent) — *opening now in parallel*.
+- **PR #27** — feat(guardrail): author-aware Rule with AuthorMask + Behavior (Wave 2 F) — **merged: 0257dbb** (10-round loop, 13 findings).
+- **PR #28** — refactor(llm): split pure parse helpers into submodule folder (Wave 2 A, slice 1 — `parse.zig`) — **merged: 9b583d3** (5-round loop, 4 findings).
+- **PR #29** — feat(atuin): tag LLM-authored commits via `--author atty:llm` + LLM-side `setCommitAuthor` staging (Wave 2 G) — **merged: 5a4bf53** (7-round loop, 5 findings; round 5 caught a real shipping bug — `tag_llm_author` would've been dead code without the cross-module `setCommitAuthor` call).
+- **PR #30** — refactor(proxy): split pure I/O helpers into submodule folder (Wave 2 J, slice 1 — `proxy/io.zig`) — **merged: e0a928e** (5-round loop, 3 findings).
 - Remaining roadmap PRs — *queued*, listed below in shipping order.
 
 ## Shipping order — by wave
@@ -51,10 +52,10 @@ has been merged.
 
 | # | Branch / title | Touches | LOC | Depends on | Status |
 |---|---|---|---|---|---|
-| **A** | `refactor/llm-submodule` | `src/modules/llm.zig` only (split into folder) | ~0 net | #21 | queued |
-| **J** | `refactor/proxy-submodule` | `src/proxy.zig` only | ~0 net | E (avoids proxy.zig hook conflict) | queued |
-| **F** | `feat/guardrail-v2` | `src/modules/guardrail.zig` + e2e | ~400 | E | queued |
-| **G** | `feat/atuin-author-intent` | `src/modules/atuin.zig` only | ~150 | E, M | queued |
+| **A** | `refactor/llm-submodule` | slice 1: `parse.zig` extract | ~300 LOC moved | #21 | **slice 1 merged: 9b583d3** (PR #28). Slices 2-4 (dialog / worker / types) queued as follow-ups. |
+| **J** | `refactor/proxy-submodule` | slice 1: `proxy/io.zig` extract | ~50 LOC moved | E | **slice 1 merged: e0a928e** (PR #30). Render-helper slice queued as follow-up. |
+| **F** | `feat/guardrail-v2` | `src/modules/guardrail.zig` + e2e | ~400 | E | **merged: 0257dbb** (PR #27) |
+| **G** | `feat/atuin-author-intent` | `src/modules/atuin.zig` + cross-module `setCommitAuthor` in `src/modules/llm.zig` | ~180 | E | **merged: 5a4bf53** (PR #29). M dependency dropped since M is deferred. |
 
 ### Wave 3 — opens after A merges
 
