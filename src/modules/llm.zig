@@ -37,6 +37,7 @@ const keymap = @import("../keymap.zig");
 const Osc133 = @import("../osc133.zig").Osc133;
 const parse = @import("llm/parse.zig");
 const types = @import("llm/types.zig");
+const dialog = @import("llm/dialog.zig");
 const nowMs = @import("_lib.zig").nowMs;
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
@@ -90,89 +91,17 @@ pub fn configure(comptime cfg: Config) type {
         /// uses the pre-built `body_buf`.
         const RequestKind = enum { single, dialog };
 
-        const DialogState = enum {
-            /// Not in a dialog. Either user hasn't entered AI mode
-            /// or a previous dialog has been completed/cancelled.
-            idle,
-            /// Request is in flight (initial Alt+S, or a follow-up
-            /// after an observation arrived). Worker is POSTing.
-            generating,
-            /// LLM has replied with `action=exec`; the suggested
-            /// command is injected at the prompt and waiting for
-            /// the user to press Enter (or cancel).
-            suggesting,
-            /// User hit Enter. Command bytes are on their way to
-            /// the shell; we're waiting for OSC 133 `;C` to fire
-            /// so we know the command actually started.
-            executing,
-            /// Between OSC 133 `;C` and `;D` — `onOutput` is
-            /// appending bytes to `captured_output`.
-            capturing_output,
-            /// `;D` fired; observation is ready. Next `onTick` will
-            /// push the observation as a turn and re-enter
-            /// `.generating` with the follow-up request.
-            observation_ready,
-            /// LLM replied with `action=question`. The prompt is
-            /// latched in the hint row; the user types their answer
-            /// at the shell prompt and Enter sends it as the next
-            /// `.user` turn. AI mode stays on while we wait.
-            awaiting_question_answer,
-        };
-
-        const DialogAction = enum { exec, question, done };
-
-        const TurnKind = enum {
-            /// Initial user task (`#: <task>` body).
-            user,
-            /// LLM's raw JSON reply for an exec step. Echoed back
-            /// to the model verbatim on the next turn so the
-            /// conversation stays self-consistent.
-            assistant_exec,
-            /// OSC 133 `;C` → `;D` captured output for the prior
-            /// exec turn. Prefixed with `OBSERVATION:\n` when
-            /// rendered into the request body.
-            observation,
-        };
-
-        /// Conversation turn — heap-owned by the runtime (freed in
-        /// `detach` and on cancel). Content length is bounded at
-        /// `cfg.max_turn_bytes` so a runaway model can't bloat the
-        /// process memory.
-        const Turn = struct {
-            kind: TurnKind,
-            content: []u8,
-        };
-
-        /// Parsed dialog response. Stack-allocated; populated by
-        /// `parseDialogResponse` from the raw assistant content.
-        /// Unset fields stay len=0.
-        const DialogResponse = struct {
-            action: DialogAction = .done,
-            command_buf: [cfg.max_response_bytes]u8 = undefined,
-            command_len: usize = 0,
-            description_buf: [256]u8 = undefined,
-            description_len: usize = 0,
-            reason_buf: [256]u8 = undefined,
-            reason_len: usize = 0,
-            /// `action=question` payload — the prompt text. Surfaced
-            /// in the hint row; the user's free-form answer at the
-            /// shell prompt becomes the next `.user` turn.
-            question_buf: [cfg.max_response_bytes]u8 = undefined,
-            question_len: usize = 0,
-
-            fn command(self: *const DialogResponse) []const u8 {
-                return self.command_buf[0..self.command_len];
-            }
-            fn description(self: *const DialogResponse) []const u8 {
-                return self.description_buf[0..self.description_len];
-            }
-            fn reason(self: *const DialogResponse) []const u8 {
-                return self.reason_buf[0..self.reason_len];
-            }
-            fn question(self: *const DialogResponse) []const u8 {
-                return self.question_buf[0..self.question_len];
-            }
-        };
+        // Dialog-mode types live in `llm/dialog.zig` — pure enums +
+        // a `Response(N)` factory. Re-exported here so existing
+        // call sites keep using the unqualified names (`DialogState`,
+        // `Turn`, …). The factory call resolves `cfg.max_response_bytes`
+        // at comptime, giving back a Response struct sized correctly
+        // for this configure() instance.
+        const DialogState = dialog.State;
+        const DialogAction = dialog.Action;
+        const TurnKind = dialog.TurnKind;
+        const Turn = dialog.Turn;
+        const DialogResponse = dialog.Response(cfg.max_response_bytes);
 
         const Shared = struct {
             mutex: std.Io.Mutex = .init,
@@ -2258,135 +2187,18 @@ pub fn configure(comptime cfg: Config) type {
         /// turns are wrapped as user messages prefixed with
         /// `OBSERVATION:` so the model recognizes them as command
         /// output rather than a fresh task. Caller frees the slice.
-        pub fn buildDialogRequestBody(
-            allocator: std.mem.Allocator,
-            model: []const u8,
-            system_prompt: []const u8,
-            shell_name: []const u8,
-            context_blob: []const u8,
-            turns: []const Turn,
-        ) ![]u8 {
-            var allocating: std.Io.Writer.Allocating = .init(allocator);
-            errdefer allocating.deinit();
-            const writer = &allocating.writer;
-
-            // Compose the system message: configured system prompt
-            // PLUS a stable shell/context preamble. Putting shell
-            // name + context_blob on the SYSTEM message (rather than
-            // wrapping the first user turn) means they survive FIFO
-            // eviction — once history fills past `history_turns_max`
-            // and the original user task ages out, future requests
-            // would otherwise lose every trace of shell context.
-            // The system message is always rebuilt per request, so
-            // there's no historical-rewrite concern either.
-            const composed_system = if (context_blob.len > 0)
-                try std.fmt.allocPrint(
-                    allocator,
-                    "{s}\n\nShell: {s}\nContext: {s}",
-                    .{ system_prompt, shell_name, context_blob },
-                )
-            else
-                try std.fmt.allocPrint(
-                    allocator,
-                    "{s}\n\nShell: {s}",
-                    .{ system_prompt, shell_name },
-                );
-            defer allocator.free(composed_system);
-
-            try writer.writeAll("{\"model\":");
-            try std.json.Stringify.encodeJsonString(model, .{}, writer);
-            try writer.writeAll(",\"messages\":[{\"role\":\"system\",\"content\":");
-            try std.json.Stringify.encodeJsonString(composed_system, .{}, writer);
-            try writer.writeAll("}");
-
-            for (turns) |turn| {
-                const role: []const u8 = switch (turn.kind) {
-                    .assistant_exec => "assistant",
-                    .user, .observation => "user",
-                };
-                try writer.writeAll(",{\"role\":\"");
-                try writer.writeAll(role);
-                try writer.writeAll("\",\"content\":");
-
-                if (turn.kind == .observation) {
-                    const wrapped = try std.fmt.allocPrint(
-                        allocator,
-                        "OBSERVATION:\n{s}",
-                        .{turn.content},
-                    );
-                    defer allocator.free(wrapped);
-                    try std.json.Stringify.encodeJsonString(wrapped, .{}, writer);
-                } else {
-                    try std.json.Stringify.encodeJsonString(turn.content, .{}, writer);
-                }
-                try writer.writeAll("}");
-            }
-
-            try writer.writeAll("],\"stream\":false}");
-            return allocating.toOwnedSlice();
-        }
-
-        /// Parse a dialog response (the raw assistant content
-        /// returned by `extractRawContent`). `std.json.parseFromSlice`
-        /// owns an internal arena which is released by
-        /// `parsed.deinit()` — we copy out the fields we care about
-        /// into fixed-size buffers on the returned struct BEFORE
-        /// `deinit` fires, so the slices we hand back point at the
-        /// caller's `out` storage, not at arena-owned memory.
-        /// `ignore_unknown_fields` is on so a model emitting extra
-        /// keys doesn't error out the loop.
+        // Dialog request body composition + parsed-response decoding
+        // live in `llm/dialog.zig`. Re-exported here for callers that
+        // expect the names on the `configure()` factory; the pub
+        // re-exports also let test code reach them via the existing
+        // surface without an import dance.
+        pub const buildDialogRequestBody = dialog.buildRequestBody;
         pub fn parseDialogResponse(
             allocator: std.mem.Allocator,
             raw: []const u8,
             out: *DialogResponse,
         ) !void {
-            // `std.json.parseFromSlice` returns a `Parsed(T)` whose
-            // `.deinit()` frees an INTERNAL arena allocated through
-            // the passed allocator. Wrapping our own arena AROUND
-            // that and calling both `arena.deinit()` and
-            // `parsed.deinit()` would be redundant at best and
-            // dangerous at worst (double free of arena-owned
-            // storage on some Zig versions). Use `parsed.deinit()`
-            // alone — it owns everything `parsed.value` references.
-            const Parsed = struct {
-                action: []const u8,
-                command: ?[]const u8 = null,
-                description: ?[]const u8 = null,
-                reason: ?[]const u8 = null,
-                question: ?[]const u8 = null,
-            };
-
-            const parsed = std.json.parseFromSlice(
-                Parsed,
-                allocator,
-                raw,
-                .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-            ) catch return error.MalformedJson;
-            defer parsed.deinit();
-
-            const action_enum = std.meta.stringToEnum(DialogAction, parsed.value.action) orelse return error.UnknownAction;
-            out.* = .{ .action = action_enum };
-
-            if (parsed.value.command) |c| {
-                const n = @min(c.len, out.command_buf.len);
-                @memcpy(out.command_buf[0..n], c[0..n]);
-                out.command_len = n;
-            }
-            if (parsed.value.description) |d| {
-                const n = @min(d.len, out.description_buf.len);
-                @memcpy(out.description_buf[0..n], d[0..n]);
-                out.description_len = n;
-            }
-            if (parsed.value.reason) |r| {
-                const n = @min(r.len, out.reason_buf.len);
-                @memcpy(out.reason_buf[0..n], r[0..n]);
-                out.reason_len = n;
-            }
-            if (parsed.value.question) |q| {
-                const n = @min(q.len, out.question_buf.len);
-                @memcpy(out.question_buf[0..n], q[0..n]);
-                out.question_len = n;
-            }
+            return dialog.parseResponse(DialogResponse, allocator, raw, out);
         }
 
         /// Result of `extractResponse` — both halves of the model's
