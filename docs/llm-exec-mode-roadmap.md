@@ -39,7 +39,7 @@ has been merged.
 |---|---|---|---|---|---|
 | **K** | `refactor/subprocess-submodule` | `src/subprocess.zig` only | ~0 net | none | **merged: a1823ae** (PR #23) |
 | **L** | `refactor/history-submodule` | `src/modules/history.zig` only | ~0 net | none | **merged: d692dfc** (PR #25) |
-| **M** | `refactor/atuin-submodule` | `src/modules/atuin.zig` only | ~0 net | none | queued |
+| **M** | `refactor/atuin-submodule` | `src/modules/atuin.zig` only | ~0 net | none | **deferred** — atuin.zig is 686 LOC, only 86 over threshold, and every inner helper closes over `cfg` so a folder split would force a leak of comptime config types through extracted helpers for marginal readability gain. Revisit if atuin grows past ~800 LOC or sprouts a logically-separable subsystem. |
 | **N** | `refactor/keymap-submodule` | `src/keymap.zig` only | ~0 net | none | **merged: 79c498b** (PR #22) |
 | **E** | `feat/line-state-author` | `src/line_state.zig` + `src/module.zig` | ~200 | none | **merged: e2dfacf** (PR #26) |
 | **P** | `fix/delete-history-match-after-uparrow-flake` | `tests/e2e/.../scenario.e2e` + golden | ~30 | none | **merged: e2ce456** (PR #24) |
