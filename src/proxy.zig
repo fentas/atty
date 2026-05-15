@@ -1156,7 +1156,48 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // gate is the only way ghost text can survive
                 // there.
                 if (osc133_tracker.captureActive()) {
-                    line_state.syncFromCapture(osc133_tracker.currentInput());
+                    const osc_input = osc133_tracker.currentInput();
+                    // Skip the sync when `osc.input` is empty BUT
+                    // line_state has accumulated keystrokes.
+                    //
+                    // Why: bash readline can re-emit
+                    // `\[\033]133;A\007\]…\[\033]133;B\007\]` (the
+                    // wrap markers from `atty init bash`) during
+                    // incremental prompt redraws — line-wrap
+                    // recovery, prompt-manager async updates, etc.
+                    // Each `;B` re-fire calls
+                    // `osc.input.clearRetainingCapacity()`. Without
+                    // this gate, `syncFromCapture("")` would
+                    // immediately wipe the user's keystroke-derived
+                    // buffer too, observed as "ghost text matches
+                    // last N-1 chars when typing N chars fast."
+                    //
+                    // The gate is SAFE for the existing recovery
+                    // paths it was added for:
+                    //
+                    //   - Arrow-Up history recall: bash emits
+                    //     `\r\033[K<recalled>` — the `\r` clears
+                    //     `osc.input` AND the recalled bytes get
+                    //     captured AFTER, so by the time we sync
+                    //     `osc.input.len > 0` and the gate passes.
+                    //   - Tab completion expansion: same shape —
+                    //     completion text is re-emitted to the
+                    //     terminal, gets captured.
+                    //   - Paste: same — pasted bytes captured into
+                    //     osc.input before we sync.
+                    //   - Ctrl+L full-screen redraw: typed buffer
+                    //     is re-emitted alongside the prompt; gets
+                    //     re-captured after the `;A;B` clear,
+                    //     gate passes.
+                    //
+                    // The only legitimate "shell cleared the line"
+                    // signals (Ctrl+U via stdin, Ctrl+C, etc.) are
+                    // already handled by `line_state.applyInput`
+                    // BEFORE we get here, so line_state is already
+                    // empty when osc.input is empty.
+                    if (osc_input.len > 0 or line_state.current().len == 0) {
+                        line_state.syncFromCapture(osc_input);
+                    }
                 }
 
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
