@@ -240,6 +240,7 @@ const LineState = @import("../line_state.zig").LineState;
 // `_ = @import("modules/guardrail.zig")` line discovers them.
 test {
     _ = match_mod;
+    _ = rules_mod;
 }
 
 const TestSink = struct {
