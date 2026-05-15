@@ -36,6 +36,7 @@ pub fn decodeContent(body: []const u8, out: []u8) usize {
     if (i >= body.len or body[i] != '"') return 0;
     i += 1;
     var n: usize = 0;
+    var saw_close_quote = false;
     while (i < body.len) : (i += 1) {
         const c = body[i];
         if (c == '\\' and i + 1 < body.len) {
@@ -78,12 +79,19 @@ pub fn decodeContent(body: []const u8, out: []u8) usize {
             }
             continue;
         }
-        if (c == '"') break;
+        if (c == '"') {
+            saw_close_quote = true;
+            break;
+        }
         if (n < out.len) {
             out[n] = c;
             n += 1;
         }
     }
+    // Unterminated string → treat the response as malformed
+    // (matches the docstring) so callers don't silently see a
+    // partial decode that looks like a valid command.
+    if (!saw_close_quote) return 0;
     return n;
 }
 
@@ -223,6 +231,27 @@ pub fn sanitizeCommand(raw: []const u8, out: []u8) usize {
 // ===========================================================================
 
 const testing = std.testing;
+
+test "decodeContent returns 0 on unterminated content string (regression)" {
+    // Truncated JSON: closing quote never seen. Pre-fix this would
+    // walk to end-of-buffer and return whatever it had partially
+    // decoded as if it were a valid command — a model could exploit
+    // this by emitting an unterminated string that ends with a
+    // dangerous prefix and the upstream sanitiser would still let
+    // it through as "valid extraction".
+    var out: [128]u8 = undefined;
+    const truncated = "{\"choices\":[{\"message\":{\"content\":\"rm -rf /home";
+    try testing.expectEqual(@as(usize, 0), decodeContent(truncated, &out));
+
+    // Empty unterminated still 0.
+    const empty_truncated = "{\"content\":\"";
+    try testing.expectEqual(@as(usize, 0), decodeContent(empty_truncated, &out));
+
+    // Properly terminated still works (control).
+    const ok = "{\"content\":\"echo hi\"}";
+    const n = decodeContent(ok, &out);
+    try testing.expectEqualStrings("echo hi", out[0..n]);
+}
 
 test "sanitizeCommand handles fence + whitespace combinations" {
     var out: [64]u8 = undefined;
