@@ -1371,6 +1371,15 @@ pub fn configure(comptime cfg: Config) type {
             // `in_flight = false`. The error hint above is what
             // the user will see.
             if (n == 0) return null;
+            // Stage the line's author for the next submit() so
+            // downstream consumers (atuin's --author tag,
+            // guardrail's author-aware rules) see `.llm` instead
+            // of the default `.user`. The flag persists in
+            // line_state until submit() snapshots it; backspace /
+            // killLine / killWord that empty the buffer reset it,
+            // so a user who wipes and retypes still commits as
+            // `.user`.
+            ctx.line.setCommitAuthor(.llm);
             return rt.inject_buf[0..rt.inject_len];
         }
 
@@ -1452,6 +1461,9 @@ pub fn configure(comptime cfg: Config) type {
                     }
 
                     rt.dialog_state = .suggesting;
+                    // Same author-staging contract as single mode —
+                    // see the matching call in `pollShellInput`.
+                    ctx.line.setCommitAuthor(.llm);
                     // Return the command bytes for injection at
                     // the shell prompt — directly from
                     // `pending_command` so the buffer's role stays
