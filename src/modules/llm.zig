@@ -37,8 +37,7 @@ const keymap = @import("../keymap.zig");
 const Osc133 = @import("../osc133.zig").Osc133;
 const parse = @import("llm/parse.zig");
 const types = @import("llm/types.zig");
-const _lib = @import("_lib.zig");
-const nowMs = _lib.nowMs;
+const nowMs = @import("_lib.zig").nowMs;
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
@@ -709,14 +708,17 @@ pub fn configure(comptime cfg: Config) type {
         ///   the next `pollShellInput` tick to wipe the typed
         ///   `#: …` text. The LLM response gets injected when it
         ///   lands.
-        /// - `llm_exec_dialog` / `_auto`: TODO (dialog state
-        ///   machine not yet wired). For now, latch a
-        ///   "coming soon" hint so the user sees feedback.
+        /// - `llm_exec_dialog` / `_auto`: route through
+        ///   `startDialog` — fires the multi-turn dialog request,
+        ///   then waits for `;C`/`;D` markers between exec steps.
+        ///   `_auto` additionally arms an auto-submit timer
+        ///   (`cfg.auto_delay_ms`) so each suggested command runs
+        ///   without manual Enter; any keystroke aborts the timer.
         /// - `llm_exec_cycle_model`: rotates `current_model_idx`
-        ///   through the configured list. TODO until the model
-        ///   list config arrives.
-        /// - `llm_exec_toggle_help`: TODO — help overlay not yet
-        ///   wired.
+        ///   through `cfg.models[]`; no-op + hint when there's
+        ///   only the single-model fallback.
+        /// - `llm_exec_toggle_help`: latches a one-line help hint
+        ///   summarising the active model / endpoint / cancel key.
         /// - `llm_exec_cancel`: clears any in-flight state, bumps
         ///   the worker's req_gen so a late response is dropped,
         ///   wipes the typed prompt via Ctrl+U injection, clears
@@ -1258,13 +1260,15 @@ pub fn configure(comptime cfg: Config) type {
 
         /// Process a parsed dialog response. Branches by `action`:
         /// `exec` injects the command + transitions to `.suggesting`
-        /// (description goes to the hint row); `done` clears state
-        /// and latches a confirmation; `question` latches a
-        /// "not yet wired" hint and resets (Question UI lands in a
-        /// follow-up PR). Returns bytes to inject — for `exec`
-        /// that's the command; for done/question/error it's null
-        /// after queueing Ctrl+U on `pending_injection` so the
-        /// suggested-command text gets wiped from the prompt.
+        /// (description goes to the hint row, auto-exec arms if
+        /// the user picked Alt+Shift+S); `done` clears state and
+        /// latches a confirmation; `question` latches the prompt
+        /// text and transitions to `.awaiting_question_answer` so
+        /// the next typed line becomes the next `.user` turn (see
+        /// onInput's `.replace_commit` redirect that keeps bash
+        /// from executing the answer). Returns bytes to inject —
+        /// for `exec` that's the command; for done/question/error
+        /// it's null.
         fn handleDialogResponse(rt: *Runtime, ctx: *m.Context, n: usize) m.Error!?[]const u8 {
             if (n == 0) {
                 // Worker reported failure; the error slot already

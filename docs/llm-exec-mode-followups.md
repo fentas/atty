@@ -84,62 +84,48 @@ LineState focused on text + author.
 
 ### Auto-exec (Alt+Shift+S)
 
-**Status**: stub.
+**Status**: shipped in PR #37 (commit `4edb236`).
 
-The action handler at `llm.zig` (search for `llm_exec_auto`) prints
-`"auto exec coming in a follow-up PR — use Alt+S for now"` and
-returns. PR C in the roadmap would wire this. `cfg.auto_delay_ms`
-is already defined (800ms default) — the work is:
-
-1. After the LLM injects a command on the dialog `.exec` path,
-   start a tick-based timer.
-2. On expiry, send `\r` to the PTY automatically.
-3. Any user keystroke during the window cancels the auto-fire.
-
-**Question**: anything design-y to lock down before I implement?
+`cfg.auto_delay_ms` is now wired: `handleDialogResponse .exec`
+arms a timer when `auto_mode_active` is true (set by the
+`llm_exec_auto` action). `onTick` fires `\r` once the delay
+expires; any keystroke disarms via `onInput`. New e2e scenario
+`llm_exec_auto_fires` pins the full step-1 → step-2 → done loop.
 
 ### Question UI (Alt+S `.question` action)
 
-**Status**: not implemented.
+**Status**: shipped (single-question free-text) in PR #38 (commit
+`8a68b82`).
 
-PR D in the roadmap. The LLM's JSON envelope can return
-`{"action": "question", "prompt": "…", "choices": ["a", "b"]}`.
-Today, dialog mode handles `.exec` and `.done` but not
-`.question`. The design doc says use `ghost_list` to render the
-choices below the prompt (Ctrl+1..9 to pick); free-text answers
-land in a status-bar input ribbon.
+Single free-form prompt: latches the LLM's question in the hint
+row, transitions to `.awaiting_question_answer`, and accepts the
+user's typed reply as the next `.user` turn. The `.replace_commit
+= "\x15"` redirect in `onInput` keeps bash from executing the
+answer as a shell command.
 
-**Question**: design doc covers the rendering. The trickier piece
-is the *threading*: where does the answer go in the conversation
-history? As a `user` turn in the next request? Or a new `TurnKind`
-(say, `.user_answer`)?
+**Remaining**: multi-choice rendering through `ghost_list`
+(Ctrl+1..9 picking). The state machine is in place; what's
+missing is the rendering plumbing + a parser for `choices: []`
+in the JSON envelope. Worth doing if interactive scripted flows
+turn out to want pick-lists more often than free-text.
 
 ### OSC 133 edge offset (PR H)
 
-**Status**: not implemented.
+**Status**: shipped in PR #36 (commit `84a6847`).
 
-PR H in the roadmap. The current edge-detection in OSC 133's
-parser sometimes misses the cmd_start boundary by one byte on
-specific shell-integration flavours. The design doc has a one-line
-fix: walk back to the ESC instead of stopping at BEL.
-
-**Question**: low-risk, just needs testing across the
-shell-integration matrix (Ghostty's snippet, ble.sh, zsh4humans,
-VS Code's). I can ship this without design input.
+`edge_offsets` now stamp the leading ESC of each marker (not the
+terminator). Callers slice cleanly with `bytes[cursor..offset]`;
+no more backwards-walking through feed boundaries.
 
 ### Esc exits AI mode (PR I)
 
-**Status**: not implemented.
+**Status**: shipped in PR #34 (commit `5146447`).
 
-PR I in the roadmap. Pressing Esc while in AI mode should exit
-back to the local prompt + clear any pending injection. Today Esc
-falls through to the shell. The design doc specifies the
-keybinding (`Esc` → `llm_exec_cancel`).
-
-**Question**: scope question: does "exit AI mode" mean abort the
-current step (single-step) or unwind the whole conversation
-(clear history too)? Design doc says "exit AI mode (clear line)"
-— I'll interpret that as abort-current-step, preserve history.
+Both legacy `\x1b` and kitty-CSI-u `\x1b[27u` Esc bind to
+`llm_exec_cancel`. The proxy clears `matched_binding` for the
+unconsumed-Esc path so CSI-u cleanup translates back to legacy
+when the handler declines (vim users on kitty-kbd still get bare
+Esc).
 
 ## Architectural questions
 
