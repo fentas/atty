@@ -15,13 +15,16 @@ pub fn containsEnter(bytes: []const u8) bool {
 
 /// Shared write loop used by every fd-target write in the proxy.
 /// `INTR` is retried (signal arrived mid-syscall); every other
-/// errno propagates as `error.WriteFailed`. Notably `EAGAIN` is
-/// **not** retried — every fd we write to is blocking by design
-/// (pty.master, stdout for ghost overlays), so `EAGAIN` indicates
-/// the caller flipped the fd to non-blocking and we should surface
-/// it explicitly rather than tight-loop until a future POLLOUT.
-/// `EBADF` / `EIO` from PTY teardown is the other path this gate
-/// guards against — those used to spin at 100% CPU.
+/// errno propagates as `error.WriteFailed`. A 0-byte return from
+/// `write()` (peer hung up cleanly mid-write) surfaces as
+/// `error.EndOfFile` so callers can distinguish a closed fd from a
+/// real failure. Notably `EAGAIN` is **not** retried — every fd we
+/// write to is blocking by design (pty.master, stdout for ghost
+/// overlays), so `EAGAIN` indicates the caller flipped the fd to
+/// non-blocking and we should surface it explicitly rather than
+/// tight-loop until a future POLLOUT. `EBADF` / `EIO` from PTY
+/// teardown is the other path this gate guards against — those
+/// used to spin at 100% CPU.
 pub fn writeFully(fd: posix.fd_t, bytes: []const u8) !void {
     var i: usize = 0;
     while (i < bytes.len) {

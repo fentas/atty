@@ -19,7 +19,6 @@ const dispatch = @import("dispatch.zig");
 const module = @import("module.zig");
 const io_helpers = @import("proxy/io.zig");
 const containsEnter = io_helpers.containsEnter;
-const writeFully = io_helpers.writeFully;
 const writeAll = io_helpers.writeAll;
 const PtmWriter = io_helpers.PtmWriter;
 
@@ -1474,10 +1473,4 @@ fn deactivateGhostList(list: *GhostList, out_buf: []u8) !void {
     var w: std.Io.Writer = .fixed(out_buf);
     list.deactivate(&w) catch return;
     if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
-}
-
-// Pull in sibling proxy/*.zig tests so `unit_tests.zig`'s single
-// `_ = @import("proxy.zig")` line discovers them.
-test {
-    _ = io_helpers;
 }
