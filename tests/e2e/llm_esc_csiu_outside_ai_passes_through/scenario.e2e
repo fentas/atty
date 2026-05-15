@@ -1,0 +1,39 @@
+# llm_esc_csiu_outside_ai_passes_through — pins the CSI-u Esc
+# cleanup gate.
+#
+# When the user fires Esc OUTSIDE AI mode on a kitty-kbd terminal,
+# the binding matches but llm_exec_cancel's onAction returns false
+# (no work). The proxy must then translate `\x1b[27u` → legacy
+# `\x1b` so the shell sees bare Esc, not raw CSI-u bytes that
+# would echo as mojibake.
+#
+# Regression for proxy.zig's matched_binding gating fix on PR #34
+# round 2: without that fix, the binding match would suppress the
+# CSI-u cleanup path and the raw bytes would flow through.
+
+cols 80
+rows 6
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 200
+
+# Fire CSI-u Esc without entering AI mode (no `#: ` prefix). The
+# llm module's onAction returns false because `had_work` is false
+# (no ai_mode_active, no dialog state, no pending injection).
+# Proxy clears matched_binding, CSI-u cleanup translates back to
+# legacy `\x1b`. Bash sees bare Esc at the prompt — no-op.
+type "\x1b[27u"
+sleep 200
+
+# Type a visible command to confirm the prompt didn't get
+# polluted with `[27u` mojibake.
+type "echo csiu-clean\r"
+wait_for "csiu-clean"
+sleep 200
+snapshot esc_csiu_outside_ai
+
+# Clean exit.
+type "exit\r"
+exit_code 0

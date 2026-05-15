@@ -1,0 +1,6 @@
+$ cho csiu-clean
+bash: cho: command not found
+$
+
+
+atty │ atuin
