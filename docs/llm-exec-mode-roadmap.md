@@ -71,7 +71,7 @@ has been merged.
 
 | # | Branch / title | Touches | LOC | Depends on | Status |
 |---|---|---|---|---|---|
-| **O** | `refactor/guardrail-submodule` | slice 1: `guardrail/match.zig` extract | ~60 LOC moved | F | **slice 1 merged: aa1faae** (PR #31, Match union + matches + globMatch). Slice 2 (`rules.zig` for Behavior / AuthorMask / Rule / default_rules) feasible but low-value — those types are tiny and tightly coupled to `Rule`'s shape; deferred. |
+| **O** | `refactor/guardrail-submodule` | slices 1+2: `guardrail/match.zig` + `guardrail/rules.zig` + `extra_rules` config knob | ~250 LOC moved | F | **slice 1 merged: aa1faae** (PR #31, Match union + matches + globMatch). **slice 2 merged: be8db06** (PR #33, Behavior/AuthorMask/Rule/default_rules moved; new `Config.extra_rules` for additive overrides under first-match-wins). |
 
 ## Per-PR protocol
 
