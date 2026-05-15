@@ -147,18 +147,26 @@ Author-aware: model-suggested destructive commands are stricter than
 user-typed ones. The exact root-path `rm -rf /` and the classic fork
 bomb are `.block` for both authors. Most others differentiate:
 
-| Pattern                     | User behavior | LLM behavior |
-|-----------------------------|---------------|--------------|
-| `rm -rf /` (exact glob)     | `.block`      | `.block`     |
-| `:(){ :\|:& };:` (substring) | `.block`     | `.block`     |
-| `rm -rf ~` (substring)      | `.confirm`    | `.block`     |
-| `rm -rf` (substring)        | `.confirm`    | `.block`     |
-| `sudo ` (prefix)            | `.confirm`    | `.confirm`   |
-| `mkfs` (prefix)             | `.confirm`    | `.block`     |
-| `dd ` (prefix)              | `.confirm`    | `.block`     |
-| `\| sh` (substring)          | `.confirm`   | `.confirm`   |
-| `\| bash` (substring)        | `.confirm`   | `.confirm`   |
-| `chmod 777 /` (substring)   | `.confirm`    | `.confirm`   |
+| Pattern                       | User behavior | LLM behavior |
+|-------------------------------|---------------|--------------|
+| `rm -rf /` (exact glob)       | `.block`      | `.block`     |
+| `:(){ :&#124;:& };:` (substring) | `.block`   | `.block`     |
+| `rm -rf ~` (substring)        | `.confirm`    | `.block`     |
+| `rm -rf` (substring)          | `.confirm`    | `.block`     |
+| `sudo mkfs` (prefix)          | `.confirm` †  | `.block`     |
+| `sudo dd ` (prefix)           | `.confirm` †  | `.block`     |
+| `sudo ` (prefix)              | `.confirm`    | `.confirm`   |
+| `mkfs` (prefix)               | `.confirm`    | `.block`     |
+| `dd ` (prefix)                | `.confirm`    | `.block`     |
+| `&#124; sh` (substring)       | `.confirm`    | `.confirm`   |
+| `&#124; bash` (substring)     | `.confirm`    | `.confirm`   |
+| `chmod 777 /` (substring)     | `.confirm`    | `.confirm`   |
+
+† User-typed `sudo mkfs …` / `sudo dd …` match the explicit user rules
+no earlier than the generic `sudo` rule (which also `.confirm`s), so
+the visible behavior is the same; the explicit `sudo-mkfs-llm` /
+`sudo-dd-llm` rules exist to shadow the generic `sudo` rule for the
+LLM path under first-match-wins ordering.
 
 ### Custom rules
 
