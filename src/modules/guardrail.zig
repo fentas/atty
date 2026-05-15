@@ -13,19 +13,11 @@
 const std = @import("std");
 const m = @import("../module.zig");
 const style_mod = @import("../style.zig");
+const match_mod = @import("guardrail/match.zig");
 
-/// How a rule decides whether the committed line is a hit. `prefix` and
-/// `substring` are O(n) byte scans; `glob` runs an iterative
-/// `*`-backtrack matcher (no character classes, no recursion).
-pub const Match = union(enum) {
-    /// Line starts with this exact byte sequence.
-    prefix: []const u8,
-    /// `std.mem.indexOf` non-null.
-    substring: []const u8,
-    /// Shell-style: `*` = any (greedy) run, `?` = any single byte.
-    /// Anchored to both ends of the line.
-    glob: []const u8,
-};
+pub const Match = match_mod.Match;
+const matches = match_mod.matches;
+const globMatch = match_mod.globMatch;
 
 /// Whether a rule fires depending on who initiated the commit.
 /// Default = applies to both. Use this to declare two rules for the
@@ -382,49 +374,18 @@ pub fn configure(comptime cfg: Config) type {
     };
 }
 
-fn matches(match: Match, line: []const u8) bool {
-    return switch (match) {
-        .prefix => |p| std.mem.startsWith(u8, line, p),
-        .substring => |s| std.mem.indexOf(u8, line, s) != null,
-        .glob => |g| globMatch(g, line),
-    };
-}
-
-/// Iterative `*` / `?` matcher with backtracking to the most recent
-/// `*`. Anchored to both ends — same shape as shell globs (no `[abc]`
-/// classes). No recursion: O(pattern × line) worst case, constant
-/// stack.
-fn globMatch(pattern: []const u8, line: []const u8) bool {
-    var pi: usize = 0;
-    var li: usize = 0;
-    var star_pi: ?usize = null;
-    var star_li: usize = 0;
-    while (li < line.len) {
-        if (pi < pattern.len and pattern[pi] == '*') {
-            star_pi = pi;
-            star_li = li;
-            pi += 1;
-        } else if (pi < pattern.len and (pattern[pi] == '?' or pattern[pi] == line[li])) {
-            pi += 1;
-            li += 1;
-        } else if (star_pi) |sp| {
-            pi = sp + 1;
-            star_li += 1;
-            li = star_li;
-        } else {
-            return false;
-        }
-    }
-    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
-    return pi == pattern.len;
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
 
 const testing = std.testing;
 const LineState = @import("../line_state.zig").LineState;
+
+// Pull in sibling guardrail/*.zig tests so `unit_tests.zig`'s
+// `_ = @import("modules/guardrail.zig")` line discovers them.
+test {
+    _ = match_mod;
+}
 
 const TestSink = struct {
     buf: std.ArrayList(u8),
@@ -470,23 +431,6 @@ test "AuthorMask.applies" {
     const user_only = AuthorMask{ .user = true, .llm = false };
     try testing.expect(user_only.applies(.user));
     try testing.expect(!user_only.applies(.llm));
-}
-
-test "glob: simple star and question" {
-    try testing.expect(globMatch("rm *", "rm foo"));
-    try testing.expect(globMatch("rm *", "rm "));
-    try testing.expect(!globMatch("rm *", "rmfoo"));
-    try testing.expect(globMatch("?at", "cat"));
-    try testing.expect(!globMatch("?at", "cats"));
-    try testing.expect(globMatch("*", ""));
-    try testing.expect(globMatch("a*b", "ab"));
-    try testing.expect(globMatch("a*b", "aXYZb"));
-    try testing.expect(!globMatch("a*b", "axyzc"));
-}
-
-test "glob: anchored on both ends" {
-    try testing.expect(!globMatch("rm", "rm foo"));
-    try testing.expect(!globMatch("foo", "echo foo"));
 }
 
 test "Match union: prefix vs substring" {
