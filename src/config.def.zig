@@ -24,15 +24,24 @@ const atty = @import("atty");
 // pub const modules = .{
 //     atty.modules.guardrail.configure(.{
 //         // .rules = &.{
-//         //     // .mode is per-rule:
+//         //     // .behavior is per-rule:
 //         //     //   .confirm       (default) press Enter again to confirm
 //         //     //   .confirm_once  same, then never asks again this session
 //         //     //   .block         banner + clear line; command can't run
-//         //     //   .silent_block  clear line + no banner
-//         //     .{ .name = "rm-rf-root", .kind = .{ .substring = "rm -rf /" },
-//         //        .reason = "rm -rf on root", .mode = .block },
-//         //     .{ .name = "git-force", .kind = .{ .substring = "git push --force" },
-//         //        .reason = "force-pushing", .mode = .confirm_once },
+//         //     //   .warn          banner + forward (audit, no friction)
+//         //     // .authors restricts a rule to user-typed or llm-injected
+//         //     // commits (default = both).
+//         //     // `.glob` anchors to both ends — only the literal
+//         //     // `rm -rf /` matches, so `rm -rf /home/x` falls
+//         //     // through to a broader rule below.
+//         //     .{ .name = "rm-rf-root", .match = .{ .glob = "rm -rf /" },
+//         //        .reason = "rm -rf on root", .behavior = .block },
+//         //     .{ .name = "rm-rf-llm", .match = .{ .substring = "rm -rf" },
+//         //        .reason = "rm -rf (llm)",
+//         //        .authors = .{ .user = false, .llm = true },
+//         //        .behavior = .block },
+//         //     .{ .name = "git-force", .match = .{ .substring = "git push --force" },
+//         //        .reason = "force-pushing", .behavior = .confirm_once },
 //         // },
 //         // .warning_style = atty.style.presets.danger,
 //     }),

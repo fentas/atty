@@ -1,5 +1,5 @@
 $
-atty guardrail: rm -rf on a root-ish path
+atty guardrail: rm -rf invocation [user]
         line: rm -rf /tmp/atty-nonexist
         press Enter again to confirm, any other key to cancel.
 

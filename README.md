@@ -41,7 +41,7 @@ $ git checkout featu re/auth-refactor                     ← dim italic ghost t
                     ^^^^^^^^^^^^^^^^^
 
 $ rm -rf /home/work/
-! atty guardrail: rm -rf on a root-ish path
+! atty guardrail: rm -rf invocation [user]
         line: rm -rf /home/work/
         press Enter again to confirm, any other key to cancel.
 ```
