@@ -314,23 +314,35 @@ pub const Osc133 = struct {
                 if (self.phase == .in_command) {
                     self.pushEdge(.prompt_start_implicit_end);
                 }
-                // **Clear `self.input` too** — even though
-                // `syncFromCapture` is now gated on `captureActive()`
-                // (strict `.in_input`) and so won't repaint
-                // `line_state` from `.at_prompt`, callers that
-                // expose `currentInput()` directly (or tests that
-                // assert against it) must see an empty buffer in
-                // `.at_prompt`. Without the clear, a sequence
-                // `;B…ls…;C…;D…;A` leaves "ls" sitting in
-                // `currentInput()` even though the user is now at
-                // a fresh prompt — a stale read for anything that
-                // queries the tracker between feeds.
+                // Clear `self.input` ONLY when transitioning INTO
+                // the prompt zone from outside it (`.idle` after a
+                // command finished, or `.in_command` for partial
+                // emitters that skip `;D`). Bash readline can
+                // re-emit `;A` mid-typing during incremental prompt
+                // redraws — clearing `input` unconditionally there
+                // would wipe the user's accumulated keystrokes,
+                // observed as "ghost text matches against last
+                // N-1 chars" when the user types N chars fast.
+                // The OUTSIDE-IN guard preserves typed input
+                // across redundant redraws while still clearing
+                // legitimately on a fresh prompt cycle.
+                if (self.phase == .idle or self.phase == .in_command) {
+                    self.input.clearRetainingCapacity();
+                }
                 self.phase = .at_prompt;
-                self.input.clearRetainingCapacity();
             },
             'B' => {
+                // Same OUTSIDE-IN gate as `;A` — bash readline can
+                // re-emit `\[\033]133;B\007\]` (the trailing wrap
+                // marker from `atty init bash`) on every prompt
+                // redraw, including mid-keystroke incremental
+                // updates. Without the gate, every redraw wiped
+                // the accumulated keystrokes. The legit transitions
+                // (`.idle`/`.in_command` → `.in_input`) still clear.
+                if (self.phase == .idle or self.phase == .in_command) {
+                    self.input.clearRetainingCapacity();
+                }
                 self.phase = .in_input;
-                self.input.clearRetainingCapacity();
             },
             'C' => {
                 self.phase = .in_command;
@@ -543,6 +555,59 @@ test "Osc133: full emitter ;A after ;D does NOT synthesize an implicit-end edge"
         const edges = o.drainEdges();
         try testing.expectEqual(@as(usize, 0), edges.len);
     }
+}
+
+test "Osc133: mid-typing prompt redraw (;A or ;B re-fires) preserves accumulated input" {
+    // Regression: bash readline + a prompt manager like starship
+    // can redraw the prompt while the user is typing — incremental
+    // updates, line-wrap recovery, mode indicators, etc. Each
+    // redraw re-emits the visible PS1, which under
+    // `atty init bash` includes the `\[\033]133;A\007\]` and
+    // `\[\033]133;B\007\]` wrap markers. Before this gate the
+    // wrap re-fire wiped `osc.input` mid-keystroke; the user's
+    // accumulated typing vanished from ghost-text matching and
+    // history recall (observed as "ghost text matches against
+    // last N-1 chars when typing N chars fast").
+    //
+    // The fix: clear `input` ONLY when transitioning into the
+    // prompt zone FROM OUTSIDE it (`.idle` after `;D`, or
+    // `.in_command` for partial emitters that skip `;D`). A
+    // `;A` or `;B` received while already in `.at_prompt` /
+    // `.in_input` is treated as a redraw and the captured input
+    // survives.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    // Fresh prompt + user starts typing.
+    o.feed("\x1b]133;A\x07$ \x1b]133;B\x07ec");
+    try testing.expectEqualStrings("ec", o.currentInput());
+    // Readline incremental redraw: emits the wrapped PS1 again.
+    // Without the gate, this would clear "ec" mid-typing.
+    o.feed("\x1b]133;A\x07$ \x1b]133;B\x07");
+    try testing.expectEqualStrings("ec", o.currentInput());
+    // User finishes typing.
+    o.feed("ho");
+    try testing.expectEqualStrings("echo", o.currentInput());
+    // The next legit prompt cycle (after the user pressed Enter
+    // and the command ran to completion) MUST clear cleanly.
+    // Phase transitions: .in_input → .in_command (`;C`) →
+    // .idle (`;D`) → .at_prompt (`;A`) → .in_input (`;B`).
+    // Clear happens on `;A` (phase was .idle) per the gate.
+    o.feed("\x1b]133;C\x07output\x1b]133;D\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    try testing.expectEqualStrings("", o.currentInput());
+}
+
+test "Osc133: ;B re-fire alone (no preceding ;A) also preserves input" {
+    // Edge case: some emitters might re-emit just `;B` for prompt
+    // re-display (instead of the full `;A` + PS1 + `;B`). The
+    // gate must still preserve input.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07$ \x1b]133;B\x07hello");
+    try testing.expectEqualStrings("hello", o.currentInput());
+    // Bare ;B re-fire — phase is already .in_input, gate skips
+    // the clear.
+    o.feed("\x1b]133;B\x07");
+    try testing.expectEqualStrings("hello", o.currentInput());
 }
 
 test "Osc133: B → typed → C → D → A leaves currentInput() empty (not stale)" {
