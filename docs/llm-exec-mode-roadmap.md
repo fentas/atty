@@ -52,8 +52,8 @@ has been merged.
 
 | # | Branch / title | Touches | LOC | Depends on | Status |
 |---|---|---|---|---|---|
-| **A** | `refactor/llm-submodule` | slice 1: `parse.zig` extract | ~300 LOC moved | #21 | **slice 1 merged: 9b583d3** (PR #28). Slices 2-4 (dialog / worker / types) queued as follow-ups. |
-| **J** | `refactor/proxy-submodule` | slice 1: `proxy/io.zig` extract | ~50 LOC moved | E | **slice 1 merged: e0a928e** (PR #30). Render-helper slice queued as follow-up. |
+| **A** | `refactor/llm-submodule` | slices 1+2: `parse.zig` + `types.zig` extracts | ~470 LOC moved | #21 | **slice 1 merged: 9b583d3** (PR #28, parse.zig). **slice 2 merged: 49b2d2c** (PR #32, types.zig — Config). Remaining slices (DialogState / Turn / Shared / HTTP worker / dialog handler all close over `cfg`) deferred — not cleanly extractable without a comptime-parameter rewrite. |
+| **J** | `refactor/proxy-submodule` | slice 1: `proxy/io.zig` extract | ~50 LOC moved | E | **slice 1 merged: e0a928e** (PR #30). Render-helper slice deferred — `renderGhost` / `renderStatus` / `renderGhostList` reference internal structs scoped inside `run()` (Ghost, GhostList, AltScreen, Runtimes), so extraction needs those types lifted to module scope first. |
 | **F** | `feat/guardrail-v2` | `src/modules/guardrail.zig` + e2e | ~400 | E | **merged: 0257dbb** (PR #27) |
 | **G** | `feat/atuin-author-intent` | `src/modules/atuin.zig` + cross-module `setCommitAuthor` in `src/modules/llm.zig` | ~180 | E | **merged: 5a4bf53** (PR #29). M dependency dropped since M is deferred. |
 
@@ -71,7 +71,7 @@ has been merged.
 
 | # | Branch / title | Touches | LOC | Depends on | Status |
 |---|---|---|---|---|---|
-| **O** | `refactor/guardrail-submodule` | `src/modules/guardrail.zig` (post-F structure) | ~0 net | F | queued |
+| **O** | `refactor/guardrail-submodule` | slice 1: `guardrail/match.zig` extract | ~60 LOC moved | F | **slice 1 merged: aa1faae** (PR #31, Match union + matches + globMatch). Slice 2 (`rules.zig` for Behavior / AuthorMask / Rule / default_rules) feasible but low-value — those types are tiny and tightly coupled to `Rule`'s shape; deferred. |
 
 ## Per-PR protocol
 
