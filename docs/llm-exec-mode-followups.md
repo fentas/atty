@@ -88,6 +88,55 @@ trailing space from `input` before returning `currentInput()`.
 Doesn't help if multiple trailing spaces, but matches the
 common case.
 
+**Most plausible root cause (working theory)**: bash readline
+**re-emits PS1 markers on every prompt redraw**. Specifically,
+when readline redraws the prompt (incremental update during
+typing, line-wrap recovery, etc.), it re-emits the entire visible
+PS1 region including the `\[\033]133;A\007\]` and
+`\[\033]133;B\007\]` markers. Each `;B` re-fire calls
+`osc133_capture.input.clearRetainingCapacity()`, wiping the
+user's accumulated keystrokes.
+
+Pattern fits the observations:
+
+- Typing single char: `;B` from initial prompt draw clears
+  input; user types `e`; input = "e". Then readline emits a
+  PS1-redraw with `;B` → input cleared again. atuin worker
+  queries with "" → no results → empty pick list.
+- Typing `ec` fast: `;B` cleared input; `e` captured; redraw
+  cleared again BETWEEN `e` and `c`; `c` captured fresh; input
+  = "c". atuin matches `c`-prefix.
+
+**Speculative fix** (needs unit tests + e2e verification):
+
+```zig
+// In src/osc133.zig dispatchOsc, gate the input.clear on
+// "transition INTO prompt zone from outside":
+'A' => {
+    if (self.phase == .idle or self.phase == .in_command) {
+        self.input.clearRetainingCapacity();
+    }
+    // ... existing prompt_start_implicit_end push ...
+    self.phase = .at_prompt;
+},
+'B' => {
+    if (self.phase == .idle or self.phase == .in_command) {
+        self.input.clearRetainingCapacity();
+    }
+    self.phase = .in_input;
+},
+```
+
+This preserves `input` across redundant `;A;B` re-fires mid-
+typing, while still clearing legitimately on the transition
+from `.in_command` → `.at_prompt` / `.in_input` (new prompt
+cycle after a finished command).
+
+Risk: existing tests assert behaviour relying on per-`;B`
+clearing — needs careful audit. Recommend implementing as a
+separate PR with a focused e2e scenario that synthesises the
+redraw byte sequence and asserts the fix.
+
 ## Refactor sweep — deferred extracts
 
 ### A slices 3+ — llm.zig dialog / worker / Shared
