@@ -1157,45 +1157,40 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // there.
                 if (osc133_tracker.captureActive()) {
                     const osc_input = osc133_tracker.currentInput();
-                    // Skip the sync when `osc.input` is empty BUT
-                    // line_state has accumulated keystrokes.
+                    const line_current = line_state.current();
+                    // Sync only when EITHER:
                     //
-                    // Why: bash readline can re-emit
-                    // `\[\033]133;A\007\]…\[\033]133;B\007\]` (the
-                    // wrap markers from `atty init bash`) during
-                    // incremental prompt redraws — line-wrap
-                    // recovery, prompt-manager async updates, etc.
-                    // Each `;B` re-fire calls
-                    // `osc.input.clearRetainingCapacity()`. Without
-                    // this gate, `syncFromCapture("")` would
-                    // immediately wipe the user's keystroke-derived
-                    // buffer too, observed as "ghost text matches
-                    // last N-1 chars when typing N chars fast."
+                    //   (a) line_state is `uncertain` — keystroke
+                    //       tracker hit something it couldn't model
+                    //       (Arrow-Up recall, Tab completion, lone
+                    //       ESC, paste, …). The OSC capture is the
+                    //       authoritative recovery path; trust it
+                    //       even when it's shorter than the
+                    //       keystroke buffer (history recall to a
+                    //       shorter line, completion-replace).
                     //
-                    // The gate is SAFE for the existing recovery
-                    // paths it was added for:
+                    //   (b) `osc_input.len >= line_current.len` —
+                    //       OSC capture is at least as complete as
+                    //       the keystroke tracker. Covers normal
+                    //       typing (echo matches), paste (full
+                    //       buffer arrives at once), Ctrl+L full-
+                    //       screen redraw (typed buffer re-emitted).
                     //
-                    //   - Arrow-Up history recall: bash emits
-                    //     `\r\033[K<recalled>` — the `\r` clears
-                    //     `osc.input` AND the recalled bytes get
-                    //     captured AFTER, so by the time we sync
-                    //     `osc.input.len > 0` and the gate passes.
-                    //   - Tab completion expansion: same shape —
-                    //     completion text is re-emitted to the
-                    //     terminal, gets captured.
-                    //   - Paste: same — pasted bytes captured into
-                    //     osc.input before we sync.
-                    //   - Ctrl+L full-screen redraw: typed buffer
-                    //     is re-emitted alongside the prompt; gets
-                    //     re-captured after the `;A;B` clear,
-                    //     gate passes.
-                    //
-                    // The only legitimate "shell cleared the line"
-                    // signals (Ctrl+U via stdin, Ctrl+C, etc.) are
-                    // already handled by `line_state.applyInput`
-                    // BEFORE we get here, so line_state is already
-                    // empty when osc.input is empty.
-                    if (osc_input.len > 0 or line_state.current().len == 0) {
+                    // Skip the sync otherwise (osc shorter than the
+                    // keystroke buffer AND line_state is certain).
+                    // This guards against bash readline re-emitting
+                    // `\[\033]133;A\007\]…\[\033]133;B\007\]` mid-
+                    // typing (line-wrap recovery, prompt-manager
+                    // async updates) — each `;B` re-fire clears
+                    // `osc.input`, then bash echoes only the most
+                    // recently typed char, so `osc_input.len < N`
+                    // while the keystroke buffer correctly has
+                    // all N chars. Without this gate, the
+                    // re-emission-only-of-last-char path
+                    // `syncFromCapture`d the keystrokes away, seen
+                    // downstream as "ghost text matches last N-1
+                    // chars when typing N chars fast."
+                    if (line_state.uncertain or osc_input.len >= line_current.len) {
                         line_state.syncFromCapture(osc_input);
                     }
                 }
