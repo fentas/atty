@@ -160,7 +160,9 @@ would have submitted a dangerous command.
 
 `.replace_commit` exists for modules that intercept Enter to do
 something custom but still want the typed line to land in history.
-The LLM module uses it: typing `#: list files` + Enter returns
+The LLM module uses it: typing `#: list files` + **`Alt+A`** (or
+**Enter** when `Config.enter_action = .single` — default is
+`.none`, an explicit-action-only safety gate) returns
 `.replace_commit = "\x15"` — Ctrl+U kills the readline buffer so
 the shell doesn't run the prompt, but the proxy fires
 `dispatchLineCommit` on `#: list files` so atuin / history record
