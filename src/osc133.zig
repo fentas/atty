@@ -80,6 +80,16 @@ pub const Osc133 = struct {
     /// across feed boundaries.
     osc_start_index: u32 = 0,
 
+    /// Cumulative bytes fed across the lifetime of the tracker. Used
+    /// by the LLM module's diagnostic error path (`Alt+S` without
+    /// active OSC 133) to distinguish "shell never wrote a byte" from
+    /// "shell wrote bytes but no 133 marker among them". Never used
+    /// for correctness — purely a sticky observability counter.
+    total_bytes_fed: u64 = 0,
+    /// Cumulative OSC 133 dispatches seen (any marker — A/B/C/D).
+    /// Diagnostic only.
+    total_dispatches: u32 = 0,
+
     const State = enum {
         ground, // regular input-byte processing (when in input phase)
         esc, // saw 0x1B; next byte chooses sub-state
@@ -193,6 +203,7 @@ pub const Osc133 = struct {
     /// per-byte events captured during the same feed.
     pub fn feed(self: *Osc133, bytes: []const u8) void {
         self.feed_byte_index = 0;
+        self.total_bytes_fed +%= bytes.len;
         for (bytes) |b| {
             self.feedByte(b);
             self.feed_byte_index += 1;
@@ -274,6 +285,7 @@ pub const Osc133 = struct {
         if (!std.mem.startsWith(u8, body, "133;")) return;
         if (body.len < 5) return;
         self.active = true;
+        self.total_dispatches +%= 1;
         switch (body[4]) {
             'A' => {
                 // Prompt drawing / open. We're "at the prompt" but

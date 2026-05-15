@@ -10,10 +10,23 @@ title: LLM module
 {:toc}
 
 Type `#: list all .zig files modified in the last week` at the
-shell prompt, hit Enter, and atty replaces your typed line with
-the command the model generated. Reviewable: atty injects the
-command into the readline buffer, the user hits Enter again to
-actually run it.
+shell prompt and press **`Alt+A`**. atty wipes the typed line and
+injects the LLM-generated command into the readline buffer. You
+hit Enter to actually run it (or edit it / `Ctrl+C` to discard).
+
+Three action keys, each with its own follow-up flow:
+
+| Key           | Mode                                   |
+|---------------|----------------------------------------|
+| `Alt+A`       | single command, no follow-up           |
+| `Alt+S`       | multi-turn dialog with OSC 133 capture |
+| `Alt+Shift+S` | dialog + auto-submit each step         |
+
+> **Why not `Enter`?** Pressing Enter on `#: …` is a **no-op by
+> default** (`enter_action = .none`) — defense against accidental
+> LLM calls when you just want to type a comment. Set
+> `Config.enter_action = .single` (or `.dialog` / `.auto`) to
+> bring back the pre-Alt-key trigger flow if you preferred it.
 
 ## Quickstart
 
@@ -38,15 +51,53 @@ circuits to inert mode (no worker thread spawned) when no
 endpoint is configured, so the rest of your shell experience is
 untouched.
 
+## OSC 133 — required for dialog / auto modes
+
+Dialog (`Alt+S`) and auto (`Alt+Shift+S`) modes need OSC 133
+prompt markers so atty knows where command output begins / ends.
+Single mode (`Alt+A`) works without them.
+
+```sh
+# in your ~/.bashrc:
+eval "$(atty init bash)"
+
+# or ~/.zshrc:
+eval "$(atty init zsh)"
+```
+
+**Gotcha — `.bashrc` is load-bearing.** The init snippet does
+`exec atty bash` at the top to re-launch your shell under atty.
+`exec` **replaces** the current shell, so any function
+definitions / `PROMPT_COMMAND` wiring the snippet ALSO sets are
+discarded along with it. The canonical flow expects the new atty
+bash to re-read `.bashrc` (interactive shells do), which re-runs
+the eval; this time `ATTY=1` skips the exec and the OSC 133
+setup applies in-place.
+
+If you run `eval "$(atty init bash)"` **manually** from a fresh
+shell without it in your rc, the new atty session won't have
+OSC 133 hooks — you'll see the `exec mode needs OSC 133` error
+on Alt+S. Two fixes:
+
+1. Add the eval line to `.bashrc` (canonical), OR
+2. After landing in the atty session, run `eval "$(atty init
+   bash)"` **a second time** — `ATTY=1` is now set, exec gets
+   skipped, OSC 133 setup runs in your current shell.
+
+Sanity-check with `eval "$(atty doctor)"` — colour-coded
+pass/fail for every step of the integration chain.
+
 ## How a prompt flows
 
-1. **You type** `#: list zig files` + Enter.
-2. **`onInput`** in the module sees the Enter, looks at the
-   committed line, recognises the prefix, and returns
-   `.replace_commit = "\x15"` — Ctrl+U for readline (kills the
-   typed line in the shell) AND tells the proxy to fire
-   `dispatchLineCommit` on the typed `#: list zig files` so
-   atuin / history record it.
+1. **You type** `#: list zig files` then press **`Alt+A`**.
+2. **`onAction`** in the module sees the `llm_exec_single`
+   action, checks `ai_mode_active` (line starts with `#: `), and
+   queues `\x15` (Ctrl+U) on `pending_injection`. The proxy
+   drains that to the shell on the next `pollShellInput` tick,
+   wiping the typed `#: …` text. (Setting
+   `Config.enter_action = .single` re-binds the legacy
+   `#:<Enter>` trigger to the same code path — same result,
+   different entry point.)
 3. **A worker thread** wakes on a condvar, POSTs to
    `${api_base}/chat/completions` with the prompt body, parses the
    `choices[0].message.content` from the response.
@@ -188,6 +239,8 @@ prompt too.
 | `timeout_ms`                  | `30_000`                                 | Stored; not yet wired into `client.fetch` (deferred to a follow-up).                  |
 | `max_response_bytes`          | `4096`                                   | Cap on the parsed command size.                                                       |
 | `max_prompt_bytes`            | `2048`                                   | Cap on prompt-body size. Longer inputs ignored as "likely paste, not a task."         |
+| `enter_action`                | `.none`                                  | What Enter on `#: …` does. `.none` (default), `.single`, `.dialog`, `.auto`. `.none` is the safe default — Alt+A / Alt+S / Alt+Shift+S are the explicit triggers. |
+| `auto_delay_ms`               | `800`                                    | Auto-exec confirm delay (ms) for `Alt+Shift+S`. Any keystroke aborts.                  |
 
 ## Security notes
 

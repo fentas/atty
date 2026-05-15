@@ -42,6 +42,14 @@ pub const ParseOutcome = union(enum) {
     /// done. `main.zig` skips the free because it exits immediately
     /// after emitting the snippet; tests must free explicitly.
     print_init: []const u8,
+    /// `atty doctor` — print a shell snippet to stdout that, when
+    /// evaluated, inspects the calling shell's state and prints
+    /// pass/fail for each integration check (OSC 133 hooks defined,
+    /// PROMPT_COMMAND wired, PS1 wrapped, $ATTY set, …). Used via
+    /// `eval "$(atty doctor)"` from inside an atty session when the
+    /// OSC 133 gate keeps firing — pinpoints which step of the
+    /// integration chain is broken without rebuilding the binary.
+    print_doctor,
 };
 
 /// Free the allocator-owned shell string carried by `.print_init`.
@@ -100,6 +108,16 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
             else
                 "";
             return .{ .print_init = shell_name };
+        }
+        // `atty doctor` — same shape as `init`: positional, must
+        // come before any shell-name positional. The doctor snippet
+        // is shell-agnostic (works in bash and zsh) and takes no
+        // arguments. A user with a shell named `doctor` can still
+        // run it via `atty -- doctor`.
+        if (std.mem.eql(u8, a, "doctor") and positional.items.len == 0) {
+            for (positional.items) |s| allocator.free(s);
+            positional.deinit(allocator);
+            return .print_doctor;
         }
         // First positional ends flag parsing.
         try positional.append(allocator, try allocator.dupe(u8, a));
@@ -214,6 +232,11 @@ test "parseArgv: `init` is a subcommand that prints integration snippet" {
     defer freePrintInit(testing.allocator, got3.print_init);
     try testing.expect(got3 == .print_init);
     try testing.expectEqualStrings("zsh", got3.print_init);
+}
+
+test "parseArgv: `doctor` is a subcommand that prints health-check snippet" {
+    const got = try parseArgv(testing.allocator, &.{"doctor"});
+    try testing.expect(got == .print_doctor);
 }
 
 test "parseArgv: `--` escape lets a user reach a real shell named `init`" {

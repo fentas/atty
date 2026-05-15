@@ -1156,7 +1156,43 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // gate is the only way ghost text can survive
                 // there.
                 if (osc133_tracker.captureActive()) {
-                    line_state.syncFromCapture(osc133_tracker.currentInput());
+                    const osc_input = osc133_tracker.currentInput();
+                    const line_current = line_state.current();
+                    // Sync only when EITHER:
+                    //
+                    //   (a) line_state is `uncertain` — keystroke
+                    //       tracker hit something it couldn't model
+                    //       (Arrow-Up recall, Tab completion, lone
+                    //       ESC, paste, …). The OSC capture is the
+                    //       authoritative recovery path; trust it
+                    //       even when it's shorter than the
+                    //       keystroke buffer (history recall to a
+                    //       shorter line, completion-replace).
+                    //
+                    //   (b) `osc_input.len >= line_current.len` —
+                    //       OSC capture is at least as complete as
+                    //       the keystroke tracker. Covers normal
+                    //       typing (echo matches), paste (full
+                    //       buffer arrives at once), Ctrl+L full-
+                    //       screen redraw (typed buffer re-emitted).
+                    //
+                    // Skip the sync otherwise (osc shorter than the
+                    // keystroke buffer AND line_state is certain).
+                    // This guards against bash readline re-emitting
+                    // `\[\033]133;A\007\]…\[\033]133;B\007\]` mid-
+                    // typing (line-wrap recovery, prompt-manager
+                    // async updates) — each `;B` re-fire clears
+                    // `osc.input`, then bash echoes only the most
+                    // recently typed char, so `osc_input.len < N`
+                    // while the keystroke buffer correctly has
+                    // all N chars. Without this gate, the
+                    // re-emission-only-of-last-char path
+                    // `syncFromCapture`d the keystrokes away, seen
+                    // downstream as "ghost text matches last N-1
+                    // chars when typing N chars fast."
+                    if (line_state.uncertain or osc_input.len >= line_current.len) {
+                        line_state.syncFromCapture(osc_input);
+                    }
                 }
 
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};

@@ -3,6 +3,6 @@ $ #: do something
 
 
 
-⚠ exec mode needs OSC 133 — run `eval "$(atty init bash)"` or use Alt+A
+⚠ exec mode needs OSC 133 (bytes=25 dispatches=0) — run `eval "$(atty init bash)"` or use Alt+A
 
 atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Esc cancel

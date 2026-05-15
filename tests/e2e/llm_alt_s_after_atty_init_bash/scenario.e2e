@@ -1,0 +1,64 @@
+# llm_alt_s_after_atty_init_bash — regression pin: after the user
+# runs `eval "$(atty init bash)"`, the very next `#: …` + Alt+S
+# should fire the dialog (NOT print the "needs OSC 133" gate
+# error). The init snippet wraps PS1 with `;A` / `;B` markers and
+# adds `__atty_osc133_d` to PROMPT_COMMAND, so by the time the
+# user types the next character at the prompt the LLM module's
+# osc133_capture.active should already be true.
+#
+# Without this scenario the integration path is untested — every
+# other dialog scenario sets PS1 manually with the markers
+# inlined, which bypasses the `atty init bash` → PROMPT_COMMAND →
+# PS1 expansion chain that real users hit.
+#
+# We send Alt+S via the kitty kbd CSI-u byte form (`\x1b[115;3u`)
+# because atty pushes the disambiguate flag at startup — real
+# Ghostty / kitty / foot sessions will only emit this form, not
+# the legacy `\x1bs` (which the e2e harness historically used but
+# does not exercise the real-terminal code path).
+
+cols 120
+rows 10
+timeout_ms 8000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Run the real `atty init bash` snippet inline. Once eval
+# returns, PROMPT_COMMAND fires `__atty_osc133_d` (emits `;D;0`)
+# and `__atty_osc133_wrap_ps1` (wraps PS1 with `;A` / `;B`).
+# The next prompt redraw emits the wrapped markers — that's
+# what flips osc133_capture.active inside the LLM runtime.
+#
+# `$ATTY_BIN` is exposed by the harness — the forced PATH
+# doesn't include the `.zig-cache/o/<hash>/` bin dir.
+type "eval \"$($ATTY_BIN init bash)\"\r"
+wait_for "$"
+sleep 300
+
+# Enter AI mode.
+type "#: print ok"
+sleep 300
+
+# Alt+S via the kitty kbd CSI-u encoding (115 = 's', mod 3 = Alt).
+# This is what Ghostty / kitty / foot send under atty's default
+# `\x1b[>1u` push. The dual binding in defaults.zig is what
+# closes the gap with the legacy `\x1bs` form.
+type "\x1b[115;3u"
+sleep 500
+
+# If the OSC 133 gate is closed (regression), the bar prints the
+# ⚠ "needs OSC 133" hint. If the fix is in place, the fixture
+# response lands on the prompt as the suggested command and the
+# state moves to .suggesting (hint above the bar is the
+# description, not the gate-failure message).
+snapshot dialog_started
+
+# Cleanly cancel + exit so exit_code matches the golden. Esc
+# under kitty kbd is `\x1b[27u`.
+type "\x1b[27u"
+sleep 100
+type "\x15"
+sleep 100
+type "exit\r"
+exit_code 0

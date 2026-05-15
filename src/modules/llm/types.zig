@@ -3,6 +3,28 @@
 //! comptime `configure()` return type — keeps the dependency graph
 //! between sibling submodules acyclic.
 
+/// What happens when the user presses Enter on a line that starts
+/// with `Config.prefix` (`#: ` by default). See `Config.enter_action`.
+pub const EnterAction = enum {
+    /// No-op — Enter on `#: …` does nothing. User must press
+    /// Alt+A / Alt+S / Alt+Shift+S explicitly to fire the LLM.
+    /// **Default** — defends against accidental LLM calls when
+    /// typing comments at the prompt.
+    none,
+    /// Same effect as Alt+A — single-prompt, no dialog loop. The
+    /// LLM returns one command and atty injects it for the user
+    /// to review + Enter to run.
+    single,
+    /// Same effect as Alt+S — multi-turn dialog with OSC 133
+    /// output capture between exec steps. Requires the shell to
+    /// emit OSC 133 markers.
+    dialog,
+    /// Same effect as Alt+Shift+S — dialog mode + auto-submit
+    /// each suggested command after `auto_delay_ms`. Any
+    /// keystroke during the delay aborts the auto-submit.
+    auto,
+};
+
 /// Compile-time configuration for the LLM module. Every field has a
 /// reasonable default; override only what your endpoint / model /
 /// shell needs.
@@ -183,4 +205,13 @@ pub const Config = struct {
     /// time (mirroring `system_prompt`). There is no runtime
     /// fallback; recompile to change it.
     dialog_system_prompt: []const u8 = "",
+    /// Behaviour of the bare Enter key when the line starts with
+    /// `prefix`. Default `.none` — Enter is a no-op in AI mode and
+    /// the user must press Alt+A / Alt+S / Alt+Shift+S explicitly.
+    /// This defends against accidental LLM calls when the user
+    /// types a `#: …` comment intending to actually commit it.
+    /// Flip to `.single` / `.dialog` / `.auto` to bind Enter to the
+    /// corresponding action — useful for muscle-memory users who
+    /// preferred the pre-Alt-key trigger flow.
+    enter_action: EnterAction = .none,
 };
