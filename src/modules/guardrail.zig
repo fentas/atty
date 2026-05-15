@@ -642,11 +642,14 @@ test "custom rule list overrides defaults" {
     try testing.expect(G.check("rm -rf /") == null);
 }
 
-test "extra_rules: user rule prepends to defaults and wins under first-match-wins" {
+test "extra_rules: prepended rule wins over default match under first-match-wins" {
+    // No .authors mask on the extra rule → applies to both .user
+    // and .llm. The assertion is purely about prepend ordering,
+    // not author-gated behavior.
     const extra = [_]Rule{.{
         .name = "git-force-extra",
         .match = .{ .substring = "git push --force" },
-        .reason = "force-pushing (user-extra)",
+        .reason = "force-pushing (extra)",
         .behavior = .confirm_once,
     }};
     const G = configure(.{ .extra_rules = &extra });
@@ -661,7 +664,7 @@ test "extra_rules: user rule prepends to defaults and wins under first-match-win
     try testing.expectEqual(Behavior.block, G.check("rm -rf /").?.behavior);
 }
 
-test "extra_rules: user rule overrides default behavior on the same pattern (prepend wins)" {
+test "extra_rules: prepended rule overrides default behavior on the same pattern" {
     // Default `sudo` is .confirm for both authors. User pre-empts
     // with a .warn rule (e.g. audit but never block on sudo).
     const extra = [_]Rule{.{
