@@ -3,6 +3,6 @@ $ #:
 
 
 
-model: model-alpha (1/2) · endpoint: (inert — no endpoint) · Ctrl+Shift+X cancel · Ctrl+Shift+I incognito
+model: model-alpha (1/2) · endpoint: (inert — no endpoint) · Esc cancel · Ctrl+Shift+I incognito
 
-atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-alpha · Alt+H help · Ctrl+Shift+X cancel
+atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-alpha · Alt+H help · Esc cancel

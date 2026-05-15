@@ -808,7 +808,7 @@ pub fn configure(comptime cfg: Config) type {
                     // overwritten — bufPrint copies the formatted
                     // string verbatim, so this read-then-write order
                     // is safe.
-                    const msg = std.fmt.bufPrint(buf[32..], "model: {s}{s} · endpoint: {s} · Ctrl+Shift+X cancel · Ctrl+Shift+I incognito", .{ current, cycle_info, endpoint }) catch {
+                    const msg = std.fmt.bufPrint(buf[32..], "model: {s}{s} · endpoint: {s} · Esc cancel · Ctrl+Shift+I incognito", .{ current, cycle_info, endpoint }) catch {
                         // Truncated; render at least the model name.
                         latchHint(rt, current);
                         return true;
@@ -1570,12 +1570,11 @@ pub fn configure(comptime cfg: Config) type {
             // hint string is what shows once the user has typed
             // `#: `.
             //
-            // `Esc cancel` is intentionally NOT advertised here —
-            // no Esc handler is wired yet on the proxy side and
-            // advertising a key that doesn't fire would mislead
-            // users. `Ctrl+Shift+X` (`llm_exec_cancel`) is the
-            // actual cancel binding; it's discoverable via Alt+H
-            // once the help overlay lands.
+            // Esc and Ctrl+Shift+X both fire `llm_exec_cancel`.
+            // Esc is the discoverable short form; Ctrl+Shift+X is
+            // the safety lever for users on terminals that bind
+            // Esc to something else, or who'd rather not have a
+            // bare Esc grabbed inside AI mode.
             if (rt.ai_mode_active) {
                 // With a configured `models[]` list, surface the
                 // current pick inline so `Alt+M` cycling has
@@ -1588,11 +1587,11 @@ pub fn configure(comptime cfg: Config) type {
                     const pick = cfg.models[rt.current_model_idx];
                     return std.fmt.bufPrint(
                         &rt.status_buf,
-                        "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M {s} · Alt+H help · Ctrl+Shift+X cancel",
+                        "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M {s} · Alt+H help · Esc cancel",
                         .{pick},
-                    ) catch "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel";
+                    ) catch "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Esc cancel";
                 }
-                return "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift+X cancel";
+                return "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Esc cancel";
             }
 
             // Legacy prefix signal — kept for users who set the
