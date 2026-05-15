@@ -28,13 +28,13 @@ sleep 200
 type "\x1bs"
 sleep 500
 
-# Cancel — kitty-protocol-style "Ctrl+Shift+X". atty's stdin
+# Cancel — kitty-keyboard CSI-u "Ctrl+Shift+X". The kitty kbd
+# protocol uses the BASE keycode (lowercase `x` = 120), not the
+# shifted one, plus modifier 6 for Ctrl+Shift. `key("Ctrl+Shift+X")`
+# in src/keymap/parser.zig resolves to `\x1b[120;6u`. atty's stdin
 # interceptor matches this; the action wipes the line + clears
-# all dialog state. (We're not running under a kitty kbd
-# protocol in this scenario, but the cancel binding is also
-# registered for the classic-encoded Ctrl+X — kitty's
-# disambiguation flag is set by atty at startup.)
-type "\x1b[88;6u"
+# all dialog state.
+type "\x1b[120;6u"
 sleep 400
 snapshot post_cancel_prompt
 

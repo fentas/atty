@@ -3,6 +3,6 @@ $ #:
 
 
 
-model: model-beta (2/2) · endpoint: (inert — no endpoint) · Ctrl+Shift+X cancel · Ctrl+Shift+I incognito
+model: model-beta (2/2) · endpoint: (inert — no endpoint) · Esc cancel · Ctrl+Shift+I incognito
 
-atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-beta · Alt+H help · Ctrl+Shift+X cancel
+atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-beta · Alt+H help · Esc cancel

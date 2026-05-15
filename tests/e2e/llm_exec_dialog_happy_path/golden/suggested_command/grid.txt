@@ -1,4 +1,4 @@
-  printf '\033]133;C\007ok\033]133;D;0\007'
+$ printf '\033]133;C\007ok\033]133;D;0\007'
 
 
 
@@ -6,5 +6,5 @@
 
 
 emit ok with markers
-atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Ctrl+Shift
+
 atty

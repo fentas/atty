@@ -1,0 +1,42 @@
+# llm_esc_exits_ai — bare Esc cancels an in-progress AI dialog,
+# wipes the suggested-command line, clears AI mode.
+#
+# The Esc binding is gated by the module's onAction `had_work`
+# check: bare Esc outside AI mode falls through to the shell (so
+# vim's Esc still works for terminal users). Inside AI mode with
+# a suggested command on the prompt, Esc clears everything just
+# like Ctrl+Shift+X.
+#
+# Same shape as llm_exec_cancel_mid_run; the only difference is
+# the cancel keystroke.
+
+cols 100
+rows 8
+timeout_ms 6000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+type "PS1=$'\\[\\033]133;A\\007\\]$ ' && clear\r"
+wait_for "$"
+sleep 200
+
+# Enter AI mode, fire dialog, suggested command lands on prompt.
+type "#: do nothing"
+sleep 200
+type "\x1bs"
+sleep 500
+
+# Cancel via bare Esc. Triggers llm_exec_cancel since AI mode is
+# active (the `had_work` gate in the handler). Wipes the line,
+# resets dialog state, clears AI mode.
+type "\x1b"
+sleep 400
+snapshot post_esc_cancel_prompt
+
+sleep 200
+# Clear any residue + clean exit.
+type "\x15"
+sleep 100
+type "exit\r"
+exit_code 0

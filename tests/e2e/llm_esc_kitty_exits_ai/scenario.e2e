@@ -1,0 +1,41 @@
+# llm_esc_kitty_exits_ai — kitty-kbd CSI-u Esc (`\x1b[27u`) cancels
+# an in-progress AI dialog. Sibling of llm_esc_exits_ai which covers
+# the legacy lone-ESC byte path.
+#
+# atty enables the kitty keyboard protocol by default, so real Esc
+# presses arrive as `\x1b[27u` instead of bare `\x1b`. Keymap
+# matching happens BEFORE the CSI-u → legacy translator, so the
+# cancel binding has to ALSO cover the CSI-u form.
+#
+# Same fixture as llm_esc_exits_ai; the only difference is the
+# cancel keystroke encoding.
+
+cols 100
+rows 8
+timeout_ms 6000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+type "PS1=$'\\[\\033]133;A\\007\\]$ ' && clear\r"
+wait_for "$"
+sleep 200
+
+# Enter AI mode, fire dialog, suggested command lands on prompt.
+type "#: do nothing"
+sleep 200
+type "\x1bs"
+sleep 500
+
+# Cancel via kitty-kbd CSI-u Esc. Wipes the line, resets dialog
+# state, clears AI mode — same as the legacy-Esc sibling.
+type "\x1b[27u"
+sleep 400
+snapshot post_kitty_esc_cancel_prompt
+
+sleep 200
+# Clear any residue + clean exit.
+type "\x15"
+sleep 100
+type "exit\r"
+exit_code 0
