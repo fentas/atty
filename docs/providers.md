@@ -172,16 +172,19 @@ LLM path under first-match-wins ordering.
 
 Two knobs:
 
-- **`extra_rules`** — your rules are *prepended* to the shipped
-  defaults. Under first-match-wins your entries check first, so this
-  is the right place to declare stricter overrides (`.block` a
-  pattern the defaults only `.confirm`) or whitelists (a `.warn`
-  rule that matches before the default `.block` would). Empty
-  default = use `rules` only. **Use this for the common "I just
-  want to add a couple more rules" case.**
+- **`extra_rules`** — your rules are *prepended* to whatever
+  `rules` resolves to (defaults to the shipped `default_rules`).
+  Under first-match-wins your entries check first, so this is the
+  right place to declare stricter overrides (`.block` a pattern the
+  defaults only `.confirm`) or whitelists (a `.warn` rule that
+  matches before the default `.block` would). Empty default = use
+  `rules` only. **Use this for the common "I just want to add a
+  couple more rules" case.**
 - **`rules`** — full replacement list. Defaults to the shipped
   `default_rules`. Set this when you want a minimal custom policy
   tailored to your environment and explicitly *not* the defaults.
+  Setting both `rules` and `extra_rules` is supported (extras
+  prepend to your custom list).
 
 ```zig
 // Common case: extend the defaults.

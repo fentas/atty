@@ -27,13 +27,16 @@ const matches = match_mod.matches;
 const globMatch = match_mod.globMatch;
 
 pub const Config = struct {
-    /// User-supplied rules merged in alongside `rules`. Prepended
-    /// at comptime so user entries check FIRST under first-match-
-    /// wins — handy for declaring a stricter rule (e.g. `.block` a
-    /// pattern the defaults only `.confirm`) or whitelisting a
-    /// false positive (a `.warn` rule that matches before the
-    /// default `.block` would). Empty default = use `rules` only.
-    /// Replaces no defaults.
+    /// User-supplied rules prepended to `rules` at comptime so
+    /// they check FIRST under first-match-wins — handy for
+    /// declaring a stricter rule (e.g. `.block` a pattern the
+    /// underlying list only `.confirm`s) or whitelisting a false
+    /// positive (a `.warn` rule that matches before the underlying
+    /// `.block` would). The "underlying list" is `cfg.rules` —
+    /// which itself defaults to `default_rules`, but if you also
+    /// override `rules`, extras prepend to your custom list rather
+    /// than to the shipped defaults. Empty default = use `rules`
+    /// alone.
     extra_rules: []const Rule = &.{},
     /// Full rule list. Defaults to the shipped `default_rules`.
     /// Set to override the defaults entirely — typically only when
@@ -47,8 +50,9 @@ pub const Config = struct {
 /// Compile-time-baked module type.
 pub fn configure(comptime cfg: Config) type {
     // Comptime concat — extras prepend, so they check first under
-    // first-match-wins. When cfg.extra_rules is empty (the common
-    // case) this evaluates to the same slice as cfg.rules.
+    // first-match-wins. `++` produces a fresh slice constant; when
+    // cfg.extra_rules is empty (the common case) the result has
+    // the same *contents* as cfg.rules but isn't slice-identical.
     const effective_rules: []const Rule = cfg.extra_rules ++ cfg.rules;
     return struct {
         pub const name = "guardrail";

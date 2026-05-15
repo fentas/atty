@@ -31,9 +31,11 @@ const atty = @import("atty");
 //         // .authors restricts a rule to user-typed or llm-injected
 //         // commits (default = both).
 //         //
-//         // `extra_rules` PREPENDS to the shipped defaults — under
-//         // first-match-wins, your rules check first. Use this for
-//         // the common "I just want a couple more rules" case.
+//         // `extra_rules` PREPENDS to whatever `rules` resolves
+//         // to (defaults to the shipped `default_rules` unless
+//         // you also override `rules`). Under first-match-wins
+//         // your rules check first. Use this for the common
+//         // "I just want a couple more rules" case.
 //         // .extra_rules = &.{
 //         //     .{ .name = "git-force", .match = .{ .substring = "git push --force" },
 //         //        .reason = "force-pushing", .behavior = .confirm_once },
