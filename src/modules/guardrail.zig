@@ -15,199 +15,50 @@ const m = @import("../module.zig");
 const style_mod = @import("../style.zig");
 const match_mod = @import("guardrail/match.zig");
 
+const rules_mod = @import("guardrail/rules.zig");
+
 pub const Match = match_mod.Match;
+pub const AuthorMask = rules_mod.AuthorMask;
+pub const Behavior = rules_mod.Behavior;
+pub const Rule = rules_mod.Rule;
+pub const default_rules = rules_mod.default_rules;
+
 const matches = match_mod.matches;
 const globMatch = match_mod.globMatch;
 
-/// Whether a rule fires depending on who initiated the commit.
-/// Default = applies to both. Use this to declare two rules for the
-/// same pattern with different `Behavior` per author (the canonical
-/// "confirm for user, block for llm" shape).
-pub const AuthorMask = struct {
-    user: bool = true,
-    llm: bool = true,
-
-    pub fn applies(self: AuthorMask, author: m.Author) bool {
-        return switch (author) {
-            .user => self.user,
-            .llm => self.llm,
-        };
-    }
-};
-
-/// What to do when a rule matches.
-pub const Behavior = enum {
-    /// Banner + swallow. Press Enter again to confirm (forwards),
-    /// any other key to cancel (disarms; user can keep editing).
-    confirm,
-    /// Like `.confirm`, but the confirmation persists for the rest of
-    /// the session. Once the user confirms this rule once, subsequent
-    /// matches forward immediately with no banner. Per-rule, not
-    /// module-wide.
-    confirm_once,
-    /// Banner with a "blocked." trailer; the Enter is replaced with
-    /// Ctrl+U (unix-line-discard) so readline kills the typed line.
-    /// Nothing reaches the shell.
-    block,
-    /// Banner with a "warning — running anyway." trailer; the Enter
-    /// is forwarded. Use for lines that should be flagged but not
-    /// stopped (audit trail without friction).
-    warn,
-};
-
-pub const Rule = struct {
-    name: []const u8,
-    match: Match,
-    reason: []const u8,
-    /// Which author(s) trigger this rule. Default = both. To get
-    /// different behavior per author for the same pattern, declare
-    /// two rules with mutually-exclusive masks.
-    authors: AuthorMask = .{},
-    behavior: Behavior = .confirm,
-};
-
-/// Default rules. Catastrophic patterns (exact `rm -rf /`, fork bomb)
-/// are `.block` for both authors so neither party can talk their way
-/// past them. Merely-dangerous patterns (`rm -rf` with a subpath,
-/// `mkfs`, `dd …`) `.block` when the line is `.llm`-authored but only
-/// `.confirm` for `.user` — the human can override their own decision;
-/// a model suggesting the same line cannot.
-pub const default_rules = [_]Rule{
-    .{
-        // Exact-only — `rm -rf /home/me` falls through to the
-        // broader "rm -rf" substring rules below (confirm for
-        // user, block for llm). Use `.glob` not `.substring` so
-        // typing `rm -rf /something` doesn't get blocked outright.
-        .name = "rm-rf-root",
-        .match = .{ .glob = "rm -rf /" },
-        .reason = "rm -rf on the root path",
-        .behavior = .block,
-    },
-    .{
-        .name = "fork-bomb",
-        .match = .{ .substring = ":(){ :|:& };:" },
-        .reason = "classic fork bomb",
-        .behavior = .block,
-    },
-    .{
-        .name = "rm-rf-tilde-user",
-        .match = .{ .substring = "rm -rf ~" },
-        .reason = "rm -rf on home",
-        .authors = .{ .user = true, .llm = false },
-        .behavior = .confirm,
-    },
-    .{
-        .name = "rm-rf-tilde-llm",
-        .match = .{ .substring = "rm -rf ~" },
-        .reason = "rm -rf on home (llm)",
-        .authors = .{ .user = false, .llm = true },
-        .behavior = .block,
-    },
-    .{
-        .name = "rm-rf-user",
-        .match = .{ .substring = "rm -rf" },
-        .reason = "rm -rf invocation",
-        .authors = .{ .user = true, .llm = false },
-        .behavior = .confirm,
-    },
-    .{
-        .name = "rm-rf-llm",
-        .match = .{ .substring = "rm -rf" },
-        .reason = "rm -rf invocation",
-        .authors = .{ .user = false, .llm = true },
-        .behavior = .block,
-    },
-    .{
-        // Must precede the generic `sudo` rule: `sudo mkfs.ext4 /dev/sda`
-        // would otherwise match `sudo` first and only require
-        // `.confirm`, bypassing the prefix-anchored `mkfs` block rule
-        // for llm. Same goes for the dd variant below.
-        .name = "sudo-mkfs-llm",
-        .match = .{ .prefix = "sudo mkfs" },
-        .reason = "sudo mkfs (llm)",
-        .authors = .{ .user = false, .llm = true },
-        .behavior = .block,
-    },
-    .{
-        .name = "sudo-dd-llm",
-        .match = .{ .prefix = "sudo dd " },
-        .reason = "sudo dd (llm)",
-        .authors = .{ .user = false, .llm = true },
-        .behavior = .block,
-    },
-    .{
-        .name = "sudo",
-        .match = .{ .prefix = "sudo " },
-        .reason = "sudo invocation",
-        .behavior = .confirm,
-    },
-    .{
-        .name = "mkfs-user",
-        .match = .{ .prefix = "mkfs" },
-        .reason = "filesystem creation",
-        .authors = .{ .user = true, .llm = false },
-        .behavior = .confirm,
-    },
-    .{
-        .name = "mkfs-llm",
-        .match = .{ .prefix = "mkfs" },
-        .reason = "filesystem creation (llm)",
-        .authors = .{ .user = false, .llm = true },
-        .behavior = .block,
-    },
-    .{
-        // Prefix not substring — any `dd ` invocation deserves a beat
-        // (covers both `dd if=/dev/sda …` reads and
-        // `dd … of=/dev/sda` writes; `dd if=/tmp of=/tmp/copy` too,
-        // which is fine, the confirm prompt is cheap).
-        .name = "dd-user",
-        .match = .{ .prefix = "dd " },
-        .reason = "dd invocation",
-        .authors = .{ .user = true, .llm = false },
-        .behavior = .confirm,
-    },
-    .{
-        .name = "dd-llm",
-        .match = .{ .prefix = "dd " },
-        .reason = "dd invocation",
-        .authors = .{ .user = false, .llm = true },
-        .behavior = .block,
-    },
-    .{
-        .name = "curl-pipe-sh",
-        .match = .{ .substring = "| sh" },
-        .reason = "piping untrusted output into a shell",
-        .behavior = .confirm,
-    },
-    .{
-        .name = "curl-pipe-bash",
-        .match = .{ .substring = "| bash" },
-        .reason = "piping untrusted output into a shell",
-        .behavior = .confirm,
-    },
-    .{
-        .name = "chmod-world",
-        .match = .{ .substring = "chmod 777 /" },
-        .reason = "world-writable root path",
-        .behavior = .confirm,
-    },
-};
-
 pub const Config = struct {
+    /// User-supplied rules merged in alongside `rules`. Prepended
+    /// at comptime so user entries check FIRST under first-match-
+    /// wins — handy for declaring a stricter rule (e.g. `.block` a
+    /// pattern the defaults only `.confirm`) or whitelisting a
+    /// false positive (a `.warn` rule that matches before the
+    /// default `.block` would). Empty default = use `rules` only.
+    /// Replaces no defaults.
+    extra_rules: []const Rule = &.{},
+    /// Full rule list. Defaults to the shipped `default_rules`.
+    /// Set to override the defaults entirely — typically only when
+    /// you want a minimal policy tailored to your environment.
+    /// For the common "I just want to add a couple of rules" case,
+    /// leave this alone and use `extra_rules`.
     rules: []const Rule = &default_rules,
     warning_style: style_mod.Style = .{ .dim = true, .italic = true },
 };
 
 /// Compile-time-baked module type.
 pub fn configure(comptime cfg: Config) type {
+    // Comptime concat — extras prepend, so they check first under
+    // first-match-wins. When cfg.extra_rules is empty (the common
+    // case) this evaluates to the same slice as cfg.rules.
+    const effective_rules: []const Rule = cfg.extra_rules ++ cfg.rules;
     return struct {
         pub const name = "guardrail";
         pub const config = cfg;
+        pub const rules = effective_rules;
 
         pub const Runtime = struct {
             armed: bool = false,
             armed_rule_idx: usize = 0,
-            confirmed_once: [cfg.rules.len]bool = .{false} ** cfg.rules.len,
+            confirmed_once: [effective_rules.len]bool = .{false} ** effective_rules.len,
             sink_ctx: ?*anyopaque = null,
             sink_fn: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void = null,
         };
@@ -239,7 +90,7 @@ pub fn configure(comptime cfg: Config) type {
         const Hit = struct { rule: Rule, idx: usize };
 
         fn findRule(line: []const u8, author: m.Author) ?Hit {
-            inline for (config.rules, 0..) |rule, i| {
+            inline for (effective_rules, 0..) |rule, i| {
                 if (rule.authors.applies(author) and matches(rule.match, line)) {
                     return .{ .rule = rule, .idx = i };
                 }
@@ -288,8 +139,8 @@ pub fn configure(comptime cfg: Config) type {
 
             if (rt.armed) {
                 rt.armed = false;
-                if (rt.armed_rule_idx < cfg.rules.len) {
-                    const armed_rule = cfg.rules[rt.armed_rule_idx];
+                if (rt.armed_rule_idx < effective_rules.len) {
+                    const armed_rule = effective_rules[rt.armed_rule_idx];
                     if (armed_rule.behavior == .confirm_once) {
                         rt.confirmed_once[rt.armed_rule_idx] = true;
                     }
@@ -781,6 +632,41 @@ test "custom rule list overrides defaults" {
     const G = configure(.{ .rules = &my_rules });
     try testing.expect(G.check("git push --force origin main") != null);
     try testing.expect(G.check("rm -rf /") == null);
+}
+
+test "extra_rules: user rule prepends to defaults and wins under first-match-wins" {
+    const extra = [_]Rule{.{
+        .name = "git-force-extra",
+        .match = .{ .substring = "git push --force" },
+        .reason = "force-pushing (user-extra)",
+        .behavior = .confirm_once,
+    }};
+    const G = configure(.{ .extra_rules = &extra });
+
+    // The new rule matches.
+    const hit = G.check("git push --force origin main").?;
+    try testing.expectEqualStrings("git-force-extra", hit.name);
+    try testing.expectEqual(Behavior.confirm_once, hit.behavior);
+
+    // Defaults still active.
+    try testing.expect(G.check("rm -rf /") != null);
+    try testing.expectEqual(Behavior.block, G.check("rm -rf /").?.behavior);
+}
+
+test "extra_rules: user rule overrides default behavior on the same pattern (prepend wins)" {
+    // Default `sudo` is .confirm for both authors. User pre-empts
+    // with a .warn rule (e.g. audit but never block on sudo).
+    const extra = [_]Rule{.{
+        .name = "sudo-warn",
+        .match = .{ .prefix = "sudo " },
+        .reason = "sudo audit",
+        .behavior = .warn,
+    }};
+    const G = configure(.{ .extra_rules = &extra });
+
+    const hit = G.check("sudo apt update").?;
+    try testing.expectEqualStrings("sudo-warn", hit.name);
+    try testing.expectEqual(Behavior.warn, hit.behavior);
 }
 
 test "sudo-prefixed mkfs/dd from llm still hits .block (generic sudo rule must not shadow)" {

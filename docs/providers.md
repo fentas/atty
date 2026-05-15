@@ -170,9 +170,23 @@ LLM path under first-match-wins ordering.
 
 ### Custom rules
 
+Two knobs:
+
+- **`extra_rules`** — your rules are *prepended* to the shipped
+  defaults. Under first-match-wins your entries check first, so this
+  is the right place to declare stricter overrides (`.block` a
+  pattern the defaults only `.confirm`) or whitelists (a `.warn`
+  rule that matches before the default `.block` would). Empty
+  default = use `rules` only. **Use this for the common "I just
+  want to add a couple more rules" case.**
+- **`rules`** — full replacement list. Defaults to the shipped
+  `default_rules`. Set this when you want a minimal custom policy
+  tailored to your environment and explicitly *not* the defaults.
+
 ```zig
+// Common case: extend the defaults.
 pub const Guardrail = atty.modules.guardrail.configure(.{
-    .rules = &.{
+    .extra_rules = &.{
         .{
             // user-only — without the explicit mask this would also
             // match llm-authored commits, and because first-match
@@ -193,12 +207,21 @@ pub const Guardrail = atty.modules.guardrail.configure(.{
     },
     .warning_style = atty.style.presets.danger,   // bold red
 });
+
+// Rare case: replace defaults entirely.
+pub const MinimalGuardrail = atty.modules.guardrail.configure(.{
+    .rules = &.{
+        .{ .name = "rm-rf-root",
+           .match = .{ .glob = "rm -rf /" },
+           .reason = "rm -rf on root",
+           .behavior = .block },
+    },
+});
 ```
 
-Passing `.rules` replaces the default list entirely; merge manually
-if you want both. `warning_style` takes an `atty.Style` — same type
-the ghost overlay uses, so a single palette can drive the whole
-proxy. Default style is `.{ .dim = true, .italic = true }`.
+`warning_style` takes an `atty.Style` — same type the ghost overlay
+uses, so a single palette can drive the whole proxy. Default style
+is `.{ .dim = true, .italic = true }`.
 
 ### Limitations
 

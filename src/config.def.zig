@@ -23,14 +23,25 @@ const atty = @import("atty");
 //
 // pub const modules = .{
 //     atty.modules.guardrail.configure(.{
+//         // .behavior is per-rule:
+//         //   .confirm       (default) press Enter again to confirm
+//         //   .confirm_once  same, then never asks again this session
+//         //   .block         banner + clear line; command can't run
+//         //   .warn          banner + forward (audit, no friction)
+//         // .authors restricts a rule to user-typed or llm-injected
+//         // commits (default = both).
+//         //
+//         // `extra_rules` PREPENDS to the shipped defaults — under
+//         // first-match-wins, your rules check first. Use this for
+//         // the common "I just want a couple more rules" case.
+//         // .extra_rules = &.{
+//         //     .{ .name = "git-force", .match = .{ .substring = "git push --force" },
+//         //        .reason = "force-pushing", .behavior = .confirm_once },
+//         // },
+//         //
+//         // `rules` REPLACES the entire default list — use when you
+//         // want a minimal custom policy.
 //         // .rules = &.{
-//         //     // .behavior is per-rule:
-//         //     //   .confirm       (default) press Enter again to confirm
-//         //     //   .confirm_once  same, then never asks again this session
-//         //     //   .block         banner + clear line; command can't run
-//         //     //   .warn          banner + forward (audit, no friction)
-//         //     // .authors restricts a rule to user-typed or llm-injected
-//         //     // commits (default = both).
 //         //     // `.glob` anchors to both ends — only the literal
 //         //     // `rm -rf /` matches, so `rm -rf /home/x` falls
 //         //     // through to a broader rule below.
@@ -40,9 +51,8 @@ const atty = @import("atty");
 //         //        .reason = "rm -rf (llm)",
 //         //        .authors = .{ .user = false, .llm = true },
 //         //        .behavior = .block },
-//         //     .{ .name = "git-force", .match = .{ .substring = "git push --force" },
-//         //        .reason = "force-pushing", .behavior = .confirm_once },
 //         // },
+//         //
 //         // .warning_style = atty.style.presets.danger,
 //     }),
 //     atty.modules.atuin.configure(.{
