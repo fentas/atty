@@ -35,6 +35,7 @@ const std = @import("std");
 const m = @import("../module.zig");
 const keymap = @import("../keymap.zig");
 const Osc133 = @import("../osc133.zig").Osc133;
+const parse = @import("llm/parse.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
@@ -2436,225 +2437,13 @@ pub fn configure(comptime cfg: Config) type {
             return trimmed.len;
         }
 
-        /// Decode the JSON `"content"` field of an OpenAI-style
-        /// chat-completion response into a flat byte buffer. Same
-        /// JSON-escape handling as the original extractCommand —
-        /// drops `\r` for security, decodes `\n` / `\t` / `\"` /
-        /// `\\` / `\/`, skips `\uXXXX` and other escapes. Returns 0
-        /// when the field is missing or the body is malformed.
-        fn decodeContent(body: []const u8, out: []u8) usize {
-            // Minimal extraction: find the `"content"` key, then
-            // hop over JSON whitespace + `:` + whitespace + `"`.
-            // Robust JSON parsing would be nicer but std.json's
-            // Scanner is heavyweight; for the OpenAI / Ollama
-            // shape this matches both compact (`"content":"…"`)
-            // and pretty-printed (`"content": "…"`) formatting
-            // that some compatible servers emit.
-            const key = "\"content\"";
-            const start = std.mem.indexOf(u8, body, key) orelse return 0;
-            var i: usize = start + key.len;
-            while (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r')) i += 1;
-            if (i >= body.len or body[i] != ':') return 0;
-            i += 1;
-            while (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r')) i += 1;
-            if (i >= body.len or body[i] != '"') return 0;
-            i += 1;
-            var n: usize = 0;
-            while (i < body.len) : (i += 1) {
-                const c = body[i];
-                if (c == '\\' and i + 1 < body.len) {
-                    const e = body[i + 1];
-                    switch (e) {
-                        '"', '\\', '/', 'n', 't' => {
-                            const decoded: u8 = switch (e) {
-                                '"' => '"',
-                                '\\' => '\\',
-                                '/' => '/',
-                                'n' => '\n',
-                                't' => '\t',
-                                else => unreachable,
-                            };
-                            if (n < out.len) {
-                                out[n] = decoded;
-                                n += 1;
-                            }
-                            i += 1;
-                        },
-                        // Drop \r — never inject a carriage return
-                        // into the shell. Writing CR to the PTY
-                        // acts as Enter so it'd auto-execute a
-                        // partial command without user review.
-                        // Security-critical; see sanitizeCommand
-                        // for the defence-in-depth strip too.
-                        'r' => i += 1,
-                        'u' => {
-                            // `\uXXXX` — skip up to 4 hex digits
-                            // after the `u`, but bail early at a
-                            // closing quote or backslash so
-                            // malformed JSON (fewer than 4 hex
-                            // digits) cannot cause us to skip past
-                            // the content boundary into the next
-                            // field.
-                            i += 1;
-                            var k: usize = 0;
-                            while (k < 4 and i + 1 < body.len) : (k += 1) {
-                                const h = body[i + 1];
-                                if (h == '"' or h == '\\') break;
-                                i += 1;
-                            }
-                        },
-                        else => i += 1,
-                    }
-                    continue;
-                }
-                if (c == '"') break;
-                if (n < out.len) {
-                    out[n] = c;
-                    n += 1;
-                }
-            }
-            return n;
-        }
-
-        /// Flatten prose to a single line, strip control bytes,
-        /// truncate to `out.len`. Multi-line explanations get
-        /// joined with a single space rather than dropping the
-        /// trailing lines — the hint row only fits one line but
-        /// the user gets the gist.
-        pub fn sanitizeExplanation(raw: []const u8, out: []u8) usize {
-            const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-            // Two-pass: first collapse whitespace + drop C0/DEL into
-            // a scratch buffer, then run the C1-aware UTF-8 stripper
-            // over that. We can't merge the passes because the
-            // whitespace collapsing needs to see the trimmed bytes
-            // before any sequence-boundary scanning, and the C1
-            // stripper needs to see all bytes (including legitimate
-            // UTF-8 continuations) to track sequence length.
-            // Splitting keeps each step simple and reuses the same
-            // C1 logic the command path is hardened with.
-            var scratch: [1024]u8 = undefined;
-            const scratch_cap = @min(scratch.len, out.len);
-            var s_n: usize = 0;
-            var last_was_space = false;
-            for (trimmed) |b| {
-                if (b == '\n' or b == '\r' or b == '\t' or b == ' ') {
-                    if (last_was_space) continue;
-                    if (s_n >= scratch_cap) break;
-                    scratch[s_n] = ' ';
-                    s_n += 1;
-                    last_was_space = true;
-                    continue;
-                }
-                // Drop C0 controls + DEL early. C1 stripping is
-                // delegated to `stripControlBytes` below so the
-                // logic stays in one place (defence in depth — a
-                // raw 0x9B byte would otherwise reach the terminal
-                // as CSI).
-                if (b < 0x20 or b == 0x7F) continue;
-                if (s_n >= scratch_cap) break;
-                scratch[s_n] = b;
-                s_n += 1;
-                last_was_space = false;
-            }
-            // Trim a trailing whitespace introduced by the join above.
-            while (s_n > 0 and scratch[s_n - 1] == ' ') s_n -= 1;
-
-            return stripControlBytes(scratch[0..s_n], out);
-        }
-
-        /// UTF-8-aware filter that drops:
-        ///   - C0 controls (< 0x20) and DEL (0x7F)
-        ///   - C1 controls U+0080..U+009F as raw bytes (Latin-1 /
-        ///     invalid-UTF-8 interpretation) AND as UTF-8 (`0xC2`
-        ///     followed by `0x80..0x9F`).
-        /// Legitimate UTF-8 multi-byte sequences pass through whole;
-        /// continuation bytes in `0x80..0xBF` that aren't standalone
-        /// are preserved (e.g. "ƒ" = `0xC6 0x92`, where 0x92 is a
-        /// continuation, not a C1 codepoint). Malformed / truncated
-        /// sequences drop just the bad lead byte and continue.
-        ///
-        /// Used by both `sanitizeCommand` (PTY-bound bytes) and
-        /// `sanitizeExplanation` (terminal-bound bytes) — both
-        /// destinations honour C1 controls, so both need the strip.
-        pub fn stripControlBytes(s: []const u8, out: []u8) usize {
-            var n: usize = 0;
-            var i: usize = 0;
-            while (i < s.len) {
-                const b = s[i];
-                if (b < 0x80) {
-                    if (b < 0x20 or b == 0x7F) {
-                        i += 1;
-                        continue;
-                    }
-                    if (n >= out.len) break;
-                    out[n] = b;
-                    n += 1;
-                    i += 1;
-                    continue;
-                }
-                const seq_len: usize = if (b >= 0xC2 and b <= 0xDF) 2 else if (b >= 0xE0 and b <= 0xEF) 3 else if (b >= 0xF0 and b <= 0xF4) 4 else 0;
-                if (seq_len == 0 or i + seq_len > s.len) {
-                    i += 1;
-                    continue;
-                }
-                if (seq_len == 2 and b == 0xC2 and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F) {
-                    i += 2;
-                    continue;
-                }
-                var ok = true;
-                var k: usize = 1;
-                while (k < seq_len) : (k += 1) {
-                    if (s[i + k] < 0x80 or s[i + k] > 0xBF) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (!ok) {
-                    i += 1;
-                    continue;
-                }
-                if (n + seq_len > out.len) break;
-                @memcpy(out[n .. n + seq_len], s[i .. i + seq_len]);
-                n += seq_len;
-                i += seq_len;
-            }
-            return n;
-        }
-
-        /// Trim markdown fences (```bash … ```) + whitespace + take
-        /// the first non-empty line + strip remaining control bytes.
-        /// Some models stubbornly wrap in fences.
-        ///
-        /// **Security note**: writing a `\r` (CR) or `\n` (LF) byte
-        /// to the PTY acts as Enter — the shell would immediately
-        /// execute whatever's in its readline buffer. We must NEVER
-        /// inject those into the shell. extractCommand already
-        /// drops `\r` at decode time; this is defence in depth for
-        /// any control byte that survives (incl. embedded NUL/BEL/
-        /// BS/HT/CR/LF/0x01..0x1F/0x7F).
-        pub fn sanitizeCommand(raw: []const u8, out: []u8) usize {
-            var s = std.mem.trim(u8, raw, " \t\r\n");
-            // Strip a leading code fence if present.
-            if (std.mem.startsWith(u8, s, "```")) {
-                if (std.mem.indexOfScalar(u8, s, '\n')) |nl| {
-                    s = s[nl + 1 ..];
-                } else {
-                    s = s[3..];
-                }
-            }
-            // Strip a trailing code fence.
-            if (std.mem.endsWith(u8, s, "```")) {
-                s = s[0 .. s.len - 3];
-            }
-            s = std.mem.trim(u8, s, " \t\r\n");
-            // First line only.
-            if (std.mem.indexOfScalar(u8, s, '\n')) |nl| s = s[0..nl];
-            s = std.mem.trim(u8, s, " \t\r");
-            // Same C0/C1/DEL-stripping byte walker that `sanitizeExplanation`
-            // uses — factored into `stripControlBytes` so the security
-            // logic lives in one place.
-            return stripControlBytes(s, out);
-        }
+        // Pure response/sanitization helpers extracted to
+        // `llm/parse.zig` — see there for security rationale and
+        // tests.
+        pub const decodeContent = parse.decodeContent;
+        pub const sanitizeExplanation = parse.sanitizeExplanation;
+        pub const stripControlBytes = parse.stripControlBytes;
+        pub const sanitizeCommand = parse.sanitizeCommand;
     };
 }
 
@@ -2826,18 +2615,6 @@ test "extractCommand tolerates whitespace around the `\"content\":` key (pretty-
     try testing.expectEqualStrings("echo hi", out[0..7]);
 }
 
-test "sanitizeCommand handles fence + whitespace combinations" {
-    const L = configure(.{});
-    var out: [64]u8 = undefined;
-    // "  ls -la  " → trim to "ls -la" = 6 bytes.
-    try testing.expectEqual(@as(usize, 6), L.sanitizeCommand("  ls -la  ", &out));
-    try testing.expectEqualStrings("ls -la", out[0..6]);
-
-    // "```bash\nls -la\n```" → strip fences + trim.
-    try testing.expectEqual(@as(usize, 6), L.sanitizeCommand("```bash\nls -la\n```", &out));
-    try testing.expectEqualStrings("ls -la", out[0..6]);
-}
-
 test "extractCommand drops decoded \\r — never inject a CR that would auto-execute (security)" {
     // Attack scenario: model returns `cmd1\\r cmd2` in JSON. A
     // naive decoder would convert `\\r` to a literal CR; writing
@@ -2852,62 +2629,6 @@ test "extractCommand drops decoded \\r — never inject a CR that would auto-exe
     try testing.expectEqualStrings("echo hi && rm -rf /", out[0..n]);
     // And no raw \r anywhere in the output.
     for (out[0..n]) |b| try testing.expect(b != '\r');
-}
-
-test "sanitizeCommand strips raw control bytes — defence in depth (security)" {
-    // Even if a CR slips past extractCommand somehow, the
-    // sanitiser strips it before the bytes can reach the PTY.
-    const L = configure(.{});
-    var out: [128]u8 = undefined;
-    const n = L.sanitizeCommand("ls -la\r ; rm -rf /", &out);
-    try testing.expectEqualStrings("ls -la ; rm -rf /", out[0..n]);
-    for (out[0..n]) |b| try testing.expect(b != '\r');
-
-    // NUL / BS / DEL — also dropped.
-    const n2 = L.sanitizeCommand("ls\x00 -la\x08\x7Fextra", &out);
-    try testing.expectEqualStrings("ls -laextra", out[0..n2]);
-}
-
-test "sanitizeCommand strips C1 control codepoints — terminal-escape injection (security)" {
-    // Attack: a model emits U+009B (CSI) — `0xC2 0x9B` in UTF-8 —
-    // followed by a control-sequence parameter. A terminal that
-    // honours C1 controls (most do, in UTF-8 mode) would treat
-    // the bytes that follow as the start of a CSI escape sequence
-    // the user never typed.
-    const L = configure(.{});
-    var out: [128]u8 = undefined;
-
-    // U+009B (UTF-8 0xC2 0x9B) followed by an SGR-style payload.
-    // Both bytes of the C1 pair must vanish, leaving the literal
-    // command intact.
-    const n = L.sanitizeCommand("ls\xC2\x9B31mred", &out);
-    try testing.expectEqualStrings("ls31mred", out[0..n]);
-
-    // Standalone 0x9B (Latin-1 / invalid-UTF-8 path) also dropped.
-    const n2 = L.sanitizeCommand("rm\x9B -rf /tmp", &out);
-    try testing.expectEqualStrings("rm -rf /tmp", out[0..n2]);
-
-    // Sweep across the whole C1 block (U+0080..U+009F).
-    var cp: u8 = 0x80;
-    while (cp <= 0x9F) : (cp += 1) {
-        const input = [_]u8{ 'a', 0xC2, cp, 'b' };
-        const m_n = L.sanitizeCommand(&input, &out);
-        try testing.expectEqualStrings("ab", out[0..m_n]);
-    }
-
-    // Legitimate UTF-8 with continuation bytes in 0x80..0x9F
-    // (which are NOT C1 controls — they're continuation bytes of
-    // a multi-byte sequence) must NOT be dropped. "ƒ" is U+0192,
-    // UTF-8 = 0xC6 0x92; the 0x92 is a continuation byte, not a
-    // standalone C1 — the character must survive intact.
-    const n4 = L.sanitizeCommand("ƒoo", &out);
-    try testing.expectEqualStrings("ƒoo", out[0..n4]);
-
-    // "café" (UTF-8: 63 61 66 C3 A9) — the 0xA9 isn't in the
-    // C1 range anyway, but pin it to catch regressions in the
-    // UTF-8 walker.
-    const n5 = L.sanitizeCommand("café", &out);
-    try testing.expectEqualStrings("café", out[0..n5]);
 }
 
 test "extractResponse splits explanation + fenced command" {
@@ -2938,48 +2659,6 @@ test "extractResponse — missing content field returns zero lengths" {
     const r = L.extractResponse("{\"error\":\"bad\"}", &cmd_out, &exp_out);
     try testing.expectEqual(@as(usize, 0), r.cmd_len);
     try testing.expectEqual(@as(usize, 0), r.explanation_len);
-}
-
-test "sanitizeExplanation flattens newlines + strips control bytes" {
-    const L = configure(.{});
-    var out: [128]u8 = undefined;
-
-    // Multi-line prose collapses to a single space-separated line.
-    const n = L.sanitizeExplanation("Line one.\nLine two.\nLine three.", &out);
-    try testing.expectEqualStrings("Line one. Line two. Line three.", out[0..n]);
-
-    // Embedded NUL / BEL / DEL — dropped silently.
-    const n2 = L.sanitizeExplanation("hello\x00\x07world\x7F", &out);
-    try testing.expectEqualStrings("helloworld", out[0..n2]);
-
-    // Adjacent whitespace coalesces into a single space.
-    const n3 = L.sanitizeExplanation("a   b\t\tc\n\nd", &out);
-    try testing.expectEqualStrings("a b c d", out[0..n3]);
-}
-
-test "sanitizeExplanation strips C1 codepoints — terminal-escape injection (security)" {
-    // The explanation is written to the statusbar's hint row,
-    // which goes straight to the user's terminal. A model that
-    // returns U+009B (CSI) — `0xC2 0x9B` in UTF-8 — followed by
-    // an SGR-style payload would otherwise inject a terminal
-    // escape sequence the user never typed. Same defence as
-    // `sanitizeCommand` (now shared via `stripControlBytes`).
-    const L = configure(.{});
-    var out: [128]u8 = undefined;
-
-    // UTF-8-encoded C1 (U+009B = 0xC2 0x9B) — both bytes vanish.
-    const n = L.sanitizeExplanation("hello\xC2\x9B31mworld", &out);
-    try testing.expectEqualStrings("hello31mworld", out[0..n]);
-
-    // Standalone 0x9B (Latin-1 / invalid-UTF-8 path) also dropped.
-    const n2 = L.sanitizeExplanation("foo\x9Bbar", &out);
-    try testing.expectEqualStrings("foobar", out[0..n2]);
-
-    // Legitimate UTF-8 with a continuation byte in the C1 range
-    // (e.g. "ƒ" = 0xC6 0x92) must survive — 0x92 is a UTF-8
-    // continuation, not a standalone C1 codepoint.
-    const n3 = L.sanitizeExplanation("ƒoo", &out);
-    try testing.expectEqualStrings("ƒoo", out[0..n3]);
 }
 
 test "effective_system_prompt picks the with-explanation default" {
