@@ -102,6 +102,22 @@ pub const Config = struct {
     /// the line are removed. See `DeleteScope` for the broader modes
     /// if you want Ctrl+Shift+D to sweep wider.
     delete_scope: DeleteScope = .exact,
+
+    /// Tag LLM-authored commits with `atuin history start --author
+    /// <prefix>:llm <cmd>`. Off by default because not every atuin
+    /// build accepts `--author` (the flag landed in v18.3+) and
+    /// passing an unknown flag aborts the record. Turn on once you
+    /// confirm your atuin supports it; then `atuin search
+    /// --filter-mode global --author <prefix>:llm` will scope to
+    /// model-suggested commits. User-typed commits stay untagged
+    /// to preserve the existing on-disk format.
+    tag_llm_author: bool = false,
+
+    /// Prefix prepended to the author tag (`<prefix>:llm`). Lets
+    /// multiple atty installs distinguish each other in shared
+    /// atuin databases. Common choices: `"atty"`, `"<hostname>"`,
+    /// `"<user>@<host>"`.
+    author_tag_prefix: []const u8 = "atty",
 };
 
 pub fn configure(comptime cfg: Config) type {
@@ -135,6 +151,10 @@ pub fn configure(comptime cfg: Config) type {
             // worker drains.
             rec_cwd_buf: [subprocess_mod.max_cwd_bytes]u8 = undefined,
             rec_cwd_len: usize = 0,
+            // Author of the pending record, snapshotted in onLineCommit
+            // so the worker has a stable read even if a follow-up
+            // commit overwrites the slot before this one fires.
+            rec_author: m.Author = .user,
 
             shutdown: bool = false,
         };
@@ -192,6 +212,7 @@ pub fn configure(comptime cfg: Config) type {
             var record_len: usize = 0;
             var record_cwd_local: [subprocess_mod.max_cwd_bytes]u8 = undefined;
             var record_cwd_len: usize = 0;
+            var record_author_local: m.Author = .user;
             var records_since_sync: u32 = 0;
             var last_sync_ms: i64 = 0;
             var total_records: u32 = 0;
@@ -228,6 +249,7 @@ pub fn configure(comptime cfg: Config) type {
                     if (record_cwd_len > 0) {
                         @memcpy(record_cwd_local[0..record_cwd_len], shared.rec_cwd_buf[0..record_cwd_len]);
                     }
+                    record_author_local = shared.rec_author;
                     shared.rec_pending = false;
                 }
                 shared.mutex.unlock(io);
@@ -247,7 +269,7 @@ pub fn configure(comptime cfg: Config) type {
                 }
 
                 if (has_record and cfg.record) {
-                    runRecord(gpa, io, record_local[0..record_len], record_cwd_local[0..record_cwd_len]);
+                    runRecord(gpa, io, record_local[0..record_len], record_cwd_local[0..record_cwd_len], record_author_local);
                     total_records += 1;
                     records_since_sync += 1;
                     const now = nowMs();
@@ -352,26 +374,59 @@ pub fn configure(comptime cfg: Config) type {
         /// entry so atuin's `[ DIRECTORY ]` filter on Ctrl+R scopes
         /// commands per remote/elevation target without needing
         /// atuin patches.
-        fn runRecord(gpa: std.mem.Allocator, io: std.Io, line: []const u8, cwd: []const u8) void {
-            if (line.len == 0) return;
-            var argv_buf: [6][]const u8 = undefined;
-            var argv_len: usize = 0;
-            argv_buf[argv_len] = cfg.atuin_binary;
-            argv_len += 1;
-            argv_buf[argv_len] = "history";
-            argv_len += 1;
-            argv_buf[argv_len] = "start";
-            argv_len += 1;
+        /// Comptime-formatted author tag — every byte is known at
+        /// configure() time, no runtime buffer.
+        const author_tag_llm: []const u8 =
+            std.fmt.comptimePrint("{s}:llm", .{cfg.author_tag_prefix});
+
+        /// Pure argv builder, factored out of `runRecord` so the
+        /// flag/author/cwd interactions can be unit-tested without
+        /// spawning a subprocess. Caller supplies the `[8][]const u8`
+        /// scratch buffer; we return the populated subslice. Slot
+        /// budget: 3 fixed (binary/history/start) + 2 (--cwd <v>) +
+        /// 2 (--author <v>) + 1 (line) = 8.
+        pub fn buildRecordArgv(
+            buf: *[8][]const u8,
+            line: []const u8,
+            cwd: []const u8,
+            author: m.Author,
+        ) []const []const u8 {
+            var n: usize = 0;
+            buf[n] = cfg.atuin_binary;
+            n += 1;
+            buf[n] = "history";
+            n += 1;
+            buf[n] = "start";
+            n += 1;
             if (cwd.len > 0) {
-                argv_buf[argv_len] = "--cwd";
-                argv_len += 1;
-                argv_buf[argv_len] = cwd;
-                argv_len += 1;
+                buf[n] = "--cwd";
+                n += 1;
+                buf[n] = cwd;
+                n += 1;
             }
-            argv_buf[argv_len] = line;
-            argv_len += 1;
+            if (cfg.tag_llm_author and author == .llm) {
+                buf[n] = "--author";
+                n += 1;
+                buf[n] = author_tag_llm;
+                n += 1;
+            }
+            buf[n] = line;
+            n += 1;
+            return buf[0..n];
+        }
+
+        fn runRecord(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            line: []const u8,
+            cwd: []const u8,
+            author: m.Author,
+        ) void {
+            if (line.len == 0) return;
+            var argv_buf: [8][]const u8 = undefined;
+            const argv = buildRecordArgv(&argv_buf, line, cwd, author);
             const result = std.process.run(gpa, io, .{
-                .argv = argv_buf[0..argv_len],
+                .argv = argv,
                 .stdout_limit = .limited(256),
             }) catch return;
             gpa.free(result.stdout);
@@ -541,6 +596,7 @@ pub fn configure(comptime cfg: Config) type {
             } else {
                 rt.shared.rec_cwd_len = 0;
             }
+            rt.shared.rec_author = ctx.line.committedAuthor();
             rt.shared.rec_pending = true;
             rt.shared.cv.signal(ctx.io);
         }
@@ -656,6 +712,86 @@ test "configure carries delete_scope through to A.config (default exact)" {
     try testing.expectEqual(DeleteScope.full_text, A3.config.delete_scope);
     const A4 = configure(.{ .delete_scope = .fuzzy });
     try testing.expectEqual(DeleteScope.fuzzy, A4.config.delete_scope);
+}
+
+test "buildRecordArgv: user line, tagging off → no --author, no --cwd" {
+    const A = configure(.{});
+    var buf: [8][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls -la", "", .user);
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("atuin", argv[0]);
+    try testing.expectEqualStrings("history", argv[1]);
+    try testing.expectEqualStrings("start", argv[2]);
+    try testing.expectEqualStrings("ls -la", argv[3]);
+}
+
+test "buildRecordArgv: llm line with tagging off → still no --author" {
+    // Defaults: tag_llm_author=false. The LLM author flows through
+    // but the tag is suppressed — preserves the existing on-disk
+    // format for users who haven't opted in.
+    const A = configure(.{});
+    var buf: [8][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "rm -rf /", "", .llm);
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("rm -rf /", argv[3]);
+}
+
+test "buildRecordArgv: llm line with tagging on → --author atty:llm appended before line" {
+    const A = configure(.{ .tag_llm_author = true });
+    var buf: [8][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "echo hi", "", .llm);
+    try testing.expectEqual(@as(usize, 6), argv.len);
+    try testing.expectEqualStrings("--author", argv[3]);
+    try testing.expectEqualStrings("atty:llm", argv[4]);
+    try testing.expectEqualStrings("echo hi", argv[5]);
+}
+
+test "buildRecordArgv: tagging on + .user → no --author (user-typed never tagged)" {
+    const A = configure(.{ .tag_llm_author = true });
+    var buf: [8][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "echo hi", "", .user);
+    try testing.expectEqual(@as(usize, 4), argv.len);
+}
+
+test "buildRecordArgv: cwd inserts --cwd <value> between start and the line" {
+    const A = configure(.{});
+    var buf: [8][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "ssh://user@host/srv", .user);
+    try testing.expectEqual(@as(usize, 6), argv.len);
+    try testing.expectEqualStrings("--cwd", argv[3]);
+    try testing.expectEqualStrings("ssh://user@host/srv", argv[4]);
+    try testing.expectEqualStrings("ls", argv[5]);
+}
+
+test "buildRecordArgv: tagging on + cwd + .llm → full 8-slot argv" {
+    const A = configure(.{ .tag_llm_author = true });
+    var buf: [8][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "ssh://user@host/srv", .llm);
+    try testing.expectEqual(@as(usize, 8), argv.len);
+    try testing.expectEqualStrings("--cwd", argv[3]);
+    try testing.expectEqualStrings("--author", argv[5]);
+    try testing.expectEqualStrings("atty:llm", argv[6]);
+    try testing.expectEqualStrings("ls", argv[7]);
+}
+
+test "buildRecordArgv: custom author_tag_prefix flows through to the tag" {
+    const A = configure(.{ .tag_llm_author = true, .author_tag_prefix = "ws01" });
+    var buf: [8][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "", .llm);
+    try testing.expectEqualStrings("ws01:llm", argv[4]);
+}
+
+test "Config: tag_llm_author defaults off; author_tag_prefix defaults atty" {
+    // Default off — atuin builds before v18.3 reject `--author` and
+    // would silently drop the record. Users opt in once they
+    // confirm their atuin supports the flag.
+    const A1 = configure(.{});
+    try testing.expectEqual(false, A1.config.tag_llm_author);
+    try testing.expectEqualStrings("atty", A1.config.author_tag_prefix);
+
+    const A2 = configure(.{ .tag_llm_author = true, .author_tag_prefix = "ws01" });
+    try testing.expectEqual(true, A2.config.tag_llm_author);
+    try testing.expectEqualStrings("ws01", A2.config.author_tag_prefix);
 }
 
 test "configure exposes provideGhostList hook (multi-row pick list)" {
