@@ -1,8 +1,7 @@
 //! Public types for the LLM module's compile-time configuration.
-//! Lifted out of `llm.zig` so the parent module stays focused on
-//! the framework hooks and the configure() factory, and so other
-//! submodule slices can import `Config` without pulling in the
-//! entire `configure()` return type.
+//! Lives in its own file so a `Config` import doesn't drag in the
+//! comptime `configure()` return type — keeps the dependency graph
+//! between sibling submodules acyclic.
 
 /// Compile-time configuration for the LLM module. Every field has a
 /// reasonable default; override only what your endpoint / model /
