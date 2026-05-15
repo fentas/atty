@@ -558,7 +558,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 var accept_buf: [4096]u8 = undefined;
                 var swallow_after_binding = false;
                 const matched_action = keymap.match(config.keymap.bindings, input);
-                const matched_binding = matched_action != null;
+                // `var` so the llm-action arm can clear it when a
+                // match didn't consume — that lets the CSI-u
+                // cleanup at the bottom still translate / drop the
+                // raw kitty-kbd bytes instead of forwarding them to
+                // the shell as mojibake.
+                var matched_binding = matched_action != null;
                 if (matched_action) |act| {
                     switch (act) {
                         .ghost_accept => {
@@ -703,8 +708,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // bytes flow through to readline /
                             // inner programs that may bind them
                             // (emacs, less, vim, …).
+                            //
+                            // When NOT consumed, clear matched_binding
+                            // so the CSI-u cleanup below can still
+                            // run — without it, a kitty-encoded key
+                            // (e.g. `\x1b[27u` for Esc) that the
+                            // module rejected would flow to the
+                            // shell as raw CSI-u mojibake instead of
+                            // being translated back to its legacy
+                            // form.
                             if (D.dispatchAction(&runtimes, &ctx, act)) {
                                 swallow_after_binding = true;
+                            } else {
+                                matched_binding = false;
                             }
                         },
                     }
