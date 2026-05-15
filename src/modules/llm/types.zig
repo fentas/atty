@@ -148,11 +148,14 @@ pub const Config = struct {
     /// Truncated at this length; the model loses the tail of a
     /// pathological response.
     max_turn_bytes: comptime_int = 4 * 1024,
-    /// Auto-confirm delay in ms used by the auto-exec path
-    /// (`Alt+Shift+S`) between the LLM injecting a command and the
-    /// proxy submitting the Enter on the user's behalf. Long enough
-    /// for the user to abort with Ctrl-C if they spot something
-    /// dangerous; short enough that the loop feels live.
+    /// Reserved auto-confirm delay (ms) for the auto-exec
+    /// (`Alt+Shift+S`) path: how long the proxy should wait between
+    /// an LLM-injected command landing at the prompt and the
+    /// auto-submitted Enter, leaving a window for the user to abort
+    /// with Ctrl-C. Currently unread — the auto-exec action handler
+    /// is a stub that prints "auto exec coming in a follow-up" —
+    /// kept here so the knob is configurable the moment the path is
+    /// wired (no defaults bump or config migration required).
     auto_delay_ms: u32 = 800,
     /// Fixture-driven LLM responses for e2e tests. When non-empty,
     /// the worker bypasses HTTP entirely and returns the next slice
