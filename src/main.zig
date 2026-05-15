@@ -27,6 +27,8 @@ const usage =
     \\  atty zsh -c 'cmd'     spawn zsh -c 'cmd'
     \\  atty init [shell]     print shell-integration snippet
     \\                          (use as: eval "$(atty init bash)")
+    \\  atty doctor           print health-check snippet
+    \\                          (use as: eval "$(atty doctor)")
     \\
     \\Flags:
     \\  -h, --help            Print this help
@@ -66,7 +68,18 @@ const shell_init_osc133_bash =
     \\# away on the first redraw. Idempotent: if the wrap is
     \\# already on PS1 we return, so users without a prompt
     \\# manager don't pay re-wrapping cost.
-    \\__atty_osc133_d() { local __code=$?; printf '\033]133;D;%s\007' "$__code"; }
+    \\__atty_osc133_d() {
+    \\    # PRESERVE the user's command exit code through the hook —
+    \\    # other PROMPT_COMMAND consumers (direnv, starship, zoxide,
+    \\    # …) inspect `$?` to render "last command status" /
+    \\    # conditional output. Without the explicit `return`,
+    \\    # `printf`'s exit code (0 unless the write failed) would
+    \\    # shadow the real exit code and every command would look
+    \\    # successful to downstream hooks.
+    \\    local __code=$?
+    \\    printf '\033]133;D;%s\007' "$__code"
+    \\    return "$__code"
+    \\}
     \\__atty_osc133_wrap_ps1() {
     \\    # Skip ONLY when both `;A` and `;B` are already in PS1
     \\    # (in order) — that's atty's wrap signature. A partial
@@ -81,7 +94,20 @@ const shell_init_osc133_bash =
     \\    esac
     \\    PS1=$'\\[\033]133;A\007\\]'"${PS1}"$'\\[\033]133;B\007\\]'
     \\}
-    \\PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-};__atty_osc133_wrap_ps1"
+    \\# bash 5.1+ supports PROMPT_COMMAND as an array. Prompt
+    \\# managers (starship, oh-my-posh, p10k…) typically switch it to
+    \\# array form on 5.1+ AND replace PS1 inside their own precmd.
+    \\# For atty's wrap to survive, it MUST run AFTER theirs — which
+    \\# means appending it as a separate array element rather than
+    \\# semicolon-chaining inside whatever element[0] happens to be.
+    \\# String form (bash <5.1, or 5.1+ where no manager has switched
+    \\# PROMPT_COMMAND to array yet) keeps the original semicolon
+    \\# concat — correct in that mode.
+    \\if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+    \\    PROMPT_COMMAND=("__atty_osc133_d" "${PROMPT_COMMAND[@]}" "__atty_osc133_wrap_ps1")
+    \\else
+    \\    PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-};__atty_osc133_wrap_ps1"
+    \\fi
     \\__atty_osc133_wrap_ps1
     \\
 ;
@@ -129,6 +155,100 @@ const shell_init_osc133_generic =
     \\    add-zsh-hook preexec __atty_osc133_preexec
     \\    PS1+=$'%{\e]133;B\a%}'
     \\fi
+    \\
+;
+
+// ──────────────────────────────────────────────────────────────────────
+// `atty doctor` — shell-agnostic health check.
+//
+// Emit as `eval "$(atty doctor)"` inside an atty session. Inspects the
+// caller's shell state — env vars, PROMPT_COMMAND, PS1, function
+// defs, bash vs zsh — and prints pass/fail for each step of the OSC
+// 133 integration chain. The only knob atty itself can't reach from
+// a child process (cumulative parser byte/dispatch counters) is
+// already surfaced in the OSC 133 gate's error string, so the doctor
+// concentrates on the shell side.
+//
+// Coloured output via ANSI SGR. `\e[32m✓\e[0m` / `\e[31m✗\e[0m` —
+// trivially detectable, low visual noise. Heredoc-quoting is `'EOF'`
+// (single-quoted) so the snippet's `$X` references survive the eval
+// stage and land at runtime.
+const shell_doctor_snippet =
+    \\# atty doctor — paste into your shell:  eval "$(atty doctor)"
+    \\__atty_doctor_ok()   { printf '  \033[32m✓\033[0m  %s\n' "$*"; }
+    \\__atty_doctor_fail() { printf '  \033[31m✗\033[0m  %s\n' "$*"; }
+    \\__atty_doctor_warn() { printf '  \033[33m!\033[0m  %s\n' "$*"; }
+    \\__atty_doctor_pass=0
+    \\__atty_doctor_fail_count=0
+    \\__atty_doctor_check() {
+    \\    if eval "$1"; then __atty_doctor_ok "$2"; __atty_doctor_pass=$((__atty_doctor_pass+1));
+    \\    else __atty_doctor_fail "$2 — $3"; __atty_doctor_fail_count=$((__atty_doctor_fail_count+1)); fi
+    \\}
+    \\printf '\033[1matty doctor\033[0m — OSC 133 integration check\n\n'
+    \\__atty_doctor_check '[ -n "${ATTY:-}" ]' \
+    \\    'inside atty session ($ATTY set)' \
+    \\    'not running under atty — start a new shell with `atty bash`'
+    \\if [ -n "${BASH_VERSION:-}" ]; then
+    \\    __atty_doctor_ok "shell: bash $BASH_VERSION"
+    \\    # bash 5.1+ supports PROMPT_COMMAND-as-array. Mention this
+    \\    # in the doctor output (informational, not a failure — atty's
+    \\    # init handles both forms since the array-aware fix). If
+    \\    # `wrap_ps1` is at the END of the array we're good; if it's
+    \\    # embedded inside an earlier element (legacy/broken state
+    \\    # from a pre-fix install), later checks for `;A` / `;B` in
+    \\    # PS1 will surface the real failure.
+    \\    if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+    \\        __atty_doctor_ok "PROMPT_COMMAND is an array (bash 5.1+, prompt manager active) — atty's init handles this"
+    \\    fi
+    \\    __atty_doctor_check 'declare -F __atty_osc133_d > /dev/null' \
+    \\        '__atty_osc133_d function defined' \
+    \\        'init eval was run OUTSIDE atty — its `exec atty bash` replaced your shell and discarded the function defs. Either add `eval "$(atty init bash)"` to your ~/.bashrc, or run it AGAIN now inside this session (ATTY=1 skips the exec, sets up OSC 133 in-place)'
+    \\    __atty_doctor_check 'declare -F __atty_osc133_wrap_ps1 > /dev/null' \
+    \\        '__atty_osc133_wrap_ps1 function defined' \
+    \\        'same as above — re-run `eval "$(atty init bash)"` inside this atty session'
+    \\    # `${PROMPT_COMMAND[*]}` flattens both string and array
+    \\    # forms — array elements get joined by the first char of
+    \\    # IFS (space by default), which is enough for substring
+    \\    # matching. Plain `${PROMPT_COMMAND:-}` would return only
+    \\    # the first array element and silently miss our wrap when
+    \\    # it lives as a separate (final) element.
+    \\    __atty_doctor_check 'case "${PROMPT_COMMAND[*]:-}" in *__atty_osc133_d*) true ;; *) false ;; esac' \
+    \\        'PROMPT_COMMAND wired to __atty_osc133_d' \
+    \\        'something overwrote PROMPT_COMMAND after the init eval (.bashrc / prompt manager?)'
+    \\    __atty_doctor_check 'case "${PROMPT_COMMAND[*]:-}" in *__atty_osc133_wrap_ps1*) true ;; *) false ;; esac' \
+    \\        'PROMPT_COMMAND wired to __atty_osc133_wrap_ps1' \
+    \\        'same as above — PROMPT_COMMAND was reassigned'
+    \\    __atty_doctor_check 'case "${PS1:-}" in *$(printf "\033]133;A\007")*) true ;; *) false ;; esac' \
+    \\        'PS1 contains `;A` prompt-start marker' \
+    \\        'wrap_ps1 never ran on the current prompt (try pressing Enter once)'
+    \\    __atty_doctor_check 'case "${PS1:-}" in *$(printf "\033]133;B\007")*) true ;; *) false ;; esac' \
+    \\        'PS1 contains `;B` input-region marker' \
+    \\        'same as above — wrap_ps1 not yet applied'
+    \\elif [ -n "${ZSH_VERSION:-}" ]; then
+    \\    __atty_doctor_ok "shell: zsh $ZSH_VERSION"
+    \\    __atty_doctor_check 'typeset -f __atty_osc133_precmd > /dev/null' \
+    \\        '__atty_osc133_precmd function defined' \
+    \\        'did you run `eval "$(atty init zsh)"` yet?'
+    \\    __atty_doctor_check 'typeset -f __atty_osc133_preexec > /dev/null' \
+    \\        '__atty_osc133_preexec function defined' \
+    \\        'did you run `eval "$(atty init zsh)"` yet?'
+    \\    __atty_doctor_check '(( ${precmd_functions[(I)__atty_osc133_precmd]} ))' \
+    \\        'precmd hook installed' \
+    \\        'add-zsh-hook precmd never ran — re-run the eval'
+    \\    __atty_doctor_check '(( ${preexec_functions[(I)__atty_osc133_preexec]} ))' \
+    \\        'preexec hook installed' \
+    \\        'add-zsh-hook preexec never ran — re-run the eval'
+    \\else
+    \\    __atty_doctor_warn 'unknown shell — only bash and zsh are first-class. Press `Alt+A` for single-shot LLM, dialog/auto modes need OSC 133.'
+    \\fi
+    \\printf '\n'
+    \\if [ "$__atty_doctor_fail_count" -eq 0 ]; then
+    \\    printf '\033[32mall checks passed.\033[0m if `Alt+S` still fails, the OSC 133 gate error includes a \033[1mbytes=N dispatches=M\033[0m diagnostic — `dispatches>0` means atty IS seeing markers; `dispatches=0` means the shell never emitted any (even though the hooks look wired — try `set | grep PROMPT`)\n'
+    \\else
+    \\    printf '\033[31m%d check(s) failed.\033[0m fix the items above (most often: re-run the init eval AFTER your .bashrc / prompt manager has finished setting up PROMPT_COMMAND)\n' "$__atty_doctor_fail_count"
+    \\fi
+    \\unset -f __atty_doctor_ok __atty_doctor_fail __atty_doctor_warn __atty_doctor_check 2>/dev/null
+    \\unset __atty_doctor_pass __atty_doctor_fail_count
     \\
 ;
 
@@ -219,6 +339,10 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args) !CliOpts {
         },
         .print_init => |shell| {
             emitInitSnippet(shell);
+            std.process.exit(0);
+        },
+        .print_doctor => {
+            writeStdout(shell_doctor_snippet);
             std.process.exit(0);
         },
     }

@@ -51,6 +51,42 @@ circuits to inert mode (no worker thread spawned) when no
 endpoint is configured, so the rest of your shell experience is
 untouched.
 
+## OSC 133 — required for dialog / auto modes
+
+Dialog (`Alt+S`) and auto (`Alt+Shift+S`) modes need OSC 133
+prompt markers so atty knows where command output begins / ends.
+Single mode (`Alt+A`) works without them.
+
+```sh
+# in your ~/.bashrc:
+eval "$(atty init bash)"
+
+# or ~/.zshrc:
+eval "$(atty init zsh)"
+```
+
+**Gotcha — `.bashrc` is load-bearing.** The init snippet does
+`exec atty bash` at the top to re-launch your shell under atty.
+`exec` **replaces** the current shell, so any function
+definitions / `PROMPT_COMMAND` wiring the snippet ALSO sets are
+discarded along with it. The canonical flow expects the new atty
+bash to re-read `.bashrc` (interactive shells do), which re-runs
+the eval; this time `ATTY=1` skips the exec and the OSC 133
+setup applies in-place.
+
+If you run `eval "$(atty init bash)"` **manually** from a fresh
+shell without it in your rc, the new atty session won't have
+OSC 133 hooks — you'll see the `exec mode needs OSC 133` error
+on Alt+S. Two fixes:
+
+1. Add the eval line to `.bashrc` (canonical), OR
+2. After landing in the atty session, run `eval "$(atty init
+   bash)"` **a second time** — `ATTY=1` is now set, exec gets
+   skipped, OSC 133 setup runs in your current shell.
+
+Sanity-check with `eval "$(atty doctor)"` — colour-coded
+pass/fail for every step of the integration chain.
+
 ## How a prompt flows
 
 1. **You type** `#: list zig files` then press **`Alt+A`**.

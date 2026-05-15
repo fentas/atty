@@ -1434,6 +1434,34 @@ pub fn configure(comptime cfg: Config) type {
             rt.err_pending = true;
         }
 
+        /// Latch the OSC-133-gate diagnostic error. Surfaces the
+        /// cumulative byte-feed + dispatch counts so the user can
+        /// tell at a glance WHY the gate is closed:
+        ///
+        ///   - `bytes=0` → atty's `onOutput` was never called. The
+        ///     LLM module isn't seeing shell output at all (very
+        ///     unlikely — would mean a broken dispatcher wiring).
+        ///   - `bytes>0 dispatches=0` → shell IS emitting output but
+        ///     no OSC 133 markers among it. Either the init snippet
+        ///     never ran, the user's .bashrc overwrote
+        ///     `PROMPT_COMMAND` after the eval, or the user is in a
+        ///     shell other than bash with the bash init.
+        ///   - `bytes>0 dispatches>0 but active=false` → impossible
+        ///     by construction (dispatchOsc sets active before
+        ///     incrementing the counter); kept defensively in case
+        ///     the parser ever changes shape.
+        fn latchOsc133Diag(rt: *Runtime) void {
+            const fed = rt.osc133_capture.total_bytes_fed;
+            const dispatches = rt.osc133_capture.total_dispatches;
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "exec mode needs OSC 133 (bytes={d} dispatches={d}) — run `eval \"$(atty init bash)\"` or use Alt+A",
+                .{ fed, dispatches },
+            ) catch "exec mode needs OSC 133 — run `eval \"$(atty init bash)\"` or use Alt+A";
+            latchErr(rt, msg);
+        }
+
         // ---- dialog helpers ----------------------------------------------
 
         /// Append bytes to `captured_output`, respecting the cap.
@@ -1566,7 +1594,7 @@ pub fn configure(comptime cfg: Config) type {
                 return .forward;
             }
             if (!rt.osc133_capture.active) {
-                latchErr(rt, "exec mode needs OSC 133 — run `eval \"$(atty init bash)\"` or use Alt+A");
+                latchOsc133Diag(rt);
                 return .forward;
             }
             const initial = rt.allocator.dupe(u8, body) catch {
@@ -1615,7 +1643,7 @@ pub fn configure(comptime cfg: Config) type {
             // running each step's command. Single mode (Alt+A)
             // doesn't have this requirement.
             if (!rt.osc133_capture.active) {
-                latchErr(rt, "exec mode needs OSC 133 — run `eval \"$(atty init bash)\"` or use Alt+A");
+                latchOsc133Diag(rt);
                 return true;
             }
             const initial = rt.allocator.dupe(u8, body) catch {
