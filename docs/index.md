@@ -134,6 +134,18 @@ once (atty injects `ATTY=1` / `ATTY_PID` / `ATTY_VERSION` into the
 child env so nested invocations short-circuit) and wires the
 shell-side OSC 133 prompt markers so atty can capture the input
 region precisely instead of falling back to keystroke tracking.
+
+**Diagnose if integration misfires.** When inside an atty
+session, `eval "$(atty doctor)"` prints a colour-coded check of
+each step — `$ATTY` set, shell detected, OSC 133 functions
+defined, `PROMPT_COMMAND` wired (handles both bash 5.1+ array
+form and the string form), PS1 wrapped with `;A` / `;B` markers
+— and points at the specific failing step when something's off.
+The common trap is running `atty init bash` from a non-atty
+shell: the `exec atty bash` step replaces the shell process,
+which means any in-memory function defs from the snippet die
+along with it. Either put the eval in `.bashrc` (canonical) or
+run it a second time once you're already inside atty.
 Non-interactive shells (scripts, `bash -c`, ssh without TTY) skip
 the snippet entirely.
 
