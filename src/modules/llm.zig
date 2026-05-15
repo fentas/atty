@@ -350,7 +350,10 @@ pub fn configure(comptime cfg: Config) type {
             /// the most recent exec step. Filled in `onOutput`;
             /// drained in `onTick` (built into the next observation
             /// turn) and reset to 0.
-            captured_output: [cfg.captured_output_bytes]u8 = undefined,
+            /// Heap-promoted to keep Runtime's stack footprint small —
+            /// at 16 KB default this dominated the inline-Runtime size.
+            /// Allocated in `attach`, freed in `detach`.
+            captured_output: *[cfg.captured_output_bytes]u8,
             captured_output_len: usize = 0,
             /// True when `captured_output` was filled to the cap
             /// and tail bytes were dropped. Surfaced in the
@@ -385,7 +388,9 @@ pub fn configure(comptime cfg: Config) type {
             /// parsed); appended verbatim as an `assistant_exec`
             /// turn so the conversation echoes back what the LLM
             /// actually emitted.
-            last_assistant_json: [cfg.max_response_bytes]u8 = undefined,
+            /// Heap-promoted alongside `captured_output` — same
+            /// rationale (4 KB default off the inline Runtime).
+            last_assistant_json: *[cfg.max_response_bytes]u8,
             last_assistant_json_len: usize = 0,
         };
 
@@ -393,6 +398,15 @@ pub fn configure(comptime cfg: Config) type {
             const shared = try allocator.create(Shared);
             shared.* = .{};
             errdefer allocator.destroy(shared);
+
+            // Heap-promote the two biggest inline buffers off
+            // Runtime so the stack footprint stays small even with
+            // generous comptime config sizes (default totals: 16 KB
+            // capture + 4 KB JSON).
+            const captured_output = try allocator.create([cfg.captured_output_bytes]u8);
+            errdefer allocator.destroy(captured_output);
+            const last_assistant_json = try allocator.create([cfg.max_response_bytes]u8);
+            errdefer allocator.destroy(last_assistant_json);
 
             // Resolve env vars at attach time so the worker doesn't
             // have to re-read them per request.
@@ -424,12 +438,21 @@ pub fn configure(comptime cfg: Config) type {
                 .shell = shell_name,
                 .context_blob = context_blob,
                 .osc133_capture = Osc133.init(allocator),
+                .captured_output = captured_output,
+                .last_assistant_json = last_assistant_json,
             };
         }
 
         pub fn detach(rt: *Runtime, io: std.Io) void {
             freeTurns(rt);
             rt.osc133_capture.deinit();
+            // Heap-promoted Runtime buffers are owned by the main
+            // thread alone — the worker reaches into `Shared`, not
+            // these — so they can be freed even on the
+            // worker-still-running path that intentionally leaks
+            // worker-owned state below.
+            rt.allocator.destroy(rt.captured_output);
+            rt.allocator.destroy(rt.last_assistant_json);
             if (rt.thread) |t| {
                 {
                     rt.shared.mutex.lockUncancelable(io);
@@ -2547,6 +2570,8 @@ fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
     rt.allocator.free(rt.api_key);
     rt.allocator.free(rt.shell);
     rt.allocator.free(rt.context_blob);
+    rt.allocator.destroy(rt.captured_output);
+    rt.allocator.destroy(rt.last_assistant_json);
 }
 
 test "resolveApiBase priority — static cfg.api_base beats both env vars" {
@@ -2844,20 +2869,7 @@ test "LLM worker round-trips a mock ollama response into the latch + hint surfac
     // Don't call L.detach — it does t.detach() which leaks the heap
     // allocations (intentional, see round-5 fix). For the test we do a
     // sync join so the testing allocator's leak detector stays happy.
-    defer {
-        {
-            rt.shared.mutex.lockUncancelable(real_io);
-            defer rt.shared.mutex.unlock(real_io);
-            rt.shared.shutdown = true;
-            rt.shared.cv.signal(real_io);
-        }
-        if (rt.thread) |t| t.join();
-        testing.allocator.destroy(rt.shared);
-        testing.allocator.free(rt.api_base);
-        testing.allocator.free(rt.api_key);
-        testing.allocator.free(rt.shell);
-        testing.allocator.free(rt.context_blob);
-    }
+    defer shutdownAndFree(L, &rt, real_io);
 
     // Prime line_state with `#: hello` followed by Enter — onInput
     // expects lastCommitted to hold the prefixed line.
@@ -3014,20 +3026,7 @@ test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
     });
 
     var rt = try L.attach(testing.allocator, real_io);
-    defer {
-        {
-            rt.shared.mutex.lockUncancelable(real_io);
-            defer rt.shared.mutex.unlock(real_io);
-            rt.shared.shutdown = true;
-            rt.shared.cv.signal(real_io);
-        }
-        if (rt.thread) |t| t.join();
-        testing.allocator.destroy(rt.shared);
-        testing.allocator.free(rt.api_base);
-        testing.allocator.free(rt.api_key);
-        testing.allocator.free(rt.shell);
-        testing.allocator.free(rt.context_blob);
-    }
+    defer shutdownAndFree(L, &rt, real_io);
 
     var line: @import("../line_state.zig").LineState = .{};
     _ = line.applyInput("#: hello\r");

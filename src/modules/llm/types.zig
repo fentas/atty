@@ -130,15 +130,19 @@ pub const Config = struct {
     /// memory bound, not a correctness bound — most commands fit
     /// in <1 KB.
     ///
-    /// **Footprint note**: this buffer is currently inline on
-    /// `Runtime`. Together with `last_assistant_json`
-    /// (`max_response_bytes`), `pending_command`, and `body_buf`
-    /// in `Shared`, the module adds ~`captured_output_bytes +
-    /// max_response_bytes + max_response_bytes + body_buf_bytes`
-    /// bytes of static + heap memory per attach. Heap-promoting
-    /// `captured_output` / `last_assistant_json` is tracked as a
-    /// follow-up; for now reduce these knobs if you're embedding
-    /// atty's Runtime on a tight stack.
+    /// **Footprint note** (approximate, default-config in
+    /// parens): per-attach memory has three pieces.
+    /// - Heap (via `Runtime` directly): `captured_output_bytes`
+    ///   (16 KB) + `last_assistant_json` (`max_response_bytes`,
+    ///   4 KB).
+    /// - Heap (via the `Shared` block): `req_buf`
+    ///   (`max_prompt_bytes`, 2 KB) + `res_buf`
+    ///   (`max_response_bytes`, 4 KB) + `body_buf`
+    ///   (`body_buf_bytes`, 32 KB).
+    /// - Inline on `Runtime`: `inject_buf` + `pending_command`
+    ///   (each `max_response_bytes`, 8 KB total).
+    /// Default config: ~58 KB heap + 8 KB inline per instance.
+    /// Sizes scale with whichever knob you bump.
     captured_output_bytes: comptime_int = 16 * 1024,
     /// Maximum conversation turns kept in memory. FIFO truncation
     /// when exceeded — older turns drop first.
