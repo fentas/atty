@@ -64,7 +64,7 @@ has been merged.
 | **B** | `refactor/llm-heap-promote` | `src/modules/llm.zig` Runtime — heap-promote captured_output + last_assistant_json | ~30 | A | **merged: 14ccaa3** (PR #35, 4-round loop) |
 | **C** | `feat/llm-auto-exec` | `src/modules/llm.zig` dialog handler + tick wiring | ~150 | A | queued |
 | **D** | `feat/llm-question-ui` | `src/modules/llm.zig` dialog handler + ghost_list rendering | ~350 | A | queued |
-| **H** | `feat/osc133-edge-start-offset` | `src/osc133.zig` parser edge | ~30 | A | queued |
+| **H** | `feat/osc133-edge-start-offset` | `src/osc133.zig` parser edge + `src/modules/llm.zig` capture refactor | ~60 | A | **merged: 84a6847** (PR #36) |
 | **I** | `feat/llm-esc-exits-ai` | `src/defaults.zig` Esc binding + proxy CSI-u gating + 2 e2e scenarios | ~80 | A | **merged: 5146447** (PR #34, 7-round loop, 12+ findings) |
 
 ### Wave 4 — opens after F merges
