@@ -17,6 +17,10 @@ const linux = std.os.linux;
 const config = @import("config");
 const dispatch = @import("dispatch.zig");
 const module = @import("module.zig");
+const io_helpers = @import("proxy/io.zig");
+const containsEnter = io_helpers.containsEnter;
+const writeAll = io_helpers.writeAll;
+const PtmWriter = io_helpers.PtmWriter;
 
 extern "c" fn clock_gettime(clk_id: c_int, tp: *posix.timespec) c_int;
 const CLOCK_MONOTONIC: c_int = 1;
@@ -1285,11 +1289,6 @@ const POLLIN: i16 = 0x001;
 const POLLHUP: i16 = 0x010;
 const POLLERR: i16 = 0x008;
 
-fn containsEnter(bytes: []const u8) bool {
-    for (bytes) |b| if (b == 0x0D or b == 0x0A) return true;
-    return false;
-}
-
 /// True when the shell is running a foreground subprocess (not at
 /// the local prompt). Gates `renderGhost` / `renderGhostList` /
 /// `dispatchLineCommit` so atty doesn't paint suggestions over
@@ -1322,44 +1321,6 @@ fn inSubprocess(alt: *const AltScreen, osc: *const Osc133) bool {
     if (osc.active and !osc.inInputPhase()) return true;
     return false;
 }
-
-/// Shared write loop used by every fd-target write in the proxy.
-/// `INTR` is retried (signal arrived mid-syscall); every other
-/// errno propagates as `error.WriteFailed`. Notably `EAGAIN` is
-/// **not** retried — every fd we write to is blocking by design
-/// (pty.master, stdout for ghost overlays), so `EAGAIN` indicates
-/// the caller flipped the fd to non-blocking and we should surface
-/// it explicitly rather than tight-loop until a future POLLOUT.
-/// `EBADF` / `EIO` from PTY teardown is the other path this gate
-/// guards against — those used to spin at 100% CPU.
-fn writeFully(fd: posix.fd_t, bytes: []const u8) !void {
-    var i: usize = 0;
-    while (i < bytes.len) {
-        const rc = std.c.write(fd, bytes[i..].ptr, bytes.len - i);
-        if (rc < 0) {
-            if (posix.errno(rc) == .INTR) continue;
-            return error.WriteFailed;
-        }
-        if (rc == 0) return error.EndOfFile;
-        i += @intCast(rc);
-    }
-}
-
-fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
-    return writeFully(fd, bytes);
-}
-
-/// Thin Writer adapter so `keymap.translateCsiUStream` (which
-/// speaks the generic Writer interface) can target the PTY master
-/// directly, without an intermediate buffer. Delegates to
-/// `writeFully` so the errno-gated retry policy is the only
-/// implementation of the write loop in this file.
-const PtmWriter = struct {
-    fd: posix.fd_t,
-    pub fn writeAll(self: PtmWriter, bytes: []const u8) !void {
-        return writeFully(self.fd, bytes);
-    }
-};
 
 /// Render the current best suggestion (or clear the overlay if no
 /// module wants one). Idempotent.
