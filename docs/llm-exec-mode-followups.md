@@ -17,6 +17,77 @@ either:
 
 Order = roughly "smallest-question first."
 
+## Active bugs
+
+### Ghost-text first-char-drop under array PROMPT_COMMAND
+
+**Status**: open.
+
+After the array-aware OSC 133 init fix (PR #40), `;A` / `;B`
+markers correctly survive the starship / oh-my-posh prompt
+overwrite — `doctor` reports green for `PS1` containing both
+markers. But user-reported regression: typing N keystrokes
+produces ghost-text / pick-list matches against only the LAST
+N-1 chars.
+
+Concrete observations:
+
+- Typing ` e` (space + e) → matches `e`-prefix entries
+  (e.g. `echo …`)
+- Typing `ec` → matches `c`-prefix entries (`cd`, `cat`,
+  `chown`, …)
+- Typing single `e` or `c` → empty pick list (could be atuin
+  worker timing, not necessarily related)
+- Typing single `p` → matches `p`-prefix correctly (e.g.
+  `pkill`, `pip`, `pwd`)
+
+Pattern: "first char of every typing burst is dropped from the
+matching input." User's hypothesis: the **trailing space** of
+the prompt (`❯ `) is being captured into `osc133_capture.input`
+AFTER `;B` is dispatched, then subsequent keystrokes append. The
+ghost-text matcher then sees ` <typed bytes>` and either trims
+the leading space (matching against `<typed bytes>`) or matches
+against the wrong prefix.
+
+Diagnostic plumbing planned for follow-up:
+
+- `ATTY_DEBUG_OSC=/path/to/file` env var that logs all
+  master-output bytes + post-feed `input` state. Lets us see
+  EXACTLY what `osc133_capture.input` contains at each stage.
+- The repro scenario `tests/e2e/ghost_first_char_dropped/` is in
+  place but doesn't fully reproduce the bug (in-memory `history
+  -s` seeding doesn't reach the history module — would need
+  `HISTFILE` env on the spawn).
+
+Likely root causes to investigate:
+
+1. `bash readline` emits a literal byte (space or cursor-position
+   sequence) AFTER `;B` and BEFORE blocking on input — that byte
+   gets captured into `osc133_capture.input`, then user keystroke
+   appends to it.
+2. The wrap's `\[\033]133;B\007\]` is misplaced relative to the
+   trailing space in starship's PS1 (`❯ `) — should put `;B`
+   BEFORE the trailing space, not after, so the space is INSIDE
+   the prompt zone (`.at_prompt`) and ignored.
+3. `syncFromCapture` runs at a moment where `osc.currentInput()`
+   has stale state from a prior cycle that wasn't cleared.
+
+Fix candidate (option 2): change the wrap to inject `;B` BEFORE
+the trailing space of PS1, by splitting PS1 at the last visible
+character. Awkward in shell — would need to look for the prompt
+character (`$`, `❯`, `>`, etc.) which varies wildly.
+
+Cleaner candidate: have the wrap inject `;B` at the very end and
+also emit `\x1b]133;B\x07` IMMEDIATELY after the prompt is
+drawn, but via a `bind 'set show-mode-in-prompt off'` analog or
+a PS0 / `pre-input` hook. bash doesn't have a portable pre-input
+hook though.
+
+Pragmatic fix: change the OSC 133 parser to STRIP a single
+trailing space from `input` before returning `currentInput()`.
+Doesn't help if multiple trailing spaces, but matches the
+common case.
+
 ## Refactor sweep — deferred extracts
 
 ### A slices 3+ — llm.zig dialog / worker / Shared
