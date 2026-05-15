@@ -61,11 +61,11 @@ has been merged.
 
 | # | Branch / title | Touches | LOC | Depends on | Status |
 |---|---|---|---|---|---|
-| **B** | `refactor/llm-heap-promote` | `src/modules/llm/runtime.zig` (post-A) | ~80 | A | queued |
-| **C** | `feat/llm-auto-exec` | `src/modules/llm/dialog.zig` (post-A) | ~150 | A | queued |
-| **D** | `feat/llm-question-ui` | `src/modules/llm/dialog.zig` (post-A) + ghost_list | ~350 | A | queued |
-| **H** | `feat/osc133-edge-start-offset` | `src/osc133.zig` + `src/modules/llm/dialog.zig` (post-A) | ~100 | A | queued |
-| **I** | `feat/llm-esc-exits-ai` | `src/modules/llm/*` + minimal hook in proxy + keymap entry | ~80 | A, J, N | queued |
+| **B** | `refactor/llm-heap-promote` | `src/modules/llm.zig` Runtime — heap-promote captured_output + last_assistant_json | ~30 | A | **merged: 14ccaa3** (PR #35, 4-round loop) |
+| **C** | `feat/llm-auto-exec` | `src/modules/llm.zig` dialog handler + tick wiring | ~150 | A | queued |
+| **D** | `feat/llm-question-ui` | `src/modules/llm.zig` dialog handler + ghost_list rendering | ~350 | A | queued |
+| **H** | `feat/osc133-edge-start-offset` | `src/osc133.zig` parser edge | ~30 | A | queued |
+| **I** | `feat/llm-esc-exits-ai` | `src/defaults.zig` Esc binding + proxy CSI-u gating + 2 e2e scenarios | ~80 | A | **merged: 5146447** (PR #34, 7-round loop, 12+ findings) |
 
 ### Wave 4 — opens after F merges
 
