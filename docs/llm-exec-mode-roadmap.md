@@ -25,6 +25,9 @@ file is the execution log.
 - **PR #25** — refactor(history): submodule folder — **merged: d692dfc**.
 - **PR #24** — fix(e2e): make delete_history_match_after_uparrow deterministic — **merged: e2ce456**.
 - **PR #26** — feat(line-state): author propagation (Wave 1 E) — **merged: e2dfacf** (6-round Copilot loop; rounds 4–6 were docstring-style only).
+- **PR #27** — feat(guardrail): author-aware Rule with AuthorMask + Behavior (Wave 2 F) — *open*, 10-round Copilot loop complete (13 findings addressed), awaiting user merge.
+- **PR #28** — refactor(llm): split pure parse helpers into submodule folder (Wave 2 A, first slice) — *open*, round 3/10 in flight (2 findings fixed so far).
+- **PR G** (feat/atuin-author-intent) — *opening now in parallel*.
 - Remaining roadmap PRs — *queued*, listed below in shipping order.
 
 ## Shipping order — by wave

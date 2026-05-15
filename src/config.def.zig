@@ -47,6 +47,14 @@ const atty = @import("atty");
 //         //                                // .exact uses atuin fuzzy +
 //         //                                // `^line$` anchors so only
 //         //                                // the typed line is removed.
+//         // .tag_llm_author = true,        // opt-in: pass
+//         //                                // `--author atty:llm` on
+//         //                                // LLM-injected commits.
+//         //                                // Requires atuin v18.3+.
+//         // .author_tag_prefix = "atty",   // shared-DB disambiguator;
+//         //                                // e.g. "ws01" if multiple
+//         //                                // hosts sync to the same
+//         //                                // atuin account.
 //     }),
 //     atty.modules.history.configure(.{}),  // optional fallback after atuin
 // };
