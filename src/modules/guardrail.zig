@@ -49,11 +49,14 @@ pub const Config = struct {
 
 /// Compile-time-baked module type.
 pub fn configure(comptime cfg: Config) type {
-    // Comptime concat — extras prepend, so they check first under
-    // first-match-wins. `++` produces a fresh slice constant; when
-    // cfg.extra_rules is empty (the common case) the result has
-    // the same *contents* as cfg.rules but isn't slice-identical.
-    const effective_rules: []const Rule = cfg.extra_rules ++ cfg.rules;
+    // Common case (no extras) reuses cfg.rules directly to avoid
+    // a duplicate constant in the binary. The ++ branch only fires
+    // when there's actually something to prepend; extras prepend
+    // so they check first under first-match-wins.
+    const effective_rules: []const Rule = if (cfg.extra_rules.len == 0)
+        cfg.rules
+    else
+        cfg.extra_rules ++ cfg.rules;
     return struct {
         pub const name = "guardrail";
         pub const config = cfg;
