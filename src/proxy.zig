@@ -709,17 +709,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // inner programs that may bind them
                             // (emacs, less, vim, …).
                             //
-                            // When NOT consumed, clear matched_binding
-                            // so the CSI-u cleanup below can still
-                            // run — without it, a kitty-encoded key
-                            // (e.g. `\x1b[27u` for Esc) that the
-                            // module rejected would flow to the
-                            // shell as raw CSI-u mojibake instead of
-                            // being translated back to its legacy
-                            // form.
+                            // When NOT consumed, generally let the
+                            // meta-key bytes flow through to readline
+                            // / inner programs that may bind them
+                            // (emacs, less, vim, …) — matched_binding
+                            // stays true so the CSI-u cleanup below
+                            // is suppressed.
+                            //
+                            // The Esc CSI-u binding is the one
+                            // exception: a kitty-encoded `\x1b[27u`
+                            // that the module rejected (no AI mode)
+                            // must still be translated to legacy
+                            // `\x1b` so bash sees a bare Esc rather
+                            // than raw CSI-u mojibake. Limiting the
+                            // override to this exact byte sequence
+                            // preserves the Ctrl+Shift+X /
+                            // Alt+letter fallthrough behavior that
+                            // TUIs depend on.
                             if (D.dispatchAction(&runtimes, &ctx, act)) {
                                 swallow_after_binding = true;
-                            } else {
+                            } else if (std.mem.eql(u8, input, "\x1b[27u")) {
                                 matched_binding = false;
                             }
                         },
