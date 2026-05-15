@@ -131,13 +131,14 @@ pub const Config = struct {
     /// in <1 KB.
     ///
     /// **Footprint note**: `captured_output` and
-    /// `last_assistant_json` are heap-allocated in `attach` (freed
-    /// in `detach`), so the Runtime struct itself stays small;
-    /// only `pending_command` (`max_response_bytes`) remains
-    /// inline on Runtime. `body_buf` (`body_buf_bytes`) lives on
+    /// `last_assistant_json` are heap-allocated in `attach`
+    /// (freed in `detach`). Two `max_response_bytes`-sized
+    /// buffers — `inject_buf` and `pending_command` — remain
+    /// inline on Runtime; `body_buf` (`body_buf_bytes`) lives on
     /// the heap-allocated `Shared`. Per-attach memory adds up to
-    /// roughly `captured_output_bytes + max_response_bytes * 2 +
-    /// body_buf_bytes`.
+    /// `captured_output_bytes + max_response_bytes + body_buf_bytes`
+    /// on the heap, plus `max_response_bytes * 2` still inline on
+    /// Runtime itself.
     captured_output_bytes: comptime_int = 16 * 1024,
     /// Maximum conversation turns kept in memory. FIFO truncation
     /// when exceeded — older turns drop first.
