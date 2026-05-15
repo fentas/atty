@@ -1,0 +1,66 @@
+# ghost_first_char_dropped — regression repro: when PS1 has OSC
+# 133 `;A`/`;B` markers added by atty's init AND a prompt manager
+# (starship-like fake) sets PS1 with a trailing space + ANSI
+# escape resets, the FIRST byte the user types looks like it's
+# being dropped from the ghost-text-matching input buffer.
+#
+# Setup mimics the real-user case:
+#   - bash 5.1+ array PROMPT_COMMAND
+#   - "starship-like" precmd that overwrites PS1 each cycle with a
+#     multi-line prompt ending in `❯ ` (chevron + trailing space)
+#   - atty's init appends `__atty_osc133_wrap_ps1` as a separate
+#     final array element so the wrap survives starship's reset
+#   - history module pre-seeded with entries that start with `e`
+#     so a correct match against typed `e` would surface them
+#
+# The bug: typing `e` alone produces an empty pick list. Typing
+# `ec` produces a pick list of `c`-prefix matches. The expected
+# behaviour is `e`-prefix matches and `ec`-prefix matches
+# respectively.
+#
+# We snapshot the screen after each phase so the diff makes the
+# fault site obvious in the goldens.
+
+cols 100
+rows 12
+timeout_ms 8000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Seed history with a few entries starting with `e` so the
+# matcher has something to find.
+type "history -s 'echo hello'\r"
+wait_for "$"
+type "history -s 'echo world'\r"
+wait_for "$"
+type "history -s 'edit file.txt'\r"
+wait_for "$"
+
+# Define a starship-like precmd that REPLACES PS1 each cycle with
+# a multi-line prompt ending in `❯ ` (chevron + trailing space).
+type "fake_starship_precmd() { PS1=$'\\n\\033[36m\\\\h \\\\W\\033[0m \\xe2\\x9d\\xaf '; }\r"
+wait_for "$"
+
+# Switch to array form (matches real bash 5.1+ starship setup).
+type "PROMPT_COMMAND=(fake_starship_precmd)\r"
+wait_for "$"
+
+# Now run atty's init — should detect array form + append wrap.
+type "eval \"$($ATTY_BIN init bash)\"\r"
+wait_for "$"
+sleep 200
+snapshot post_init
+
+# Type `e` alone. Expected: ghost text appears with suffix of
+# `echo hello` (= `cho hello`) and pick list shows `e`-prefix
+# matches. Buggy state: empty pick list / wrong ghost.
+type "e"
+sleep 400
+snapshot typed_e
+
+# Cleanup.
+type "\x15"
+sleep 100
+type "exit\r"
+exit_code 0
