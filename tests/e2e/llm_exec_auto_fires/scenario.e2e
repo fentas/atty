@@ -1,0 +1,54 @@
+# llm_exec_auto_fires — Alt+Shift+S triggers the auto-exec
+# variant of the dialog: same setup as Alt+S, but the proxy
+# auto-submits the suggested command after cfg.auto_delay_ms (800
+# ms default) instead of waiting on the user's Enter.
+#
+# Test flow:
+#   1. Spawn bash with OSC 133-emitting PS1.
+#   2. Type `#: print ok` to enter AI mode.
+#   3. Alt+Shift+S (`\x1bS`) → llm_exec_auto → fixture returns the
+#      printf command → suggested command lands on prompt →
+#      auto_exec_armed flips true.
+#   4. Sleep > auto_delay_ms (800 ms default) WITHOUT typing — the
+#      onTick fires queueInjection("\r"). printf runs, emits the
+#      OSC 133 ;C/;D markers around "ok". Capture loop pushes
+#      observation, fires the second fixture request, gets
+#      action=done.
+#   5. Snapshot shows the "✓ done — all set" hint above the bar.
+#
+# Distinguishes auto from dialog by relying entirely on the timer
+# fire (we never type `\r` in this scenario).
+
+cols 100
+rows 10
+timeout_ms 12000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# OSC 133 ;A marker in PS1 so osc133_capture.active flips true on
+# the next prompt — Alt+Shift+S handler checks this.
+type "PS1=$'\\[\\033]133;A\\007\\]$ ' && clear\r"
+wait_for "$"
+sleep 200
+
+# Enter AI mode.
+type "#: print ok"
+sleep 300
+
+# Alt+Shift+S — terminals emit Alt+S (capital) as ESC + S.
+type "\x1bS"
+sleep 400
+snapshot suggested_command
+
+# Auto-submit window: cfg.auto_delay_ms = 800ms default + tick
+# cadence (~100ms) + shell-runs-printf + capture loop. 1500ms
+# gives plenty of slack so the timer fire + printf execution are
+# reliably reflected on screen.
+sleep 1500
+snapshot post_auto_fire
+
+# Clean exit. By here AI mode is off and the suggested command
+# already ran; just close the shell.
+type "exit\r"
+exit_code 0

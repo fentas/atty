@@ -1,0 +1,10 @@
+$ printf '\033]133;C\007ok\033]133;D;0\007'
+
+
+
+
+
+
+emit ok with markers
+
+atty

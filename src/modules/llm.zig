@@ -37,6 +37,8 @@ const keymap = @import("../keymap.zig");
 const Osc133 = @import("../osc133.zig").Osc133;
 const parse = @import("llm/parse.zig");
 const types = @import("llm/types.zig");
+const _lib = @import("_lib.zig");
+const nowMs = _lib.nowMs;
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
@@ -304,6 +306,26 @@ pub fn configure(comptime cfg: Config) type {
             // corresponding action. Enter in AI mode is swallowed
             // (no auto-fire). See `docs/llm-exec-mode-design.md`.
             ai_mode_active: bool = false,
+            /// Set by `llm_exec_auto` (Alt+Shift+S). Causes the
+            /// dialog handler's `.exec` arm to arm an auto-submit
+            /// timer after injecting the suggested command, so the
+            /// user doesn't have to press Enter for each step.
+            /// Cleared by reset / cancel / `done`. Independent of
+            /// `ai_mode_active`: auto-exec persists across the
+            /// step-by-step dialog loop, while ai_mode_active
+            /// tracks whether the user is currently TYPING a `#: …`
+            /// prompt (false during the response/observation
+            /// roundtrip).
+            auto_mode_active: bool = false,
+            /// True while waiting out the auto-submit countdown.
+            /// Cleared by any user keystroke (the abort window),
+            /// by the firing of the auto-submit itself, and by
+            /// dialog reset / cancel / done.
+            auto_exec_armed: bool = false,
+            /// Monotonic ms timestamp when `auto_exec_armed` flipped
+            /// to true. `onTick` fires the auto-submit when
+            /// `nowMs() - auto_exec_t0_ms >= cfg.auto_delay_ms`.
+            auto_exec_t0_ms: i64 = 0,
             /// Index into `cfg.models[]` for the currently-selected
             /// model. Wraps around when `Alt+M` (`llm_exec_cycle_model`)
             /// fires. Initialised to 0 at attach (first entry is
@@ -591,6 +613,12 @@ pub fn configure(comptime cfg: Config) type {
         // ---- hooks --------------------------------------------------------
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
+            // Auto-exec abort window: any keystroke during the
+            // armed window disarms the pending Enter. The
+            // suggested command stays on the prompt for the user
+            // to edit / abort with Ctrl+Shift+X or Esc.
+            if (rt.auto_exec_armed) rt.auto_exec_armed = false;
+
             // Observe the line state to maintain `ai_mode_active`.
             // Runs on EVERY keystroke (cheap — just a prefix
             // check). When the user types `#: ` the flag flips to
@@ -721,62 +749,8 @@ pub fn configure(comptime cfg: Config) type {
                     if (rt.api_base.len != 0) rt.ai_mode_active = false;
                     return true;
                 },
-                .llm_exec_dialog => {
-                    if (!rt.ai_mode_active) return false;
-                    const line = ctx.line.current();
-                    const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
-                    if (body.len == 0) {
-                        latchHint(rt, "type your task after `#: ` then press Alt+S");
-                        return true;
-                    }
-                    if (body.len > cfg.max_prompt_bytes) {
-                        latchHint(rt, "prompt too long — shorten the task and try again");
-                        return true;
-                    }
-                    if (rt.api_base.len == 0) {
-                        latchErr(rt, inert_error_msg);
-                        return true;
-                    }
-                    // Dialog mode requires OSC 133 — without `;C` /
-                    // `;D` we can't tell when the shell finished
-                    // running each step's command. Detect missing
-                    // integration by checking whether ANY marker has
-                    // arrived since the runtime attached. Single mode
-                    // (Alt+A) doesn't have this requirement.
-                    if (!rt.osc133_capture.active) {
-                        latchErr(rt, "exec mode needs OSC 133 — run `eval \"$(atty init bash)\"` or use Alt+A");
-                        return true;
-                    }
-                    // Stage the first user turn from the typed body.
-                    const initial = rt.allocator.dupe(u8, body) catch {
-                        latchErr(rt, "out of memory starting dialog");
-                        return true;
-                    };
-                    pushTurn(rt, .user, initial) catch {
-                        rt.allocator.free(initial);
-                        latchErr(rt, "out of memory starting dialog");
-                        return true;
-                    };
-
-                    fireDialogRequest(rt, ctx) catch |err| {
-                        abortDialog(rt, ctx, switch (err) {
-                            error.BodyTooLarge => "dialog body too large for buffer — increase Config.body_buf_bytes",
-                            error.OutOfMemory => "out of memory firing dialog request",
-                            else => "internal error firing dialog request",
-                        });
-                        return true;
-                    };
-                    // Wipe the `#: …` typed text — about to be
-                    // replaced by the suggested command on response.
-                    queueInjection(rt, "\x15");
-                    rt.ai_mode_active = false;
-                    return true;
-                },
-                .llm_exec_auto => {
-                    if (!rt.ai_mode_active) return false;
-                    latchHint(rt, "auto exec coming in a follow-up PR — use Alt+S for now");
-                    return true;
-                },
+                .llm_exec_dialog => return startDialog(rt, ctx, false),
+                .llm_exec_auto => return startDialog(rt, ctx, true),
                 .llm_exec_cycle_model => {
                     if (!rt.ai_mode_active) return false;
                     if (cfg.models.len == 0) {
@@ -1026,6 +1000,29 @@ pub fn configure(comptime cfg: Config) type {
         /// mutex acquisition stay off the master-output hot path.
         pub fn onTick(rt: *Runtime, ctx: *m.Context, elapsed_ms: u64) m.Error!void {
             _ = elapsed_ms;
+
+            // Auto-exec: fire \r after the configured delay if
+            // the user hasn't pressed any key (onInput would've
+            // cleared `auto_exec_armed`). One-shot — clear the
+            // flag once we enqueue the Enter so we don't re-fire
+            // on the next tick.
+            //
+            // The injection path in proxy.zig bypasses
+            // dispatchLineCommit (only stdin keystrokes pump that
+            // pipeline), so the `.suggesting → .executing`
+            // transition that onLineCommit would normally run
+            // gets done here directly — otherwise capturing of
+            // the upcoming `;C`/`;D` edges would never start and
+            // the dialog would stall in .suggesting.
+            if (rt.auto_exec_armed and rt.dialog_state == .suggesting) {
+                const elapsed: i64 = nowMs() - rt.auto_exec_t0_ms;
+                if (elapsed >= @as(i64, @intCast(cfg.auto_delay_ms))) {
+                    rt.auto_exec_armed = false;
+                    queueInjection(rt, "\r");
+                    rt.dialog_state = .executing;
+                }
+            }
+
             if (rt.dialog_state != .observation_ready) return;
 
             // Push the observation as a turn, build the next
@@ -1284,6 +1281,14 @@ pub fn configure(comptime cfg: Config) type {
                     // Same author-staging contract as single mode —
                     // see the matching call in `pollShellInput`.
                     ctx.line.setCommitAuthor(.llm);
+                    // Arm the auto-submit timer if we're in
+                    // auto-exec mode (Alt+Shift+S). onTick fires
+                    // the Enter after cfg.auto_delay_ms; any user
+                    // keystroke (via onInput) disarms it.
+                    if (rt.auto_mode_active) {
+                        rt.auto_exec_armed = true;
+                        rt.auto_exec_t0_ms = nowMs();
+                    }
                     // Return the command bytes for injection at
                     // the shell prompt — directly from
                     // `pending_command` so the buffer's role stays
@@ -1448,6 +1453,62 @@ pub fn configure(comptime cfg: Config) type {
         /// Serialize the current conversation, hand it to the
         /// worker. Sets `dialog_state` to `.generating` on success.
         /// Returns `error.BodyTooLarge` when the serialized body
+        /// Shared body for `llm_exec_dialog` (Alt+S, step-by-step)
+        /// and `llm_exec_auto` (Alt+Shift+S, auto-submitted after
+        /// `cfg.auto_delay_ms`). The `auto` flag flips
+        /// `rt.auto_mode_active` so the dialog response handler's
+        /// `.exec` arm knows to arm the auto-submit timer instead
+        /// of waiting on the user's Enter.
+        fn startDialog(rt: *Runtime, ctx: *m.Context, auto: bool) bool {
+            if (!rt.ai_mode_active) return false;
+            const line = ctx.line.current();
+            const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
+            if (body.len == 0) {
+                latchHint(rt, if (auto)
+                    "type your task after `#: ` then press Alt+Shift+S"
+                else
+                    "type your task after `#: ` then press Alt+S");
+                return true;
+            }
+            if (body.len > cfg.max_prompt_bytes) {
+                latchHint(rt, "prompt too long — shorten the task and try again");
+                return true;
+            }
+            if (rt.api_base.len == 0) {
+                latchErr(rt, inert_error_msg);
+                return true;
+            }
+            // Dialog mode (both flavours) requires OSC 133 — without
+            // `;C` / `;D` we can't tell when the shell finished
+            // running each step's command. Single mode (Alt+A)
+            // doesn't have this requirement.
+            if (!rt.osc133_capture.active) {
+                latchErr(rt, "exec mode needs OSC 133 — run `eval \"$(atty init bash)\"` or use Alt+A");
+                return true;
+            }
+            const initial = rt.allocator.dupe(u8, body) catch {
+                latchErr(rt, "out of memory starting dialog");
+                return true;
+            };
+            pushTurn(rt, .user, initial) catch {
+                rt.allocator.free(initial);
+                latchErr(rt, "out of memory starting dialog");
+                return true;
+            };
+            rt.auto_mode_active = auto;
+            fireDialogRequest(rt, ctx) catch |err| {
+                abortDialog(rt, ctx, switch (err) {
+                    error.BodyTooLarge => "dialog body too large for buffer — increase Config.body_buf_bytes",
+                    error.OutOfMemory => "out of memory firing dialog request",
+                    else => "internal error firing dialog request",
+                });
+                return true;
+            };
+            queueInjection(rt, "\x15");
+            rt.ai_mode_active = false;
+            return true;
+        }
+
         /// exceeds `cfg.body_buf_bytes` (the conversation has
         /// outgrown the shared buffer — user needs to cancel).
         fn fireDialogRequest(rt: *Runtime, ctx: *m.Context) !void {
@@ -1532,6 +1593,8 @@ pub fn configure(comptime cfg: Config) type {
             rt.pending_description_len = 0;
             rt.last_assistant_json_len = 0;
             rt.in_flight = false;
+            rt.auto_mode_active = false;
+            rt.auto_exec_armed = false;
         }
 
         /// Abort the dialog with an error notification. Surfaces in
