@@ -300,6 +300,10 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     const scenario_dir_abs = try gpa.dupe(u8, rp_buf[0..rp_len]);
     defer gpa.free(scenario_dir_abs);
     try extra_env.append(gpa, .{ .key = "ATTY_SCENARIO_DIR", .value = scenario_dir_abs });
+    // Expose the per-scenario binary path inside the spawned shell so
+    // scenarios that exercise `atty init bash` can run it via an abs
+    // path (the forced PATH doesn't include `.zig-cache/o/<hash>/`).
+    try extra_env.append(gpa, .{ .key = "ATTY_BIN", .value = scenario_bin });
     var spawn_argv: []const []const u8 = &.{};
     var spawn_seen = false;
     var first_cmd_after_spawn: usize = 0;

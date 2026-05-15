@@ -663,29 +663,34 @@ pub fn configure(comptime cfg: Config) type {
             const line = ctx.line.lastCommitted() orelse ctx.line.current();
             if (!std.mem.startsWith(u8, line, cfg.prefix)) return .forward;
 
-            // Enter in AI mode is intentionally a no-op for
-            // dialog/auto modes (you must explicitly pick an action
-            // key — security against accidental LLM calls). For the
-            // single-shot single-prompt path, we KEEP the legacy
-            // `#:<Enter>` trigger here so existing user muscle
-            // memory still works alongside the new `Alt+A`. Both
-            // routes call `triggerSinglePrompt` so the behaviour is
-            // identical.
-            const result = triggerSinglePrompt(rt, ctx, line, .replace_commit_on_enter);
-            // Mirror the Alt+A eager-clear of `ai_mode_active`.
-            // The shell wipes the line via the returned
-            // `.replace_commit = "\x15"`, so the prefix is gone
-            // from line_state on the next keystroke. Clearing
-            // ai_mode_active now means the verbose statusbar hint
-            // disappears immediately, not on the next keypress —
-            // same flicker-free behaviour the Alt+A path has.
-            // Gated on api_base.len for the same reason: inert
-            // mode keeps the user in AI mode so they can fix
-            // config + retry.
-            if (rt.api_base.len != 0 and result == .replace_commit) {
-                rt.ai_mode_active = false;
+            // Enter on `#: …` is configurable via `Config.enter_action`.
+            // Default `.none` (no-op) — explicit action keys
+            // (Alt+A / Alt+S / Alt+Shift+S) are the security gate
+            // against accidental LLM calls. Users can opt back into
+            // the pre-Alt-key trigger flow by setting `.single`,
+            // `.dialog`, or `.auto` in their config.
+            switch (cfg.enter_action) {
+                .none => return .forward,
+                .single => {
+                    const result = triggerSinglePrompt(rt, ctx, line, .replace_commit_on_enter);
+                    // Mirror the Alt+A eager-clear of
+                    // `ai_mode_active`. The shell wipes the line
+                    // via the returned `.replace_commit = "\x15"`,
+                    // so the prefix is gone from line_state on the
+                    // next keystroke. Clearing ai_mode_active now
+                    // means the verbose statusbar hint disappears
+                    // immediately, not on the next keypress —
+                    // same flicker-free behaviour as the Alt+A
+                    // path. Gated on api_base.len for the same
+                    // reason: inert mode keeps the user in AI mode
+                    // so they can fix config + retry.
+                    if (rt.api_base.len != 0 and result == .replace_commit) {
+                        rt.ai_mode_active = false;
+                    }
+                    return result;
+                },
+                .dialog, .auto => return startDialogViaEnter(rt, ctx, cfg.enter_action == .auto),
             }
-            return result;
         }
 
         /// Dispatch site for the keymap actions `llm_exec_*`. The
@@ -1531,6 +1536,61 @@ pub fn configure(comptime cfg: Config) type {
         /// `rt.auto_mode_active` so the dialog response handler's
         /// `.exec` arm knows to arm the auto-submit timer instead
         /// of waiting on the user's Enter.
+        /// Same effect as `startDialog`, but returns `m.Action` so
+        /// the `onInput` Enter branch can wipe the prompt via
+        /// `.replace_commit = "\x15"` (the shell never sees the
+        /// Enter or the `#: …` text). Returns `.forward` for the
+        /// gate-failed cases — the gate failures latch a hint or
+        /// error notification, so the user still gets feedback, but
+        /// the Enter falls through to bash which treats `#: …` as a
+        /// comment (no-op). Mirrors `startDialog` byte-for-byte
+        /// except for the replace-via-Enter wiring at the success
+        /// site.
+        fn startDialogViaEnter(rt: *Runtime, ctx: *m.Context, auto: bool) m.Action {
+            if (!rt.ai_mode_active) return .forward;
+            const line = ctx.line.current();
+            const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
+            if (body.len == 0) {
+                latchHint(rt, if (auto)
+                    "type your task after `#: ` then press Enter"
+                else
+                    "type your task after `#: ` then press Enter");
+                return .forward;
+            }
+            if (body.len > cfg.max_prompt_bytes) {
+                latchHint(rt, "prompt too long — shorten the task and try again");
+                return .forward;
+            }
+            if (rt.api_base.len == 0) {
+                latchErr(rt, inert_error_msg);
+                return .forward;
+            }
+            if (!rt.osc133_capture.active) {
+                latchErr(rt, "exec mode needs OSC 133 — run `eval \"$(atty init bash)\"` or use Alt+A");
+                return .forward;
+            }
+            const initial = rt.allocator.dupe(u8, body) catch {
+                latchErr(rt, "out of memory starting dialog");
+                return .forward;
+            };
+            pushTurn(rt, .user, initial) catch {
+                rt.allocator.free(initial);
+                latchErr(rt, "out of memory starting dialog");
+                return .forward;
+            };
+            rt.auto_mode_active = auto;
+            fireDialogRequest(rt, ctx) catch |err| {
+                abortDialog(rt, ctx, switch (err) {
+                    error.BodyTooLarge => "dialog body too large for buffer — increase Config.body_buf_bytes",
+                    error.OutOfMemory => "out of memory firing dialog request",
+                    else => "internal error firing dialog request",
+                });
+                return .forward;
+            };
+            rt.ai_mode_active = false;
+            return .{ .replace_commit = "\x15" };
+        }
+
         fn startDialog(rt: *Runtime, ctx: *m.Context, auto: bool) bool {
             if (!rt.ai_mode_active) return false;
             const line = ctx.line.current();
@@ -2984,6 +3044,10 @@ test "LLM worker round-trips a mock ollama response into the latch + hint surfac
         .api_base_fallback_env = "ATTY_TEST_LLM_NEVER",
         .api_key_env = "ATTY_TEST_LLM_NEVER",
         .model = "test-model",
+        // This test exercises the legacy `#:<Enter>` trigger path —
+        // opt back into it via `enter_action = .single` (default is
+        // `.none` since Alt+A is now the explicit binding).
+        .enter_action = .single,
     });
 
     var rt = try L.attach(testing.allocator, real_io);
@@ -3040,6 +3104,11 @@ test "inert mode (no endpoint env) surfaces a 'no endpoint' hint" {
         .api_base_env = "ATTY_TEST_INERT_BASE",
         .api_base_fallback_env = "ATTY_TEST_INERT_FALLBACK",
         .api_key_env = "ATTY_TEST_INERT_KEY_NEVER",
+        // Inert-mode assertions rely on the Enter trigger reaching
+        // `triggerSinglePrompt` (which latches the "no endpoint"
+        // error). The default `.none` skips that path, so this
+        // test opts into `.single` explicitly.
+        .enter_action = .single,
     });
 
     var rt = try L.attach(testing.allocator, test_io);
@@ -3144,6 +3213,9 @@ test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
         .api_base_fallback_env = "ATTY_TEST_LLM_500_NEVER",
         .api_key_env = "ATTY_TEST_LLM_500_NEVER",
         .model = "test-model",
+        // Opt into the legacy `#:<Enter>` path — this test types
+        // Enter to fire the request against the 500 mock.
+        .enter_action = .single,
     });
 
     var rt = try L.attach(testing.allocator, real_io);
