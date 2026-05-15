@@ -2870,22 +2870,7 @@ test "LLM worker round-trips a mock ollama response into the latch + hint surfac
     // Don't call L.detach — it does t.detach() which leaks the heap
     // allocations (intentional, see round-5 fix). For the test we do a
     // sync join so the testing allocator's leak detector stays happy.
-    defer {
-        {
-            rt.shared.mutex.lockUncancelable(real_io);
-            defer rt.shared.mutex.unlock(real_io);
-            rt.shared.shutdown = true;
-            rt.shared.cv.signal(real_io);
-        }
-        if (rt.thread) |t| t.join();
-        testing.allocator.destroy(rt.shared);
-        testing.allocator.free(rt.api_base);
-        testing.allocator.free(rt.api_key);
-        testing.allocator.free(rt.shell);
-        testing.allocator.free(rt.context_blob);
-        testing.allocator.destroy(rt.captured_output);
-        testing.allocator.destroy(rt.last_assistant_json);
-    }
+    defer shutdownAndFree(L, &rt, real_io);
 
     // Prime line_state with `#: hello` followed by Enter — onInput
     // expects lastCommitted to hold the prefixed line.
@@ -3042,22 +3027,7 @@ test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
     });
 
     var rt = try L.attach(testing.allocator, real_io);
-    defer {
-        {
-            rt.shared.mutex.lockUncancelable(real_io);
-            defer rt.shared.mutex.unlock(real_io);
-            rt.shared.shutdown = true;
-            rt.shared.cv.signal(real_io);
-        }
-        if (rt.thread) |t| t.join();
-        testing.allocator.destroy(rt.shared);
-        testing.allocator.free(rt.api_base);
-        testing.allocator.free(rt.api_key);
-        testing.allocator.free(rt.shell);
-        testing.allocator.free(rt.context_blob);
-        testing.allocator.destroy(rt.captured_output);
-        testing.allocator.destroy(rt.last_assistant_json);
-    }
+    defer shutdownAndFree(L, &rt, real_io);
 
     var line: @import("../line_state.zig").LineState = .{};
     _ = line.applyInput("#: hello\r");
