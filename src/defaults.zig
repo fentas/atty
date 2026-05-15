@@ -116,6 +116,13 @@ pub const Keymap = struct {
         // running exec loop can extend past the AI-mode entry
         // and the cancel is the safety lever for it).
         .{ .bytes = atty.keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel },
+        // Esc — bare-key shortcut for the same cancel action. The
+        // module's onAction handler is gated on AI-mode-or-
+        // pending-work, so a stray Esc outside AI mode falls
+        // through to the shell (vim users still get their bare
+        // Esc). Bytes match exact only — \x1b alone (lone Esc),
+        // not the lead byte of CSI sequences like arrow keys.
+        .{ .bytes = atty.keymap.key("Esc"), .action = .llm_exec_cancel },
         // Ghost pick — kitty kbd CSI-u + Esc+digit legacy fallback.
         // No-ops when `ghost.list_count == 0` (default) or N exceeds
         // the rendered list length.
