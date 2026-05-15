@@ -88,9 +88,13 @@ pub fn decodeContent(body: []const u8, out: []u8) usize {
 }
 
 /// Flatten prose to a single line, strip control bytes, truncate
-/// to `out.len`. Multi-line explanations join with a single space
-/// rather than dropping the trailing lines — the hint row only
-/// fits one line but the user gets the gist.
+/// to `min(out.len, 1024)` — the intermediate whitespace-collapse
+/// pass uses a 1 KiB stack scratch buffer, so the output is capped
+/// at 1024 bytes even when the caller passes a larger `out`. The
+/// hint row only fits one line so this never matters in practice;
+/// callers wanting >1 KiB should call `stripControlBytes` directly.
+/// Multi-line explanations join with a single space rather than
+/// dropping the trailing lines so the user gets the gist.
 pub fn sanitizeExplanation(raw: []const u8, out: []u8) usize {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     // Two-pass: first collapse whitespace + drop C0/DEL into a

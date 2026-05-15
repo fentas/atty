@@ -2454,6 +2454,12 @@ pub fn configure(comptime cfg: Config) type {
 const testing = std.testing;
 const test_io: std.Io = std.Io.failing;
 
+// Pull in sibling parse-tests so `unit_tests.zig`'s single
+// `_ = @import("modules/llm.zig")` line discovers them.
+test {
+    _ = parse;
+}
+
 test "configure exposes the expected hooks" {
     const L = configure(.{});
     try testing.expect(@hasDecl(L, "onInput"));
