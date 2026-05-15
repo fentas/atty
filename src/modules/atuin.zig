@@ -107,10 +107,10 @@ pub const Config = struct {
     /// <prefix>:llm <cmd>`. Off by default because not every atuin
     /// build accepts `--author` (the flag landed in v18.3+) and
     /// passing an unknown flag aborts the record. Turn on once you
-    /// confirm your atuin supports it; then `atuin search --filter
-    /// global --author <prefix>:llm` will scope to model-suggested
-    /// commits. User-typed commits stay untagged to preserve the
-    /// existing on-disk format.
+    /// confirm your atuin supports it; then `atuin search
+    /// --filter-mode global --author <prefix>:llm` will scope to
+    /// model-suggested commits. User-typed commits stay untagged
+    /// to preserve the existing on-disk format.
     tag_llm_author: bool = false,
 
     /// Prefix prepended to the author tag (`<prefix>:llm`). Lets
