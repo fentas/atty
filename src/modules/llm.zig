@@ -1827,6 +1827,70 @@ pub fn configure(comptime cfg: Config) type {
             return rt.err_buf[0..rt.err_len];
         }
 
+        // Comptime SGR escape constants for the AI-mode statusbar
+        // hint. The bar wraps the whole segment in `dim` (default
+        // bar style), so the inline `[22m` (cancel dim/bold) +
+        // `[2m` (re-apply dim) pairs preserve dim for prose while
+        // letting the icon and shortcuts override with the
+        // configured 256-colour foregrounds. `[39m` restores the
+        // default foreground without disturbing other attributes.
+        //
+        // When the color is null (user wants legacy gray-dim),
+        // the corresponding wrap is empty — segments inherit the
+        // bar's dim style.
+        const icon_open: []const u8 = if (cfg.statusbar_icon_color) |c|
+            std.fmt.comptimePrint("\x1B[22m\x1B[38;5;{d}m", .{c})
+        else
+            "";
+        const icon_close: []const u8 = if (cfg.statusbar_icon_color != null)
+            "\x1B[39m\x1B[2m"
+        else
+            "";
+        const key_open: []const u8 = if (cfg.statusbar_shortcut_color) |c|
+            std.fmt.comptimePrint("\x1B[22m\x1B[1m\x1B[38;5;{d}m", .{c})
+        else
+            "";
+        const key_close: []const u8 = if (cfg.statusbar_shortcut_color != null)
+            "\x1B[22m\x1B[39m\x1B[2m"
+        else
+            "";
+
+        // Helper to wrap a shortcut token comptime so the assembled
+        // hint string stays a const where possible.
+        const Wrap = struct {
+            fn key(comptime label: []const u8) []const u8 {
+                return key_open ++ label ++ key_close;
+            }
+            fn icon(comptime glyph: []const u8) []const u8 {
+                return icon_open ++ glyph ++ icon_close;
+            }
+        };
+
+        // Pre-built status strings for the persistent dialog/auto
+        // mode views. Comptime concatenation so the assembled
+        // bytes are static — no per-tick formatting cost. The
+        // shortcut tokens (Esc / Ctrl+Shift+X) are styled the same
+        // as Alt+A / Alt+S in AI mode so visual vocabulary is
+        // consistent across all status views.
+        const ai_idle_hint = Wrap.icon("\u{2728}") ++ " AI \u{00B7} " ++
+            Wrap.key("Alt+A") ++ " single \u{00B7} " ++
+            Wrap.key("Alt+S") ++ " dialog \u{00B7} " ++
+            Wrap.key("Alt+Shift+S") ++ " auto \u{00B7} " ++
+            Wrap.key("Alt+M") ++ " model \u{00B7} " ++
+            Wrap.key("Alt+H") ++ " help \u{00B7} " ++
+            Wrap.key("Esc") ++ " cancel";
+        const dialog_idle_hint = Wrap.icon("\u{1F916}") ++ " DIALOG mode \u{00B7} type prompt + Enter \u{00B7} " ++
+            Wrap.key("Esc") ++ " / " ++ Wrap.key("Ctrl+Shift+X") ++ " to exit";
+        const dialog_inflight_hint = Wrap.icon("\u{1F916}") ++ " DIALOG \u{00B7} " ++
+            Wrap.icon("\u{1F9E0}") ++ " thinking\u{2026} \u{00B7} " ++
+            Wrap.key("Esc") ++ " / " ++ Wrap.key("Ctrl+Shift+X") ++ " to exit";
+        const auto_idle_hint = Wrap.icon("\u{26A1}") ++ " AUTO mode \u{00B7} type prompt + Enter \u{00B7} " ++
+            Wrap.key("Esc") ++ " / " ++ Wrap.key("Ctrl+Shift+X") ++ " to exit";
+        const auto_inflight_hint = Wrap.icon("\u{26A1}") ++ " AUTO \u{00B7} " ++
+            Wrap.icon("\u{1F9E0}") ++ " thinking\u{2026} \u{00B7} " ++
+            Wrap.key("Esc") ++ " / " ++ Wrap.key("Ctrl+Shift+X") ++ " to exit";
+        const thinking_hint = Wrap.icon("\u{1F9E0}") ++ " thinking\u{2026}";
+
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             // Persistent dialog/auto mode segment takes precedence
             // over the transient "thinking…" indicator — the user
@@ -1837,17 +1901,11 @@ pub fn configure(comptime cfg: Config) type {
             // a request is in flight.
             switch (rt.dialog_persistent_mode) {
                 .off => {},
-                .dialog => return if (rt.in_flight)
-                    "\u{1F916} DIALOG · \u{1F9E0} thinking… · Esc / Ctrl+Shift+X to exit"
-                else
-                    "\u{1F916} DIALOG mode · type prompt + Enter · Esc / Ctrl+Shift+X to exit",
-                .auto => return if (rt.in_flight)
-                    "\u{26A1} AUTO · \u{1F9E0} thinking… · Esc / Ctrl+Shift+X to exit"
-                else
-                    "\u{26A1} AUTO mode · type prompt + Enter · Esc / Ctrl+Shift+X to exit",
+                .dialog => return if (rt.in_flight) dialog_inflight_hint else dialog_idle_hint,
+                .auto => return if (rt.in_flight) auto_inflight_hint else auto_idle_hint,
             }
 
-            if (rt.in_flight) return "\u{1F9E0} thinking…";
+            if (rt.in_flight) return thinking_hint;
 
             // AI mode hint: when the line starts with the prefix,
             // surface the action keys so users discover the new
@@ -1871,13 +1929,26 @@ pub fn configure(comptime cfg: Config) type {
                 // single name into the bar.
                 if (cfg.models.len > 0) {
                     const pick = cfg.models[rt.current_model_idx];
+                    // Same shape as ai_idle_hint but with the
+                    // current model name interpolated after `Alt+M`.
+                    // Fallback drops to the static hint if the
+                    // model name overruns status_buf.
                     return std.fmt.bufPrint(
                         &rt.status_buf,
-                        "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M {s} · Alt+H help · Esc cancel",
-                        .{pick},
-                    ) catch "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Esc cancel";
+                        "{s} AI \u{00B7} {s} single \u{00B7} {s} dialog \u{00B7} {s} auto \u{00B7} {s} {s} \u{00B7} {s} help \u{00B7} {s} cancel",
+                        .{
+                            Wrap.icon("\u{2728}"),
+                            Wrap.key("Alt+A"),
+                            Wrap.key("Alt+S"),
+                            Wrap.key("Alt+Shift+S"),
+                            Wrap.key("Alt+M"),
+                            pick,
+                            Wrap.key("Alt+H"),
+                            Wrap.key("Esc"),
+                        },
+                    ) catch ai_idle_hint;
                 }
-                return "\u{2728} AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Esc cancel";
+                return ai_idle_hint;
             }
 
             // Legacy prefix signal — kept for users who set the

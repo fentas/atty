@@ -123,6 +123,20 @@ pub const Config = struct {
     /// Status-bar text shown while the prefix is matched. Defaults
     /// to a sparkle so it pops against the bar's other segments.
     prefix_signal_status_text: []const u8 = "\u{2728} prompt",
+    /// 256-colour foreground for the AI / DIALOG / AUTO icon glyphs
+    /// in the status bar. Picked so the icon reads as "marked"
+    /// without competing with the surrounding dim prose for
+    /// attention. Default 141 = soft mauve — distinct from the
+    /// statusbar's gray dim and visible on both light and dark
+    /// terminal themes. Set to `null` to inherit the bar's
+    /// dim-gray styling (legacy look).
+    statusbar_icon_color: ?u8 = 141,
+    /// 256-colour foreground for the keyboard-shortcut tokens
+    /// (`Alt+A`, `Alt+S`, etc.) in the AI-mode status hint.
+    /// Default 14 = bright cyan, paired with a bold weight so
+    /// the keys jump out of the surrounding dim prose at a
+    /// glance. Set to `null` to inherit the bar's styling.
+    statusbar_shortcut_color: ?u8 = 14,
     /// Per-request timeout in ms. Stored for future use; not yet wired
     /// to the HTTP client — requests may block indefinitely on a slow
     /// or unreachable endpoint until the OS TCP timeout fires.
