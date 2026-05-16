@@ -519,24 +519,41 @@ pub fn configure(comptime cfg: Config) type {
                         // handleDialogResponse on the next worker
                         // tick; paintChatOverlay re-renders when
                         // the paint latch fires.
-                        if (rt.chat_input_len > 0) {
-                            const copy = rt.allocator.dupe(u8, rt.chat_input_buf[0..rt.chat_input_len]) catch {
-                                rt.chat_input_len = 0;
-                                rt.chat_overlay_paint_pending = true;
-                                continue;
-                            };
-                            pushTurn(rt, .user, copy) catch {
-                                rt.allocator.free(copy);
-                                rt.chat_input_len = 0;
-                                rt.chat_overlay_paint_pending = true;
-                                continue;
-                            };
-                            rt.chat_input_len = 0;
-                            fireDialogRequest(rt, ctx) catch {
-                                latchErr(rt, "couldn't send chat turn — see status");
-                            };
+                        if (rt.chat_input_len == 0) continue;
+
+                        // Refuse to submit while a previous
+                        // request is still in flight — firing
+                        // again here would clobber `shared.body_buf`
+                        // and discard the pending response. Idle
+                        // and `.idle` covers "first user-initiated
+                        // open with no prior dialog" too.
+                        const can_fire = rt.dialog_state == .idle or
+                            rt.dialog_state == .observation_ready or
+                            rt.dialog_state == .awaiting_question_answer;
+                        if (!can_fire) {
+                            latchHint(rt, "request in flight — wait for the response, or Ctrl+Shift+X to cancel");
                             rt.chat_overlay_paint_pending = true;
+                            continue;
                         }
+
+                        const copy = rt.allocator.dupe(u8, rt.chat_input_buf[0..rt.chat_input_len]) catch {
+                            latchErr(rt, "out of memory submitting chat turn");
+                            rt.chat_input_len = 0;
+                            rt.chat_overlay_paint_pending = true;
+                            continue;
+                        };
+                        pushTurn(rt, .user, copy) catch {
+                            rt.allocator.free(copy);
+                            latchErr(rt, "out of memory submitting chat turn");
+                            rt.chat_input_len = 0;
+                            rt.chat_overlay_paint_pending = true;
+                            continue;
+                        };
+                        rt.chat_input_len = 0;
+                        fireDialogRequest(rt, ctx) catch {
+                            latchErr(rt, "couldn't send chat turn — see status");
+                        };
+                        rt.chat_overlay_paint_pending = true;
                     },
                     0x08, 0x7F => {
                         // Backspace / Delete — pop one byte.
@@ -1513,14 +1530,26 @@ pub fn configure(comptime cfg: Config) type {
                     if (parsed.open_chat) {
                         switch (cfg.overlay_open_policy) {
                             .always => {
-                                rt.chat_overlay_open = true;
-                                rt.chat_overlay_paint_pending = true;
-                                // Suppress the inline banner emission
-                                // — the overlay will render the
-                                // conclusion as its content, double-
-                                // emitting would scroll it into
-                                // history under the open overlay too.
-                                rt.conclusion_pending = false;
+                                // Refuse `.always` when the overlay
+                                // would open empty — `dialogReset`
+                                // wiped the turn ring and an empty
+                                // reason leaves `conclusion_len` at
+                                // zero. Better to surface the notify-
+                                // shape hint than open an overlay
+                                // saying "no conversation yet".
+                                if (rt.conclusion_len > 0) {
+                                    rt.chat_overlay_open = true;
+                                    rt.chat_overlay_paint_pending = true;
+                                    // Suppress the inline banner
+                                    // emission — overlay renders the
+                                    // conclusion as content; double-
+                                    // emitting would scroll the same
+                                    // banner into history under the
+                                    // open overlay.
+                                    rt.conclusion_pending = false;
+                                } else {
+                                    latchHint(rt, "✨ LLM done — Alt+C to open chat");
+                                }
                             },
                             .notify => {
                                 latchHint(rt, "✨ LLM suggests follow-up — Alt+C to open chat");
@@ -1567,6 +1596,27 @@ pub fn configure(comptime cfg: Config) type {
                     rt.dialog_state = .awaiting_question_answer;
                     rt.auto_exec_armed = false;
                     rt.ai_mode_active = true;
+                    // `open_chat` advisory flag on .question: the
+                    // overlay's chat input is a better surface for
+                    // free-form answers than the shell prompt — same
+                    // policy semantics as the .done arm. With
+                    // `.always`, auto-open so the user can type the
+                    // answer in the overlay (the next Enter there
+                    // fires fireDialogRequest with the typed text
+                    // as the next .user turn — same path as the
+                    // shell prompt's onLineCommit).
+                    if (parsed.open_chat) {
+                        switch (cfg.overlay_open_policy) {
+                            .always => {
+                                rt.chat_overlay_open = true;
+                                rt.chat_overlay_paint_pending = true;
+                            },
+                            .notify => {
+                                latchHint(rt, "✨ LLM suggests overlay for this answer — Alt+C to open chat");
+                            },
+                            .never => {},
+                        }
+                    }
                     return null;
                 },
             }
@@ -2105,17 +2155,21 @@ pub fn configure(comptime cfg: Config) type {
         fn paintChatOverlay(rt: *Runtime) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
             if (!rt.chat_overlay_open) {
-                // Close: leave the alt screen, restoring the
-                // underlying shell screen unchanged. No further
-                // bytes after the exit sequence — the shell's own
-                // next render will populate whatever cursor
-                // position it had before atty's overlay opened.
-                w.writeAll("\x1B[?1049l") catch return false;
+                // Close: restore cursor visibility (paired with the
+                // hide we emit on open below) THEN leave the alt
+                // screen. The order matters — the shell expects its
+                // cursor back; doing it after the alt-screen exit
+                // would briefly flash the cursor on the underlying
+                // screen at row/col (1,1) before the shell repaints.
+                w.writeAll("\x1B[?25h\x1B[?1049l") catch return false;
                 rt.chat_overlay_buf_len = w.end;
                 return true;
             }
-            // Open: enter alt screen, clear, home cursor.
-            w.writeAll("\x1B[?1049h\x1B[2J\x1B[1;1H") catch return false;
+            // Open: enter alt screen, hide the real terminal cursor
+            // (the input row paints its own reverse-video block
+            // cursor; without `?25l` the real cursor parks adjacent
+            // to it and the user sees two), clear, home cursor.
+            w.writeAll("\x1B[?1049h\x1B[?25l\x1B[2J\x1B[1;1H") catch return false;
             // Title bar — dim chrome so it reads as frame, not content.
             // Coloured icon picks up the same fg=141 used in the
             // statusbar AI hint (consistent visual vocabulary).
@@ -2689,8 +2743,10 @@ test "chat overlay (Alt+C): toggle emits alt-screen enter then exit" {
     try testing.expect(rt.chat_overlay_paint_pending);
     const closed = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(closed != null);
-    // Just the alt-screen exit, nothing else.
-    try testing.expectEqualStrings("\x1B[?1049l", closed.?);
+    // Cursor-show + alt-screen exit, in that order (real cursor
+    // was hidden on open so the overlay's reverse-video block
+    // cursor wasn't doubled).
+    try testing.expectEqualStrings("\x1B[?25h\x1B[?1049l", closed.?);
 }
 
 test "chat overlay: onInput swallows all keystrokes while open" {
