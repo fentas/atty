@@ -159,6 +159,19 @@ pub const Pty = struct {
             // why we died.
             childSetup(self.master, self.slave_path) catch std.c._exit(127);
 
+            // execve(2) preserves SIG_IGN across exec, so the parent's
+            // SIGPIPE → SIG_IGN disposition would leak into the user's
+            // shell and break `yes | head` / `curl | less` / any
+            // pipeline whose writer expects to die on EPIPE. Restore
+            // default before exec so the shell starts with a vanilla
+            // signal mask.
+            const dfl = posix.Sigaction{
+                .handler = .{ .handler = posix.SIG.DFL },
+                .mask = posix.sigemptyset(),
+                .flags = 0,
+            };
+            posix.sigaction(posix.SIG.PIPE, &dfl, null);
+
             // Inject the ATTY env markers so shell rc files can detect
             // "running inside atty" and skip wrapping themselves again.
             injectAttyEnv(atty_pid);
