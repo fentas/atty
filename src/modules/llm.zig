@@ -2064,7 +2064,7 @@ pub fn configure(comptime cfg: Config) type {
             // line — leaves the last row free of overlay text in
             // case the terminal renders a scrollbar / status hint
             // there.
-            w.writeAll("\x1B[999;1H\x1B[2m[Alt+C close]\x1B[0m") catch return false;
+            w.writeAll("\x1B[999;1H\x1B[1A\x1B[2m[Alt+C close]\x1B[0m") catch return false;
             rt.chat_overlay_buf_len = w.end;
             return true;
         }
@@ -2081,8 +2081,18 @@ pub fn configure(comptime cfg: Config) type {
                 if (paintChatOverlay(rt)) {
                     return rt.chat_overlay_buf[0..rt.chat_overlay_buf_len];
                 }
-                // Paint overran the buffer — drop the latch silently;
-                // the next toggle re-attempts.
+                // Paint overran the buffer. The close path can't
+                // overflow (single `?1049l` byte sequence), so this
+                // only fires on open. Roll back `chat_overlay_open`
+                // so the input swallow releases — otherwise the
+                // user would see a frozen shell that eats every
+                // keystroke until they remember to press Alt+C
+                // again. Surface a hint so the failure mode isn't
+                // silent.
+                if (rt.chat_overlay_open) {
+                    rt.chat_overlay_open = false;
+                    latchErr(rt, "chat overlay too big to render — buffer overflow");
+                }
             }
             // Conclusion banner emission takes precedence over the
             // cursor-colour edge logic — the banner is one-shot
