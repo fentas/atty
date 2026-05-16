@@ -1,30 +1,20 @@
-//! Dialog-mode types + pure helpers extracted from `llm.zig`.
+//! Dialog-mode types + Runtime-touching helpers extracted from `llm.zig`.
 //!
-//! The dialog-mode state machine (Alt+S / Alt+Shift+S) lives in
-//! `llm.zig` because its phase transitions reference the full
-//! `Runtime` struct (osc133_capture, captured_output, dialog_state,
-//! …). What CAN move out cleanly is the leaf surface:
+//! Two layers in this file:
 //!
-//!   - Pure enums (`State`, `Action`, `TurnKind`) — no cfg or
-//!     Runtime dependency.
-//!   - `Turn` — a `{kind, content}` pair owned by the runtime; no
-//!     cfg dependency either.
-//!   - `Response(max_bytes)` — the parsed-reply struct factory.
-//!     Buffer sizes come from `cfg.max_response_bytes`, so the
-//!     factory takes that as a comptime parameter.
-//!   - `parseResponse` — JSON → `Response` decoder. Pure modulo the
-//!     allocator (used by `std.json.parseFromSlice`).
-//!   - `buildRequestBody` — composes the OpenAI chat-completion
-//!     JSON envelope from a turn slice + the static system/shell/
-//!     context preamble. Pure modulo the allocator.
+//! Layer 1 (top of file): pure types + pure helpers, no Runtime
+//! dependency — `State`, `Action`, `TurnKind`, `Turn`,
+//! `Response(max_bytes)` factory, `parseResponse`, `buildRequestBody`.
 //!
-//! Everything else (Runtime-touching functions: `pushTurn`,
-//! `handleResponse`, `dialogReset`, `abortDialog`, …) stays in
-//! `llm.zig` for now. Lifting those out cleanly requires either a
-//! Runtime factory (Runtime closes over cfg too) or threading the
-//! Runtime type through as a comptime parameter — both increase
-//! diff size + review burden without a corresponding readability
-//! win at this slice. Tracked in `docs/llm-exec-mode-followups.md`.
+//! Layer 2 (`Module(cfg, Runtime)` factory near the bottom): the
+//! small Runtime-touching helpers that compose the turn ring, the
+//! captured-output buffer, and the conclusion banner. They take
+//! `*Runtime` by reference and don't try to model the full state
+//! machine — that still lives in `llm.zig`. The factory takes
+//! `Runtime` as a comptime arg so it can stay defined in `llm.zig`
+//! (Runtime closes over `cfg` in ways that make a sibling
+//! definition awkward), while the helpers move out to keep llm.zig
+//! lean.
 
 const std = @import("std");
 
@@ -465,4 +455,173 @@ test "buildRequestBody: assistant_exec turn uses assistant role" {
     const body = try buildRequestBody(testing.allocator, "m", "s", "bash", "", &turns);
     defer testing.allocator.free(body);
     try testing.expect(std.mem.indexOf(u8, body, "\"role\":\"assistant\"") != null);
+}
+
+// ============================================================================
+// Module(cfg, Runtime) — Runtime-touching helpers
+// ============================================================================
+//
+// Small, focused helpers that touch `*Runtime` fields directly.
+// Grouped here because each one wraps an inline buffer on Runtime
+// (turn ring, captured_output, conclusion_buf) and is otherwise
+// pure logic. Larger state-machine functions (`handleResponse`,
+// `dialogReset`, `fireDialogRequest`, …) stay in `llm.zig` for now.
+
+const types = @import("types.zig");
+
+pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
+    return struct {
+        /// 58 box-drawing dashes — used twice by `captureConclusion`
+        /// to render symmetric top/bottom borders. Comptime so the
+        /// banner width stays a single source of truth.
+        pub const conclusion_border_dashes: []const u8 = "\u{2500}" ** 58;
+
+        /// Push a turn onto the conversation history. `content` must
+        /// be heap-allocated by the caller and is OWNED by the
+        /// runtime after this call (freed in `freeTurns`). At
+        /// `cfg.history_turns_max` capacity, drops the OLDEST turn
+        /// first (FIFO eviction) so a long dialog can't grow
+        /// unbounded across the runtime's lifetime.
+        ///
+        /// Ownership contract:
+        ///   - SUCCESS path: runtime now owns `content` (or its
+        ///     truncated replacement). Caller MUST NOT free.
+        ///   - FAILURE path: caller still owns `content`. The only
+        ///     failure mode is the truncation `dupe` — error
+        ///     propagates BEFORE we'd `free(content)`.
+        pub fn pushTurn(rt: *Runtime, kind: TurnKind, content: []u8) !void {
+            const final_content: []u8 = if (content.len > cfg.max_turn_bytes) blk: {
+                const trimmed = try rt.allocator.dupe(u8, content[0..cfg.max_turn_bytes]);
+                rt.allocator.free(content);
+                break :blk trimmed;
+            } else content;
+
+            if (rt.turns_len == cfg.history_turns_max) {
+                rt.allocator.free(rt.turns[0].content);
+                for (1..rt.turns_len) |i| {
+                    rt.turns[i - 1] = rt.turns[i];
+                }
+                rt.turns_len -= 1;
+            }
+            rt.turns[rt.turns_len] = .{ .kind = kind, .content = final_content };
+            rt.turns_len += 1;
+        }
+
+        /// Free every turn's content + reset the count. Called on
+        /// `detach` and on cancel so a follow-up dialog starts
+        /// clean. Safe to call when `turns_len == 0`.
+        pub fn freeTurns(rt: *Runtime) void {
+            for (rt.turns[0..rt.turns_len]) |turn| {
+                rt.allocator.free(turn.content);
+            }
+            rt.turns_len = 0;
+        }
+
+        /// Append bytes to `captured_output`, respecting the cap.
+        /// On overflow, set `captured_truncated = true` so the
+        /// observation turn surfaces a `[truncated]` suffix. Bytes
+        /// silently drop when the buffer is full — the caller
+        /// doesn't need to track room.
+        pub fn appendCaptured(rt: *Runtime, bytes: []const u8) void {
+            const room = rt.captured_output.len - rt.captured_output_len;
+            if (bytes.len > room) {
+                rt.captured_truncated = true;
+                if (room == 0) return;
+                @memcpy(rt.captured_output[rt.captured_output_len..][0..room], bytes[0..room]);
+                rt.captured_output_len += room;
+                return;
+            }
+            @memcpy(rt.captured_output[rt.captured_output_len..][0..bytes.len], bytes);
+            rt.captured_output_len += bytes.len;
+        }
+
+        /// Given a slice and the index of the LEADING ESC of an OSC
+        /// marker at `start`, return the index one past the marker's
+        /// terminator (BEL or ST `ESC \`). Bounded by `slice.len`.
+        /// `onOutput` uses this to resume capture after the marker
+        /// without re-parsing it.
+        ///
+        /// When the terminator doesn't arrive in the current feed
+        /// (rare; OSC sequences flush atomically in practice),
+        /// resumes at end-of-slice so the next feed doesn't
+        /// double-capture marker bytes.
+        pub fn advancePastMarker(slice: []const u8, start: u32) u32 {
+            const len: u32 = @intCast(slice.len);
+            if (start >= len) return len;
+            var i: usize = start;
+            while (i < slice.len) : (i += 1) {
+                if (slice[i] == 0x07) return @intCast(@min(i + 1, slice.len));
+                if (slice[i] == 0x1B and i + 1 < slice.len and slice[i + 1] == '\\') {
+                    return @intCast(@min(i + 2, slice.len));
+                }
+            }
+            return len;
+        }
+
+        /// Synchronously latch a hint string on the Runtime so the
+        /// next `provideHintText` tick surfaces it. For
+        /// informational content (LLM explanation of the injected
+        /// command).
+        pub fn latchHint(rt: *Runtime, msg: []const u8) void {
+            const n = @min(msg.len, rt.hint_buf.len);
+            @memcpy(rt.hint_buf[0..n], msg[0..n]);
+            rt.hint_len = n;
+            rt.hint_pending = true;
+        }
+
+        /// Synchronously latch an error string on the Runtime so
+        /// the next `provideErrorText` tick surfaces it (muted red
+        /// + ⚠ in the statusbar). Used by the onInput inert path
+        /// (no worker involved) and by the test scaffolding.
+        pub fn latchErr(rt: *Runtime, msg: []const u8) void {
+            const n = @min(msg.len, rt.err_buf.len);
+            @memcpy(rt.err_buf[0..n], msg[0..n]);
+            rt.err_len = n;
+            rt.err_pending = true;
+        }
+
+        /// Queue bytes for `pollShellInput` to drain on the next
+        /// tick. Used to route `\x15` (Ctrl+U) to the pty after
+        /// `onAction` triggers a worker call — `onAction` can't
+        /// synchronously modify the stdin path, so it queues the
+        /// kill-line byte here and the next poll tick drains it
+        /// AHEAD of the response.
+        pub fn queueInjection(rt: *Runtime, bytes: []const u8) void {
+            std.debug.assert(bytes.len <= rt.pending_injection.len);
+            @memcpy(rt.pending_injection[0..bytes.len], bytes);
+            rt.pending_injection_len = bytes.len;
+        }
+
+        /// Format the LLM session conclusion into a multi-line
+        /// banner stored in `conclusion_buf`. Re-emittable via Alt+C
+        /// (`llm_chat_overlay_toggle`). Surfaced via
+        /// `provideTermBytes`; the banner scrolls into the shell's
+        /// normal history above the next prompt — no DECSTBM resize
+        /// needed.
+        ///
+        /// Format (with dim SGR for the box chrome):
+        ///
+        ///     ╭─ atty · LLM session complete ────────────────
+        ///     │ ✓ <reason>
+        ///     │ <N> execs / <N> obs / <N> turns
+        ///     ╰──────────────────────────────────────────────
+        ///
+        /// Reason truncates to fit within `conclusion_buf` (1024
+        /// bytes); realistic reasons are 100-200 bytes.
+        pub fn captureConclusion(rt: *Runtime, reason: []const u8, execs: usize, obs: usize, turns: usize) void {
+            var w: std.Io.Writer = .fixed(&rt.conclusion_buf);
+            // Top: `╭─ atty · LLM session complete ` (31 visible cols
+            // incl. corners + trailing space) + 28 dashes = 59 visible
+            // cols. Bottom: `╰` + 58 dashes = 59 cols. Symmetric.
+            w.print("\n\x1b[2m\u{256D}\u{2500} atty \u{00B7} LLM session complete {s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(28 * 3)]}) catch {};
+            if (reason.len > 0) {
+                w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} {s}\r\n", .{reason}) catch {};
+            } else {
+                w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} done\r\n", .{}) catch {};
+            }
+            w.print("\x1b[2m\u{2502}\x1b[0m {d} execs / {d} obs / {d} turns\r\n", .{ execs, obs, turns }) catch {};
+            w.print("\x1b[2m\u{2570}{s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(58 * 3)]}) catch {};
+            rt.conclusion_len = w.end;
+        }
+    };
 }
