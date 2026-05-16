@@ -462,10 +462,16 @@ test "buildRequestBody: assistant_exec turn uses assistant role" {
 // ============================================================================
 //
 // Small, focused helpers that touch `*Runtime` fields directly.
-// Grouped here because each one wraps an inline buffer on Runtime
-// (turn ring, captured_output, conclusion_buf) and is otherwise
-// pure logic. Larger state-machine functions (`handleResponse`,
-// `dialogReset`, `fireDialogRequest`, …) stay in `llm.zig` for now.
+// Four conceptual groups:
+//   - turn ring: `pushTurn`, `freeTurns`
+//   - captured-output buffer: `appendCaptured`, `advancePastMarker`
+//   - status latches: `latchHint`, `latchErr`, `queueInjection`
+//   - conclusion banner: `captureConclusion`
+//
+// Larger state-machine functions (`handleResponse`, `dialogReset`,
+// `fireDialogRequest`, …) stay in `llm.zig` for now — they touch
+// worker channels and the dialog state machine in ways that aren't
+// purely buffer-shaped.
 
 const types = @import("types.zig");
 
@@ -663,4 +669,82 @@ test "Module.captureConclusion falls back to 'done' when reason is empty" {
 
     try testing.expect(std.mem.indexOf(u8, out, "\u{2713} done") != null);
     try testing.expect(std.mem.indexOf(u8, out, "1 execs / 0 obs / 2 turns") != null);
+}
+
+// Tiny config + FakeRuntime fixture for pushTurn / freeTurns tests.
+// `history_turns_max=3` so we can exercise FIFO eviction with a
+// reasonable byte budget; `max_turn_bytes=8` so we can exercise
+// truncation with short, readable test strings.
+fn TurnTestFixture(comptime hmax: comptime_int, comptime tmax: comptime_int) type {
+    const Cfg: types.Config = .{ .history_turns_max = hmax, .max_turn_bytes = tmax };
+    return struct {
+        pub const FakeRuntime = struct {
+            allocator: std.mem.Allocator,
+            turns: [hmax]Turn = undefined,
+            turns_len: usize = 0,
+        };
+        pub const M = Module(Cfg, FakeRuntime);
+    };
+}
+
+test "Module.pushTurn truncates content longer than cfg.max_turn_bytes" {
+    const F = TurnTestFixture(3, 8);
+    var rt: F.FakeRuntime = .{ .allocator = testing.allocator };
+    defer F.M.freeTurns(&rt);
+
+    const long = try testing.allocator.dupe(u8, "1234567890");
+    try F.M.pushTurn(&rt, .user, long);
+
+    try testing.expectEqual(@as(usize, 1), rt.turns_len);
+    try testing.expectEqual(@as(usize, 8), rt.turns[0].content.len);
+    try testing.expectEqualStrings("12345678", rt.turns[0].content);
+}
+
+test "Module.pushTurn keeps content shorter than cap untouched" {
+    const F = TurnTestFixture(3, 8);
+    var rt: F.FakeRuntime = .{ .allocator = testing.allocator };
+    defer F.M.freeTurns(&rt);
+
+    const short = try testing.allocator.dupe(u8, "hi");
+    try F.M.pushTurn(&rt, .user, short);
+
+    try testing.expectEqual(@as(usize, 1), rt.turns_len);
+    try testing.expectEqualStrings("hi", rt.turns[0].content);
+}
+
+test "Module.pushTurn FIFO-evicts the oldest turn at capacity" {
+    const F = TurnTestFixture(3, 32);
+    var rt: F.FakeRuntime = .{ .allocator = testing.allocator };
+    defer F.M.freeTurns(&rt);
+
+    try F.M.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "first"));
+    try F.M.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, "second"));
+    try F.M.pushTurn(&rt, .observation, try testing.allocator.dupe(u8, "third"));
+    try testing.expectEqual(@as(usize, 3), rt.turns_len);
+
+    try F.M.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "fourth"));
+
+    // "first" was evicted; the ring is now [second, third, fourth].
+    try testing.expectEqual(@as(usize, 3), rt.turns_len);
+    try testing.expectEqualStrings("second", rt.turns[0].content);
+    try testing.expectEqualStrings("third", rt.turns[1].content);
+    try testing.expectEqualStrings("fourth", rt.turns[2].content);
+    // Kind tags shifted with the contents.
+    try testing.expectEqual(TurnKind.assistant_exec, rt.turns[0].kind);
+    try testing.expectEqual(TurnKind.observation, rt.turns[1].kind);
+    try testing.expectEqual(TurnKind.user, rt.turns[2].kind);
+}
+
+test "Module.freeTurns frees every entry and resets the count" {
+    const F = TurnTestFixture(3, 32);
+    var rt: F.FakeRuntime = .{ .allocator = testing.allocator };
+
+    try F.M.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "a"));
+    try F.M.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "b"));
+    try testing.expectEqual(@as(usize, 2), rt.turns_len);
+
+    F.M.freeTurns(&rt);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+    // Safe to call on an empty ring.
+    F.M.freeTurns(&rt);
 }

@@ -1444,15 +1444,6 @@ pub fn configure(comptime cfg: Config) type {
             latchErr(rt, msg);
         }
 
-        /// Serialize the current conversation, hand it to the
-        /// worker. Sets `dialog_state` to `.generating` on success.
-        /// Returns `error.BodyTooLarge` when the serialized body
-        /// Shared body for `llm_exec_dialog` (Alt+S, step-by-step)
-        /// and `llm_exec_auto` (Alt+Shift+S, auto-submitted after
-        /// `cfg.auto_delay_ms`). The `auto` flag flips
-        /// `rt.auto_mode_active` so the dialog response handler's
-        /// `.exec` arm knows to arm the auto-submit timer instead
-        /// of waiting on the user's Enter.
         /// Same effect as `startDialog`, but returns `m.Action` so
         /// the `onInput` Enter branch can wipe the prompt via
         /// `.replace_commit = "\x15"` (the shell never sees the
