@@ -2081,6 +2081,16 @@ pub fn configure(comptime cfg: Config) type {
             Wrap.key("Esc") ++ " / " ++ Wrap.key("Ctrl+Shift+X") ++ " to exit";
         const thinking_hint = Wrap.icon("\u{1F9E0}") ++ " thinking\u{2026}";
 
+        /// Reports whether the chat overlay (Alt+C) currently owns
+        /// atty's alt-screen on the user's outer terminal. The
+        /// proxy queries this each master-read tick to decide
+        /// whether to write shell output to stdout (overlay closed)
+        /// or buffer it in the ring buffer for replay on close
+        /// (overlay open).
+        pub fn isOverlayActive(rt: *Runtime) bool {
+            return rt.chat_overlay_open;
+        }
+
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             // Persistent dialog/auto mode segment takes precedence
             // over the transient "thinking…" indicator — the user

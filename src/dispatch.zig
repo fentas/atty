@@ -191,6 +191,26 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return null;
         }
 
+        /// Returns true when any module's `isOverlayActive` hook
+        /// reports an open atty-controlled alt-screen overlay on
+        /// the user's outer terminal. The proxy uses this to:
+        ///   - mirror the bool onto `ctx.module_overlay_active`
+        ///   - capture PTY-master bytes into a ring buffer instead
+        ///     of writing them to stdout (so shell output during
+        ///     the overlay doesn't clobber the painted alt-screen)
+        ///   - suspend statusbar repaints (same reason)
+        ///
+        /// First module reporting true wins; short-circuits the
+        /// iteration.
+        pub fn anyOverlayActive(rts: *Runtimes) bool {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "isOverlayActive")) {
+                    if (M.isOverlayActive(rts[i])) return true;
+                }
+            }
+            return false;
+        }
+
         /// Sibling of `gatherHintText` for error notifications.
         /// Same one-shot, first-non-null semantics, but the proxy
         /// pushes the result into the statusbar's *error* slot which

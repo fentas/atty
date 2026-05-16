@@ -25,6 +25,7 @@ test {
     _ = @import("status_text.zig");
     _ = @import("args.zig");
     _ = @import("proxy/io.zig");
+    _ = @import("overlay_ring.zig");
     _ = @import("modules/_lib.zig");
     _ = @import("modules/atuin.zig");
     _ = @import("modules/llm.zig");

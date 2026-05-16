@@ -48,6 +48,7 @@ const AltScreen = @import("altscreen.zig").AltScreen;
 const CursorTracker = @import("cursor_tracker.zig").CursorTracker;
 const Osc7 = @import("osc7.zig").Osc7;
 const subprocess_mod = @import("subprocess.zig");
+const overlay_ring = @import("overlay_ring.zig");
 
 /// The single dispatcher specialisation used by the binary. Comptime
 /// expansion of `config.modules` happens here.
@@ -349,6 +350,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     };
     var pending_launches: PendingLaunches = .{};
 
+    // PTY-master ring buffer for the overlay-active interval.
+    // While any module reports `isOverlayActive == true`, atty's
+    // outer terminal is in alt-screen mode and writing shell
+    // output to stdout would clobber the overlay. Bytes captured
+    // here are flushed back to stdout on the overlay-closed
+    // transition. Drop-oldest on overflow with a count marker so
+    // the user knows when output was truncated.
+    var overlay_ring_state: overlay_ring.RingBuf(overlay_ring.default_size) = .{};
+    var prev_overlay_active: bool = false;
+
     var ctx = module.Context{
         .allocator = allocator,
         .io = io,
@@ -413,6 +424,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
     while (child_alive) {
         const n = try posix.poll(&pfds, config.proxy.tick_interval_ms);
+
+        // Overlay-state edge detection. Query at the top of each
+        // iteration so we catch overlay open/close transitions
+        // triggered by stdin-handler keymap actions (Alt+C). On
+        // the close edge, flush the ring buffer captured during
+        // the overlay-active interval back to stdout — the user's
+        // shell output that ran "behind" the overlay now appears
+        // in scroll history with a dropped-byte marker if any.
+        const overlay_active_iter = D.anyOverlayActive(&runtimes);
+        ctx.module_overlay_active = overlay_active_iter;
+        if (prev_overlay_active and !overlay_active_iter) {
+            overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
+        }
+        prev_overlay_active = overlay_active_iter;
 
         // ---- timeout → tick ----------------------------------------------
         if (n == 0) {
@@ -1087,6 +1112,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Updated after every master-read so a TUI launch
                 // / exit propagates within one tick.
                 ctx.shell_alt_screen_active = alt_screen.active;
+                // Query module-overlay state for the ring-buffer
+                // gate below. Mirror onto ctx so other modules
+                // (and the renderStatus path) see the same value.
+                const overlay_active_now = D.anyOverlayActive(&runtimes);
+                ctx.module_overlay_active = overlay_active_now;
 
                 // Walk the OSC 133 edge ring + OSC 7 capture ring
                 // INTERLEAVED by byte offset within the current
@@ -1264,7 +1294,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 D.dispatchOutput(&runtimes, &ctx, output) catch {};
-                try writeAll(posix.STDOUT_FILENO, output);
+                // While any module's overlay is active, divert
+                // master output to the ring buffer rather than
+                // writing it to stdout — stdout is in alt-screen
+                // mode painted by the overlay; direct writes
+                // would garble its content. On the overlay-closed
+                // transition (handled below after this dispatch
+                // block) the ring flushes back to stdout in order
+                // with a dropped-byte marker if it overflowed.
+                if (overlay_active_now) {
+                    overlay_ring_state.push(output);
+                } else {
+                    try writeAll(posix.STDOUT_FILENO, output);
+                }
 
                 // Deferred alt-screen side effects — see the captured
                 // `alt_transitioned` / `alt_now_active` above. Run AFTER
@@ -1489,6 +1531,10 @@ fn renderStatus(
     incognito: bool,
 ) !void {
     if (!ctx.is_tty) return;
+    // Suspend statusbar painting while any module's overlay is up
+    // — atty's terminal is in alt-screen, and writing the bar's
+    // bytes there clobbers the overlay's painted content.
+    if (ctx.module_overlay_active) return;
 
     // First gather the module contributions into a scratch buffer.
     //
