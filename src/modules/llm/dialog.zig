@@ -85,14 +85,6 @@ pub const Turn = struct {
     content: []u8,
 };
 
-/// Parsed-reply struct factory. The buffer sizes come from
-/// `cfg.max_response_bytes` (for `command_buf` and `question_buf`,
-/// which can be long shell-command-shaped strings) and a fixed
-/// 256-byte budget for the two short prose fields (`description`
-/// and `reason`). Returning a `type` (rather than passing buffer
-/// sizes through as runtime params) keeps callers stack-friendly:
-/// they can `var parsed: Response = .{}` inline without an
-/// allocator.
 /// Max number of multi-choice options atty parses from an
 /// `action=question` reply. Capped at 9 because `ghost_pick`'s
 /// Ctrl+1..9 / Esc+1..9 bindings address up to 9 entries — a
@@ -103,6 +95,14 @@ pub const max_choices = 9;
 /// choices would wrap and confuse the pick-list rendering.
 pub const choice_max_len = 256;
 
+/// Parsed-reply struct factory. The buffer sizes come from
+/// `cfg.max_response_bytes` (for `command_buf` and `question_buf`,
+/// which can be long shell-command-shaped strings) and a fixed
+/// 256-byte budget for the two short prose fields (`description`
+/// and `reason`). Returning a `type` (rather than passing buffer
+/// sizes through as runtime params) keeps callers stack-friendly:
+/// they can `var parsed: Response = .{}` inline without an
+/// allocator.
 pub fn Response(comptime max_response_bytes: comptime_int) type {
     return struct {
         const Self = @This();
@@ -591,7 +591,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// `onAction` triggers a worker call — `onAction` can't
         /// synchronously modify the stdin path, so it queues the
         /// kill-line byte here and the next poll tick drains it
-        /// AHEAD of the response.
+        /// AHEAD of the response. The compile-time assert pins the
+        /// 16-byte invariant: `pending_injection` is fixed for the
+        /// Ctrl+U / short-CSI use case; longer sequences need to
+        /// grow the buffer at the Runtime declaration first.
         pub fn queueInjection(rt: *Runtime, bytes: []const u8) void {
             std.debug.assert(bytes.len <= rt.pending_injection.len);
             @memcpy(rt.pending_injection[0..bytes.len], bytes);
