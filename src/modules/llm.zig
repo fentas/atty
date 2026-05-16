@@ -113,6 +113,21 @@ pub fn configure(comptime cfg: Config) type {
         const Turn = dialog.Turn;
         const DialogResponse = dialog.Response(cfg.max_response_bytes);
 
+        // Runtime-touching helpers from `llm/dialog.zig`. The factory
+        // takes `Runtime` as a comptime arg because Runtime is
+        // defined further down in this same `configure()` block; the
+        // helpers are otherwise free of cfg-level dependencies. See
+        // llm/dialog.zig's `Module()` for the body.
+        const dialog_helpers = dialog.Module(cfg, Runtime);
+        const pushTurn = dialog_helpers.pushTurn;
+        const freeTurns = dialog_helpers.freeTurns;
+        const appendCaptured = dialog_helpers.appendCaptured;
+        const advancePastMarker = dialog_helpers.advancePastMarker;
+        const captureConclusion = dialog_helpers.captureConclusion;
+        const latchHint = dialog_helpers.latchHint;
+        const latchErr = dialog_helpers.latchErr;
+        const queueInjection = dialog_helpers.queueInjection;
+
         // Shared state struct (mutex + buffers shared between
         // proxy and worker thread) lives in `llm/worker.zig`.
         // Aliased so existing call sites keep using `Shared` and
@@ -1401,41 +1416,6 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
-        /// Queue bytes on `pending_injection` for the next
-        /// `pollShellInput` tick to drain. Single entry point for
-        /// every site that wants to inject bytes synchronously
-        /// from a hook that has no return-value channel (i.e.
-        /// `onAction`). The compile-time assert pins the
-        /// invariant — `pending_injection` is fixed at 16 bytes
-        /// for the Ctrl+U / short-CSI use case; longer sequences
-        /// need to grow the buffer first.
-        fn queueInjection(rt: *Runtime, bytes: []const u8) void {
-            std.debug.assert(bytes.len <= rt.pending_injection.len);
-            @memcpy(rt.pending_injection[0..bytes.len], bytes);
-            rt.pending_injection_len = bytes.len;
-        }
-
-        /// Synchronously latch a hint string on the Runtime so the
-        /// next `provideHintText` tick surfaces it. For informational
-        /// content (LLM explanation of the injected command).
-        fn latchHint(rt: *Runtime, msg: []const u8) void {
-            const n = @min(msg.len, rt.hint_buf.len);
-            @memcpy(rt.hint_buf[0..n], msg[0..n]);
-            rt.hint_len = n;
-            rt.hint_pending = true;
-        }
-
-        /// Synchronously latch an error string on the Runtime so the
-        /// next `provideErrorText` tick surfaces it (muted red + ⚠
-        /// in the statusbar). Used by the onInput inert path (no
-        /// worker involved) and by the test scaffolding.
-        fn latchErr(rt: *Runtime, msg: []const u8) void {
-            const n = @min(msg.len, rt.err_buf.len);
-            @memcpy(rt.err_buf[0..n], msg[0..n]);
-            rt.err_len = n;
-            rt.err_pending = true;
-        }
-
         /// Latch the OSC-133-gate diagnostic error. Surfaces the
         /// cumulative byte-feed + dispatch counts so the user can
         /// tell at a glance WHY the gate is closed:
@@ -1452,56 +1432,6 @@ pub fn configure(comptime cfg: Config) type {
         ///     by construction (dispatchOsc sets active before
         ///     incrementing the counter); kept defensively in case
         ///     the parser ever changes shape.
-        /// Format the LLM session conclusion into a multi-line
-        /// banner stored in `conclusion_buf`. Emitted via
-        /// `provideTermBytes` (phase 1 design: the banner scrolls
-        /// into the shell's normal history above the next prompt
-        /// — no DECSTBM resize needed; the banner becomes part of
-        /// the shell session log). Re-emittable via Alt+C
-        /// (`llm_chat_overlay_toggle`).
-        ///
-        /// Format (with ANSI colour for the bordered chrome):
-        ///
-        ///     ╭─ atty · LLM session complete ────────────────
-        ///     │ ✓ <reason>
-        ///     │ <N> execs / <N> obs / <N> turns
-        ///     ╰──────────────────────────────────────────────
-        ///
-        /// Box-drawing chars + dim SGR for the borders so the
-        /// banner reads as chrome, not content. Truncates the
-        /// reason to fit within `conclusion_buf` (1024 bytes) —
-        /// realistic reasons are 100-200 bytes; the cap is just a
-        /// safety bound.
-        /// Comptime-built border for the conclusion banner. Single
-        /// source of truth — top and bottom emit the same width so
-        /// the box renders symmetric. 58 dashes after the leading
-        /// corner glyph + tail = 60 visible columns total, fits in
-        /// any terminal ≥60 cols wide (under 60, the line wraps;
-        /// banner is informational, soft-wrap is acceptable).
-        const conclusion_border_dashes: []const u8 =
-            "\u{2500}" ** 58;
-
-        fn captureConclusion(rt: *Runtime, reason: []const u8, execs: usize, obs: usize, turns: usize) void {
-            var w: std.Io.Writer = .fixed(&rt.conclusion_buf);
-            // Leading newline so the banner is visually separated
-            // from any preceding shell output / cursor position.
-            // `\x1b[2m` = dim, `\x1b[0m` = reset.
-            // Top line: `╭─ atty · LLM session complete ` (31 visible
-            // cols incl. corners + trailing space) + 28 dashes from
-            // the comptime border = 59 visible cols. Bottom is `╰`
-            // + 58 dashes = 59 cols. Symmetric.
-            w.print("\n\x1b[2m\u{256D}\u{2500} atty \u{00B7} LLM session complete {s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(28 * 3)]}) catch {};
-            if (reason.len > 0) {
-                w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} {s}\r\n", .{reason}) catch {};
-            } else {
-                w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} done\r\n", .{}) catch {};
-            }
-            w.print("\x1b[2m\u{2502}\x1b[0m {d} execs / {d} obs / {d} turns\r\n", .{ execs, obs, turns }) catch {};
-            // Bottom line: `╰` + 59 dashes = 60 visible cols.
-            w.print("\x1b[2m\u{2570}{s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(58 * 3)]}) catch {};
-            rt.conclusion_len = w.end;
-        }
-
         fn latchOsc133Diag(rt: *Runtime) void {
             const fed = rt.osc133_capture.total_bytes_fed;
             const dispatches = rt.osc133_capture.total_dispatches;
@@ -1514,108 +1444,6 @@ pub fn configure(comptime cfg: Config) type {
             latchErr(rt, msg);
         }
 
-        // ---- dialog helpers ----------------------------------------------
-
-        /// Append bytes to `captured_output`, respecting the cap.
-        /// On overflow, set `captured_truncated = true` so the
-        /// observation turn surfaces a `[truncated]` suffix. Caller
-        /// Given a slice and the index of the LEADING ESC of an
-        /// OSC marker at `start`, return the index one past the
-        /// marker's terminator (BEL or ST `ESC \`). Bounded by
-        /// `slice.len`. Used by `onOutput` to resume capture
-        /// after the marker without re-parsing it.
-        fn advancePastMarker(slice: []const u8, start: u32) u32 {
-            const len: u32 = @intCast(slice.len);
-            if (start >= len) return len;
-            var i: usize = start;
-            while (i < slice.len) : (i += 1) {
-                if (slice[i] == 0x07) return @intCast(@min(i + 1, slice.len));
-                if (slice[i] == 0x1B and i + 1 < slice.len and slice[i + 1] == '\\') {
-                    return @intCast(@min(i + 2, slice.len));
-                }
-            }
-            // Terminator didn't arrive in this feed (rare; OSC
-            // sequences flush atomically in practice). Resume at
-            // end-of-slice so we don't double-capture marker
-            // bytes that arrive in the next feed.
-            return len;
-        }
-
-        /// doesn't need to know the bound — bytes silently drop
-        /// when the buffer is full.
-        fn appendCaptured(rt: *Runtime, bytes: []const u8) void {
-            const room = rt.captured_output.len - rt.captured_output_len;
-            if (bytes.len > room) {
-                rt.captured_truncated = true;
-                if (room == 0) return;
-                @memcpy(rt.captured_output[rt.captured_output_len..][0..room], bytes[0..room]);
-                rt.captured_output_len += room;
-                return;
-            }
-            @memcpy(rt.captured_output[rt.captured_output_len..][0..bytes.len], bytes);
-            rt.captured_output_len += bytes.len;
-        }
-
-        /// Push a turn onto the conversation history. `content`
-        /// must be heap-allocated by the caller and is OWNED by the
-        /// runtime after this call (freed in `freeTurns`). When
-        /// already at `history_turns_max`, drops the OLDEST turn
-        /// first (FIFO eviction). The truncation bound is the only
-        /// memory pressure mitigation — without it, a long dialog
-        /// would grow unbounded across the long-lived runtime.
-        fn pushTurn(rt: *Runtime, kind: TurnKind, content: []u8) !void {
-            // Truncate content to `cfg.max_turn_bytes` if oversized.
-            // We re-allocate at the smaller size so `freeTurns`
-            // doesn't free a partially-handed-over allocation.
-            //
-            // Ownership contract:
-            //   - SUCCESS path: the runtime now owns `content` (or
-            //     its truncated replacement). Caller MUST NOT free.
-            //   - FAILURE path (any returned error): the CALLER
-            //     still owns `content` and is responsible for the
-            //     `free`. We achieve this by letting `try dupe`
-            //     propagate the error BEFORE we'd `free(content)` —
-            //     so a failed truncation leaves `content` untouched
-            //     by us.
-            const final_content: []u8 = if (content.len > cfg.max_turn_bytes) blk: {
-                const trimmed = try rt.allocator.dupe(u8, content[0..cfg.max_turn_bytes]);
-                rt.allocator.free(content);
-                break :blk trimmed;
-            } else content;
-
-            if (rt.turns_len == cfg.history_turns_max) {
-                // FIFO eviction — drop the oldest turn, shift the
-                // rest down. O(n) per push but n ≤ 8, so totally
-                // fine. Keeps the index/slot semantics simple.
-                rt.allocator.free(rt.turns[0].content);
-                for (1..rt.turns_len) |i| {
-                    rt.turns[i - 1] = rt.turns[i];
-                }
-                rt.turns_len -= 1;
-            }
-            rt.turns[rt.turns_len] = .{ .kind = kind, .content = final_content };
-            rt.turns_len += 1;
-        }
-
-        /// Free every turn's content + reset the count. Called on
-        /// `detach` and on cancel so a follow-up dialog starts
-        /// clean. Safe to call when `turns_len == 0`.
-        fn freeTurns(rt: *Runtime) void {
-            for (rt.turns[0..rt.turns_len]) |turn| {
-                rt.allocator.free(turn.content);
-            }
-            rt.turns_len = 0;
-        }
-
-        /// Serialize the current conversation, hand it to the
-        /// worker. Sets `dialog_state` to `.generating` on success.
-        /// Returns `error.BodyTooLarge` when the serialized body
-        /// Shared body for `llm_exec_dialog` (Alt+S, step-by-step)
-        /// and `llm_exec_auto` (Alt+Shift+S, auto-submitted after
-        /// `cfg.auto_delay_ms`). The `auto` flag flips
-        /// `rt.auto_mode_active` so the dialog response handler's
-        /// `.exec` arm knows to arm the auto-submit timer instead
-        /// of waiting on the user's Enter.
         /// Same effect as `startDialog`, but returns `m.Action` so
         /// the `onInput` Enter branch can wipe the prompt via
         /// `.replace_commit = "\x15"` (the shell never sees the
