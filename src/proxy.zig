@@ -1350,9 +1350,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         // global that propagates to the primary
                         // screen.
                         if (statusbar) |*sb| {
-                            var w2: std.Io.Writer = .fixed(&out_buf);
-                            sb.reactivate(&w2) catch {};
-                            if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+                            if (!ctx.module_overlay_active) {
+                                var w2: std.Io.Writer = .fixed(&out_buf);
+                                sb.reactivate(&w2) catch {};
+                                if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+                            }
                         }
                         // Clear line_state too. Any keystrokes
                         // recorded before the TUI entered alt-
@@ -1452,6 +1454,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
         }
         prev_overlay_active = overlay_active_end;
+    }
+
+    // Child died (or POLLHUP/SIGCHLD ended the loop) with the
+    // overlay still open — the close-edge inside the loop never
+    // fired. Drain the ring now so the user's terminal isn't
+    // left missing output that the subprocess produced just
+    // before exiting.
+    if (prev_overlay_active) {
+        overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
     }
 
     _ = posix.kill(child_pid, posix.SIG.HUP) catch {};
