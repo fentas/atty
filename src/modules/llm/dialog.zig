@@ -640,11 +640,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             //
             // Top line: dim corner + dim dash + space + MAUVE
             // "✨ atty" + dim "· LLM session complete " + dim
-            // dashes. 28 trailing dashes for symmetry with the
-            // 58-dash bottom border (31 visible cols of brand +
-            // ~28 dashes ≈ 60 col visible width).
+            // dashes.
+            //
+            // Column accounting (for symmetric framing with the
+            // bottom border):
+            //   ╭(1) + ─(1) + " "(1) = 3 cols of leading chrome
+            //   ✨(2 in most fonts) + " atty"(5) = 7 cols of brand
+            //   " · LLM session complete "(24) = 24 cols of prose
+            //   --- subtotal: 34 cols of fixed prefix ---
+            //   25 trailing dashes → 59 cols total
+            //   Bottom: ╰(1) + 58 dashes = 59 cols. Matches.
             w.writeAll("\n\n\x1B[2m\u{256D}\u{2500} \x1B[22;38;5;141m\u{2728} atty\x1B[39;2m \u{00B7} LLM session complete ") catch {};
-            w.writeAll(conclusion_border_dashes[0..(28 * 3)]) catch {};
+            w.writeAll(conclusion_border_dashes[0..(25 * 3)]) catch {};
             w.writeAll("\x1B[0m\r\n") catch {};
 
             if (reason.len > 0) {
