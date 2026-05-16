@@ -451,7 +451,52 @@ pub fn main(init: std.process.Init) !void {
     try argv_list.append(allocator, null);
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(argv_list.items.ptr);
 
-    const is_tty = isatty(std.posix.STDOUT_FILENO) != 0 and isatty(std.posix.STDIN_FILENO) != 0;
+    const stdin_tty = isatty(std.posix.STDIN_FILENO) != 0;
+    const stdout_tty = isatty(std.posix.STDOUT_FILENO) != 0;
+    const is_tty = stdin_tty and stdout_tty;
+
+    // Refuse to run when stdio isn't an interactive terminal on both
+    // sides. atty is a TTY-in-the-middle: its model assumes a real
+    // user typing into a real terminal. Piping its stdin or stdout
+    // (`echo x | atty bash`, `atty bash | head -1`) leaves the proxy
+    // forwarding shell output into a dead pipe — reproduces as a
+    // 100%-CPU runaway when the pipe peer exits and atty's writes
+    // start hitting EPIPE without anything to drive a clean shutdown.
+    // The shipped writeFully (`src/proxy/io.zig`) now surfaces EPIPE
+    // promptly, but the resulting "crashes on startup" is a worse UX
+    // than a clear refusal up front.
+    if (!is_tty) {
+        var buf: [512]u8 = undefined;
+        const which: []const u8 = if (!stdin_tty and !stdout_tty)
+            "stdin and stdout are"
+        else if (!stdin_tty)
+            "stdin is"
+        else
+            "stdout is";
+        const msg = std.fmt.bufPrint(&buf, "atty: refusing to run — {s} not a terminal.\n" ++
+            "  atty wraps a shell for interactive use; pipes/redirected stdio leave the\n" ++
+            "  proxy with no terminal to drive. Run atty directly from an interactive\n" ++
+            "  terminal, not through pipes or shell redirections.\n", .{which}) catch
+            "atty: refusing to run — stdio is not a terminal.\n";
+        writeStderr(msg);
+        std.process.exit(1);
+    }
+
+    // Ignore SIGPIPE so a transient write to a half-closed fd
+    // (overlay writes after the user detaches the terminal, a kill
+    // -HUP race against the slave) surfaces as `error.WriteFailed`
+    // via `writeFully`'s errno gate — never as silent termination.
+    // Zig's startup historically catches SIGPIPE on Linux, but
+    // pinning the disposition here decouples atty from that
+    // implementation detail.
+    {
+        const sa = std.posix.Sigaction{
+            .handler = .{ .handler = std.posix.SIG.IGN },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        std.posix.sigaction(std.posix.SIG.PIPE, &sa, null);
+    }
 
     const info = try atty.proxy.run(allocator, io, .{
         .argv = argv,
