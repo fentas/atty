@@ -1,8 +1,37 @@
 # chat-overlay phase 2 — design doc
 
-Status: **brainstorm**, to be revised together.
+Status: **v2 (2026-05-16)** — decisions locked from PR #54 subagent review. Phase 2a shipped in PR #56.
 
-Phase 1 (PR #48, shipped) made the LLM-session "conclusion banner" re-emittable via `Alt+C` (`llm_chat_overlay_toggle`). Phase 2 turns that action into a persistent, interactive overlay that hosts a back-and-forth conversation with the LLM, openable at any time — including during long-running subprocesses.
+Phase 1 (PR #48) made the LLM-session "conclusion banner" re-emittable via `Alt+C`. Phase 2a (PR #56) made `Alt+C` toggle a persistent alt-screen overlay rendering the conversation history (render-only). Phase 2b+ adds chat input, LLM round-trip from the overlay, the LLM's ability to *request* opening the overlay, and shell-side robustness (PTY back-pressure, alt-screen guards).
+
+## Decisions taken from PR #54 review
+
+| Topic | Decision |
+|---|---|
+| **A — PTY back-pressure** | **Ring buffer with drop-oldest** + `[N lines dropped]` marker on close. atty keeps reading the PTY master while overlay is open so long-running subprocesses (`find /`) don't freeze. |
+| **B — Auto-open behavior** | Default: overlay does NOT auto-open on `action=done`. The phase-1 conclusion banner still scrolls into shell history, but **restyled** (mauve+cyan vocab matching the statusbar from #53) AND with **1-2 newlines of top-padding** so it never glues to the prompt line. **The LLM itself decides** whether the overlay opens via a new envelope flag; user-config picks between (1) auto-open on the LLM's request, or (2) just notify ("LLM wants to chat — Alt+C to open"). |
+| **C — Language answers** | Folded into B — no atty-side heuristic. The LLM signals intent via the envelope's open-chat flag. |
+| **D — Module-graph placement** | Overlay lifts to a proxy-level surface (new `src/overlay.zig` analogue of `src/statusbar.zig`). Other modules can register content sources. Future-proofs for tabs. **Deferred** to its own refactor PR after phase 2b lands as LLM-internal. |
+| **E — `ctx.shell_alt_screen_active`** | Added as a `bool` field on `module.Context`, populated by the proxy each dispatch. Modules query it to refuse opening overlays while nvim/k9s is running; proxy uses it (combined with a new `ctx.module_overlay_active`) to suspend statusbar paints and skip `line_state.applyInput` while any module's overlay is up. |
+
+## LLM-driven open — envelope shape
+
+When the LLM produces a response that would benefit from a conversational follow-up (long prose explanation, ambiguous result, complex question), it adds an `open_chat: true` flag to its existing envelope:
+
+```json
+{"action":"done","reason":"explained ELF dynamic linking","open_chat":true}
+{"action":"question","question":"which file?","options":["a","b"],"open_chat":true}
+```
+
+atty parses the flag; behavior gated on `Config.chat_overlay.open_policy`:
+
+| `open_policy` | Behavior on `open_chat:true` |
+|---|---|
+| `.always` | Auto-open the overlay (carrying the conversation as content). |
+| `.notify` (default) | Latch a hint: "LLM wants to chat — Alt+C to open". User decides. |
+| `.never` | Ignore the flag entirely — only user-initiated Alt+C opens. |
+
+The flag is advisory; user keeps final control via `open_policy`.
 
 ## Goals
 
