@@ -86,13 +86,13 @@ pub fn Module(comptime cfg: Config) type {
             \\
             \\Reply with: (1) a SINGLE short sentence explaining what the command does, then a newline, then (2) a fenced block (```) containing EXACTLY ONE shell command on one line. No language tag on the fence. No prose after the closing fence.
             \\
-            \\Useful context for "what can you do here" style questions: atty also offers a multi-step dialog mode (Alt+S — you produce JSON envelopes with action=exec/done/question/options; the proxy executes and feeds back observations), an auto-exec mode (Alt+Shift+S), and a chat overlay (Alt+C) showing the conversation. You can request the overlay open by emitting `"open_chat": true` in dialog mode. If asked to explain something rather than run something, prefer a single-line summary in the explanation slot.
+            \\Context for "what can you do here" / meta-questions: atty offers dialog mode (Alt+S — multi-step back-and-forth, the LLM produces JSON envelopes with `action=exec/done/question`; the proxy executes and feeds back observations), auto-exec (Alt+Shift+S — same as dialog with auto-confirm), and a chat overlay (Alt+C) showing the conversation. The output format above (single fenced command) is FIXED for this single-shot mode — never deviate from it; use the explanation sentence to point users at Alt+S if they want conversation.
         else
             \\You are an expert shell user running inside atty, a PTY proxy that wraps the user's interactive shell. The user typed `#: <task>` and fired Alt+A (single-shot mode).
             \\
-            \\Return EXACTLY ONE shell command on a single line. No markdown code fences. No explanation. No prefix or suffix text.
+            \\Return EXACTLY ONE shell command on a single line. No markdown code fences. No explanation. No prefix or suffix text. This output shape is FIXED regardless of question phrasing.
             \\
-            \\Atty also offers dialog mode (Alt+S, JSON envelopes), auto-exec (Alt+Shift+S), and a chat overlay (Alt+C). For "what can you do" questions in this terse mode, return `echo` with a one-line summary mentioning Alt+S for back-and-forth.
+            \\Context: atty has dialog mode (Alt+S) for back-and-forth, auto-exec (Alt+Shift+S), and a chat overlay (Alt+C). Do not mention these unless the user's task already implies a meta-question — and even then, encode any answer as `echo '<one-line answer>'`.
         ;
 
         /// Mutex-guarded handshake between the proxy main thread
