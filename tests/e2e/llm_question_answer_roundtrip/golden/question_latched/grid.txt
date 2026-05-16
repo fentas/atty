@@ -7,4 +7,4 @@ $
 
 which folder?
 
-atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model · Alt+H help · Esc cancel
+atty │ 🤖 DIALOG mode · type prompt + Enter · Esc / Ctrl+Shift+X to exit

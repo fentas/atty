@@ -1,0 +1,51 @@
+# llm_dialog_mode_persists — pin the mode-toggle redesign:
+#
+#   - Alt+S activates DIALOG mode (statusbar segment + cursor
+#     colour flip).
+#   - Mode stays on until the LLM emits action=done OR the user
+#     hits Esc / Ctrl+Shift+X / Alt+S-again.
+#   - While in mode, every Enter on a non-empty line sends the
+#     typed text to the LLM as a `.user` turn AND runs as a shell
+#     command (the LLM sees what was actually executed).
+#
+# We use fixture responses so the LLM step is deterministic:
+#   - Turn 1: `printf '...';C ok ;D` (executes, emits OSC 133).
+#   - Turn 2: action=done — deactivates the mode.
+
+cols 100
+rows 12
+timeout_ms 10000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# OSC 133 ;A in PS1 + a DEBUG trap that emits ;C inline (mimics
+# what `atty init bash` now does). Without ;C the dialog state
+# machine stalls in .executing — that bug is fixed in PR #44's
+# init snippet update; this test asserts the FIXED loop.
+type "PS1=$'\\[\\033]133;A\\007\\]$ \\[\\033]133;B\\007\\]' && clear\r"
+wait_for "$"
+sleep 200
+
+# Type a `#:` prompt + Alt+S to enter dialog mode AND fire the
+# initial request (the kick-off path).
+type "#: print ok"
+sleep 200
+type "\x1bs"
+sleep 500
+snapshot mode_on_with_command_suggested
+
+# User Enter on the suggested command (printf …) — runs it, OSC
+# 133 captures output, dialog state machine pushes observation
+# turn, fires next request, LLM returns action=done → mode
+# auto-deactivates.
+type "\r"
+sleep 800
+snapshot mode_done
+
+# Clean exit.
+sleep 200
+type "\x15"
+sleep 100
+type "exit\r"
+exit_code 0

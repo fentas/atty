@@ -175,6 +175,22 @@ pub fn configure(comptime cfg: Config) type {
             /// prompt (false during the response/observation
             /// roundtrip).
             auto_mode_active: bool = false,
+            /// Persistent dialog/auto MODE — stays on across multiple
+            /// command cycles until the user explicitly deactivates
+            /// (Esc / Ctrl+Shift+X / same-key toggle) OR the LLM
+            /// emits `action=done`. While `.dialog` / `.auto`, every
+            /// Enter on a non-empty line is treated as a
+            /// conversational turn: the typed text is sent to the
+            /// LLM as a `.user` turn AND the line still runs in the
+            /// shell. This is distinct from `auto_mode_active`
+            /// (which only controls the auto-submit timer for
+            /// LLM-suggested commands) — they're set together when
+            /// Alt+Shift+S toggles auto mode on, but `auto_mode_active`
+            /// is the LOCAL flag the dialog state machine reads,
+            /// while `dialog_persistent_mode` is the MACRO flag the
+            /// proxy reads to decide "should this Enter become a
+            /// conversational turn?".
+            dialog_persistent_mode: enum { off, dialog, auto } = .off,
             /// True while waiting out the auto-submit countdown.
             /// Cleared by any user keystroke (the abort window),
             /// by the firing of the auto-submit itself, and by
@@ -272,6 +288,16 @@ pub fn configure(comptime cfg: Config) type {
             /// rationale (4 KB default off the inline Runtime).
             last_assistant_json: *[cfg.max_response_bytes]u8,
             last_assistant_json_len: usize = 0,
+            /// How many times we've already asked the LLM to re-do
+            /// a malformed reply this dialog. Reset on dialog start
+            /// and on a successful parse. Capped at
+            /// `cfg.dialog_parse_retry_max` so an LLM that
+            /// consistently refuses the JSON envelope can't trap
+            /// the loop forever — after the cap, the dialog aborts
+            /// with the same "wasn't valid JSON" error the user
+            /// reported, but the user has at least had a chance
+            /// for the model to self-correct.
+            dialog_parse_retry_count: u8 = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -507,6 +533,58 @@ pub fn configure(comptime cfg: Config) type {
             // Same lookup pattern as guardrail: applyInput already
             // ran, so the line we want is in lastCommitted.
             const line = ctx.line.lastCommitted() orelse ctx.line.current();
+
+            // Persistent dialog / auto mode: while active, every
+            // Enter on a non-empty line gets sent to the LLM as a
+            // `.user` turn AND runs as a shell command (the line
+            // could be an LLM-suggested command that the user
+            // edited, OR a free-form follow-up — in both cases we
+            // want the LLM to see what was actually executed).
+            //
+            // Gating on the dialog state machine being IDLE here is
+            // important: if we're already mid-flight (.generating,
+            // .suggesting, .executing, .capturing_output,
+            // .observation_ready), the LLM will get the
+            // observation as the next user turn automatically via
+            // OSC 133 capture — adding another `.user` turn here
+            // would double-up.
+            //
+            // The Enter passes through to the shell (we return
+            // `.forward`, not `.replace_commit`), so the typed
+            // command actually runs. The dialog request fires
+            // async on the worker thread; output flows back via
+            // OSC 133 capture as the next observation turn.
+            if (rt.dialog_persistent_mode != .off and rt.dialog_state == .idle) {
+                if (line.len > 0) {
+                    // Strip the optional `#: ` prefix so the user
+                    // can use the same Enter-fires-LLM behaviour
+                    // whether they prepend the prefix or not.
+                    const body = if (std.mem.startsWith(u8, line, cfg.prefix))
+                        std.mem.trim(u8, line[cfg.prefix.len..], " \t")
+                    else
+                        std.mem.trim(u8, line, " \t");
+                    if (body.len > 0 and body.len <= cfg.max_prompt_bytes and rt.api_base.len > 0 and rt.osc133_capture.active) {
+                        const initial = rt.allocator.dupe(u8, body) catch return .forward;
+                        pushTurn(rt, .user, initial) catch {
+                            rt.allocator.free(initial);
+                            return .forward;
+                        };
+                        rt.auto_mode_active = (rt.dialog_persistent_mode == .auto);
+                        fireDialogRequest(rt, ctx) catch |err| {
+                            abortDialog(rt, ctx, switch (err) {
+                                error.BodyTooLarge => "dialog body too large for buffer — increase Config.body_buf_bytes",
+                                error.OutOfMemory => "out of memory firing dialog request",
+                                else => "internal error firing dialog request",
+                            });
+                        };
+                        // Let the Enter pass through so the command
+                        // also runs in the shell. Output → OSC 133
+                        // → next observation turn.
+                    }
+                }
+                return .forward;
+            }
+
             if (!std.mem.startsWith(u8, line, cfg.prefix)) return .forward;
 
             // Enter on `#: …` is configurable via `Config.enter_action`.
@@ -625,8 +703,23 @@ pub fn configure(comptime cfg: Config) type {
                     if (rt.api_base.len != 0) rt.ai_mode_active = false;
                     return true;
                 },
-                .llm_exec_dialog => return startDialog(rt, ctx, false),
-                .llm_exec_auto => return startDialog(rt, ctx, true),
+                // Alt+S / Alt+Shift+S TOGGLE persistent mode rather
+                // than firing a one-shot request. Mode stays on
+                // across multiple command cycles until the user
+                // deactivates (Esc / Ctrl+Shift+X / same-key
+                // toggle) OR the LLM emits `action=done`. While in
+                // mode, every Enter on a non-empty line is sent to
+                // the LLM as a `.user` turn AND runs as a shell
+                // command — see the Enter branch of `onInput`.
+                //
+                // First entry into mode ALSO fires the initial
+                // request if `ai_mode_active` is true (the user
+                // already typed `#: …`) — same kick-off behaviour
+                // as the old action-based design. After that, the
+                // user can keep typing prompts at the bare shell
+                // prompt without the `#: ` prefix.
+                .llm_exec_dialog => return toggleDialogMode(rt, ctx, .dialog),
+                .llm_exec_auto => return toggleDialogMode(rt, ctx, .auto),
                 .llm_exec_cycle_model => {
                     if (!rt.ai_mode_active) return false;
                     if (cfg.models.len == 0) {
@@ -698,7 +791,8 @@ pub fn configure(comptime cfg: Config) type {
                     // stray Ctrl+Shift+X in a normal shell got
                     // eaten by atty.
                     const dialog_active = rt.dialog_state != .idle;
-                    const had_work = rt.in_flight or rt.ai_mode_active or rt.pending_injection_len > 0 or dialog_active;
+                    const mode_active = rt.dialog_persistent_mode != .off;
+                    const had_work = rt.in_flight or rt.ai_mode_active or rt.pending_injection_len > 0 or dialog_active or mode_active;
                     if (!had_work) return false;
 
                     // Dialog cancel funnels through dialogReset
@@ -719,6 +813,11 @@ pub fn configure(comptime cfg: Config) type {
                     // trigger in `onInput`.
                     ctx.line.reset();
                     rt.ai_mode_active = false;
+                    // Also exit persistent dialog/auto mode if active
+                    // — the user wants out of the whole flow, not
+                    // just the in-flight request.
+                    rt.dialog_persistent_mode = .off;
+                    rt.auto_mode_active = false;
                     return true;
                 },
                 else => return false, // not our action
@@ -1141,17 +1240,55 @@ pub fn configure(comptime cfg: Config) type {
 
             var parsed: DialogResponse = .{};
             parseDialogResponse(rt.allocator, raw, &parsed) catch {
-                latchErr(rt, "LLM reply wasn't valid JSON — cancel and retry");
+                // Self-correction loop — give the model a chance to
+                // re-emit a valid JSON envelope. Cap at
+                // `cfg.dialog_parse_retry_max` so a model that
+                // refuses the format can't trap the loop. The
+                // bad reply itself is pushed as the assistant turn
+                // (so the model sees its own output), then a user
+                // turn explains the parse failure in concrete
+                // terms ("you replied X, here's what was wrong,
+                // please re-emit JSON exactly like this …").
+                if (rt.dialog_parse_retry_count < cfg.dialog_parse_retry_max) {
+                    rt.dialog_parse_retry_count += 1;
+                    requestParseRetry(rt, ctx, "wasn't valid JSON") catch {
+                        latchErr(rt, "LLM reply wasn't valid JSON — cancel and retry");
+                        dialogReset(rt, ctx);
+                        rt.ai_mode_active = false;
+                        queueInjection(rt, "\x15");
+                    };
+                    return null;
+                }
+                latchErr(rt, "LLM reply wasn't valid JSON (gave up after retries) — cancel and re-prompt");
                 dialogReset(rt, ctx);
                 rt.ai_mode_active = false;
                 queueInjection(rt, "\x15");
                 return null;
             };
+            // Successful parse — reset the retry counter so any
+            // future malformed reply within this dialog gets the
+            // full retry budget again.
+            rt.dialog_parse_retry_count = 0;
 
             switch (parsed.action) {
                 .exec => {
                     if (parsed.command_len == 0) {
-                        latchErr(rt, "LLM reply had no command — cancel and retry");
+                        // Same retry budget as the JSON-parse-fail
+                        // path — an action=exec without a `command`
+                        // field is a model error of the same shape
+                        // (envelope is technically valid JSON but
+                        // doesn't satisfy our protocol contract).
+                        if (rt.dialog_parse_retry_count < cfg.dialog_parse_retry_max) {
+                            rt.dialog_parse_retry_count += 1;
+                            requestParseRetry(rt, ctx, "had action=exec but no command field") catch {
+                                latchErr(rt, "LLM reply had no command — cancel and retry");
+                                dialogReset(rt, ctx);
+                                rt.ai_mode_active = false;
+                                queueInjection(rt, "\x15");
+                            };
+                            return null;
+                        }
+                        latchErr(rt, "LLM reply had no command (gave up after retries) — cancel and re-prompt");
                         dialogReset(rt, ctx);
                         rt.ai_mode_active = false;
                         queueInjection(rt, "\x15");
@@ -1221,6 +1358,12 @@ pub fn configure(comptime cfg: Config) type {
                     latchHint(rt, msg);
                     dialogReset(rt, ctx);
                     rt.ai_mode_active = false;
+                    // LLM signalling done also deactivates the
+                    // persistent mode — user can re-enter via
+                    // Alt+S / Alt+Shift+S if they want another
+                    // session.
+                    rt.dialog_persistent_mode = .off;
+                    rt.auto_mode_active = false;
                     return null;
                 },
                 .question => {
@@ -1465,6 +1608,71 @@ pub fn configure(comptime cfg: Config) type {
             return .{ .replace_commit = "\x15" };
         }
 
+        /// Toggle persistent dialog/auto mode.
+        ///
+        ///   - off → target mode: activate. If `ai_mode_active`
+        ///     (user typed `#: …`), ALSO fire the initial dialog
+        ///     request immediately so the first prompt round-trips.
+        ///   - same as target mode: deactivate. Clear mode flag
+        ///     and reset any in-flight dialog state.
+        ///   - other mode → target mode: switch. Update mode flag
+        ///     without disrupting an in-flight cycle (so the user
+        ///     can switch from dialog ↔ auto mid-loop without
+        ///     losing context — the next `.exec` step will respect
+        ///     the new mode's auto-submit setting).
+        ///
+        /// Returns true always (action consumed — the user will see
+        /// the statusbar / cursor indicator flip even if no
+        /// request fires).
+        fn toggleDialogMode(rt: *Runtime, ctx: *m.Context, target: @TypeOf(rt.dialog_persistent_mode)) bool {
+            const current = rt.dialog_persistent_mode;
+            if (current == target) {
+                // Deactivate: clear mode + reset any in-flight
+                // state. Uses the same path as `llm_exec_cancel` so
+                // the worker's req_gen bumps + turn cleanup happen
+                // consistently.
+                rt.dialog_persistent_mode = .off;
+                rt.auto_mode_active = false;
+                if (rt.dialog_state != .idle or rt.in_flight) {
+                    dialogReset(rt, ctx);
+                    queueInjection(rt, "\x15");
+                    ctx.line.reset();
+                    rt.ai_mode_active = false;
+                }
+                latchHint(rt, switch (current) {
+                    .off => unreachable,
+                    .dialog => "dialog mode OFF",
+                    .auto => "auto mode OFF",
+                });
+                return true;
+            }
+            // Activate (from .off) or switch (from other mode).
+            const switching = current != .off;
+            rt.dialog_persistent_mode = target;
+            rt.auto_mode_active = (target == .auto);
+            if (switching) {
+                latchHint(rt, switch (target) {
+                    .off => unreachable,
+                    .dialog => "→ dialog mode",
+                    .auto => "→ auto mode",
+                });
+                return true;
+            }
+            // First-time entry into mode: kick off the initial
+            // request if the user already typed a `#: …` prompt.
+            // Otherwise just announce the mode and wait for the
+            // next Enter to fire a request from a free-form line.
+            if (rt.ai_mode_active) {
+                return startDialog(rt, ctx, target == .auto);
+            }
+            latchHint(rt, switch (target) {
+                .off => unreachable,
+                .dialog => "dialog mode ON — type a task and press Enter",
+                .auto => "auto mode ON — type a task and press Enter",
+            });
+            return true;
+        }
+
         fn startDialog(rt: *Runtime, ctx: *m.Context, auto: bool) bool {
             if (!rt.ai_mode_active) return false;
             const line = ctx.line.current();
@@ -1598,9 +1806,66 @@ pub fn configure(comptime cfg: Config) type {
             rt.pending_command_len = 0;
             rt.pending_description_len = 0;
             rt.last_assistant_json_len = 0;
+            rt.dialog_parse_retry_count = 0;
             rt.in_flight = false;
             rt.auto_mode_active = false;
             rt.auto_exec_armed = false;
+        }
+
+        /// Echo the LLM's malformed reply back as an `assistant_exec`
+        /// turn AND push a corrective user turn explaining what was
+        /// wrong, then fire the dialog request again. Used by the
+        /// parse-fail and missing-field branches of
+        /// `handleDialogResponse` to give the model a chance to
+        /// self-correct.
+        ///
+        /// `reason` is a short human-readable description of the
+        /// failure ("wasn't valid JSON", "had action=exec but no
+        /// command field", …) that gets formatted into the
+        /// corrective prompt. Caller's responsibility to gate on
+        /// retry budget; this function unconditionally fires the
+        /// retry.
+        fn requestParseRetry(rt: *Runtime, ctx: *m.Context, reason: []const u8) !void {
+            // Echo the malformed reply back as an assistant turn so
+            // the model sees its own output in context. Without
+            // this the corrective user turn would seem to come
+            // from nowhere.
+            const bad_reply = rt.last_assistant_json[0..rt.last_assistant_json_len];
+            const assistant_copy = try rt.allocator.dupe(u8, bad_reply);
+            errdefer rt.allocator.free(assistant_copy);
+            try pushTurn(rt, .assistant_exec, assistant_copy);
+
+            // Build the corrective user turn. Kept short — most
+            // models react better to a terse correction than a
+            // wall of meta-commentary.
+            const corrective = try std.fmt.allocPrint(
+                rt.allocator,
+                "Your previous reply {s}. Reply STRICTLY with JSON: " ++
+                    "{{\"action\":\"exec\",\"command\":\"…\",\"description\":\"…\"}} " ++
+                    "or {{\"action\":\"done\",\"reason\":\"…\"}} " ++
+                    "or {{\"action\":\"question\",\"question\":\"…\"}}. " ++
+                    "No prose. No markdown fences. No code blocks.",
+                .{reason},
+            );
+            errdefer rt.allocator.free(corrective);
+            try pushTurn(rt, .user, corrective);
+
+            // Fire the retry. fireDialogRequest builds the request
+            // body from the full turn list (including our newly
+            // appended assistant + corrective turns), bumps
+            // req_gen, signals the worker. Dialog state transitions
+            // through .generating → .suggesting on the next response.
+            try fireDialogRequest(rt, ctx);
+
+            // Surface the retry visibly so the user knows
+            // something's happening (the loop isn't silent).
+            var msg_buf: [128]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &msg_buf,
+                "LLM reply {s} — retrying ({d}/{d})",
+                .{ reason, rt.dialog_parse_retry_count, cfg.dialog_parse_retry_max },
+            ) catch "LLM reply malformed — retrying";
+            latchHint(rt, msg);
         }
 
         /// Abort the dialog with an error notification. Surfaces in
@@ -1638,6 +1903,25 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            // Persistent dialog/auto mode segment takes precedence
+            // over the transient "thinking…" indicator — the user
+            // wants to know they're IN a mode persistently across
+            // the entire interaction, more than they want
+            // per-request "thinking" feedback. We still show the
+            // thinking glyph as a suffix on the mode segment when
+            // a request is in flight.
+            switch (rt.dialog_persistent_mode) {
+                .off => {},
+                .dialog => return if (rt.in_flight)
+                    "\u{1F916} DIALOG · \u{1F9E0} thinking… · Esc / Ctrl+Shift+X to exit"
+                else
+                    "\u{1F916} DIALOG mode · type prompt + Enter · Esc / Ctrl+Shift+X to exit",
+                .auto => return if (rt.in_flight)
+                    "\u{26A1} AUTO · \u{1F9E0} thinking… · Esc / Ctrl+Shift+X to exit"
+                else
+                    "\u{26A1} AUTO mode · type prompt + Enter · Esc / Ctrl+Shift+X to exit",
+            }
+
             if (rt.in_flight) return "\u{1F9E0} thinking…";
 
             // AI mode hint: when the line starts with the prefix,
@@ -1702,8 +1986,15 @@ pub fn configure(comptime cfg: Config) type {
         /// redundant OSC traffic on every tick.
         pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             if (!cfg.prefix_signal_cursor) return null;
+            // Cursor colour fires when EITHER the prefix is matched
+            // (user typing `#: …`) OR persistent dialog/auto mode
+            // is active. The latter makes the colour stick across
+            // the whole multi-step interaction — useful visual
+            // confirmation that you're "talking to the LLM" even
+            // when the line content doesn't have the prefix
+            // (e.g. while reviewing an LLM-injected command).
             const line = ctx.line.current();
-            const matches = std.mem.startsWith(u8, line, cfg.prefix);
+            const matches = std.mem.startsWith(u8, line, cfg.prefix) or rt.dialog_persistent_mode != .off;
             if (matches and !rt.cursor_signal_active) {
                 rt.cursor_signal_active = true;
                 return cursor_set_seq;
