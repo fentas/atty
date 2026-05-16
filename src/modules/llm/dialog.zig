@@ -715,6 +715,25 @@ test "Module.pushTurn keeps content shorter than cap untouched" {
     try testing.expectEqualStrings("hi", rt.turns[0].content);
 }
 
+test "Module.pushTurn at exactly max_turn_bytes takes the no-copy branch" {
+    // Boundary: the truncation branch uses strict `>`, so content
+    // exactly at the cap should pass through untouched. Locks in
+    // the `>` vs `>=` distinction the ownership contract relies on.
+    const F = TurnTestFixture(3, 8);
+    var rt: F.FakeRuntime = .{ .allocator = testing.allocator };
+    defer F.M.freeTurns(&rt);
+
+    const at_cap = try testing.allocator.dupe(u8, "12345678");
+    try F.M.pushTurn(&rt, .user, at_cap);
+
+    try testing.expectEqual(@as(usize, 1), rt.turns_len);
+    try testing.expectEqual(@as(usize, 8), rt.turns[0].content.len);
+    try testing.expectEqualStrings("12345678", rt.turns[0].content);
+    // The runtime now owns the exact same allocation we passed in
+    // (no truncation `dupe + free` round-trip).
+    try testing.expectEqual(at_cap.ptr, rt.turns[0].content.ptr);
+}
+
 test "Module.pushTurn FIFO-evicts the oldest turn at capacity" {
     const F = TurnTestFixture(3, 32);
     var rt: F.FakeRuntime = .{ .allocator = testing.allocator };
