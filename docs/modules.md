@@ -30,7 +30,16 @@ pub fn   provideHintText(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   provideErrorText(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   provideTermBytes(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
+pub fn   isOverlayActive(rt: *Runtime) bool
 ```
+
+Modules that paint a persistent alt-screen overlay on the user's
+outer terminal (via `provideTermBytes` emitting `\x1B[?1049h`) must
+implement `isOverlayActive` so the proxy can divert PTY-master
+output into a ring buffer while the overlay is up — without it,
+shell output writes to STDOUT clobber the overlay's painted
+content. The LLM module's chat overlay (`Alt+C`) is the current
+example.
 
 The framework introspects each module via `@hasDecl` at comptime —
 missing hooks are statically eliminated from the dispatch loop, not
@@ -50,6 +59,10 @@ pub const Context = struct {
     line:      *LineState,      // current user input buffer + uncertain flag
     scratch:   *std.ArrayList(u8),
     is_tty:    bool,
+    incognito: bool,            // user toggled incognito mode
+    shell_alt_screen_active: bool,  // shell-side TUI (nvim/k9s/less) is in alt-screen
+    module_overlay_active:   bool,  // any module's overlay is up on atty's outer terminal
+    // …other fields (cursor_row, subprocess) — see src/module.zig
 };
 
 pub const Error = error{ ModuleFailed, OutOfMemory };
