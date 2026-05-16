@@ -15,6 +15,18 @@
 //!
 //! Sized to ~64 KB by default — matches Linux's typical PTY pipe
 //! buffer, so single chatty bursts don't drop unnecessarily.
+//!
+//! **Partial-escape hazard.** Drop-oldest can split a multi-byte
+//! sequence (UTF-8 codepoint, CSI parameter string, OSC body).
+//! After eviction the buffer may start mid-codepoint or mid-
+//! escape; the terminal then either renders U+FFFD for partial
+//! UTF-8 or — worse — treats the leftover `\x1B[…` head as an
+//! unterminated escape that swallows subsequent printable bytes
+//! as parameters. The flush prefix below emits a hard SGR reset
+//! AND an ST (`\x1B\\`) before the dropped-byte marker to
+//! forcibly close any dangling OSC/CSI that survived eviction.
+//! Mid-codepoint UTF-8 is accepted as a known cosmetic issue
+//! (single garbled glyph at the boundary).
 
 const std = @import("std");
 const writeAll = @import("proxy/io.zig").writeAll;
@@ -56,13 +68,29 @@ pub fn RingBuf(comptime cap: comptime_int) type {
         /// underlying subprocess produced more output than the
         /// buffer could hold.
         pub fn flush(self: *Self, fd: std.posix.fd_t) !void {
-            if (self.dropped > 0) {
+            // Preamble before any captured bytes:
+            //   `\x1B\\` (ST) — forcibly close any dangling OSC/DCS
+            //     that started before eviction (no harmful effect
+            //     if no such escape was pending).
+            //   `\x1B[0m` — full SGR reset so a half-applied colour
+            //     attribute from a truncated CSI doesn't bleed.
+            //   `\r\n` — start the marker on its own row.
+            //
+            // Only emitted when there's something to flush
+            // (`dropped > 0` OR `len > 0`); empty-flush stays a
+            // pure no-op.
+            const has_dropped = self.dropped > 0;
+            const has_content = self.len > 0;
+            if (has_dropped or has_content) {
+                try writeAll(fd, "\x1B\\\x1B[0m\r\n");
+            }
+            if (has_dropped) {
                 var msg_buf: [96]u8 = undefined;
                 const msg = std.fmt.bufPrint(
                     &msg_buf,
-                    "\r\n\x1B[2m[atty: {d} bytes of subprocess output dropped during overlay]\x1B[0m\r\n",
+                    "\x1B[2m[atty: {d} bytes of subprocess output dropped during overlay]\x1B[0m\r\n",
                     .{self.dropped},
-                ) catch "\r\n\x1B[2m[atty: subprocess output truncated]\x1B[0m\r\n";
+                ) catch "\x1B[2m[atty: subprocess output truncated]\x1B[0m\r\n";
                 try writeAll(fd, msg);
             }
             // Two segments: head..min(head+len,cap) then 0..wrap.
