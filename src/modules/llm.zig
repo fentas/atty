@@ -801,6 +801,14 @@ pub fn configure(comptime cfg: Config) type {
                             return true;
                         }
                         rt.chat_overlay_open = true;
+                        // Disarm the conclusion auto-emit latch —
+                        // the overlay already renders the conclusion
+                        // as content, so firing the banner again on
+                        // the next tick would print the same text
+                        // twice (once in the overlay, once scrolled
+                        // into shell history after the overlay
+                        // closes).
+                        rt.conclusion_pending = false;
                     } else {
                         rt.chat_overlay_open = false;
                     }
@@ -2092,6 +2100,11 @@ pub fn configure(comptime cfg: Config) type {
                 if (rt.chat_overlay_open) {
                     rt.chat_overlay_open = false;
                     latchErr(rt, "chat overlay too big to render — buffer overflow");
+                    // Stderr fallback — the statusbar error surface
+                    // is gated on `config.statusbar.enabled`, which
+                    // defaults to false. Without this the user
+                    // sees Alt+C do nothing with no diagnostic.
+                    _ = std.c.write(2, "atty: chat overlay too big to render — buffer overflow\n", 56);
                 }
             }
             // Conclusion banner emission takes precedence over the
