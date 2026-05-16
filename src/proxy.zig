@@ -1093,9 +1093,33 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Feed OSC 133 tracker — captures the input region
                 // when the shell emits prompt-zone markers. Stays
                 // dormant otherwise.
-                osc133_tracker.feed(output);
-                alt_screen.feed(output);
-                osc7_tracker.feed(output);
+                // Fast path: when the chunk has no escape bytes AND
+                // every OSC/CSI tracker is in `.ground` (between
+                // sequences), the state machines provably can't
+                // transition — feeding each byte through them is
+                // pure overhead. A 4 KB chunk of plain text would
+                // otherwise burn ~50 µs per tracker on per-byte
+                // switch dispatch. Skip + only keep total_bytes_fed
+                // accurate for the OSC-133-active diagnostic.
+                //
+                // Edge bytes ARE counted (osc133.skipBytes) so the
+                // "exec mode needs OSC 133" hint stays honest about
+                // how much output actually flowed.
+                //
+                // cursor_tracker doesn't get a fast-path — it
+                // tracks CR/LF/printable-advance for every byte,
+                // not just escapes.
+                const has_esc = std.mem.indexOfScalar(u8, output, 0x1B) != null;
+                const trackers_ground = osc133_tracker.isGround() and
+                    alt_screen.isGround() and
+                    osc7_tracker.isGround();
+                if (has_esc or !trackers_ground) {
+                    osc133_tracker.feed(output);
+                    alt_screen.feed(output);
+                    osc7_tracker.feed(output);
+                } else {
+                    osc133_tracker.skipBytes(output.len);
+                }
                 cursor_tracker.feed(output);
                 // Only surface the row to modules on real TTY runs
                 // — matches the null-on-non-TTY contract on

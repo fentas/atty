@@ -87,6 +87,16 @@ pub const Osc7 = struct {
         return self.cwd_offsets[i];
     }
 
+    /// True when the parser is between sequences (idle / `.ground`).
+    /// The proxy uses this with `std.mem.indexOfScalar(0x1B)` to
+    /// fast-path master-output chunks that contain no escape bytes:
+    /// when all OSC/CSI trackers are ground AND the chunk has no
+    /// `\x1B`, the state machines provably can't transition, so
+    /// their per-byte loops are skippable.
+    pub fn isGround(self: *const Osc7) bool {
+        return self.state == .ground;
+    }
+
     /// Feed master-output bytes. Captures from prior feeds are
     /// cleared at the start so each `feed()` returns a fresh
     /// ring of captures bound to its own byte stream.
@@ -298,4 +308,15 @@ test "Osc7: capture overflow drops the tail (rare; 16 OSC 7s in one chunk)" {
     var o = Osc7.init();
     o.feed(buf[0..off]);
     try testing.expectEqual(@as(usize, max_captures), o.count);
+}
+
+test "Osc7.isGround — fast-path contract" {
+    var o = Osc7.init();
+    try testing.expect(o.isGround());
+    o.feed("plain output with no escapes\nstill no escapes\n");
+    try testing.expect(o.isGround());
+    o.feed("\x1b]7;file://"); // mid-OSC
+    try testing.expect(!o.isGround());
+    o.feed("host/path\x07");
+    try testing.expect(o.isGround());
 }

@@ -196,6 +196,34 @@ pub const Osc133 = struct {
         return self.phase == .in_input;
     }
 
+    /// True when the byte-level parser is between sequences
+    /// (`state == .ground`). The proxy uses this with
+    /// `std.mem.indexOfScalar(0x1B)` to fast-path master-output
+    /// chunks that contain no escape bytes: when all OSC/CSI
+    /// trackers are ground AND the chunk has no `\x1B`, the
+    /// state machines provably can't transition, so their
+    /// per-byte loops are skippable.
+    ///
+    /// Note: `phase` (prompt-zone phase: `.at_prompt`, `.in_input`,
+    /// `.in_command`) is independent and DOES NOT need to be
+    /// idle for fast-path — it transitions only on escape-driven
+    /// dispatches, so a ground parser with non-idle phase still
+    /// won't transition on plain ASCII bytes.
+    pub fn isGround(self: *const Osc133) bool {
+        return self.state == .ground;
+    }
+
+    /// Account for `n` skipped bytes when the proxy fast-paths
+    /// past an escape-free chunk in `.ground` state. Keeps the
+    /// `total_bytes_fed` diagnostic counter accurate without
+    /// running the per-byte state machine. No edges are produced
+    /// — only the running byte count is bumped, mirroring what
+    /// `feed()` would have done if every byte stayed in
+    /// `.ground`.
+    pub fn skipBytes(self: *Osc133, n: usize) void {
+        self.total_bytes_fed +%= n;
+    }
+
     /// Feed master-output bytes. Idempotent + safe across partial
     /// sequences (state survives feed calls). Each edge pushed by
     /// this call is stamped with its byte offset within `bytes`
@@ -727,4 +755,19 @@ test "Osc133: malformed 133 (no terminator yet) doesn't crash + keeps state" {
     try testing.expect(!o.active); // dispatch hasn't fired yet
     o.feed("\x07"); // arrives later
     try testing.expect(o.active);
+}
+
+test "Osc133.isGround + skipBytes — proxy fast-path contract" {
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    try testing.expect(o.isGround());
+    o.skipBytes(1024);
+    try testing.expectEqual(@as(usize, 1024), o.total_bytes_fed);
+    try testing.expect(o.isGround()); // skipBytes doesn't touch state
+
+    // Mid-sequence: not ground.
+    o.feed("\x1b]133");
+    try testing.expect(!o.isGround());
+    o.feed(";A\x07");
+    try testing.expect(o.isGround()); // terminator returns to ground
 }

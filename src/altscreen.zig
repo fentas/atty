@@ -90,6 +90,16 @@ pub const AltScreen = struct {
         return t;
     }
 
+    /// True when the parser is between sequences (`.ground`). The
+    /// proxy uses this with `std.mem.indexOfScalar(0x1B)` to
+    /// fast-path master-output chunks that contain no escape bytes:
+    /// when all OSC/CSI trackers are ground AND the chunk has no
+    /// `\x1B`, the state machines provably can't transition, so
+    /// their per-byte loops are skippable.
+    pub fn isGround(self: *const AltScreen) bool {
+        return self.state == .ground;
+    }
+
     fn feedByte(self: *AltScreen, b: u8) void {
         switch (self.state) {
             .ground => {
@@ -297,4 +307,15 @@ test "AltScreen: multi-mode DECSET — only co-modes, no alt-screen, leaves stat
     a.feed("\x1b[?1000;1002;1006h");
     try testing.expect(!a.active);
     try testing.expect(!a.takeTransition());
+}
+
+test "AltScreen.isGround — fast-path contract" {
+    var a = AltScreen.init();
+    try testing.expect(a.isGround());
+    a.feed("plain text with no escapes");
+    try testing.expect(a.isGround());
+    a.feed("\x1b[?"); // mid-sequence
+    try testing.expect(!a.isGround());
+    a.feed("1049h");
+    try testing.expect(a.isGround());
 }
