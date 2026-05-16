@@ -130,11 +130,11 @@ fn installSignalHandlers() void {
 // ---------------------------------------------------------------------------
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
-    // Defensive: main.zig is the sole caller, and it refuses to
-    // invoke us when stdio isn't a TTY. An assertion surfaces any
-    // future caller that bypasses that gate rather than letting
-    // the proxy half-run on a non-interactive fd pair.
-    std.debug.assert(args.is_tty);
+    // Defensive guard. main.zig is the sole caller and refuses to
+    // invoke us when stdio isn't a TTY (src/main.zig). A `@panic`
+    // (rather than `std.debug.assert`) so the invariant survives
+    // ReleaseFast/Small where assertions compile to `unreachable`.
+    if (!args.is_tty) @panic("proxy.run requires args.is_tty (set by main.zig after isatty check)");
 
     // --- PTY + child --------------------------------------------------------
     var pty = try Pty.open(allocator);
