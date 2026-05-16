@@ -7,6 +7,6 @@ ok$
 
 
 
-✓ done — all set
+✓ done — all set · 1 execs / 1 obs / 1 turns
 
 atty
