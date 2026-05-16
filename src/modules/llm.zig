@@ -365,6 +365,34 @@ pub fn configure(comptime cfg: Config) type {
             /// Cleared after emission. The `Alt+C` action
             /// re-arms this flag for an explicit re-emit.
             conclusion_pending: bool = false,
+
+            // ── Chat overlay (phase 2a) ──────────────────────────
+            //
+            // Persistent alt-screen overlay showing the LLM
+            // conversation history. Alt+C toggles open/close; while
+            // open, `onInput` swallows every keystroke so they don't
+            // reach the shell (basic gate — full input handling
+            // arrives in phase 2b). The OSC 1049 enter/exit pair is
+            // emitted via `provideTermBytes`.
+            //
+            // Phase 2a scope: render-only — no chat input, no
+            // round-trip, no auto-open. The user manually toggles
+            // with Alt+C and sees the existing `turns[]` ring +
+            // captured conclusion. Closes restore the underlying
+            // shell screen unchanged.
+            chat_overlay_open: bool = false,
+            /// Set whenever the overlay needs to paint (just
+            /// opened, or just closed → need to emit the exit
+            /// sequence). Cleared by `provideTermBytes` after the
+            /// paint bytes have been returned.
+            chat_overlay_paint_pending: bool = false,
+            /// Rendered overlay bytes ready for `provideTermBytes`
+            /// to return. Sized for chrome + ~24 rows of conversation
+            /// text + SGR styling overhead. Longer conversations
+            /// truncate at the top (FIFO eviction already capped by
+            /// `cfg.history_turns_max`).
+            chat_overlay_buf: [4096]u8 = undefined,
+            chat_overlay_buf_len: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -460,6 +488,16 @@ pub fn configure(comptime cfg: Config) type {
         // ---- hooks --------------------------------------------------------
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
+            // Chat overlay (phase 2a) — while open, every
+            // non-binding keystroke is swallowed so they don't
+            // reach the shell underneath the alt screen. Keymap
+            // actions (Alt+C close, Esc, Ctrl+Shift+X) are
+            // dispatched in the proxy BEFORE this hook, so the
+            // user can still close the overlay. Phase 2b will
+            // wire the swallowed bytes into a real chat-input
+            // state machine instead of dropping them.
+            if (rt.chat_overlay_open) return .swallow;
+
             // Auto-exec abort window: any keystroke during the
             // armed window disarms the pending Enter. The
             // suggested command stays on the prompt for the user
@@ -746,18 +784,27 @@ pub fn configure(comptime cfg: Config) type {
                     return true;
                 },
                 .llm_chat_overlay_toggle => {
-                    // Phase 1: re-emit the last captured conclusion
-                    // (set by `action=done`). Phase 2 will turn
-                    // this into a persistent overlay with chat
-                    // input; for now we just re-arm the same
-                    // term-bytes latch the auto-show path uses.
-                    // No-op + info hint when no conclusion has
-                    // been captured yet this session.
-                    if (rt.conclusion_len == 0) {
-                        latchHint(rt, "no LLM session to recall — run a dialog (Alt+S) first");
-                        return true;
+                    // Phase 2a: toggle a persistent alt-screen
+                    // overlay rendering the conversation history.
+                    // Open shows turns + conclusion in a chrome-free
+                    // text view; close exits the alt screen and
+                    // restores the underlying shell. No chat input
+                    // yet — that arrives in phase 2b.
+                    if (!rt.chat_overlay_open) {
+                        const has_content = rt.turns_len > 0 or rt.conclusion_len > 0;
+                        if (!has_content) {
+                            // Nothing to show yet — refuse to open
+                            // (avoids an empty alt-screen that the
+                            // user has to dismiss). Hint surface
+                            // tells them how to populate it.
+                            latchHint(rt, "no LLM session to recall — run a dialog (Alt+S) first");
+                            return true;
+                        }
+                        rt.chat_overlay_open = true;
+                    } else {
+                        rt.chat_overlay_open = false;
                     }
-                    rt.conclusion_pending = true;
+                    rt.chat_overlay_paint_pending = true;
                     return true;
                 },
                 .llm_exec_cancel => {
@@ -1946,7 +1993,97 @@ pub fn configure(comptime cfg: Config) type {
         /// typing a prefix-matched prompt. One-shot per transition
         /// — we only emit on edges so the terminal doesn't see
         /// redundant OSC traffic on every tick.
+        /// Render the chat overlay's open or close sequence into
+        /// `rt.chat_overlay_buf`. Returns false when the content
+        /// overflows the buffer (caller should not emit a partial
+        /// sequence — better to skip the paint than leave an
+        /// incomplete alt-screen state on the terminal).
+        ///
+        /// Phase 2a renders the existing turn history as text-only
+        /// content above a single-line "Alt+C close" footer. No
+        /// chrome / no input row — those arrive in 2b/2c.
+        fn paintChatOverlay(rt: *Runtime) bool {
+            var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
+            if (!rt.chat_overlay_open) {
+                // Close: leave the alt screen, restoring the
+                // underlying shell screen unchanged. No further
+                // bytes after the exit sequence — the shell's own
+                // next render will populate whatever cursor
+                // position it had before atty's overlay opened.
+                w.writeAll("\x1B[?1049l") catch return false;
+                rt.chat_overlay_buf_len = w.end;
+                return true;
+            }
+            // Open: enter alt screen, clear, home cursor.
+            w.writeAll("\x1B[?1049h\x1B[2J\x1B[1;1H") catch return false;
+            // Title bar — dim chrome so it reads as frame, not content.
+            // Coloured icon picks up the same fg=141 used in the
+            // statusbar AI hint (consistent visual vocabulary).
+            w.writeAll("\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n") catch return false;
+
+            const has_turns = rt.turns_len > 0;
+            const has_conclusion = rt.conclusion_len > 0;
+            if (!has_turns and !has_conclusion) {
+                w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
+            } else {
+                for (rt.turns[0..rt.turns_len]) |turn| {
+                    const prefix: []const u8 = switch (turn.kind) {
+                        .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
+                        .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
+                        .observation => "\x1B[2mOutput:\x1B[0m ",
+                    };
+                    w.writeAll(prefix) catch return false;
+                    // Bound turn content rendered to ~512 chars so a
+                    // single huge JSON envelope doesn't blow the
+                    // overlay buffer. Real chat UX in 2b/2c can do
+                    // word-wrapping + structured assistant-turn
+                    // rendering (parsed action / description).
+                    const slice = if (turn.content.len > 512) turn.content[0..512] else turn.content;
+                    w.writeAll(slice) catch return false;
+                    if (turn.content.len > 512) {
+                        w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m") catch return false;
+                    }
+                    w.writeAll("\r\n\r\n") catch return false;
+                }
+                if (has_conclusion and !has_turns) {
+                    // Fallback: when the dialog already wrapped up
+                    // (turns wiped on dialogReset) but the
+                    // conclusion banner survived, surface it as the
+                    // overlay's content. Rare path but defends
+                    // against the empty-overlay-after-action=done
+                    // case.
+                    w.writeAll(rt.conclusion_buf[0..rt.conclusion_len]) catch return false;
+                    w.writeAll("\r\n") catch return false;
+                }
+            }
+
+            // Footer hint anchored at the bottom of the alt screen.
+            // `\x1B[999;1H` parks the cursor at the largest plausible
+            // row (terminals clamp to actual rows), then `\x1B[1A`
+            // backs up one row so the hint sits on the bottom-but-one
+            // line — leaves the last row free of overlay text in
+            // case the terminal renders a scrollbar / status hint
+            // there.
+            w.writeAll("\x1B[999;1H\x1B[2m[Alt+C close]\x1B[0m") catch return false;
+            rt.chat_overlay_buf_len = w.end;
+            return true;
+        }
+
         pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            // Chat overlay paint (phase 2a) takes precedence over
+            // the conclusion + cursor-colour paths. The overlay's
+            // alt-screen lives at the outer terminal, while
+            // conclusion is for scroll-history and cursor-colour is
+            // for the prompt area — they're mutually exclusive
+            // surfaces.
+            if (rt.chat_overlay_paint_pending) {
+                rt.chat_overlay_paint_pending = false;
+                if (paintChatOverlay(rt)) {
+                    return rt.chat_overlay_buf[0..rt.chat_overlay_buf_len];
+                }
+                // Paint overran the buffer — drop the latch silently;
+                // the next toggle re-attempts.
+            }
             // Conclusion banner emission takes precedence over the
             // cursor-colour edge logic — the banner is one-shot
             // multi-line output that scrolls into shell history;
@@ -2324,6 +2461,132 @@ test "resolveApiBase priority — env wins when cfg.api_base is empty" {
     defer shutdownAndFree(L, &rt, real_io);
 
     try testing.expectEqualStrings("http://from-env:1234/v1", rt.api_base);
+}
+
+test "chat overlay (Alt+C): refuses to open when no conversation exists" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Fresh runtime — no turns, no conclusion. Alt+C should hint-
+    // and-no-op rather than open an empty overlay.
+    const consumed = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
+    try testing.expect(consumed);
+    try testing.expect(!rt.chat_overlay_open);
+    try testing.expect(rt.hint_pending);
+    rt.hint_pending = false; // drain the latch so the next test starts clean
+}
+
+test "chat overlay (Alt+C): toggle emits alt-screen enter then exit" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Inject a fake turn so the overlay has content to render.
+    // `pushTurn` is internal to `configure()`, so reach it via the
+    // dialog factory the same way the module's own hooks do.
+    const helpers = dialog.Module(L.config, L.Runtime);
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "explain X"));
+    defer helpers.freeTurns(&rt);
+
+    // Open.
+    _ = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
+    try testing.expect(rt.chat_overlay_open);
+    try testing.expect(rt.chat_overlay_paint_pending);
+    const opened = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(opened != null);
+    // Alt-screen enter + clear + home + title bar present.
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[?1049h") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[2J") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "atty chat") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "You:") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "explain X") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "[Alt+C close]") != null);
+
+    // Close.
+    _ = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
+    try testing.expect(!rt.chat_overlay_open);
+    try testing.expect(rt.chat_overlay_paint_pending);
+    const closed = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(closed != null);
+    // Just the alt-screen exit, nothing else.
+    try testing.expectEqualStrings("\x1B[?1049l", closed.?);
+}
+
+test "chat overlay: onInput swallows all keystrokes while open" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_overlay_open = true;
+
+    // Any keystroke is swallowed — even Enter, even printable
+    // ASCII, even control bytes. Keymap-bound keys (Alt+C, Esc)
+    // are dispatched BEFORE onInput in the proxy, so the user
+    // can still close the overlay.
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "hello"));
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\r"));
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x03"));
 }
 
 test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
