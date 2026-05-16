@@ -1104,7 +1104,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // tracker-specific safety predicate (osc133 also
                 // checks `phase != .in_input` because plain ASCII
                 // bytes mutate the captured-input buffer in that
-                // phase). Each `skipBytes(n)` does the minimum
+                // phase). Each `onFastPath(n)` does the minimum
                 // per-feed bookkeeping `feed()` would have done
                 // for a no-transition byte stream: bump the
                 // diagnostic counter (osc133), clear the per-feed
@@ -1118,9 +1118,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     alt_screen.canFastPath() and
                     osc7_tracker.canFastPath();
                 if (can_fast) {
-                    osc133_tracker.skipBytes(output.len);
-                    alt_screen.skipBytes(output.len);
-                    osc7_tracker.skipBytes(output.len);
+                    osc133_tracker.onFastPath(output.len);
+                    alt_screen.onFastPath(output.len);
+                    osc7_tracker.onFastPath(output.len);
                 } else {
                     osc133_tracker.feed(output);
                     alt_screen.feed(output);

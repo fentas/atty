@@ -100,9 +100,9 @@ pub const AltScreen = struct {
 
     /// No-op skip — AltScreen carries no per-feed counters that
     /// need maintenance during the proxy's fast-path. Defined
-    /// for symmetry with `Osc133.skipBytes` / `Osc7.skipBytes`
+    /// for symmetry with `Osc133.onFastPath` / `Osc7.onFastPath`
     /// so the call sites all have the same shape.
-    pub fn skipBytes(self: *AltScreen, n: usize) void {
+    pub fn onFastPath(self: *AltScreen, n: usize) void {
         _ = self;
         _ = n;
     }
@@ -325,7 +325,7 @@ test "AltScreen.canFastPath — fast-path contract" {
     try testing.expect(!a.canFastPath());
     a.feed("1049h");
     try testing.expect(a.canFastPath());
-    // skipBytes is a no-op for altscreen — no state churn.
-    a.skipBytes(4096);
+    // onFastPath is a no-op for altscreen — no state churn.
+    a.onFastPath(4096);
     try testing.expect(a.canFastPath());
 }

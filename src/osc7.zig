@@ -100,7 +100,7 @@ pub const Osc7 = struct {
     /// re-emit on every subsequent fast-pathed chunk until a
     /// non-fast-pathed feed cleared them. Caller must have
     /// verified `canFastPath()` first.
-    pub fn skipBytes(self: *Osc7, n: usize) void {
+    pub fn onFastPath(self: *Osc7, n: usize) void {
         _ = n;
         self.count = 0;
     }
@@ -318,7 +318,7 @@ test "Osc7: capture overflow drops the tail (rare; 16 OSC 7s in one chunk)" {
     try testing.expectEqual(@as(usize, max_captures), o.count);
 }
 
-test "Osc7.canFastPath + skipBytes — fast-path contract" {
+test "Osc7.canFastPath + onFastPath — fast-path contract" {
     var o = Osc7.init();
     try testing.expect(o.canFastPath());
     o.feed("plain output with no escapes\nstill no escapes\n");
@@ -329,15 +329,15 @@ test "Osc7.canFastPath + skipBytes — fast-path contract" {
     try testing.expect(o.canFastPath());
 }
 
-test "Osc7.skipBytes clears stale captures (regression: re-emit on fast-pathed chunk)" {
+test "Osc7.onFastPath clears stale captures (regression: re-emit on fast-pathed chunk)" {
     // feed() resets `count` at entry; the proxy reads `count`
     // after each dispatch and assumes it scopes to the latest
-    // chunk. Without skipBytes clearing the count, a prior
+    // chunk. Without onFastPath clearing the count, a prior
     // chunk's captures would re-emit on every subsequent fast-
     // pathed chunk until a non-fast-pathed feed replaced them.
     var o = Osc7.init();
     o.feed("\x1b]7;file://host/a\x07\x1b]7;file://host/b\x07");
     try testing.expectEqual(@as(usize, 2), o.count);
-    o.skipBytes(4096);
+    o.onFastPath(4096);
     try testing.expectEqual(@as(usize, 0), o.count);
 }

@@ -217,7 +217,7 @@ pub const Osc133 = struct {
     /// "OSC 133 needs setup" diagnostic stays accurate; no edges
     /// produced, no input captured. Caller must have verified
     /// `canFastPath()` first.
-    pub fn skipBytes(self: *Osc133, n: usize) void {
+    pub fn onFastPath(self: *Osc133, n: usize) void {
         self.total_bytes_fed +%= n;
     }
 
@@ -754,11 +754,11 @@ test "Osc133: malformed 133 (no terminator yet) doesn't crash + keeps state" {
     try testing.expect(o.active);
 }
 
-test "Osc133.canFastPath + skipBytes — proxy fast-path contract" {
+test "Osc133.canFastPath + onFastPath — proxy fast-path contract" {
     var o = Osc133.init(testing.allocator);
     defer o.deinit();
     try testing.expect(o.canFastPath());
-    o.skipBytes(1024);
+    o.onFastPath(1024);
     try testing.expectEqual(@as(usize, 1024), o.total_bytes_fed);
     try testing.expect(o.canFastPath());
 
