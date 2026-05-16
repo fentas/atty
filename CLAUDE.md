@@ -79,6 +79,7 @@ pub fn onLineCommit(rt, ctx, line) !void           // Enter on non-empty + non-u
 pub fn provideGhostText(rt, ctx) !?[]const u8      // first non-null wins (order = priority)
 pub fn provideGhostList(rt, ctx) !?[]const []const u8 // multi-row pick list (Ctrl+1..9 / Esc+1..9)
 pub fn statusText(rt, ctx) !?[]const u8            // segment for the status bar
+pub fn isOverlayActive(rt) bool                    // module owns atty's alt-screen (chat overlay etc.)
 ```
 
 Hot-path rules: no allocations, no blocking I/O (use a worker thread + cv-signal mailbox like atuin's), no global locks.
