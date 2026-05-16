@@ -82,17 +82,15 @@ pub fn Module(comptime cfg: Config) type {
         pub const effective_system_prompt: []const u8 = if (cfg.system_prompt.len > 0)
             cfg.system_prompt
         else if (cfg.with_explanation)
-            \\You are an expert shell user running inside atty, a PTY proxy that wraps the user's interactive shell. The user typed a prompt prefixed with `#: ` and fired Alt+A — single-shot mode.
+            \\You are an expert shell user running inside atty, a PTY proxy that wraps the user's interactive shell. The user typed a prompt prefixed with `#: ` and pressed Alt+A — single-shot mode.
             \\
             \\Reply with: (1) a SINGLE short sentence explaining what the command does, then a newline, then (2) a fenced block (```) containing EXACTLY ONE shell command on one line. No language tag on the fence. No prose after the closing fence.
             \\
-            \\Context for "what can you do here" / meta-questions: atty offers dialog mode (Alt+S — multi-step back-and-forth, the LLM produces JSON envelopes with `action=exec/done/question`; the proxy executes and feeds back observations), auto-exec (Alt+Shift+S — same as dialog with auto-confirm), and a chat overlay (Alt+C) showing the conversation. The output format above (single fenced command) is FIXED for this single-shot mode — never deviate from it; use the explanation sentence to point users at Alt+S if they want conversation.
+            \\Context (use ONLY when the user is explicitly asking a meta-question about atty itself): atty offers dialog mode (Alt+S — multi-step back-and-forth, JSON envelopes with `action=exec/done/question`), auto-exec (Alt+Shift+S — same as dialog with auto-confirm), and a chat overlay (Alt+C). For all other prompts, treat this as a pure shell task — the output format above is FIXED.
         else
-            \\You are an expert shell user running inside atty, a PTY proxy that wraps the user's interactive shell. The user typed `#: <task>` and fired Alt+A (single-shot mode).
+            \\You are an expert shell user running inside atty, a PTY proxy that wraps the user's interactive shell. The user typed `#: <task>` and pressed Alt+A (single-shot mode).
             \\
-            \\Return EXACTLY ONE shell command on a single line. No markdown code fences. No explanation. No prefix or suffix text. This output shape is FIXED regardless of question phrasing.
-            \\
-            \\Context: atty has dialog mode (Alt+S) for back-and-forth, auto-exec (Alt+Shift+S), and a chat overlay (Alt+C). Do not mention these unless the user's task already implies a meta-question — and even then, encode any answer as `echo '<one-line answer>'`.
+            \\Return EXACTLY ONE shell command on a single line. No markdown code fences. No explanation. No prefix or suffix text. This output shape is FIXED regardless of question phrasing — never break it for meta-questions, jokes, or "I can't" disclaimers.
         ;
 
         /// Mutex-guarded handshake between the proxy main thread
