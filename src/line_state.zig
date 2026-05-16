@@ -69,6 +69,21 @@ pub const LineState = struct {
     /// next `clearLastCommitted()` or until `setCommitted("")`
     /// explicitly clears the commit slot.
     committed_author: Author = .user,
+    /// Intent text staged for the next `submit()` — typically the
+    /// LLM's one-line description of WHY this command was
+    /// suggested. atuin can persist it via `--intent` so the
+    /// history entry records "user asked for X" alongside the
+    /// command. Optional — slot is empty (len=0) for user-typed
+    /// commands. Same lifecycle as `pending_author`: cleared on
+    /// `submit()` (after snapshot), `reset()`, `markUncertain()`,
+    /// and buffer-emptying edits.
+    pending_intent_buf: [256]u8 = undefined,
+    pending_intent_len: usize = 0,
+    /// Snapshot of `pending_intent_buf` at commit time. Cleared on
+    /// `clearLastCommitted()` and `setCommitted("")`. Read by
+    /// `committedIntent()`.
+    committed_intent_buf: [256]u8 = undefined,
+    committed_intent_len: usize = 0,
 
     pub fn current(self: *const LineState) []const u8 {
         return self.buffer[0..self.len];
@@ -86,6 +101,7 @@ pub const LineState = struct {
         self.committed_len = 0;
         self.committed_was_uncertain = false;
         self.committed_author = .user;
+        self.committed_intent_len = 0;
     }
 
     pub fn reset(self: *LineState) void {
@@ -99,6 +115,7 @@ pub const LineState = struct {
         // don't pass through here — applyInput routes them through
         // markUncertain() which drops pending_author on its own.)
         self.pending_author = .user;
+        self.pending_intent_len = 0;
     }
 
     /// Stage the author for the next `submit()` to snapshot into
@@ -117,6 +134,26 @@ pub const LineState = struct {
         return self.committed_author;
     }
 
+    /// Stage intent text for the next `submit()` to snapshot into
+    /// `committed_intent`. Truncated to fit `pending_intent_buf`
+    /// (256 bytes). Pass empty to clear. Typically called by the
+    /// LLM module right after setting `pending_author = .llm`, so
+    /// the suggested-command's description rides through Enter
+    /// alongside the author tag.
+    pub fn setCommitIntent(self: *LineState, intent: []const u8) void {
+        const n = @min(intent.len, self.pending_intent_buf.len);
+        @memcpy(self.pending_intent_buf[0..n], intent[0..n]);
+        self.pending_intent_len = n;
+    }
+
+    /// Intent of the line currently in
+    /// `committed[0..committed_len]`, or null when nothing is
+    /// committed or the line was user-typed (no LLM context).
+    pub fn committedIntent(self: *const LineState) ?[]const u8 {
+        if (self.committed_intent_len == 0) return null;
+        return self.committed_intent_buf[0..self.committed_intent_len];
+    }
+
     /// Force-write the committed buffer from an externally-observed
     /// source (OSC 133 marker stream, when the shell emits them).
     /// The proxy calls this on Enter to override applyInput's own
@@ -132,7 +169,10 @@ pub const LineState = struct {
         // is unchanged (it's owned exclusively by `submit()`). An empty
         // payload is the explicit "no commit" signal — drop the author
         // too so `committedAuthor()` doesn't return stale state.
-        if (n == 0) self.committed_author = .user;
+        if (n == 0) {
+            self.committed_author = .user;
+            self.committed_intent_len = 0;
+        }
     }
 
     /// Replace the live input buffer from an externally-observed
@@ -224,6 +264,7 @@ pub const LineState = struct {
     fn markUncertain(self: *LineState) void {
         self.uncertain = true;
         self.pending_author = .user;
+        self.pending_intent_len = 0;
     }
 
     fn append(self: *LineState, b: u8) void {
@@ -247,12 +288,14 @@ pub const LineState = struct {
         // zero (handled by the second drop below).
         if (self.len == 0) {
             self.pending_author = .user;
+            self.pending_intent_len = 0;
             return;
         }
         self.len -= 1;
         if (self.len == 0) {
             self.uncertain = false;
             self.pending_author = .user;
+            self.pending_intent_len = 0;
         }
         self.generation +%= 1;
     }
@@ -264,11 +307,13 @@ pub const LineState = struct {
         // signals the user is starting fresh.
         if (self.len == 0) {
             self.pending_author = .user;
+            self.pending_intent_len = 0;
             return;
         }
         self.len = 0;
         self.uncertain = false;
         self.pending_author = .user;
+        self.pending_intent_len = 0;
         self.generation +%= 1;
     }
 
@@ -281,6 +326,7 @@ pub const LineState = struct {
         // kill empties the buffer.
         if (self.len == 0) {
             self.pending_author = .user;
+            self.pending_intent_len = 0;
             return;
         }
         // Skip trailing spaces, then the word characters.
@@ -313,10 +359,17 @@ pub const LineState = struct {
             self.committed_len = self.len;
             self.committed_was_uncertain = self.uncertain;
             self.committed_author = self.pending_author;
+            // Snapshot the staged intent alongside the author. Same
+            // lifecycle — module that wants the NEXT line tagged
+            // with a different intent must re-call `setCommitIntent`
+            // after this snapshot fires.
+            @memcpy(self.committed_intent_buf[0..self.pending_intent_len], self.pending_intent_buf[0..self.pending_intent_len]);
+            self.committed_intent_len = self.pending_intent_len;
         }
         self.len = 0;
         self.uncertain = false;
         self.pending_author = .user;
+        self.pending_intent_len = 0;
         self.generation +%= 1;
     }
 };

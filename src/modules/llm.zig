@@ -1346,6 +1346,15 @@ pub fn configure(comptime cfg: Config) type {
                     // Same author-staging contract as single mode —
                     // see the matching call in `pollShellInput`.
                     ctx.line.setCommitAuthor(.llm);
+                    // Stage the LLM's description as the intent so
+                    // downstream modules (atuin's `--intent` flag)
+                    // can persist "user asked for X" alongside the
+                    // command in history. Empty when the LLM didn't
+                    // emit a description (already handled by
+                    // line_state's len==0 short-circuit on read).
+                    if (rt.pending_description_len > 0) {
+                        ctx.line.setCommitIntent(rt.pending_description[0..rt.pending_description_len]);
+                    }
                     // Arm the auto-submit timer if we're in
                     // auto-exec mode (Alt+Shift+S). onTick fires
                     // the Enter after cfg.auto_delay_ms; any user
