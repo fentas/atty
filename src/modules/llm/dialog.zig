@@ -128,6 +128,15 @@ pub fn Response(comptime max_response_bytes: comptime_int) type {
         choices_storage: [max_choices][choice_max_len]u8 = undefined,
         choices_lens: [max_choices]usize = [_]usize{0} ** max_choices,
         choices_count: usize = 0,
+        /// Advisory flag — the LLM is asking atty to open the chat
+        /// overlay carrying this response as context. Honoured per
+        /// `Config.overlay_open_policy`:
+        ///   - `.always` → auto-open
+        ///   - `.notify` → latch a hint, user decides
+        ///   - `.never` → ignored
+        /// Defaults to false; the LLM has to explicitly opt in by
+        /// emitting `"open_chat": true` in the JSON envelope.
+        open_chat: bool = false,
 
         pub fn command(self: *const Self) []const u8 {
             return self.command_buf[0..self.command_len];
@@ -182,6 +191,10 @@ pub fn parseResponse(
         /// `max_choices` items; the rest are silently dropped (no
         /// way to address >9 entries from the keyboard anyway).
         choices: ?[]const []const u8 = null,
+        /// Advisory flag — model is asking atty to open the chat
+        /// overlay so the user can follow up. Honoured per
+        /// `Config.overlay_open_policy`. Defaults to false / absent.
+        open_chat: ?bool = null,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -223,6 +236,9 @@ pub fn parseResponse(
             out.choices_lens[i] = n;
         }
         out.choices_count = take;
+    }
+    if (parsed.value.open_chat) |flag| {
+        out.open_chat = flag;
     }
 }
 

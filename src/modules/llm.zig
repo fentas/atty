@@ -90,10 +90,11 @@ pub fn configure(comptime cfg: Config) type {
         const effective_dialog_system_prompt: []const u8 = if (cfg.dialog_system_prompt.len > 0)
             cfg.dialog_system_prompt
         else
-            \\You are an interactive shell assistant. You receive a task and step-by-step OBSERVATIONS from previously executed commands. Reply ONLY with a JSON object on a single line. Allowed shapes:
+            \\You are an interactive shell assistant running inside atty, a PTY proxy that wraps the user's shell. You receive a task and step-by-step OBSERVATIONS from previously executed commands. Reply ONLY with a JSON object on a single line. Allowed shapes:
             \\{"action":"exec","command":"<single-line shell command>","description":"<one short sentence>"}
             \\{"action":"done","reason":"<one short sentence>"}
             \\{"action":"question","question":"<short question>","options":["<opt1>","<opt2>"]}
+            \\Optional advisory flag for any of the above shapes: add `"open_chat": true` when the user would benefit from following up in atty's chat overlay — e.g. you finished but the reason is a long explanation the user might want to react to, or the question expects a free-form clarification rather than a one-token answer. Use sparingly; the flag is a request, not a guarantee (user policy may auto-open, notify, or ignore it).
             \\Never wrap the JSON in markdown fences. Never add prose around it. The command must be a single line, runnable as-is in the user's shell.
         ;
 
@@ -393,6 +394,16 @@ pub fn configure(comptime cfg: Config) type {
             /// `cfg.history_turns_max`).
             chat_overlay_buf: [4096]u8 = undefined,
             chat_overlay_buf_len: usize = 0,
+            /// Chat input buffer — keystrokes accumulated while
+            /// the overlay is open. Enter submits as a new
+            /// `.user` turn and fires a dialog request; the
+            /// response renders into the overlay's turn list.
+            /// 1 KB is roughly 16 lines of typed prose at 60
+            /// cols — plenty for follow-up clarifications.
+            /// Longer inputs are rejected at the keystroke (the
+            /// last char just gets dropped; no error).
+            chat_input_buf: [1024]u8 = undefined,
+            chat_input_len: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -488,15 +499,108 @@ pub fn configure(comptime cfg: Config) type {
         // ---- hooks --------------------------------------------------------
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
-            // Chat overlay (phase 2a) — while open, every
-            // non-binding keystroke is swallowed so they don't
-            // reach the shell underneath the alt screen. Keymap
-            // actions (Alt+C close, Esc, Ctrl+Shift+X) are
-            // dispatched in the proxy BEFORE this hook, so the
-            // user can still close the overlay. Phase 2b will
-            // wire the swallowed bytes into a real chat-input
-            // state machine instead of dropping them.
-            if (rt.chat_overlay_open) return .swallow;
+            // Chat overlay — while open, keystrokes accumulate
+            // into `chat_input_buf` rather than reaching the
+            // shell. Enter submits the buffer as a `.user` turn
+            // and fires a dialog request. Backspace pops the
+            // last byte. Other control bytes are dropped (no
+            // Ctrl+A / Ctrl+E / arrow-key editing in 2b; that
+            // is left for phase 2c).
+            //
+            // Keymap actions (Alt+C close, Esc, Ctrl+Shift+X)
+            // dispatch in the proxy BEFORE this hook fires, so
+            // the user can still close the overlay even mid-typing.
+            if (rt.chat_overlay_open) {
+                for (input) |byte| switch (byte) {
+                    0x0D, 0x0A => {
+                        // Enter — submit the buffer as a user
+                        // turn (if non-empty) and fire a dialog
+                        // request. The response will land via
+                        // handleDialogResponse on the next worker
+                        // tick; paintChatOverlay re-renders when
+                        // the paint latch fires.
+                        // Trim trailing whitespace before checking
+                        // empty — matches `onLineCommit`'s semantics
+                        // (whitespace-only line = no submission).
+                        var trimmed_len = rt.chat_input_len;
+                        while (trimmed_len > 0 and (rt.chat_input_buf[trimmed_len - 1] == ' ' or rt.chat_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
+                        if (trimmed_len == 0) {
+                            // All-whitespace input — clear and
+                            // repaint without firing.
+                            rt.chat_input_len = 0;
+                            rt.chat_overlay_paint_pending = true;
+                            continue;
+                        }
+                        rt.chat_input_len = trimmed_len;
+
+                        // Refuse to submit when atty is mid-cycle:
+                        //   - `rt.in_flight`: a worker request is
+                        //     in HTTP flight (single-mode Alt+A
+                        //     leaves dialog_state untouched, so the
+                        //     state check below would let us
+                        //     clobber `shared.body_buf` + req_gen
+                        //     and silently discard the response).
+                        //   - `.observation_ready`: onTick is about
+                        //     to drain `captured_output` into a
+                        //     turn and fire; preempting here would
+                        //     send the user's chat without the
+                        //     observation, breaking the dialog
+                        //     loop's premise.
+                        //   - other non-terminal states (.generating,
+                        //     .suggesting, .executing, .capturing_output)
+                        //     — a request is pending or in flight.
+                        //
+                        // `.idle` and `.awaiting_question_answer`
+                        // are safe to fire from (the latter is
+                        // exactly where the user's free-form answer
+                        // should go).
+                        const can_fire = !rt.in_flight and
+                            (rt.dialog_state == .idle or
+                                rt.dialog_state == .awaiting_question_answer);
+                        if (!can_fire) {
+                            latchHint(rt, "request in flight — wait for the response, or Ctrl+Shift+X to cancel");
+                            rt.chat_overlay_paint_pending = true;
+                            continue;
+                        }
+
+                        const copy = rt.allocator.dupe(u8, rt.chat_input_buf[0..rt.chat_input_len]) catch {
+                            latchErr(rt, "out of memory submitting chat turn");
+                            rt.chat_input_len = 0;
+                            rt.chat_overlay_paint_pending = true;
+                            continue;
+                        };
+                        pushTurn(rt, .user, copy) catch {
+                            rt.allocator.free(copy);
+                            latchErr(rt, "out of memory submitting chat turn");
+                            rt.chat_input_len = 0;
+                            rt.chat_overlay_paint_pending = true;
+                            continue;
+                        };
+                        rt.chat_input_len = 0;
+                        fireDialogRequest(rt, ctx) catch {
+                            latchErr(rt, "couldn't send chat turn — see status");
+                        };
+                        rt.chat_overlay_paint_pending = true;
+                    },
+                    0x08, 0x7F => {
+                        // Backspace / Delete — pop one byte.
+                        if (rt.chat_input_len > 0) {
+                            rt.chat_input_len -= 1;
+                            rt.chat_overlay_paint_pending = true;
+                        }
+                    },
+                    0x20...0x7E => {
+                        // Printable ASCII — append.
+                        if (rt.chat_input_len < rt.chat_input_buf.len) {
+                            rt.chat_input_buf[rt.chat_input_len] = byte;
+                            rt.chat_input_len += 1;
+                            rt.chat_overlay_paint_pending = true;
+                        }
+                    },
+                    else => {}, // drop other control bytes silently
+                };
+                return .swallow;
+            }
 
             // Auto-exec abort window: any keystroke during the
             // armed window disarms the pending Enter. The
@@ -1436,6 +1540,50 @@ pub fn configure(comptime cfg: Config) type {
                     // session.
                     rt.dialog_persistent_mode = .off;
                     rt.auto_mode_active = false;
+                    // `open_chat` advisory flag — model is hinting
+                    // that the user would benefit from following up
+                    // in the chat overlay. Honoured per
+                    // `cfg.overlay_open_policy`:
+                    //   .always → auto-open the overlay (paint will
+                    //     pick up the just-captured conclusion as
+                    //     content via the conclusion-fallback path)
+                    //   .notify → latch a hint so the user can
+                    //     decide whether to press Alt+C
+                    //   .never → ignore the flag
+                    // The conclusion banner still scrolls into
+                    // shell history (conclusion_pending stays
+                    // armed) regardless of policy — the overlay
+                    // open is additive, not replacement.
+                    if (parsed.open_chat) {
+                        switch (cfg.overlay_open_policy) {
+                            .always => {
+                                // Refuse `.always` when the overlay
+                                // would open empty — `dialogReset`
+                                // wiped the turn ring and an empty
+                                // reason leaves `conclusion_len` at
+                                // zero. Better to surface the notify-
+                                // shape hint than open an overlay
+                                // saying "no conversation yet".
+                                if (rt.conclusion_len > 0) {
+                                    rt.chat_overlay_open = true;
+                                    rt.chat_overlay_paint_pending = true;
+                                    // Suppress the inline banner
+                                    // emission — overlay renders the
+                                    // conclusion as content; double-
+                                    // emitting would scroll the same
+                                    // banner into history under the
+                                    // open overlay.
+                                    rt.conclusion_pending = false;
+                                } else {
+                                    latchHint(rt, "✨ LLM done — Alt+C to open chat");
+                                }
+                            },
+                            .notify => {
+                                latchHint(rt, "✨ LLM suggests follow-up — Alt+C to open chat");
+                            },
+                            .never => {},
+                        }
+                    }
                     return null;
                 },
                 .question => {
@@ -1475,6 +1623,27 @@ pub fn configure(comptime cfg: Config) type {
                     rt.dialog_state = .awaiting_question_answer;
                     rt.auto_exec_armed = false;
                     rt.ai_mode_active = true;
+                    // `open_chat` advisory flag on .question: the
+                    // overlay's chat input is a better surface for
+                    // free-form answers than the shell prompt — same
+                    // policy semantics as the .done arm. With
+                    // `.always`, auto-open so the user can type the
+                    // answer in the overlay (the next Enter there
+                    // fires fireDialogRequest with the typed text
+                    // as the next .user turn — same path as the
+                    // shell prompt's onLineCommit).
+                    if (parsed.open_chat) {
+                        switch (cfg.overlay_open_policy) {
+                            .always => {
+                                rt.chat_overlay_open = true;
+                                rt.chat_overlay_paint_pending = true;
+                            },
+                            .notify => {
+                                latchHint(rt, "✨ LLM suggests overlay for this answer — Alt+C to open chat");
+                            },
+                            .never => {},
+                        }
+                    }
                     return null;
                 },
             }
@@ -2013,17 +2182,21 @@ pub fn configure(comptime cfg: Config) type {
         fn paintChatOverlay(rt: *Runtime) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
             if (!rt.chat_overlay_open) {
-                // Close: leave the alt screen, restoring the
-                // underlying shell screen unchanged. No further
-                // bytes after the exit sequence — the shell's own
-                // next render will populate whatever cursor
-                // position it had before atty's overlay opened.
-                w.writeAll("\x1B[?1049l") catch return false;
+                // Close: restore cursor visibility (paired with the
+                // hide we emit on open below) THEN leave the alt
+                // screen. The order matters — the shell expects its
+                // cursor back; doing it after the alt-screen exit
+                // would briefly flash the cursor on the underlying
+                // screen at row/col (1,1) before the shell repaints.
+                w.writeAll("\x1B[?25h\x1B[?1049l") catch return false;
                 rt.chat_overlay_buf_len = w.end;
                 return true;
             }
-            // Open: enter alt screen, clear, home cursor.
-            w.writeAll("\x1B[?1049h\x1B[2J\x1B[1;1H") catch return false;
+            // Open: enter alt screen, hide the real terminal cursor
+            // (the input row paints its own reverse-video block
+            // cursor; without `?25l` the real cursor parks adjacent
+            // to it and the user sees two), clear, home cursor.
+            w.writeAll("\x1B[?1049h\x1B[?25l\x1B[2J\x1B[1;1H") catch return false;
             // Title bar — dim chrome so it reads as frame, not content.
             // Coloured icon picks up the same fg=141 used in the
             // statusbar AI hint (consistent visual vocabulary).
@@ -2065,14 +2238,35 @@ pub fn configure(comptime cfg: Config) type {
                 }
             }
 
-            // Footer hint anchored at the bottom of the alt screen.
-            // `\x1B[999;1H` parks the cursor at the largest plausible
-            // row (terminals clamp to actual rows), then `\x1B[1A`
-            // backs up one row so the hint sits on the bottom-but-one
-            // line — leaves the last row free of overlay text in
-            // case the terminal renders a scrollbar / status hint
-            // there.
-            w.writeAll("\x1B[999;1H\x1B[1A\x1B[2m[Alt+C close]\x1B[0m") catch return false;
+            // Chat input row + close hint anchored at the bottom.
+            // Layout from bottom up:
+            //   bottom row    → "[Alt+C close · Enter send]"
+            //   bottom-1 row  → "❯ <input>_"
+            //
+            // `\x1B[999;1H` parks at the largest plausible row
+            // (terminals clamp to actual rows); we paint the close
+            // hint there, then `\x1B[1A` up one row + `\x1B[2K`
+            // clear it for the input row.
+            w.writeAll("\x1B[999;1H\x1B[2K\x1B[2m[Alt+C close \u{00B7} Enter send]\x1B[0m") catch return false;
+            w.writeAll("\x1B[1A\x1B[2K") catch return false;
+            // Cyan prompt glyph + the typed input, then a block
+            // cursor indicator so the user sees where they're
+            // typing.
+            w.writeAll("\x1B[22;1;38;5;14m\u{276F}\x1B[0m ") catch return false;
+            if (rt.chat_input_len > 0) {
+                // Visible-on-row budget — long lines truncate at
+                // the head so the tail (where the user is typing)
+                // stays visible. Wrapping is phase 2c.
+                const visible = if (rt.chat_input_len > 512)
+                    rt.chat_input_buf[rt.chat_input_len - 512 .. rt.chat_input_len]
+                else
+                    rt.chat_input_buf[0..rt.chat_input_len];
+                w.writeAll(visible) catch return false;
+            }
+            // Block-cursor indicator (reverse-video space) so the
+            // typing position reads as a "real" cursor even though
+            // we never move the actual terminal cursor here.
+            w.writeAll("\x1B[7m \x1B[0m") catch return false;
             rt.chat_overlay_buf_len = w.end;
             return true;
         }
@@ -2565,7 +2759,10 @@ test "chat overlay (Alt+C): toggle emits alt-screen enter then exit" {
     try testing.expect(std.mem.indexOf(u8, opened.?, "atty chat") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "You:") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "explain X") != null);
-    try testing.expect(std.mem.indexOf(u8, opened.?, "[Alt+C close]") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "[Alt+C close") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "Enter send") != null);
+    // Cyan chat input prompt glyph (input row).
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\u{276F}") != null);
 
     // Close.
     _ = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
@@ -2573,8 +2770,10 @@ test "chat overlay (Alt+C): toggle emits alt-screen enter then exit" {
     try testing.expect(rt.chat_overlay_paint_pending);
     const closed = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(closed != null);
-    // Just the alt-screen exit, nothing else.
-    try testing.expectEqualStrings("\x1B[?1049l", closed.?);
+    // Cursor-show + alt-screen exit, in that order (real cursor
+    // was hidden on open so the overlay's reverse-video block
+    // cursor wasn't doubled).
+    try testing.expectEqualStrings("\x1B[?25h\x1B[?1049l", closed.?);
 }
 
 test "chat overlay: onInput swallows all keystrokes while open" {
@@ -2604,13 +2803,31 @@ test "chat overlay: onInput swallows all keystrokes while open" {
 
     rt.chat_overlay_open = true;
 
-    // Any keystroke is swallowed — even Enter, even printable
-    // ASCII, even control bytes. Keymap-bound keys (Alt+C, Esc)
-    // are dispatched BEFORE onInput in the proxy, so the user
-    // can still close the overlay.
+    // Printable ASCII accumulates into chat_input_buf; control
+    // bytes are dropped; Enter submits (and would fire a worker
+    // request); Backspace pops the last byte. Every input case
+    // returns .swallow so the underlying shell never sees these
+    // keystrokes.
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
     try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "hello"));
-    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\r"));
+    try testing.expectEqualStrings("hello", rt.chat_input_buf[0..rt.chat_input_len]);
+
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x08"));
+    try testing.expectEqualStrings("hell", rt.chat_input_buf[0..rt.chat_input_len]);
+
+    // Control byte (Ctrl+C) silently dropped — neither appended
+    // nor surfaced.
     try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x03"));
+    try testing.expectEqualStrings("hell", rt.chat_input_buf[0..rt.chat_input_len]);
+
+    // Enter clears the buffer (submitted as a turn) — even
+    // though fireDialogRequest will fail in the inert test
+    // environment, the buffer was already consumed.
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\r"));
+    try testing.expectEqual(@as(usize, 0), rt.chat_input_len);
+    try testing.expectEqual(@as(usize, 1), rt.turns_len);
 }
 
 test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {

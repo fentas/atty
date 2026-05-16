@@ -3,6 +3,20 @@
 //! comptime `configure()` return type — keeps the dependency graph
 //! between sibling submodules acyclic.
 
+/// Policy for honouring the LLM's `open_chat` advisory flag —
+/// when the dialog reply suggests the user follow up in the chat
+/// overlay. See `Config.overlay_open_policy`.
+pub const OverlayOpenPolicy = enum {
+    /// Auto-open the overlay on every `open_chat: true` reply.
+    always,
+    /// Latch a hint so the user knows the LLM wants to chat;
+    /// they decide whether to Alt+C. **Default.**
+    notify,
+    /// Ignore the flag; only user-initiated Alt+C opens the
+    /// overlay.
+    never,
+};
+
 /// What happens when the user presses Enter on a line that starts
 /// with `Config.prefix` (`#: ` by default). See `Config.enter_action`.
 pub const EnterAction = enum {
@@ -137,6 +151,17 @@ pub const Config = struct {
     /// the keys jump out of the surrounding dim prose at a
     /// glance. Set to `null` to inherit the bar's styling.
     statusbar_shortcut_color: ?u8 = 14,
+    /// How atty responds when the LLM emits `"open_chat": true` in
+    /// a dialog reply. The flag is advisory — the model signals
+    /// that the user would benefit from following up in the chat
+    /// overlay, but the user keeps final control via this policy.
+    ///
+    /// - `.always` — auto-open the overlay on the LLM's request
+    /// - `.notify` (default) — latch a hint "LLM wants to chat —
+    ///   Alt+C to open"; user decides whether to act
+    /// - `.never` — ignore the flag entirely; only user-initiated
+    ///   Alt+C opens the overlay
+    overlay_open_policy: OverlayOpenPolicy = .notify,
     /// Per-request timeout in ms. Stored for future use; not yet wired
     /// to the HTTP client — requests may block indefinitely on a slow
     /// or unreachable endpoint until the OS TCP timeout fires.
