@@ -2612,7 +2612,14 @@ test "effective_system_prompt picks the with-explanation default" {
 
 test "effective_system_prompt honours an explicit override" {
     const L = configure(.{ .with_explanation = true, .system_prompt = "be terse" });
-    try testing.expectEqualStrings("be terse", L.effective_system_prompt);
+    // User override replaces the task-framing slot but the
+    // invariant atty preamble stays at the head. The override
+    // must appear in full at the tail.
+    try testing.expect(std.mem.endsWith(u8, L.effective_system_prompt, "be terse"));
+    // Preamble survives — meta-question routing isn't lost on
+    // override.
+    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "inside atty") != null);
+    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "Alt+S") != null);
 }
 
 // Helper: attach the module and (eagerly) tear down the worker
