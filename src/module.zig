@@ -85,6 +85,36 @@ pub const Context = struct {
     /// (ghost text keeps working) matches what most fish/zsh users
     /// expect; incognito is about not *recording*, not about hiding.
     incognito: bool = false,
+    /// True when the user's shell is currently in alt-screen mode
+    /// (running a TUI: nvim, k9s, less, htop, …). Driven by the
+    /// proxy's `altscreen.zig` tracker watching the master→stdout
+    /// stream. Modules read this to refuse opening their own
+    /// overlay on top of the running TUI's alt-screen — nested
+    /// alt-screen confuses the terminal and dropping the outer one
+    /// on close vanishes the TUI's screen.
+    ///
+    /// **Freshness:** updated after each master-read, so a TUI
+    /// launch / exit propagates within the next byte chunk from
+    /// the shell. Modules whose only entry point is `onTick`
+    /// (no master-read between TUI launch and the tick) may see
+    /// the field stale by up to `cfg.proxy.tick_interval_ms`.
+    /// Acceptable in practice — TUI launch always produces
+    /// output before user keyboard input.
+    shell_alt_screen_active: bool = false,
+    /// **Forward-declared — currently always false.** Reserved for
+    /// the future overlay framework: will become true when any
+    /// module has an atty-controlled alt-screen overlay open on
+    /// the user's outer terminal. Modules SHOULD NOT gate real
+    /// behaviour on this field yet — it isn't wired through the
+    /// proxy / module dispatch. The field exists now so the
+    /// `Context` shape is stable; phase 2c will set/clear it on
+    /// overlay open/close.
+    ///
+    /// Distinct from `shell_alt_screen_active`: that one tracks
+    /// the SHELL's alt-screen state via the slave output stream;
+    /// this one (once live) tracks atty's own overlay state on
+    /// the user's terminal.
+    module_overlay_active: bool = false,
     /// The subprocess the user is currently inside, if any. Driven
     /// by the proxy's OSC 133 `;C` / `;D` handling — at `;C` we parse
     /// the just-committed line for recognised launchers (ssh / mosh

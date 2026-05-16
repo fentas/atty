@@ -609,9 +609,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// normal history above the next prompt — no DECSTBM resize
         /// needed.
         ///
-        /// Format (with dim SGR for the box chrome):
+        /// Format (statusbar-style palette: mauve brand + cyan
+        /// accent + dim chrome). Leading `\n\n` so the banner never
+        /// glues to the prompt line above it:
         ///
-        ///     ╭─ atty · LLM session complete ────────────────
+        ///     <blank>
+        ///     ╭─ ✨ atty · LLM session complete ─────────────
         ///     │ ✓ <reason>
         ///     │ <N> execs / <N> obs / <N> turns
         ///     ╰──────────────────────────────────────────────
@@ -620,17 +623,52 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// bytes); realistic reasons are 100-200 bytes.
         pub fn captureConclusion(rt: *Runtime, reason: []const u8, execs: usize, obs: usize, turns: usize) void {
             var w: std.Io.Writer = .fixed(&rt.conclusion_buf);
-            // Top: `╭─ atty · LLM session complete ` (31 visible cols
-            // incl. corners + trailing space) + 28 dashes = 59 visible
-            // cols. Bottom: `╰` + 58 dashes = 59 cols. Symmetric.
-            w.print("\n\x1b[2m\u{256D}\u{2500} atty \u{00B7} LLM session complete {s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(28 * 3)]}) catch {};
+            // Two leading newlines so the banner sits in its own
+            // visual block — without them it glues to the previous
+            // prompt's command output / cursor position.
+            //
+            // Palette (matches statusbar.zig icon + shortcut
+            // styling from PR #53):
+            //   - fg 141 (mauve): brand glyph + "atty" word
+            //   - fg 14 + bold (cyan): success ✓ + the numeric
+            //     counts so they jump out of the dim chrome
+            //   - dim: border characters, prose
+            //
+            // Combined CSI form throughout (`\x1B[22;38;5;141m`)
+            // — saves bytes vs separated escapes, matches the
+            // statusbar's compression pattern.
+            //
+            // Top line: dim corner + dim dash + space + MAUVE
+            // "✨ atty" + dim "· LLM session complete " + dim
+            // dashes.
+            //
+            // Column accounting (for symmetric framing with the
+            // bottom border):
+            //   ╭(1) + ─(1) + " "(1) = 3 cols of leading chrome
+            //   ✨(2 in most fonts) + " atty"(5) = 7 cols of brand
+            //   " · LLM session complete "(24) = 24 cols of prose
+            //   --- subtotal: 34 cols of fixed prefix ---
+            //   25 trailing dashes → 59 cols total
+            //   Bottom: ╰(1) + 58 dashes = 59 cols. Matches.
+            w.writeAll("\n\n\x1B[2m\u{256D}\u{2500} \x1B[22;38;5;141m\u{2728} atty\x1B[39;2m \u{00B7} LLM session complete ") catch {};
+            w.writeAll(conclusion_border_dashes[0..(25 * 3)]) catch {};
+            w.writeAll("\x1B[0m\r\n") catch {};
+
             if (reason.len > 0) {
-                w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} {s}\r\n", .{reason}) catch {};
+                w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{reason}) catch {};
             } else {
-                w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} done\r\n", .{}) catch {};
+                w.writeAll("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m done\r\n") catch {};
             }
-            w.print("\x1b[2m\u{2502}\x1b[0m {d} execs / {d} obs / {d} turns\r\n", .{ execs, obs, turns }) catch {};
-            w.print("\x1b[2m\u{2570}{s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(58 * 3)]}) catch {};
+            // Counts row: numeric values in bold cyan; word labels in
+            // dim prose; separators dim. Reads like a structured
+            // metric line rather than free text.
+            w.print(
+                "\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m{d}\x1B[0;2m execs / \x1B[22;1;38;5;14m{d}\x1B[0;2m obs / \x1B[22;1;38;5;14m{d}\x1B[0;2m turns\x1B[0m\r\n",
+                .{ execs, obs, turns },
+            ) catch {};
+            w.writeAll("\x1B[2m\u{2570}") catch {};
+            w.writeAll(conclusion_border_dashes[0..(58 * 3)]) catch {};
+            w.writeAll("\x1B[0m\r\n") catch {};
             rt.conclusion_len = w.end;
         }
 
@@ -701,11 +739,25 @@ test "Module.captureConclusion writes reason + counts into the buffer" {
     try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
     try testing.expect(std.mem.indexOf(u8, out, "LLM session complete") != null);
     try testing.expect(std.mem.indexOf(u8, out, "stopped at user request") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "3 execs / 2 obs / 7 turns") != null);
+    // Counts row interleaves SGR escapes between the numbers and
+    // their word labels (styled palette pass) — assert individual
+    // tokens rather than the joined string.
+    try testing.expect(std.mem.indexOf(u8, out, "3") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "execs") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "2") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "obs") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "7") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "turns") != null);
     // Box-drawing corners + dim SGR for the chrome.
     try testing.expect(std.mem.indexOf(u8, out, "\u{256D}") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\u{2570}") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2m") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[2m") != null);
+    // Styled palette: mauve brand glyph + cyan success accent.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;38;5;141m") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1;38;5;14m") != null);
+    // Two leading newlines so the banner stays separated from the
+    // prompt line above it.
+    try testing.expect(std.mem.startsWith(u8, out, "\n\n"));
 }
 
 test "Module.captureConclusion falls back to 'done' when reason is empty" {
@@ -719,8 +771,12 @@ test "Module.captureConclusion falls back to 'done' when reason is empty" {
     M.captureConclusion(&rt, "", 1, 0, 2);
     const out = rt.conclusion_buf[0..rt.conclusion_len];
 
-    try testing.expect(std.mem.indexOf(u8, out, "\u{2713} done") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1 execs / 0 obs / 2 turns") != null);
+    // ✓ glyph + "done" appear separately because cyan-accent SGR
+    // wraps the glyph only.
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2713}") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "done") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "execs") != null);
 }
 
 // Tiny config + FakeRuntime fixture for pushTurn / freeTurns tests.

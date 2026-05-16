@@ -1081,6 +1081,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // — matches the null-on-non-TTY contract on
                 // `Context.cursor_row` and the startup gate above.
                 if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
+                // Mirror the shell-side alt-screen state onto the
+                // Context so modules can refuse to open their own
+                // overlay on top of a running TUI (nvim, k9s, less).
+                // Updated after every master-read so a TUI launch
+                // / exit propagates within one tick.
+                ctx.shell_alt_screen_active = alt_screen.active;
 
                 // Walk the OSC 133 edge ring + OSC 7 capture ring
                 // INTERLEAVED by byte offset within the current
