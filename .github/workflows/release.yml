@@ -85,6 +85,7 @@ jobs:
       - name: smoke test (${{ matrix.target }})
         if: matrix.target == 'x86_64-linux-musl'
         run: |
+          set -euo pipefail
           chmod +x dist/${{ steps.pkg.outputs.stem }}
           script -qfec "dist/${{ steps.pkg.outputs.stem }} bash -c 'echo atty-release-ok'" /dev/null 2>&1 | tee /tmp/out
           grep -q atty-release-ok /tmp/out

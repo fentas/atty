@@ -472,11 +472,14 @@ pub fn main(init: std.process.Init) !void {
             "stdin is"
         else
             "stdout is";
-        const msg = std.fmt.bufPrint(&buf, "atty: refusing to run — {s} not a terminal.\n" ++
+        // ASCII-only message — the fallback is for terminals that
+        // may not render UTF-8 (the case we're bailing on can leave
+        // stderr pointed at a legacy pipe/log).
+        const msg = std.fmt.bufPrint(&buf, "atty: refusing to run -- {s} not a terminal.\n" ++
             "  atty wraps a shell for interactive use; pipes/redirected stdio leave the\n" ++
             "  proxy with no terminal to drive. Run atty directly from an interactive\n" ++
             "  terminal, not through pipes or shell redirections.\n", .{which}) catch
-            "atty: refusing to run — stdio is not a terminal.\n";
+            "atty: refusing to run -- stdio is not a terminal.\n";
         writeStderr(msg);
         std.process.exit(1);
     }
