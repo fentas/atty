@@ -127,6 +127,8 @@ pub fn configure(comptime cfg: Config) type {
         const latchHint = dialog_helpers.latchHint;
         const latchErr = dialog_helpers.latchErr;
         const queueInjection = dialog_helpers.queueInjection;
+        const dialogReset = dialog_helpers.dialogReset;
+        const abortDialog = dialog_helpers.abortDialog;
 
         // Shared state struct (mutex + buffers shared between
         // proxy and worker thread) lives in `llm/worker.zig`.
@@ -532,7 +534,7 @@ pub fn configure(comptime cfg: Config) type {
                         };
                         rt.auto_mode_active = (rt.dialog_persistent_mode == .auto);
                         fireDialogRequest(rt, ctx) catch |err| {
-                            abortDialog(rt, ctx, switch (err) {
+                            abortDialog(rt, ctx.io, switch (err) {
                                 error.BodyTooLarge => "dialog body too large for buffer — increase Config.body_buf_bytes",
                                 error.OutOfMemory => "out of memory firing dialog request",
                                 else => "internal error firing dialog request",
@@ -776,7 +778,7 @@ pub fn configure(comptime cfg: Config) type {
                     // cleanup + state machine reset. Always wipe
                     // the prompt — the suggested command (or
                     // `#: …` prefix) is typically visible.
-                    dialogReset(rt, ctx);
+                    dialogReset(rt, ctx.io);
                     queueInjection(rt, "\x15");
                     // Reset line_state to match the post-Ctrl+U
                     // shell state. The injection wipes the shell's
@@ -987,25 +989,25 @@ pub fn configure(comptime cfg: Config) type {
                     "{s}\n[truncated — output exceeded {d} bytes]",
                     .{ rt.captured_output[0..rt.captured_output_len], cfg.captured_output_bytes },
                 ) catch {
-                    abortDialog(rt, ctx, "out of memory building observation");
+                    abortDialog(rt, ctx.io, "out of memory building observation");
                     return;
                 }
             else
                 rt.allocator.dupe(u8, rt.captured_output[0..rt.captured_output_len]) catch {
-                    abortDialog(rt, ctx, "out of memory building observation");
+                    abortDialog(rt, ctx.io, "out of memory building observation");
                     return;
                 };
 
             pushTurn(rt, .observation, observation_slice) catch {
                 rt.allocator.free(observation_slice);
-                abortDialog(rt, ctx, "out of memory recording observation");
+                abortDialog(rt, ctx.io, "out of memory recording observation");
                 return;
             };
             rt.captured_output_len = 0;
             rt.captured_truncated = false;
 
             fireDialogRequest(rt, ctx) catch |err| {
-                abortDialog(rt, ctx, switch (err) {
+                abortDialog(rt, ctx.io, switch (err) {
                     error.BodyTooLarge => "context too large — cancel and start a new task",
                     error.OutOfMemory => "out of memory firing follow-up request",
                     else => "internal error firing follow-up request",
@@ -1036,21 +1038,21 @@ pub fn configure(comptime cfg: Config) type {
                 const trimmed = std.mem.trim(u8, line, " \t");
                 if (trimmed.len == 0) {
                     latchHint(rt, "empty answer — dialog cancelled");
-                    dialogReset(rt, ctx);
+                    dialogReset(rt, ctx.io);
                     rt.ai_mode_active = false;
                     return;
                 }
                 const answer = rt.allocator.dupe(u8, trimmed) catch {
-                    abortDialog(rt, ctx, "out of memory recording answer");
+                    abortDialog(rt, ctx.io, "out of memory recording answer");
                     return;
                 };
                 pushTurn(rt, .user, answer) catch {
                     rt.allocator.free(answer);
-                    abortDialog(rt, ctx, "out of memory recording answer");
+                    abortDialog(rt, ctx.io, "out of memory recording answer");
                     return;
                 };
                 fireDialogRequest(rt, ctx) catch |err| {
-                    abortDialog(rt, ctx, switch (err) {
+                    abortDialog(rt, ctx.io, switch (err) {
                         error.BodyTooLarge => "context too large — cancel and start a new task",
                         error.OutOfMemory => "out of memory firing follow-up request",
                         else => "internal error firing follow-up request",
@@ -1063,7 +1065,7 @@ pub fn configure(comptime cfg: Config) type {
             const trimmed = std.mem.trim(u8, line, " \t");
             if (trimmed.len == 0) {
                 latchHint(rt, "empty command — dialog cancelled, retry from scratch");
-                dialogReset(rt, ctx);
+                dialogReset(rt, ctx.io);
                 rt.ai_mode_active = false;
                 return;
             }
@@ -1199,7 +1201,7 @@ pub fn configure(comptime cfg: Config) type {
             if (n == 0) {
                 // Worker reported failure; the error slot already
                 // has the diagnostic. End the dialog cleanly.
-                dialogReset(rt, ctx);
+                dialogReset(rt, ctx.io);
                 rt.ai_mode_active = false;
                 queueInjection(rt, "\x15");
                 return null;
@@ -1229,14 +1231,14 @@ pub fn configure(comptime cfg: Config) type {
                     rt.dialog_parse_retry_count += 1;
                     requestParseRetry(rt, ctx, "wasn't valid JSON") catch {
                         latchErr(rt, "LLM reply wasn't valid JSON — cancel and retry");
-                        dialogReset(rt, ctx);
+                        dialogReset(rt, ctx.io);
                         rt.ai_mode_active = false;
                         queueInjection(rt, "\x15");
                     };
                     return null;
                 }
                 latchErr(rt, "LLM reply wasn't valid JSON (gave up after retries) — cancel and re-prompt");
-                dialogReset(rt, ctx);
+                dialogReset(rt, ctx.io);
                 rt.ai_mode_active = false;
                 queueInjection(rt, "\x15");
                 return null;
@@ -1258,14 +1260,14 @@ pub fn configure(comptime cfg: Config) type {
                             rt.dialog_parse_retry_count += 1;
                             requestParseRetry(rt, ctx, "had action=exec but no command field") catch {
                                 latchErr(rt, "LLM reply had no command — cancel and retry");
-                                dialogReset(rt, ctx);
+                                dialogReset(rt, ctx.io);
                                 rt.ai_mode_active = false;
                                 queueInjection(rt, "\x15");
                             };
                             return null;
                         }
                         latchErr(rt, "LLM reply had no command (gave up after retries) — cancel and re-prompt");
-                        dialogReset(rt, ctx);
+                        dialogReset(rt, ctx.io);
                         rt.ai_mode_active = false;
                         queueInjection(rt, "\x15");
                         return null;
@@ -1274,12 +1276,12 @@ pub fn configure(comptime cfg: Config) type {
                     // on the next turn so the conversation stays
                     // coherent.
                     const assistant_copy = rt.allocator.dupe(u8, rt.last_assistant_json[0..rt.last_assistant_json_len]) catch {
-                        abortDialog(rt, ctx, "out of memory continuing dialog");
+                        abortDialog(rt, ctx.io, "out of memory continuing dialog");
                         return null;
                     };
                     pushTurn(rt, .assistant_exec, assistant_copy) catch {
                         rt.allocator.free(assistant_copy);
-                        abortDialog(rt, ctx, "out of memory continuing dialog");
+                        abortDialog(rt, ctx.io, "out of memory continuing dialog");
                         return null;
                     };
 
@@ -1370,7 +1372,7 @@ pub fn configure(comptime cfg: Config) type {
                     // flag (so a cancel between a stale `.done` and
                     // the next term-bytes tick doesn't fire the
                     // banner spuriously). Arm AFTER the reset.
-                    dialogReset(rt, ctx);
+                    dialogReset(rt, ctx.io);
                     rt.conclusion_pending = true;
                     rt.ai_mode_active = false;
                     // LLM signalling done also deactivates the
@@ -1495,7 +1497,7 @@ pub fn configure(comptime cfg: Config) type {
             };
             rt.auto_mode_active = auto;
             fireDialogRequest(rt, ctx) catch |err| {
-                abortDialog(rt, ctx, switch (err) {
+                abortDialog(rt, ctx.io, switch (err) {
                     error.BodyTooLarge => "dialog body too large for buffer — increase Config.body_buf_bytes",
                     error.OutOfMemory => "out of memory firing dialog request",
                     else => "internal error firing dialog request",
@@ -1532,7 +1534,7 @@ pub fn configure(comptime cfg: Config) type {
                 rt.dialog_persistent_mode = .off;
                 rt.auto_mode_active = false;
                 if (rt.dialog_state != .idle or rt.in_flight) {
-                    dialogReset(rt, ctx);
+                    dialogReset(rt, ctx.io);
                     queueInjection(rt, "\x15");
                     ctx.line.reset();
                     rt.ai_mode_active = false;
@@ -1609,7 +1611,7 @@ pub fn configure(comptime cfg: Config) type {
             };
             rt.auto_mode_active = auto;
             fireDialogRequest(rt, ctx) catch |err| {
-                abortDialog(rt, ctx, switch (err) {
+                abortDialog(rt, ctx.io, switch (err) {
                     error.BodyTooLarge => "dialog body too large for buffer — increase Config.body_buf_bytes",
                     error.OutOfMemory => "out of memory firing dialog request",
                     else => "internal error firing dialog request",
@@ -1681,43 +1683,6 @@ pub fn configure(comptime cfg: Config) type {
             rt.dialog_state = .generating;
         }
 
-        /// Reset all dialog state — used by both `abortDialog` and
-        /// the `llm_exec_cancel` action. Bumps `req_gen` so any
-        /// in-flight worker response is discarded as stale; clears
-        /// `req_pending` so a queued-but-not-yet-picked-up request
-        /// doesn't fire AFTER the cancel (which would otherwise
-        /// burn a wasted API call AND advance `shared.fixture_idx`,
-        /// desynchronising the fixture cursor across cancel-aware
-        /// e2e scenarios).
-        fn dialogReset(rt: *Runtime, ctx: *m.Context) void {
-            rt.shared.mutex.lockUncancelable(ctx.io);
-            rt.shared.req_gen +%= 1;
-            rt.shared.req_pending = false;
-            rt.shared.res_done = false;
-            rt.shared.res_len = 0;
-            rt.shared.mutex.unlock(ctx.io);
-
-            freeTurns(rt);
-            rt.dialog_state = .idle;
-            rt.captured_output_len = 0;
-            rt.captured_truncated = false;
-            rt.pending_command_len = 0;
-            rt.pending_description_len = 0;
-            rt.last_assistant_json_len = 0;
-            rt.dialog_parse_retry_count = 0;
-            rt.question_choices_count = 0;
-            // Disarm the conclusion auto-emit latch — but keep the
-            // captured `conclusion_buf` so `Alt+C` can still recall
-            // the LAST completed session even if this reset was a
-            // cancel. The `.done` path explicitly RE-arms the latch
-            // AFTER calling dialogReset (see the captureConclusion
-            // site).
-            rt.conclusion_pending = false;
-            rt.in_flight = false;
-            rt.auto_mode_active = false;
-            rt.auto_exec_armed = false;
-        }
-
         /// Echo the LLM's malformed reply back as an `assistant_exec`
         /// turn AND push a corrective user turn explaining what was
         /// wrong, then fire the dialog request again. Used by the
@@ -1772,17 +1737,6 @@ pub fn configure(comptime cfg: Config) type {
                 .{ reason, rt.dialog_parse_retry_count, cfg.dialog_parse_retry_max },
             ) catch "LLM reply malformed — retrying";
             latchHint(rt, msg);
-        }
-
-        /// Abort the dialog with an error notification. Surfaces in
-        /// the ⚠ row and resets to idle. Used for unrecoverable
-        /// states mid-loop (OOM, body too large, malformed JSON
-        /// from the model on second attempt).
-        fn abortDialog(rt: *Runtime, ctx: *m.Context, msg: []const u8) void {
-            latchErr(rt, msg);
-            dialogReset(rt, ctx);
-            rt.ai_mode_active = false;
-            queueInjection(rt, "\x15");
         }
 
         /// One-shot hint surface: returns the latched explanation
