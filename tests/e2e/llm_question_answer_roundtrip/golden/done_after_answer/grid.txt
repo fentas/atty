@@ -1,6 +1,6 @@
 $
 
-  ╭─ ✨ atty · LLM session complete ────────────────────────────
+  ╭─ ✨ atty · LLM session complete ─────────────────────────
 │ ✓ got it
 │ 0 execs / 0 obs / 2 turns
 ╰──────────────────────────────────────────────────────────
