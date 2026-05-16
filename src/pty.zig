@@ -159,12 +159,14 @@ pub const Pty = struct {
             // why we died.
             childSetup(self.master, self.slave_path) catch std.c._exit(127);
 
-            // execve(2) preserves SIG_IGN across exec, so the parent's
-            // SIGPIPE → SIG_IGN disposition would leak into the user's
-            // shell and break `yes | head` / `curl | less` / any
-            // pipeline whose writer expects to die on EPIPE. Restore
-            // default before exec so the shell starts with a vanilla
-            // signal mask.
+            // execve(2) auto-resets caught-handler signals (WINCH,
+            // CHLD) to SIG_DFL but PRESERVES SIG_IGN. The parent's
+            // SIGPIPE → SIG_IGN disposition would leak into the
+            // user's shell and break `yes | head` / `curl | less` /
+            // any pipeline whose writer expects to die on EPIPE.
+            // Restore default explicitly — it's the only signal we
+            // set to SIG_IGN, so it's the only one execve won't
+            // reset for us.
             const dfl = posix.Sigaction{
                 .handler = .{ .handler = posix.SIG.DFL },
                 .mask = posix.sigemptyset(),

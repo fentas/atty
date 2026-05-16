@@ -349,7 +349,6 @@ fn emitInitSnippet(shell: []const u8) void {
 }
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
-extern "c" fn isatty(fd: c_int) c_int;
 
 const CliOpts = args_mod.CliOpts;
 
@@ -451,8 +450,8 @@ pub fn main(init: std.process.Init) !void {
     try argv_list.append(allocator, null);
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(argv_list.items.ptr);
 
-    const stdin_tty = isatty(std.posix.STDIN_FILENO) != 0;
-    const stdout_tty = isatty(std.posix.STDOUT_FILENO) != 0;
+    const stdin_tty = std.c.isatty(std.posix.STDIN_FILENO) != 0;
+    const stdout_tty = std.c.isatty(std.posix.STDOUT_FILENO) != 0;
     const is_tty = stdin_tty and stdout_tty;
 
     // atty is a TTY-in-the-middle — pipes/redirected stdio leave
