@@ -74,17 +74,36 @@ pub fn Module(comptime cfg: Config) type {
             explanation_len: usize,
         };
 
-        /// Comptime-resolved system prompt. Honours an explicit
-        /// `Config.system_prompt` override; otherwise picks the
-        /// canned prompt for the `with_explanation` flag. Same
-        /// value used at every request-fire site so the model sees
-        /// stable framing across the session.
-        pub const effective_system_prompt: []const u8 = if (cfg.system_prompt.len > 0)
+        /// Invariant atty-side preamble — meta-context about the
+        /// host environment + a brief mention of the other modes.
+        /// Always prepended to the effective prompt, even when the
+        /// user supplies a custom `cfg.system_prompt`. Lives
+        /// separately so user customisation can't accidentally
+        /// strip the meta-question routing that downstream UI
+        /// depends on.
+        pub const atty_preamble: []const u8 =
+            \\You are running inside atty, a PTY proxy that wraps the user's interactive shell. The user typed a prompt prefixed with `#: ` and pressed Alt+A (single-shot mode).
+            \\
+            \\Context — use ONLY when the user is explicitly asking a meta-question about atty itself: atty offers dialog mode (Alt+S — multi-step back-and-forth, JSON envelopes with `action=exec/done/question`), auto-exec (Alt+Shift+S — same as dialog with auto-confirm), and a chat overlay (Alt+C). For all other prompts, treat this as a pure shell task.
+        ;
+
+        /// The task-shaping section — replaceable via
+        /// `cfg.system_prompt`. The default depends on
+        /// `cfg.with_explanation`. Concatenated with the invariant
+        /// `atty_preamble` above to produce `effective_system_prompt`.
+        pub const task_system_prompt: []const u8 = if (cfg.system_prompt.len > 0)
             cfg.system_prompt
         else if (cfg.with_explanation)
-            "You are an expert shell user. Given a natural-language description, reply with: (1) a SINGLE short sentence explaining what the command does, then a newline, then (2) a fenced block (```) containing EXACTLY ONE shell command on one line. Nothing else. No language tag on the fence. No prose after the closing fence."
+            "You are an expert shell user. Reply with: (1) a SINGLE short sentence explaining what the command does, then a newline, then (2) a fenced block (```) containing EXACTLY ONE shell command on one line. No language tag on the fence. No prose after the closing fence. This output shape is FIXED regardless of question phrasing."
         else
-            "You are an expert shell user. Given a natural-language description, return EXACTLY ONE shell command that performs the task. Output ONLY the command on a single line. No markdown code fences. No explanation. No prefix or suffix text.";
+            "You are an expert shell user. Return EXACTLY ONE shell command on a single line. No markdown code fences. No explanation. No prefix or suffix text. This output shape is FIXED regardless of question phrasing — never break it for meta-questions, jokes, or \"I can't\" disclaimers.";
+
+        /// Comptime-resolved system prompt = atty preamble (always)
+        /// + task framing (user-overrideable via `cfg.system_prompt`).
+        /// The two-slot shape ensures user customisation can drop
+        /// in their own task instructions without losing the
+        /// host-environment context the rest of atty's UI depends on.
+        pub const effective_system_prompt: []const u8 = atty_preamble ++ "\n\n" ++ task_system_prompt;
 
         /// Mutex-guarded handshake between the proxy main thread
         /// (writer side) and the worker thread (reader side). All
