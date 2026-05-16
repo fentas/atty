@@ -137,6 +137,12 @@ pub const Keymap = struct {
         .{ .bytes = "\x1b[109;3u", .action = .llm_exec_cycle_model },
         .{ .bytes = atty.keymap.key("Alt+h"), .action = .llm_exec_toggle_help },
         .{ .bytes = "\x1b[104;3u", .action = .llm_exec_toggle_help },
+        // Alt+C — re-emit the last LLM session conclusion. Phase 1
+        // of the chat-overlay rollout (the key surface is stable;
+        // phase 2 turns this into a persistent chat panel). Dual
+        // legacy + kitty kbd CSI-u form per the pattern above.
+        .{ .bytes = atty.keymap.key("Alt+c"), .action = .llm_chat_overlay_toggle },
+        .{ .bytes = "\x1b[99;3u", .action = .llm_chat_overlay_toggle },
         // Cancel works everywhere — not gated on AI mode (a
         // running exec loop can extend past the AI-mode entry
         // and the cancel is the safety lever for it).

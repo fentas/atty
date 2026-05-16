@@ -698,6 +698,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         .llm_exec_cycle_model,
                         .llm_exec_toggle_help,
                         .llm_exec_cancel,
+                        .llm_chat_overlay_toggle,
                         => {
                             // Hand the action to the llm module via
                             // the generic onAction dispatch. Module

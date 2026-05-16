@@ -122,6 +122,20 @@ pub const Action = union(enum) {
     /// but no action has fired yet (in which case it's equivalent
     /// to Esc).
     llm_exec_cancel,
+    /// Re-emit the LLM session conclusion (the formatted summary
+    /// printed above the next prompt when the LLM finished a
+    /// dialog). Default Alt+C. Useful to recall the result of a
+    /// completed session that has scrolled out of view. No-op
+    /// when no conclusion has been captured yet (i.e. before the
+    /// first `action=done` in this atty session).
+    ///
+    /// Phase 1 of the chat-overlay design (per
+    /// docs/llm-exec-mode-followups.md): re-display only. Phase 2
+    /// will turn this into a persistent overlay with chat input +
+    /// LLM round-trip + context controls. The action variant is
+    /// added now so the keymap surface is stable across the
+    /// two-PR rollout.
+    llm_chat_overlay_toggle,
 };
 
 pub const Binding = struct {
