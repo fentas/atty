@@ -2104,7 +2104,8 @@ pub fn configure(comptime cfg: Config) type {
                     // is gated on `config.statusbar.enabled`, which
                     // defaults to false. Without this the user
                     // sees Alt+C do nothing with no diagnostic.
-                    _ = std.c.write(2, "atty: chat overlay too big to render — buffer overflow\n", 56);
+                    const overflow_msg = "atty: chat overlay too big to render — buffer overflow\n";
+                    _ = std.c.write(2, overflow_msg, overflow_msg.len);
                 }
             }
             // Conclusion banner emission takes precedence over the
