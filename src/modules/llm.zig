@@ -1580,10 +1580,10 @@ pub fn configure(comptime cfg: Config) type {
             // Leading newline so the banner is visually separated
             // from any preceding shell output / cursor position.
             // `\x1b[2m` = dim, `\x1b[0m` = reset.
-            // Top line: `╭─ atty · LLM session complete ` (29 visible
-            // cols incl. trailing space) + 28 dashes from the
-            // comptime border to total 60-ish — same width as the
-            // bottom.
+            // Top line: `╭─ atty · LLM session complete ` (31 visible
+            // cols incl. corners + trailing space) + 28 dashes from
+            // the comptime border = 59 visible cols. Bottom is `╰`
+            // + 58 dashes = 59 cols. Symmetric.
             w.print("\n\x1b[2m\u{256D}\u{2500} atty \u{00B7} LLM session complete {s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(28 * 3)]}) catch {};
             if (reason.len > 0) {
                 w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} {s}\r\n", .{reason}) catch {};
