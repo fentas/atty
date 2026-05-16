@@ -31,10 +31,9 @@
 //!     bypass, HTTP dispatch, result publish).
 //!
 //! Runtime-touching code (the proxy hooks: `onInput`, `onOutput`,
-//! `onTick`, `onLineCommit`, `pollShellInput`; the dialog state
-//! machine functions: `handleDialogResponse`, `dialogReset`,
-//! `abortDialog`, `fireDialogRequest`, `startDialog`,
-//! `startDialogViaEnter`, `pushTurn`, `freeTurns`,
+//! `onTick`, `onLineCommit`, `pollShellInput`; the remaining
+//! dialog state machine functions: `handleDialogResponse`,
+//! `fireDialogRequest`, `startDialog`, `startDialogViaEnter`,
 //! `triggerSinglePrompt`; lifecycle: `attach`, `detach`) stays in
 //! `llm.zig`. Those reference the `Runtime` struct directly, which
 //! also closes over `cfg` — extracting them cleanly requires

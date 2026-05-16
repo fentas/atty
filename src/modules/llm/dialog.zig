@@ -462,15 +462,16 @@ test "buildRequestBody: assistant_exec turn uses assistant role" {
 // ============================================================================
 //
 // Small, focused helpers that touch `*Runtime` fields directly.
-// Four conceptual groups:
+// Five conceptual groups:
 //   - turn ring: `pushTurn`, `freeTurns`
 //   - captured-output buffer: `appendCaptured`, `advancePastMarker`
 //   - status latches: `latchHint`, `latchErr`, `queueInjection`
 //   - conclusion banner: `captureConclusion`
+//   - dialog teardown: `dialogReset`, `abortDialog`
 //
-// Larger state-machine functions (`handleResponse`, `dialogReset`,
-// `fireDialogRequest`, …) stay in `llm.zig` for now — they touch
-// worker channels and the dialog state machine in ways that aren't
+// Larger state-machine functions (`handleResponse`,
+// `fireDialogRequest`, …) stay in `llm.zig` — they touch worker
+// channels and the dialog state machine in ways that aren't
 // purely buffer-shaped.
 
 const types = @import("types.zig");
@@ -631,6 +632,54 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             w.print("\x1b[2m\u{2502}\x1b[0m {d} execs / {d} obs / {d} turns\r\n", .{ execs, obs, turns }) catch {};
             w.print("\x1b[2m\u{2570}{s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(58 * 3)]}) catch {};
             rt.conclusion_len = w.end;
+        }
+
+        /// Reset all dialog state — used by both `abortDialog` and
+        /// the `llm_exec_cancel` action. Bumps `req_gen` so any
+        /// in-flight worker response is discarded as stale; clears
+        /// `req_pending` so a queued-but-not-yet-picked-up request
+        /// doesn't fire AFTER the cancel (which would otherwise
+        /// burn a wasted API call AND advance `shared.fixture_idx`,
+        /// desynchronising the fixture cursor across cancel-aware
+        /// e2e scenarios).
+        pub fn dialogReset(rt: *Runtime, io: std.Io) void {
+            rt.shared.mutex.lockUncancelable(io);
+            rt.shared.req_gen +%= 1;
+            rt.shared.req_pending = false;
+            rt.shared.res_done = false;
+            rt.shared.res_len = 0;
+            rt.shared.mutex.unlock(io);
+
+            freeTurns(rt);
+            rt.dialog_state = .idle;
+            rt.captured_output_len = 0;
+            rt.captured_truncated = false;
+            rt.pending_command_len = 0;
+            rt.pending_description_len = 0;
+            rt.last_assistant_json_len = 0;
+            rt.dialog_parse_retry_count = 0;
+            rt.question_choices_count = 0;
+            // Disarm the conclusion auto-emit latch — but keep the
+            // captured `conclusion_buf` so `Alt+C` can still recall
+            // the LAST completed session even if this reset was a
+            // cancel. The `.done` path explicitly RE-arms the latch
+            // AFTER calling dialogReset (see the captureConclusion
+            // site).
+            rt.conclusion_pending = false;
+            rt.in_flight = false;
+            rt.auto_mode_active = false;
+            rt.auto_exec_armed = false;
+        }
+
+        /// Abort the dialog with an error notification. Surfaces in
+        /// the ⚠ row and resets to idle. Used for unrecoverable
+        /// states mid-loop (OOM, body too large, malformed JSON
+        /// from the model on second attempt).
+        pub fn abortDialog(rt: *Runtime, io: std.Io, msg: []const u8) void {
+            latchErr(rt, msg);
+            dialogReset(rt, io);
+            rt.ai_mode_active = false;
+            queueInjection(rt, "\x15");
         }
     };
 }
