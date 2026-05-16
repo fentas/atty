@@ -315,6 +315,22 @@ pub fn configure(comptime cfg: Config) type {
             /// callers see a stable snapshot for the duration of
             /// the hook.
             question_choices_slices: [dialog.max_choices][]const u8 = undefined,
+            /// Captured conclusion text from the most recent
+            /// `action=done`. Formatted as a multi-line block
+            /// suitable for inline emission via the term-bytes
+            /// hook (`provideTermBytes`). Persists across the
+            /// dialog reset so `Alt+C` can re-emit it. Cleared
+            /// only on `detach` and on a fresh `action=done`
+            /// (which overwrites). Empty `conclusion_len == 0`
+            /// means no completed dialog yet this session.
+            conclusion_buf: [1024]u8 = undefined,
+            conclusion_len: usize = 0,
+            /// Latched flag — set by `handleDialogResponse` on
+            /// `action=done` so the next `provideTermBytes` tick
+            /// emits the conclusion banner (auto-show behaviour).
+            /// Cleared after emission. The `Alt+C` action
+            /// re-arms this flag for an explicit re-emit.
+            conclusion_pending: bool = false,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -797,6 +813,21 @@ pub fn configure(comptime cfg: Config) type {
                         return true;
                     };
                     latchHint(rt, msg);
+                    return true;
+                },
+                .llm_chat_overlay_toggle => {
+                    // Phase 1: re-emit the last captured conclusion
+                    // (set by `action=done`). Phase 2 will turn
+                    // this into a persistent overlay with chat
+                    // input; for now we just re-arm the same
+                    // term-bytes latch the auto-show path uses.
+                    // No-op + info hint when no conclusion has
+                    // been captured yet this session.
+                    if (rt.conclusion_len == 0) {
+                        latchHint(rt, "no LLM session to recall — run a dialog (Alt+S) first");
+                        return true;
+                    }
+                    rt.conclusion_pending = true;
                     return true;
                 },
                 .llm_exec_cancel => {
@@ -1399,7 +1430,20 @@ pub fn configure(comptime cfg: Config) type {
                     else
                         std.fmt.bufPrint(&msg_buf, "✓ done · {d} execs / {d} obs / {d} turns", .{ exec_count, observation_count, user_count }) catch "✓ done";
                     latchHint(rt, msg);
+                    // Capture the conclusion banner BEFORE dialogReset
+                    // wipes `turns_len`. Banner is multi-line ANSI
+                    // text suitable for inline emission via
+                    // `provideTermBytes` — scrolls into the
+                    // shell's normal history above the next prompt,
+                    // re-emittable via Alt+C
+                    // (`llm_chat_overlay_toggle`). See `captureConclusion`.
+                    captureConclusion(rt, reason, exec_count, observation_count, user_count);
+                    // Order matters: dialogReset clears the pending
+                    // flag (so a cancel between a stale `.done` and
+                    // the next term-bytes tick doesn't fire the
+                    // banner spuriously). Arm AFTER the reset.
                     dialogReset(rt, ctx);
+                    rt.conclusion_pending = true;
                     rt.ai_mode_active = false;
                     // LLM signalling done also deactivates the
                     // persistent mode — user can re-enter via
@@ -1502,6 +1546,56 @@ pub fn configure(comptime cfg: Config) type {
         ///     by construction (dispatchOsc sets active before
         ///     incrementing the counter); kept defensively in case
         ///     the parser ever changes shape.
+        /// Format the LLM session conclusion into a multi-line
+        /// banner stored in `conclusion_buf`. Emitted via
+        /// `provideTermBytes` (phase 1 design: the banner scrolls
+        /// into the shell's normal history above the next prompt
+        /// — no DECSTBM resize needed; the banner becomes part of
+        /// the shell session log). Re-emittable via Alt+C
+        /// (`llm_chat_overlay_toggle`).
+        ///
+        /// Format (with ANSI colour for the bordered chrome):
+        ///
+        ///     ╭─ atty · LLM session complete ────────────────
+        ///     │ ✓ <reason>
+        ///     │ <N> execs / <N> obs / <N> turns
+        ///     ╰──────────────────────────────────────────────
+        ///
+        /// Box-drawing chars + dim SGR for the borders so the
+        /// banner reads as chrome, not content. Truncates the
+        /// reason to fit within `conclusion_buf` (1024 bytes) —
+        /// realistic reasons are 100-200 bytes; the cap is just a
+        /// safety bound.
+        /// Comptime-built border for the conclusion banner. Single
+        /// source of truth — top and bottom emit the same width so
+        /// the box renders symmetric. 58 dashes after the leading
+        /// corner glyph + tail = 60 visible columns total, fits in
+        /// any terminal ≥60 cols wide (under 60, the line wraps;
+        /// banner is informational, soft-wrap is acceptable).
+        const conclusion_border_dashes: []const u8 =
+            "\u{2500}" ** 58;
+
+        fn captureConclusion(rt: *Runtime, reason: []const u8, execs: usize, obs: usize, turns: usize) void {
+            var w: std.Io.Writer = .fixed(&rt.conclusion_buf);
+            // Leading newline so the banner is visually separated
+            // from any preceding shell output / cursor position.
+            // `\x1b[2m` = dim, `\x1b[0m` = reset.
+            // Top line: `╭─ atty · LLM session complete ` (31 visible
+            // cols incl. corners + trailing space) + 28 dashes from
+            // the comptime border = 59 visible cols. Bottom is `╰`
+            // + 58 dashes = 59 cols. Symmetric.
+            w.print("\n\x1b[2m\u{256D}\u{2500} atty \u{00B7} LLM session complete {s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(28 * 3)]}) catch {};
+            if (reason.len > 0) {
+                w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} {s}\r\n", .{reason}) catch {};
+            } else {
+                w.print("\x1b[2m\u{2502}\x1b[0m \u{2713} done\r\n", .{}) catch {};
+            }
+            w.print("\x1b[2m\u{2502}\x1b[0m {d} execs / {d} obs / {d} turns\r\n", .{ execs, obs, turns }) catch {};
+            // Bottom line: `╰` + 59 dashes = 60 visible cols.
+            w.print("\x1b[2m\u{2570}{s}\x1b[0m\r\n", .{conclusion_border_dashes[0..(58 * 3)]}) catch {};
+            rt.conclusion_len = w.end;
+        }
+
         fn latchOsc133Diag(rt: *Runtime) void {
             const fed = rt.osc133_capture.total_bytes_fed;
             const dispatches = rt.osc133_capture.total_dispatches;
@@ -1871,6 +1965,13 @@ pub fn configure(comptime cfg: Config) type {
             rt.last_assistant_json_len = 0;
             rt.dialog_parse_retry_count = 0;
             rt.question_choices_count = 0;
+            // Disarm the conclusion auto-emit latch — but keep the
+            // captured `conclusion_buf` so `Alt+C` can still recall
+            // the LAST completed session even if this reset was a
+            // cancel. The `.done` path explicitly RE-arms the latch
+            // AFTER calling dialogReset (see the captureConclusion
+            // site).
+            rt.conclusion_pending = false;
             rt.in_flight = false;
             rt.auto_mode_active = false;
             rt.auto_exec_armed = false;
@@ -2075,6 +2176,16 @@ pub fn configure(comptime cfg: Config) type {
         /// — we only emit on edges so the terminal doesn't see
         /// redundant OSC traffic on every tick.
         pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            // Conclusion banner emission takes precedence over the
+            // cursor-colour edge logic — the banner is one-shot
+            // multi-line output that scrolls into shell history;
+            // cursor-colour OSC sequences are infinitely retriable
+            // on the next tick. Drains the latch (one-shot
+            // semantics).
+            if (rt.conclusion_pending and rt.conclusion_len > 0) {
+                rt.conclusion_pending = false;
+                return rt.conclusion_buf[0..rt.conclusion_len];
+            }
             if (!cfg.prefix_signal_cursor) return null;
             // Cursor colour fires when EITHER the prefix is matched
             // (user typing `#: …`) OR persistent dialog/auto mode

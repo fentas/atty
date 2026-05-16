@@ -1,9 +1,9 @@
 $ printf '\033]133;C\007ok\033]133;D;0\007'
 ok$
-
-
-
-
+    ╭─ atty · LLM session complete ────────────────────────────
+│ ✓ all set
+│ 1 execs / 1 obs / 1 turns
+╰──────────────────────────────────────────────────────────
 
 ✓ done — all set · 1 execs / 1 obs / 1 turns
 

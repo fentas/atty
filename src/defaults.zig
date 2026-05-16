@@ -96,6 +96,11 @@ pub const Keymap = struct {
         .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+Tab"), .action = .ghost_accept },
+        // Ctrl+Right — accept ONE word of the ghost suggestion
+        // (fish's section-by-section partial-accept). Useful when
+        // the LATER part of the ghost is correct but the middle
+        // needs editing — successive presses walk through.
+        .{ .bytes = atty.keymap.key("Ctrl+Right"), .action = .ghost_accept_word },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
         // Alt+i — DUAL binding (legacy ESC+letter + kitty kbd CSI-u).
         // Same reason as the Esc bindings below: keymap matching
@@ -137,6 +142,12 @@ pub const Keymap = struct {
         .{ .bytes = "\x1b[109;3u", .action = .llm_exec_cycle_model },
         .{ .bytes = atty.keymap.key("Alt+h"), .action = .llm_exec_toggle_help },
         .{ .bytes = "\x1b[104;3u", .action = .llm_exec_toggle_help },
+        // Alt+C — re-emit the last LLM session conclusion. Phase 1
+        // of the chat-overlay rollout (the key surface is stable;
+        // phase 2 turns this into a persistent chat panel). Dual
+        // legacy + kitty kbd CSI-u form per the pattern above.
+        .{ .bytes = atty.keymap.key("Alt+c"), .action = .llm_chat_overlay_toggle },
+        .{ .bytes = "\x1b[99;3u", .action = .llm_chat_overlay_toggle },
         // Cancel works everywhere — not gated on AI mode (a
         // running exec loop can extend past the AI-mode entry
         // and the cancel is the safety lever for it).

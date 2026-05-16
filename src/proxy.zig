@@ -590,6 +590,41 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 }
                             }
                         },
+                        .ghost_accept_word => {
+                            // Partial accept (fish's section-by-
+                            // section walk). Take the FIRST word
+                            // of the trailing ghost suggestion +
+                            // the trailing whitespace after it.
+                            // Successive presses peel off the next
+                            // word from the (now shorter) ghost.
+                            //
+                            // Word boundary: skip leading spaces,
+                            // skip non-space chars (the word
+                            // itself), then include trailing space
+                            // run so the next press starts cleanly.
+                            // No-op when no ghost / uncertain line.
+                            if (!line_state.uncertain) {
+                                if (D.gatherGhostText(&runtimes, &ctx) catch null) |trailing| {
+                                    if (trailing.len > 0) {
+                                        var end: usize = 0;
+                                        // Skip leading whitespace (rare —
+                                        // usually the ghost starts with
+                                        // a word char).
+                                        while (end < trailing.len and trailing[end] == ' ') end += 1;
+                                        // Consume the word.
+                                        while (end < trailing.len and trailing[end] != ' ') end += 1;
+                                        // Consume the trailing whitespace
+                                        // run so the boundary lands at
+                                        // the next word's first char.
+                                        while (end < trailing.len and trailing[end] == ' ') end += 1;
+                                        if (end > 0 and end <= accept_buf.len) {
+                                            @memcpy(accept_buf[0..end], trailing[0..end]);
+                                            input = accept_buf[0..end];
+                                        }
+                                    }
+                                }
+                            }
+                        },
                         .incognito_toggle => {
                             incognito_on = !incognito_on;
                             ctx.incognito = incognito_on;
@@ -698,6 +733,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         .llm_exec_cycle_model,
                         .llm_exec_toggle_help,
                         .llm_exec_cancel,
+                        .llm_chat_overlay_toggle,
                         => {
                             // Hand the action to the llm module via
                             // the generic onAction dispatch. Module
