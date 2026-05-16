@@ -474,7 +474,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// 58 box-drawing dashes — used twice by `captureConclusion`
         /// to render symmetric top/bottom borders. Comptime so the
         /// banner width stays a single source of truth.
-        pub const conclusion_border_dashes: []const u8 = "\u{2500}" ** 58;
+        const conclusion_border_dashes: []const u8 = "\u{2500}" ** 58;
 
         /// Push a turn onto the conversation history. `content` must
         /// be heap-allocated by the caller and is OWNED by the
@@ -624,4 +624,43 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.conclusion_len = w.end;
         }
     };
+}
+
+test "Module.captureConclusion writes reason + counts into the buffer" {
+    // Minimal Runtime stand-in — captureConclusion only touches
+    // these two fields, so we don't need to spin up the full
+    // module Runtime for a snapshot test.
+    const FakeRuntime = struct {
+        conclusion_buf: [1024]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    M.captureConclusion(&rt, "stopped at user request", 3, 2, 7);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "LLM session complete") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "stopped at user request") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "3 execs / 2 obs / 7 turns") != null);
+    // Box-drawing corners + dim SGR for the chrome.
+    try testing.expect(std.mem.indexOf(u8, out, "\u{256D}") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2570}") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2m") != null);
+}
+
+test "Module.captureConclusion falls back to 'done' when reason is empty" {
+    const FakeRuntime = struct {
+        conclusion_buf: [1024]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    M.captureConclusion(&rt, "", 1, 0, 2);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2713} done") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1 execs / 0 obs / 2 turns") != null);
 }
