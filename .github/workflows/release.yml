@@ -86,7 +86,7 @@ jobs:
         if: matrix.target == 'x86_64-linux-musl'
         run: |
           chmod +x dist/${{ steps.pkg.outputs.stem }}
-          echo "echo atty-release-ok; exit" | dist/${{ steps.pkg.outputs.stem }} 2>&1 | tee /tmp/out
+          script -qfec "dist/${{ steps.pkg.outputs.stem }} bash -c 'echo atty-release-ok'" /dev/null 2>&1 | tee /tmp/out
           grep -q atty-release-ok /tmp/out
 
       - uses: actions/upload-artifact@v7

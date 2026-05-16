@@ -36,8 +36,12 @@ jobs:
         run: zig build itest --summary all
 
       - name: smoke test
+        # atty refuses non-TTY stdio (src/main.zig), so we wrap it in
+        # `script` to allocate a real PTY for the spawned binary. The
+        # inner `bash -c` exits after running, which fires SIGCHLD →
+        # atty's main loop exits cleanly.
         run: |
-          echo "echo atty-ci-ok; exit" | ./zig-out/bin/atty 2>&1 | tee /tmp/out
+          script -qfec "./zig-out/bin/atty bash -c 'echo atty-ci-ok'" /dev/null 2>&1 | tee /tmp/out
           grep -q atty-ci-ok /tmp/out
 
       - uses: actions/upload-artifact@v7
@@ -64,5 +68,5 @@ jobs:
           docker run --rm -v "$PWD/dist:/out" atty:builder \
               cp /src/zig-out/bin/atty /out/atty
           file dist/atty
-          echo "echo atty-docker-ok; exit" | ./dist/atty 2>&1 | tee /tmp/out
+          script -qfec "./dist/atty bash -c 'echo atty-docker-ok'" /dev/null 2>&1 | tee /tmp/out
           grep -q atty-docker-ok /tmp/out
