@@ -462,15 +462,16 @@ test "buildRequestBody: assistant_exec turn uses assistant role" {
 // ============================================================================
 //
 // Small, focused helpers that touch `*Runtime` fields directly.
-// Four conceptual groups:
+// Five conceptual groups:
 //   - turn ring: `pushTurn`, `freeTurns`
 //   - captured-output buffer: `appendCaptured`, `advancePastMarker`
 //   - status latches: `latchHint`, `latchErr`, `queueInjection`
 //   - conclusion banner: `captureConclusion`
+//   - dialog teardown: `dialogReset`, `abortDialog`
 //
-// Larger state-machine functions (`handleResponse`, `dialogReset`,
-// `fireDialogRequest`, …) stay in `llm.zig` for now — they touch
-// worker channels and the dialog state machine in ways that aren't
+// Larger state-machine functions (`handleResponse`,
+// `fireDialogRequest`, …) stay in `llm.zig` — they touch worker
+// channels and the dialog state machine in ways that aren't
 // purely buffer-shaped.
 
 const types = @import("types.zig");
@@ -641,11 +642,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// burn a wasted API call AND advance `shared.fixture_idx`,
         /// desynchronising the fixture cursor across cancel-aware
         /// e2e scenarios).
-        ///
-        /// Takes `io: std.Io` rather than the full `*Context` so the
-        /// helper doesn't have to import the proxy's module surface
-        /// — only `ctx.io` is actually used (for the worker-shared
-        /// mutex lock).
         pub fn dialogReset(rt: *Runtime, io: std.Io) void {
             rt.shared.mutex.lockUncancelable(io);
             rt.shared.req_gen +%= 1;
@@ -679,9 +675,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// the ⚠ row and resets to idle. Used for unrecoverable
         /// states mid-loop (OOM, body too large, malformed JSON
         /// from the model on second attempt).
-        ///
-        /// `io` here matches `dialogReset`'s signature — Context is
-        /// not needed past `ctx.io`.
         pub fn abortDialog(rt: *Runtime, io: std.Io, msg: []const u8) void {
             latchErr(rt, msg);
             dialogReset(rt, io);
