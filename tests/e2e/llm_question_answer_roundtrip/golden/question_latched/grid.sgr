@@ -1,2 +1,8 @@
 R7 C0-12 dim italic
-R9 C0-70 dim
+R9 C0-6 dim
+R9 C7-7 fg=141
+R9 C8-44 dim
+R9 C45-47 bold fg=14
+R9 C48-50 dim
+R9 C51-62 bold fg=14
+R9 C63-70 dim

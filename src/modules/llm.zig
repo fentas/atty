@@ -237,10 +237,17 @@ pub fn configure(comptime cfg: Config) type {
             /// when `cfg.models.len > 0` — `statusText` runs every
             /// render tick, but the returned slice only needs to
             /// outlive that single call, so a stable Runtime-owned
-            /// buffer is the right shape. 256 bytes ≈ the typical
-            /// statusbar width; longer hints are truncated by the
-            /// statusbar's own clamp.
-            status_buf: [256]u8 = undefined,
+            /// buffer is the right shape.
+            ///
+            /// 1 KB to fit the styled variant: the AI-mode hint
+            /// embeds ~7 SGR-wrapped shortcut tokens (~33 bytes
+            /// each) + a styled icon (~26 bytes) + the model name
+            /// + prose. ~300 bytes total before the model name;
+            /// 1 KB leaves comfortable headroom for long model
+            /// names like `claude-3-5-sonnet-20241022`. Longer
+            /// hints are clipped by the statusbar's own width
+            /// clamp anyway.
+            status_buf: [1024]u8 = undefined,
             /// Pending bytes for pollShellInput to surface. Used to
             /// route `\x15` (Ctrl+U) to the pty after onAction
             /// triggers a worker call — `onAction` can't synchronously
@@ -1829,29 +1836,34 @@ pub fn configure(comptime cfg: Config) type {
 
         // Comptime SGR escape constants for the AI-mode statusbar
         // hint. The bar wraps the whole segment in `dim` (default
-        // bar style), so the inline `[22m` (cancel dim/bold) +
-        // `[2m` (re-apply dim) pairs preserve dim for prose while
-        // letting the icon and shortcuts override with the
-        // configured 256-colour foregrounds. `[39m` restores the
-        // default foreground without disturbing other attributes.
+        // bar style); these inline escapes cancel dim around the
+        // colored span and re-apply it after, so prose between
+        // styled spans stays dim.
         //
-        // When the color is null (user wants legacy gray-dim),
-        // the corresponding wrap is empty — segments inherit the
-        // bar's dim style.
+        // Each open/close is a single combined CSI (`\x1B[a;b;cm`)
+        // rather than three separate ones — saves ~6 bytes per
+        // styled token, which matters because the statusbar's
+        // line budget is finite and the hint embeds 7+ tokens.
+        //
+        // CSI 22 = normal intensity (cancels dim AND bold).
+        // CSI 39 = default foreground.
+        //
+        // When the color is null, the corresponding wrap is empty
+        // — segments inherit the bar's dim styling (legacy look).
         const icon_open: []const u8 = if (cfg.statusbar_icon_color) |c|
-            std.fmt.comptimePrint("\x1B[22m\x1B[38;5;{d}m", .{c})
+            std.fmt.comptimePrint("\x1B[22;38;5;{d}m", .{c})
         else
             "";
         const icon_close: []const u8 = if (cfg.statusbar_icon_color != null)
-            "\x1B[39m\x1B[2m"
+            "\x1B[39;2m"
         else
             "";
         const key_open: []const u8 = if (cfg.statusbar_shortcut_color) |c|
-            std.fmt.comptimePrint("\x1B[22m\x1B[1m\x1B[38;5;{d}m", .{c})
+            std.fmt.comptimePrint("\x1B[22;1;38;5;{d}m", .{c})
         else
             "";
         const key_close: []const u8 = if (cfg.statusbar_shortcut_color != null)
-            "\x1B[22m\x1B[39m\x1B[2m"
+            "\x1B[22;39;2m"
         else
             "";
 
@@ -2453,6 +2465,87 @@ test "statusText flips to prefix_signal_status_text while prefix matches" {
     const got2 = try L.statusText(&rt, &ctx);
     try testing.expect(got2 != null);
     try testing.expect(std.mem.indexOf(u8, got2.?, "thinking") != null);
+}
+
+test "statusText: AI hint embeds SGR escapes for icon + shortcuts (default colors)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    _ = line.applyInput("#: anything");
+    rt.ai_mode_active = true;
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    const out = got.?;
+
+    // Default config: icon color 141, shortcut color 14. Both
+    // present means the wrap escapes survived the comptime concat
+    // and reach the runtime untouched.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;38;5;141m") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1;38;5;14m") != null);
+    // Visible text is still intact end-to-end.
+    try testing.expect(std.mem.indexOf(u8, out, "Alt+A") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Esc") != null);
+}
+
+test "statusText: null icon/shortcut colors produce no SGR escapes (legacy look)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+        .statusbar_icon_color = null,
+        .statusbar_shortcut_color = null,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    _ = line.applyInput("#: anything");
+    rt.ai_mode_active = true;
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    const out = got.?;
+
+    // No 256-color SGR codes when both knobs are null — the hint
+    // inherits the bar's outer dim styling.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[38;5;") == null);
+    // Visible text still present.
+    try testing.expect(std.mem.indexOf(u8, out, "Alt+A") != null);
 }
 
 test "resolveApiBase trims a single trailing slash on cfg.api_base" {

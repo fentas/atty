@@ -1,2 +1,16 @@
 R5 C0-16 dim italic
-R7 C0-104 dim
+R7 C0-6 dim
+R7 C7-7 fg=141
+R7 C8-13 dim
+R7 C14-18 bold fg=14
+R7 C19-28 dim
+R7 C29-33 bold fg=14
+R7 C34-43 dim
+R7 C44-54 bold fg=14
+R7 C55-62 dim
+R7 C63-67 bold fg=14
+R7 C68-81 dim
+R7 C82-86 bold fg=14
+R7 C87-94 dim
+R7 C95-97 bold fg=14
+R7 C98-104 dim

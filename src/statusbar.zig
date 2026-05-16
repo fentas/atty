@@ -49,10 +49,17 @@ pub const StatusBar = struct {
     style: Style,
 
     /// Pending text — set via `setText`, painted on next `render`.
-    text_buf: [256]u8 = undefined,
+    ///
+    /// 1 KB to fit a single-line bar text payload INCLUDING any
+    /// inline SGR escapes module-side. The LLM module's styled
+    /// AI-mode hint embeds per-shortcut colour transitions that
+    /// add ~100 bytes of escape overhead on top of the visible
+    /// ~100-column text; 256 bytes was too tight and clipped the
+    /// visible suffix mid-escape.
+    text_buf: [1024]u8 = undefined,
     text_len: usize = 0,
     /// Last painted text — `render` no-ops if `text_buf` matches.
-    last_buf: [256]u8 = undefined,
+    last_buf: [1024]u8 = undefined,
     last_len: usize = 0,
     last_valid: bool = false,
 
