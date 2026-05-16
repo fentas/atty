@@ -288,6 +288,16 @@ pub fn configure(comptime cfg: Config) type {
             /// rationale (4 KB default off the inline Runtime).
             last_assistant_json: *[cfg.max_response_bytes]u8,
             last_assistant_json_len: usize = 0,
+            /// How many times we've already asked the LLM to re-do
+            /// a malformed reply this dialog. Reset on dialog start
+            /// and on a successful parse. Capped at
+            /// `cfg.dialog_parse_retry_max` so an LLM that
+            /// consistently refuses the JSON envelope can't trap
+            /// the loop forever — after the cap, the dialog aborts
+            /// with the same "wasn't valid JSON" error the user
+            /// reported, but the user has at least had a chance
+            /// for the model to self-correct.
+            dialog_parse_retry_count: u8 = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -1230,17 +1240,55 @@ pub fn configure(comptime cfg: Config) type {
 
             var parsed: DialogResponse = .{};
             parseDialogResponse(rt.allocator, raw, &parsed) catch {
-                latchErr(rt, "LLM reply wasn't valid JSON — cancel and retry");
+                // Self-correction loop — give the model a chance to
+                // re-emit a valid JSON envelope. Cap at
+                // `cfg.dialog_parse_retry_max` so a model that
+                // refuses the format can't trap the loop. The
+                // bad reply itself is pushed as the assistant turn
+                // (so the model sees its own output), then a user
+                // turn explains the parse failure in concrete
+                // terms ("you replied X, here's what was wrong,
+                // please re-emit JSON exactly like this …").
+                if (rt.dialog_parse_retry_count < cfg.dialog_parse_retry_max) {
+                    rt.dialog_parse_retry_count += 1;
+                    requestParseRetry(rt, ctx, "wasn't valid JSON") catch {
+                        latchErr(rt, "LLM reply wasn't valid JSON — cancel and retry");
+                        dialogReset(rt, ctx);
+                        rt.ai_mode_active = false;
+                        queueInjection(rt, "\x15");
+                    };
+                    return null;
+                }
+                latchErr(rt, "LLM reply wasn't valid JSON (gave up after retries) — cancel and re-prompt");
                 dialogReset(rt, ctx);
                 rt.ai_mode_active = false;
                 queueInjection(rt, "\x15");
                 return null;
             };
+            // Successful parse — reset the retry counter so any
+            // future malformed reply within this dialog gets the
+            // full retry budget again.
+            rt.dialog_parse_retry_count = 0;
 
             switch (parsed.action) {
                 .exec => {
                     if (parsed.command_len == 0) {
-                        latchErr(rt, "LLM reply had no command — cancel and retry");
+                        // Same retry budget as the JSON-parse-fail
+                        // path — an action=exec without a `command`
+                        // field is a model error of the same shape
+                        // (envelope is technically valid JSON but
+                        // doesn't satisfy our protocol contract).
+                        if (rt.dialog_parse_retry_count < cfg.dialog_parse_retry_max) {
+                            rt.dialog_parse_retry_count += 1;
+                            requestParseRetry(rt, ctx, "had action=exec but no command field") catch {
+                                latchErr(rt, "LLM reply had no command — cancel and retry");
+                                dialogReset(rt, ctx);
+                                rt.ai_mode_active = false;
+                                queueInjection(rt, "\x15");
+                            };
+                            return null;
+                        }
+                        latchErr(rt, "LLM reply had no command (gave up after retries) — cancel and re-prompt");
                         dialogReset(rt, ctx);
                         rt.ai_mode_active = false;
                         queueInjection(rt, "\x15");
@@ -1758,9 +1806,66 @@ pub fn configure(comptime cfg: Config) type {
             rt.pending_command_len = 0;
             rt.pending_description_len = 0;
             rt.last_assistant_json_len = 0;
+            rt.dialog_parse_retry_count = 0;
             rt.in_flight = false;
             rt.auto_mode_active = false;
             rt.auto_exec_armed = false;
+        }
+
+        /// Echo the LLM's malformed reply back as an `assistant_exec`
+        /// turn AND push a corrective user turn explaining what was
+        /// wrong, then fire the dialog request again. Used by the
+        /// parse-fail and missing-field branches of
+        /// `handleDialogResponse` to give the model a chance to
+        /// self-correct.
+        ///
+        /// `reason` is a short human-readable description of the
+        /// failure ("wasn't valid JSON", "had action=exec but no
+        /// command field", …) that gets formatted into the
+        /// corrective prompt. Caller's responsibility to gate on
+        /// retry budget; this function unconditionally fires the
+        /// retry.
+        fn requestParseRetry(rt: *Runtime, ctx: *m.Context, reason: []const u8) !void {
+            // Echo the malformed reply back as an assistant turn so
+            // the model sees its own output in context. Without
+            // this the corrective user turn would seem to come
+            // from nowhere.
+            const bad_reply = rt.last_assistant_json[0..rt.last_assistant_json_len];
+            const assistant_copy = try rt.allocator.dupe(u8, bad_reply);
+            errdefer rt.allocator.free(assistant_copy);
+            try pushTurn(rt, .assistant_exec, assistant_copy);
+
+            // Build the corrective user turn. Kept short — most
+            // models react better to a terse correction than a
+            // wall of meta-commentary.
+            const corrective = try std.fmt.allocPrint(
+                rt.allocator,
+                "Your previous reply {s}. Reply STRICTLY with JSON: " ++
+                    "{{\"action\":\"exec\",\"command\":\"…\",\"description\":\"…\"}} " ++
+                    "or {{\"action\":\"done\",\"reason\":\"…\"}} " ++
+                    "or {{\"action\":\"question\",\"question\":\"…\"}}. " ++
+                    "No prose. No markdown fences. No code blocks.",
+                .{reason},
+            );
+            errdefer rt.allocator.free(corrective);
+            try pushTurn(rt, .user, corrective);
+
+            // Fire the retry. fireDialogRequest builds the request
+            // body from the full turn list (including our newly
+            // appended assistant + corrective turns), bumps
+            // req_gen, signals the worker. Dialog state transitions
+            // through .generating → .suggesting on the next response.
+            try fireDialogRequest(rt, ctx);
+
+            // Surface the retry visibly so the user knows
+            // something's happening (the loop isn't silent).
+            var msg_buf: [128]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &msg_buf,
+                "LLM reply {s} — retrying ({d}/{d})",
+                .{ reason, rt.dialog_parse_retry_count, cfg.dialog_parse_retry_max },
+            ) catch "LLM reply malformed — retrying";
+            latchHint(rt, msg);
         }
 
         /// Abort the dialog with an error notification. Surfaces in

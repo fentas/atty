@@ -214,4 +214,17 @@ pub const Config = struct {
     /// corresponding action — useful for muscle-memory users who
     /// preferred the pre-Alt-key trigger flow.
     enter_action: EnterAction = .none,
+    /// How many times atty will ask the LLM to retry when its
+    /// dialog reply fails to parse as the JSON envelope. Models
+    /// sometimes drift into prose, wrap the JSON in stray fences
+    /// the strip-pass misses, or omit required fields; atty echoes
+    /// the bad reply back + sends a corrective user turn explaining
+    /// what was wrong. After this many attempts the dialog aborts
+    /// with the parse-fail error so a consistently misbehaving
+    /// model can't trap the loop forever. Default 2 — empirically
+    /// enough for most models to self-correct once shown their
+    /// mistake; raise if you're on a particularly stubborn model.
+    /// Set to 0 to disable retry (revert to the pre-retry abort
+    /// behaviour).
+    dialog_parse_retry_max: u8 = 2,
 };
