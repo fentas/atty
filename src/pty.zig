@@ -167,6 +167,10 @@ pub const Pty = struct {
             // Restore default explicitly — it's the only signal we
             // set to SIG_IGN, so it's the only one execve won't
             // reset for us.
+            //
+            // Invariant: any write syscall added between this point
+            // and execvp must tolerate EPIPE-as-die rather than
+            // silently swallowing it.
             const dfl = posix.Sigaction{
                 .handler = .{ .handler = posix.SIG.DFL },
                 .mask = posix.sigemptyset(),

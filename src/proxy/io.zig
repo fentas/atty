@@ -98,7 +98,9 @@ test "writeFully: write to a pipe whose reader closed returns error.WriteFailed 
     // SIG_IGN locally so the kernel's default SIGPIPE disposition
     // (terminate) doesn't kill the test runner — the production
     // disposition is set in proxy.installSignalHandlers, but unit
-    // tests run outside that path.
+    // tests run outside that path. The defer restore guarantees
+    // every other test in this binary observes default SIGPIPE
+    // before and after this one runs.
     const sa = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.IGN },
         .mask = std.posix.sigemptyset(),
