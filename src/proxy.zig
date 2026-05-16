@@ -1485,7 +1485,12 @@ fn renderStatus(
     if (!ctx.is_tty) return;
 
     // First gather the module contributions into a scratch buffer.
-    var mod_buf: [192]u8 = undefined;
+    //
+    // 768 bytes to fit module hints that embed inline SGR styling
+    // (LLM's colored AI hint adds ~100 bytes of escape overhead
+    // beyond the visible text; the assembler buffer is 1 KB but
+    // also holds the incognito + subprocess + base segments).
+    var mod_buf: [768]u8 = undefined;
     var mw: std.Io.Writer = .fixed(&mod_buf);
     D.gatherStatus(rts, ctx, &mw) catch {};
 
@@ -1523,7 +1528,11 @@ fn renderStatus(
     // Then ask the pure assembler to join incognito + subprocess +
     // base + modules with " │ " separators, skipping empty segments.
     // Pure logic + own tests live in src/status_text.zig.
-    var text_buf: [512]u8 = undefined;
+    //
+    // 1 KB to match the statusbar's text_buf — module contributions
+    // can include inline SGR styling (LLM colored AI hint adds
+    // ~100 bytes of escape overhead beyond the visible text).
+    var text_buf: [1024]u8 = undefined;
     var tw: std.Io.Writer = .fixed(&text_buf);
     status_text.assemble(.{
         .w = &tw,
