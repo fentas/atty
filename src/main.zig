@@ -103,11 +103,60 @@ const shell_init_osc133_bash =
     \\# String form (bash <5.1, or 5.1+ where no manager has switched
     \\# PROMPT_COMMAND to array yet) keeps the original semicolon
     \\# concat — correct in that mode.
+    \\# `;C` (command-start marker) is emitted from a DEBUG trap —
+    \\# bash has no native preexec hook, so we synthesise one. The
+    \\# trap fires for every simple command bash executes; we gate
+    \\# emission so only the FIRST simple command of each logical
+    \\# user-typed command produces `;C`. Without this gate ;C would
+    \\# fire many times per prompt cycle (every function call in
+    \\# PROMPT_COMMAND, every pipeline component, every subshell).
+    \\#
+    \\# The flag is reset at the END of PROMPT_COMMAND so the next
+    \\# user command re-arms emission. Existing DEBUG traps
+    \\# (starship's `_starship_set_return`, atuin's
+    \\# `__atuin_preexec`, etc.) are chained — atty's trap APPENDS
+    \\# its body rather than overwriting, so prompt-manager exit-
+    \\# code capture and history-tracking hooks keep firing.
+    \\__atty_osc133_c_emitted=1
+    \\__atty_osc133_preexec() {
+    \\    # Skip inside readline completion subshells (bash sets
+    \\    # COMP_LINE while running completion functions). Without
+    \\    # this guard ;C fires during Tab-completion expansion,
+    \\    # which the proxy then sees as "user just ran a command"
+    \\    # — confuses the OSC 133 state machine.
+    \\    [[ -n "${COMP_LINE-}" ]] && return
+    \\    (( __atty_osc133_c_emitted )) && return
+    \\    __atty_osc133_c_emitted=1
+    \\    printf '\033]133;C\007'
+    \\}
+    \\__atty_osc133_reset_c() { __atty_osc133_c_emitted=0; }
+    \\__atty_osc133_setup_debug_trap() {
+    \\    # Idempotency: skip if atty's preexec is already chained.
+    \\    case "$(trap -p DEBUG 2>/dev/null)" in
+    \\        *__atty_osc133_preexec*) return ;;
+    \\    esac
+    \\    local existing
+    \\    existing="$(trap -p DEBUG 2>/dev/null)"
+    \\    if [[ -z "$existing" ]]; then
+    \\        trap '__atty_osc133_preexec' DEBUG
+    \\    else
+    \\        # `trap -p DEBUG` outputs `trap -- 'BODY' DEBUG` —
+    \\        # strip the wrapping to extract BODY for chaining.
+    \\        # Single-quote embedded in BODY would break this
+    \\        # parse, but no shipped tool's DEBUG trap body
+    \\        # contains quoted bodies in practice (starship,
+    \\        # atuin, bash-preexec all use plain function calls).
+    \\        existing="${existing#trap -- \'}"
+    \\        existing="${existing%\' DEBUG}"
+    \\        trap "${existing}; __atty_osc133_preexec" DEBUG
+    \\    fi
+    \\}
     \\if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-    \\    PROMPT_COMMAND=("__atty_osc133_d" "${PROMPT_COMMAND[@]}" "__atty_osc133_wrap_ps1")
+    \\    PROMPT_COMMAND=("__atty_osc133_d" "${PROMPT_COMMAND[@]}" "__atty_osc133_wrap_ps1" "__atty_osc133_reset_c")
     \\else
-    \\    PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-};__atty_osc133_wrap_ps1"
+    \\    PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-};__atty_osc133_wrap_ps1;__atty_osc133_reset_c"
     \\fi
+    \\__atty_osc133_setup_debug_trap
     \\__atty_osc133_wrap_ps1
     \\
 ;
