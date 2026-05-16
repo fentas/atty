@@ -1346,15 +1346,32 @@ pub fn configure(comptime cfg: Config) type {
                     return rt.pending_command[0..rt.pending_command_len];
                 },
                 .done => {
-                    // Sized to fit the "✓ done — " prefix (~12
-                    // bytes) plus the full 256-byte reason buffer
-                    // without spilling into the fallback "✓ done".
-                    var msg_buf: [320]u8 = undefined;
+                    // Tally the conversation so the user gets a
+                    // glance-able summary of what just happened —
+                    // useful both for the loop they just exited
+                    // AND as a quick sanity check ("did the model
+                    // really execute 12 commands or am I
+                    // misremembering?"). Counts are pre-reset
+                    // since `dialogReset` below clears `turns_len`.
+                    var exec_count: usize = 0;
+                    var observation_count: usize = 0;
+                    var user_count: usize = 0;
+                    for (rt.turns[0..rt.turns_len]) |t| switch (t.kind) {
+                        .assistant_exec => exec_count += 1,
+                        .observation => observation_count += 1,
+                        .user => user_count += 1,
+                    };
+                    // Sized for: "✓ done — " (~12) + reason (≤256) +
+                    // " · N execs / N obs / N turns" (~40). 384B
+                    // leaves comfortable headroom for the formatted
+                    // suffix even at max reason length.
+                    var msg_buf: [384]u8 = undefined;
                     const reason = parsed.reason();
                     const msg = if (reason.len > 0)
-                        std.fmt.bufPrint(&msg_buf, "✓ done — {s}", .{reason}) catch "✓ done"
+                        std.fmt.bufPrint(&msg_buf, "✓ done — {s} · {d} execs / {d} obs / {d} turns", .{ reason, exec_count, observation_count, user_count }) catch
+                            (std.fmt.bufPrint(&msg_buf, "✓ done — {s}", .{reason}) catch "✓ done")
                     else
-                        "✓ done";
+                        std.fmt.bufPrint(&msg_buf, "✓ done · {d} execs / {d} obs / {d} turns", .{ exec_count, observation_count, user_count }) catch "✓ done";
                     latchHint(rt, msg);
                     dialogReset(rt, ctx);
                     rt.ai_mode_active = false;
