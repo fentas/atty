@@ -100,13 +100,21 @@ pub const Config = struct {
     /// Disable for terse single-command responses (matches the
     /// pre-explanation behaviour).
     with_explanation: bool = true,
-    /// System-role message. The default depends on
+    /// System-role TASK FRAMING. The default depends on
     /// `with_explanation`: with → "one-line explanation + fenced
     /// command"; without → "exactly one command, no extras."
     /// Override to tune for your model's idiosyncrasies. When you
     /// override AND set `with_explanation = false`, also drop the
     /// fence/explanation guidance from your prompt or atty will
     /// happily render whatever prose it sees in the hint row.
+    ///
+    /// **Note:** atty prepends an invariant `atty_preamble` (host-
+    /// environment context + meta-question routing) regardless of
+    /// this override. The effective prompt sent to the LLM is
+    /// `atty_preamble ++ "\n\n" ++ this`. The preamble exists so
+    /// user customisation can't accidentally strip the framing
+    /// the rest of atty's UI depends on. If you need full control,
+    /// build atty with the preamble emptied at source.
     system_prompt: []const u8 = "",
     /// Environment variables exposed to the model alongside the
     /// user's prompt. Each named var is read at attach time and
