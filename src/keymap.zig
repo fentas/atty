@@ -56,6 +56,15 @@ pub const Action = union(enum) {
     /// No-op when no ghost is showing or the line is in an uncertain
     /// state.
     ghost_accept,
+    /// Accept ONE word of the ghost suggestion (fish's Alt+f /
+    /// Ctrl+Right semantics — partial accept). The "word" is the
+    /// next whitespace-delimited chunk INCLUDING the trailing
+    /// whitespace, so successive presses walk through the
+    /// suggestion section by section. Useful when the bottom of
+    /// the ghost is correct but you want to edit the middle.
+    /// No-op when no ghost / uncertain line / already at end of
+    /// suggestion.
+    ghost_accept_word,
     /// Flip incognito mode on/off. While on: line commits aren't
     /// recorded (no atuin / history writes); the status bar prepends
     /// a 🔒 segment; a one-line stderr toast announces the flip.

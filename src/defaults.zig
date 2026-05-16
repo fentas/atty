@@ -96,6 +96,11 @@ pub const Keymap = struct {
         .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+Tab"), .action = .ghost_accept },
+        // Ctrl+Right — accept ONE word of the ghost suggestion
+        // (fish's section-by-section partial-accept). Useful when
+        // the LATER part of the ghost is correct but the middle
+        // needs editing — successive presses walk through.
+        .{ .bytes = atty.keymap.key("Ctrl+Right"), .action = .ghost_accept_word },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
         // Alt+i — DUAL binding (legacy ESC+letter + kitty kbd CSI-u).
         // Same reason as the Esc bindings below: keymap matching
