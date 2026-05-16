@@ -1,6 +1,15 @@
-R1 C2-60 dim
-R2 C0-0 dim
+R2 C2-4 dim
+R2 C5-10 fg=141
+R2 C11-62 dim
 R3 C0-0 dim
-R4 C0-58 dim
+R3 C2-2 bold fg=14
+R4 C0-0 dim
+R4 C2-2 bold fg=14
+R4 C3-11 dim
+R4 C12-12 bold fg=14
+R4 C13-19 dim
+R4 C20-20 bold fg=14
+R4 C21-26 dim
+R5 C0-58 dim
 R7 C0-42 dim italic
 R9 C0-3 dim

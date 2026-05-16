@@ -85,6 +85,24 @@ pub const Context = struct {
     /// (ghost text keeps working) matches what most fish/zsh users
     /// expect; incognito is about not *recording*, not about hiding.
     incognito: bool = false,
+    /// True when the user's shell is currently in alt-screen mode
+    /// (running a TUI: nvim, k9s, less, htop, …). Driven by the
+    /// proxy's `altscreen.zig` tracker watching the master→stdout
+    /// stream. Modules read this to refuse opening their own
+    /// overlay on top of the running TUI's alt-screen — nested
+    /// alt-screen confuses the terminal and dropping the outer one
+    /// on close vanishes the TUI's screen.
+    shell_alt_screen_active: bool = false,
+    /// True when any module's overlay is currently open (the
+    /// proxy's outer terminal is in atty-controlled alt-screen).
+    /// Set by the proxy after a module's onAction or onTick
+    /// returns having opened an overlay; cleared on close. Other
+    /// modules read this to avoid scribbling on the overlay
+    /// (e.g. the statusbar repaint path skips when set). Distinct
+    /// from `shell_alt_screen_active`: that one tracks the SHELL's
+    /// alt-screen state via the slave output stream; this one
+    /// tracks atty's own overlay state on the user's terminal.
+    module_overlay_active: bool = false,
     /// The subprocess the user is currently inside, if any. Driven
     /// by the proxy's OSC 133 `;C` / `;D` handling — at `;C` we parse
     /// the just-committed line for recognised launchers (ssh / mosh
