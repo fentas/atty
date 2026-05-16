@@ -87,6 +87,24 @@ pub const Osc7 = struct {
         return self.cwd_offsets[i];
     }
 
+    /// True iff the next escape-free byte chunk is a guaranteed
+    /// no-op — Osc7 state machine only leaves `.ground` on ESC.
+    pub fn canFastPath(self: *const Osc7) bool {
+        return self.state == .ground;
+    }
+
+    /// Reset the per-feed capture ring to match what `feed()`
+    /// would have done at entry. The proxy reads `count` after
+    /// every dispatch and assumes it scopes to the latest chunk
+    /// — without this reset, captures from the prior chunk would
+    /// re-emit on every subsequent fast-pathed chunk until a
+    /// non-fast-pathed feed cleared them. Caller must have
+    /// verified `canFastPath()` first.
+    pub fn onFastPath(self: *Osc7, n: usize) void {
+        _ = n;
+        self.count = 0;
+    }
+
     /// Feed master-output bytes. Captures from prior feeds are
     /// cleared at the start so each `feed()` returns a fresh
     /// ring of captures bound to its own byte stream.
@@ -298,4 +316,28 @@ test "Osc7: capture overflow drops the tail (rare; 16 OSC 7s in one chunk)" {
     var o = Osc7.init();
     o.feed(buf[0..off]);
     try testing.expectEqual(@as(usize, max_captures), o.count);
+}
+
+test "Osc7.canFastPath + onFastPath — fast-path contract" {
+    var o = Osc7.init();
+    try testing.expect(o.canFastPath());
+    o.feed("plain output with no escapes\nstill no escapes\n");
+    try testing.expect(o.canFastPath());
+    o.feed("\x1b]7;file://"); // mid-OSC
+    try testing.expect(!o.canFastPath());
+    o.feed("host/path\x07");
+    try testing.expect(o.canFastPath());
+}
+
+test "Osc7.onFastPath clears stale captures (regression: re-emit on fast-pathed chunk)" {
+    // feed() resets `count` at entry; the proxy reads `count`
+    // after each dispatch and assumes it scopes to the latest
+    // chunk. Without onFastPath clearing the count, a prior
+    // chunk's captures would re-emit on every subsequent fast-
+    // pathed chunk until a non-fast-pathed feed replaced them.
+    var o = Osc7.init();
+    o.feed("\x1b]7;file://host/a\x07\x1b]7;file://host/b\x07");
+    try testing.expectEqual(@as(usize, 2), o.count);
+    o.onFastPath(4096);
+    try testing.expectEqual(@as(usize, 0), o.count);
 }

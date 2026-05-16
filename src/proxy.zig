@@ -1093,9 +1093,39 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Feed OSC 133 tracker — captures the input region
                 // when the shell emits prompt-zone markers. Stays
                 // dormant otherwise.
-                osc133_tracker.feed(output);
-                alt_screen.feed(output);
-                osc7_tracker.feed(output);
+                // Fast path: when the chunk has no escape bytes AND
+                // every OSC/CSI tracker reports `canFastPath()`,
+                // the per-byte state machines provably stay in
+                // `.ground` — feeding each byte is pure overhead.
+                // A 4 KB plain-text chunk otherwise burns ~50 µs
+                // per tracker on switch dispatch.
+                //
+                // Each tracker's `canFastPath()` encodes the
+                // tracker-specific safety predicate (osc133 also
+                // checks `phase != .in_input` because plain ASCII
+                // bytes mutate the captured-input buffer in that
+                // phase). Each `onFastPath(n)` does the minimum
+                // per-feed bookkeeping `feed()` would have done
+                // for a no-transition byte stream: bump the
+                // diagnostic counter (osc133), clear the per-feed
+                // capture ring (osc7), nothing (altscreen).
+                //
+                // cursor_tracker has no fast-path — it tracks
+                // CR/LF/printable-advance for every byte.
+                const has_esc = std.mem.indexOfScalar(u8, output, 0x1B) != null;
+                const can_fast = !has_esc and
+                    osc133_tracker.canFastPath() and
+                    alt_screen.canFastPath() and
+                    osc7_tracker.canFastPath();
+                if (can_fast) {
+                    osc133_tracker.onFastPath(output.len);
+                    alt_screen.onFastPath(output.len);
+                    osc7_tracker.onFastPath(output.len);
+                } else {
+                    osc133_tracker.feed(output);
+                    alt_screen.feed(output);
+                    osc7_tracker.feed(output);
+                }
                 cursor_tracker.feed(output);
                 // Only surface the row to modules on real TTY runs
                 // — matches the null-on-non-TTY contract on

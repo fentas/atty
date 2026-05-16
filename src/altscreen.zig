@@ -90,6 +90,23 @@ pub const AltScreen = struct {
         return t;
     }
 
+    /// True iff the next escape-free byte chunk is a guaranteed
+    /// no-op — the AltScreen state machine only leaves `.ground`
+    /// on ESC, so a ground tracker + no-escape chunk produces no
+    /// state changes.
+    pub fn canFastPath(self: *const AltScreen) bool {
+        return self.state == .ground;
+    }
+
+    /// No-op skip — AltScreen carries no per-feed counters that
+    /// need maintenance during the proxy's fast-path. Defined
+    /// for symmetry with `Osc133.onFastPath` / `Osc7.onFastPath`
+    /// so the call sites all have the same shape.
+    pub fn onFastPath(self: *AltScreen, n: usize) void {
+        _ = self;
+        _ = n;
+    }
+
     fn feedByte(self: *AltScreen, b: u8) void {
         switch (self.state) {
             .ground => {
@@ -297,4 +314,18 @@ test "AltScreen: multi-mode DECSET — only co-modes, no alt-screen, leaves stat
     a.feed("\x1b[?1000;1002;1006h");
     try testing.expect(!a.active);
     try testing.expect(!a.takeTransition());
+}
+
+test "AltScreen.canFastPath — fast-path contract" {
+    var a = AltScreen.init();
+    try testing.expect(a.canFastPath());
+    a.feed("plain text with no escapes");
+    try testing.expect(a.canFastPath());
+    a.feed("\x1b[?"); // mid-sequence
+    try testing.expect(!a.canFastPath());
+    a.feed("1049h");
+    try testing.expect(a.canFastPath());
+    // onFastPath is a no-op for altscreen — no state churn.
+    a.onFastPath(4096);
+    try testing.expect(a.canFastPath());
 }
