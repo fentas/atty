@@ -103,6 +103,18 @@ fn installSignalHandlers() void {
     };
     posix.sigaction(posix.SIG.WINCH, &sa, null);
     posix.sigaction(posix.SIG.CHLD, &sa, null);
+
+    // SIGPIPE → ignore. Writes to half-closed fds (e.g. user
+    // detaches the terminal mid-overlay-paint) must surface as
+    // `error.WriteFailed` from writeFully's errno gate so the
+    // proxy can shut down cleanly, never as silent SIGPIPE
+    // termination.
+    const ign = posix.Sigaction{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.PIPE, &ign, null);
 }
 
 // ---------------------------------------------------------------------------

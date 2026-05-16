@@ -91,16 +91,14 @@ test "writeFully: empty input is a no-op (no syscall, no error)" {
 }
 
 test "writeFully: write to a pipe whose reader closed returns error.WriteFailed (no spin)" {
-    // Regression for the 100%-CPU runaway observed on a long-lived
-    // session whose stdout pipe lost its reader: the kernel returns
-    // -1 + EPIPE on every write. The errno gate must surface this
-    // as error.WriteFailed so the caller can shut down, not retry.
-    //
-    // Install SIG_IGN for SIGPIPE locally so the kernel's default
-    // disposition (terminate) doesn't kill the test runner. atty's
-    // main() does the same at startup; the test pins it explicitly
-    // so the assertion holds independent of the Zig runtime's
-    // historical SIGPIPE handler.
+    // EPIPE must surface as error.WriteFailed so callers can shut
+    // down rather than retrying. The errno gate is the only thing
+    // between a broken pipe and an unbounded write-syscall loop.
+
+    // SIG_IGN locally so the kernel's default SIGPIPE disposition
+    // (terminate) doesn't kill the test runner — the production
+    // disposition is set in proxy.installSignalHandlers, but unit
+    // tests run outside that path.
     const sa = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.IGN },
         .mask = std.posix.sigemptyset(),
@@ -113,11 +111,8 @@ test "writeFully: write to a pipe whose reader closed returns error.WriteFailed 
     var fds: [2]std.posix.fd_t = undefined;
     const rc = std.c.pipe2(&fds, .{});
     try testing.expectEqual(@as(c_int, 0), rc);
-    // Close the read end so the write end is a "broken pipe".
     _ = std.c.close(fds[0]);
     defer _ = std.c.close(fds[1]);
 
-    // A previous version of writeFully retried any negative rc
-    // unconditionally — that path would loop forever here.
     try testing.expectError(error.WriteFailed, writeFully(fds[1], "x"));
 }

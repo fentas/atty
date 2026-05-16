@@ -455,16 +455,16 @@ pub fn main(init: std.process.Init) !void {
     const stdout_tty = isatty(std.posix.STDOUT_FILENO) != 0;
     const is_tty = stdin_tty and stdout_tty;
 
-    // Refuse to run when stdio isn't an interactive terminal on both
-    // sides. atty is a TTY-in-the-middle: its model assumes a real
-    // user typing into a real terminal. Piping its stdin or stdout
-    // (`echo x | atty bash`, `atty bash | head -1`) leaves the proxy
-    // forwarding shell output into a dead pipe — reproduces as a
-    // 100%-CPU runaway when the pipe peer exits and atty's writes
-    // start hitting EPIPE without anything to drive a clean shutdown.
-    // The shipped writeFully (`src/proxy/io.zig`) now surfaces EPIPE
-    // promptly, but the resulting "crashes on startup" is a worse UX
-    // than a clear refusal up front.
+    // atty is a TTY-in-the-middle — pipes/redirected stdio leave
+    // the proxy with no terminal to drive, and overlay writes to a
+    // dead pipe accumulate as silently-swallowed `error.WriteFailed`
+    // from the catch-all rendering paths. Refuse up front with an
+    // actionable error rather than starting an interactive session
+    // on an unusable terminal.
+    //
+    // `atty init` / `atty doctor` / `-V` / `-h` exit inside
+    // parseArgs before this check, so init eval'd into a non-tty
+    // context still works.
     if (!is_tty) {
         var buf: [512]u8 = undefined;
         const which: []const u8 = if (!stdin_tty and !stdout_tty)
@@ -480,22 +480,6 @@ pub fn main(init: std.process.Init) !void {
             "atty: refusing to run — stdio is not a terminal.\n";
         writeStderr(msg);
         std.process.exit(1);
-    }
-
-    // Ignore SIGPIPE so a transient write to a half-closed fd
-    // (overlay writes after the user detaches the terminal, a kill
-    // -HUP race against the slave) surfaces as `error.WriteFailed`
-    // via `writeFully`'s errno gate — never as silent termination.
-    // Zig's startup historically catches SIGPIPE on Linux, but
-    // pinning the disposition here decouples atty from that
-    // implementation detail.
-    {
-        const sa = std.posix.Sigaction{
-            .handler = .{ .handler = std.posix.SIG.IGN },
-            .mask = std.posix.sigemptyset(),
-            .flags = 0,
-        };
-        std.posix.sigaction(std.posix.SIG.PIPE, &sa, null);
     }
 
     const info = try atty.proxy.run(allocator, io, .{
