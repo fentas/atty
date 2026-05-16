@@ -519,17 +519,44 @@ pub fn configure(comptime cfg: Config) type {
                         // handleDialogResponse on the next worker
                         // tick; paintChatOverlay re-renders when
                         // the paint latch fires.
-                        if (rt.chat_input_len == 0) continue;
+                        // Trim trailing whitespace before checking
+                        // empty — matches `onLineCommit`'s semantics
+                        // (whitespace-only line = no submission).
+                        var trimmed_len = rt.chat_input_len;
+                        while (trimmed_len > 0 and (rt.chat_input_buf[trimmed_len - 1] == ' ' or rt.chat_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
+                        if (trimmed_len == 0) {
+                            // All-whitespace input — clear and
+                            // repaint without firing.
+                            rt.chat_input_len = 0;
+                            rt.chat_overlay_paint_pending = true;
+                            continue;
+                        }
+                        rt.chat_input_len = trimmed_len;
 
-                        // Refuse to submit while a previous
-                        // request is still in flight — firing
-                        // again here would clobber `shared.body_buf`
-                        // and discard the pending response. Idle
-                        // and `.idle` covers "first user-initiated
-                        // open with no prior dialog" too.
-                        const can_fire = rt.dialog_state == .idle or
-                            rt.dialog_state == .observation_ready or
-                            rt.dialog_state == .awaiting_question_answer;
+                        // Refuse to submit when atty is mid-cycle:
+                        //   - `rt.in_flight`: a worker request is
+                        //     in HTTP flight (single-mode Alt+A
+                        //     leaves dialog_state untouched, so the
+                        //     state check below would let us
+                        //     clobber `shared.body_buf` + req_gen
+                        //     and silently discard the response).
+                        //   - `.observation_ready`: onTick is about
+                        //     to drain `captured_output` into a
+                        //     turn and fire; preempting here would
+                        //     send the user's chat without the
+                        //     observation, breaking the dialog
+                        //     loop's premise.
+                        //   - other non-terminal states (.generating,
+                        //     .suggesting, .executing, .capturing_output)
+                        //     — a request is pending or in flight.
+                        //
+                        // `.idle` and `.awaiting_question_answer`
+                        // are safe to fire from (the latter is
+                        // exactly where the user's free-form answer
+                        // should go).
+                        const can_fire = !rt.in_flight and
+                            (rt.dialog_state == .idle or
+                                rt.dialog_state == .awaiting_question_answer);
                         if (!can_fire) {
                             latchHint(rt, "request in flight — wait for the response, or Ctrl+Shift+X to cancel");
                             rt.chat_overlay_paint_pending = true;
