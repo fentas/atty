@@ -118,6 +118,19 @@ pub const Config = struct {
     /// atuin databases. Common choices: `"atty"`, `"<hostname>"`,
     /// `"<user>@<host>"`.
     author_tag_prefix: []const u8 = "atty",
+
+    /// Pass `--intent "<description>"` when recording an
+    /// LLM-authored commit (paired with `--author`). The intent
+    /// text comes from the LLM's `description` field on the
+    /// dialog `.exec` reply — staged onto `LineState` via
+    /// `setCommitIntent` at the same moment as the author tag,
+    /// snapshot at submit time, read here. Off by default because
+    /// `--intent` landed even later than `--author` (atuin
+    /// v18.5+); passing an unknown flag aborts the record. Turn
+    /// on once you confirm your atuin supports it. User-typed
+    /// commits have no intent to record so this is a no-op for
+    /// them either way.
+    tag_llm_intent: bool = false,
 };
 
 pub fn configure(comptime cfg: Config) type {
@@ -155,6 +168,13 @@ pub fn configure(comptime cfg: Config) type {
             // so the worker has a stable read even if a follow-up
             // commit overwrites the slot before this one fires.
             rec_author: m.Author = .user,
+            // Intent text for the pending record (LLM's description
+            // of why the command was suggested). Empty for user-typed
+            // commands. Same snapshot-in-onLineCommit lifecycle as
+            // rec_author. Bounded by `LineState.pending_intent_buf`
+            // size on the producer side (256 bytes).
+            rec_intent_buf: [256]u8 = undefined,
+            rec_intent_len: usize = 0,
 
             shutdown: bool = false,
         };
@@ -213,6 +233,8 @@ pub fn configure(comptime cfg: Config) type {
             var record_cwd_local: [subprocess_mod.max_cwd_bytes]u8 = undefined;
             var record_cwd_len: usize = 0;
             var record_author_local: m.Author = .user;
+            var record_intent_local: [256]u8 = undefined;
+            var record_intent_len: usize = 0;
             var records_since_sync: u32 = 0;
             var last_sync_ms: i64 = 0;
             var total_records: u32 = 0;
@@ -250,6 +272,10 @@ pub fn configure(comptime cfg: Config) type {
                         @memcpy(record_cwd_local[0..record_cwd_len], shared.rec_cwd_buf[0..record_cwd_len]);
                     }
                     record_author_local = shared.rec_author;
+                    record_intent_len = shared.rec_intent_len;
+                    if (record_intent_len > 0) {
+                        @memcpy(record_intent_local[0..record_intent_len], shared.rec_intent_buf[0..record_intent_len]);
+                    }
                     shared.rec_pending = false;
                 }
                 shared.mutex.unlock(io);
@@ -269,7 +295,11 @@ pub fn configure(comptime cfg: Config) type {
                 }
 
                 if (has_record and cfg.record) {
-                    runRecord(gpa, io, record_local[0..record_len], record_cwd_local[0..record_cwd_len], record_author_local);
+                    const intent_slice: ?[]const u8 = if (record_intent_len > 0)
+                        record_intent_local[0..record_intent_len]
+                    else
+                        null;
+                    runRecord(gpa, io, record_local[0..record_len], record_cwd_local[0..record_cwd_len], record_author_local, intent_slice);
                     total_records += 1;
                     records_since_sync += 1;
                     const now = nowMs();
@@ -380,16 +410,18 @@ pub fn configure(comptime cfg: Config) type {
             std.fmt.comptimePrint("{s}:llm", .{cfg.author_tag_prefix});
 
         /// Pure argv builder, factored out of `runRecord` so the
-        /// flag/author/cwd interactions can be unit-tested without
-        /// spawning a subprocess. Caller supplies the `[8][]const u8`
-        /// scratch buffer; we return the populated subslice. Slot
-        /// budget: 3 fixed (binary/history/start) + 2 (--cwd <v>) +
-        /// 2 (--author <v>) + 1 (line) = 8.
+        /// flag/author/intent/cwd interactions can be unit-tested
+        /// without spawning a subprocess. Caller supplies the
+        /// `[10][]const u8` scratch buffer; we return the populated
+        /// subslice. Slot budget: 3 fixed (binary/history/start) +
+        /// 2 (--cwd <v>) + 2 (--author <v>) + 2 (--intent <v>) + 1
+        /// (line) = 10.
         pub fn buildRecordArgv(
-            buf: *[8][]const u8,
+            buf: *[10][]const u8,
             line: []const u8,
             cwd: []const u8,
             author: m.Author,
+            intent: ?[]const u8,
         ) []const []const u8 {
             var n: usize = 0;
             buf[n] = cfg.atuin_binary;
@@ -410,6 +442,14 @@ pub fn configure(comptime cfg: Config) type {
                 buf[n] = author_tag_llm;
                 n += 1;
             }
+            if (cfg.tag_llm_intent and author == .llm) {
+                if (intent) |intent_text| if (intent_text.len > 0) {
+                    buf[n] = "--intent";
+                    n += 1;
+                    buf[n] = intent_text;
+                    n += 1;
+                };
+            }
             buf[n] = line;
             n += 1;
             return buf[0..n];
@@ -421,10 +461,11 @@ pub fn configure(comptime cfg: Config) type {
             line: []const u8,
             cwd: []const u8,
             author: m.Author,
+            intent: ?[]const u8,
         ) void {
             if (line.len == 0) return;
-            var argv_buf: [8][]const u8 = undefined;
-            const argv = buildRecordArgv(&argv_buf, line, cwd, author);
+            var argv_buf: [10][]const u8 = undefined;
+            const argv = buildRecordArgv(&argv_buf, line, cwd, author, intent);
             const result = std.process.run(gpa, io, .{
                 .argv = argv,
                 .stdout_limit = .limited(256),
@@ -597,6 +638,16 @@ pub fn configure(comptime cfg: Config) type {
                 rt.shared.rec_cwd_len = 0;
             }
             rt.shared.rec_author = ctx.line.committedAuthor();
+            // Snapshot the staged intent (LLM's description for
+            // `.llm`-authored commits; empty for user-typed lines).
+            // Worker reads from `rec_intent_buf` under the same lock.
+            if (ctx.line.committedIntent()) |intent_text| {
+                const n = @min(intent_text.len, rt.shared.rec_intent_buf.len);
+                @memcpy(rt.shared.rec_intent_buf[0..n], intent_text[0..n]);
+                rt.shared.rec_intent_len = n;
+            } else {
+                rt.shared.rec_intent_len = 0;
+            }
             rt.shared.rec_pending = true;
             rt.shared.cv.signal(ctx.io);
         }
@@ -716,8 +767,8 @@ test "configure carries delete_scope through to A.config (default exact)" {
 
 test "buildRecordArgv: user line, tagging off → no --author, no --cwd" {
     const A = configure(.{});
-    var buf: [8][]const u8 = undefined;
-    const argv = A.buildRecordArgv(&buf, "ls -la", "", .user);
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls -la", "", .user, null);
     try testing.expectEqual(@as(usize, 4), argv.len);
     try testing.expectEqualStrings("atuin", argv[0]);
     try testing.expectEqualStrings("history", argv[1]);
@@ -730,16 +781,16 @@ test "buildRecordArgv: llm line with tagging off → still no --author" {
     // but the tag is suppressed — preserves the existing on-disk
     // format for users who haven't opted in.
     const A = configure(.{});
-    var buf: [8][]const u8 = undefined;
-    const argv = A.buildRecordArgv(&buf, "rm -rf /", "", .llm);
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "rm -rf /", "", .llm, null);
     try testing.expectEqual(@as(usize, 4), argv.len);
     try testing.expectEqualStrings("rm -rf /", argv[3]);
 }
 
 test "buildRecordArgv: llm line with tagging on → --author atty:llm appended before line" {
     const A = configure(.{ .tag_llm_author = true });
-    var buf: [8][]const u8 = undefined;
-    const argv = A.buildRecordArgv(&buf, "echo hi", "", .llm);
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "echo hi", "", .llm, null);
     try testing.expectEqual(@as(usize, 6), argv.len);
     try testing.expectEqualStrings("--author", argv[3]);
     try testing.expectEqualStrings("atty:llm", argv[4]);
@@ -748,15 +799,15 @@ test "buildRecordArgv: llm line with tagging on → --author atty:llm appended b
 
 test "buildRecordArgv: tagging on + .user → no --author (user-typed never tagged)" {
     const A = configure(.{ .tag_llm_author = true });
-    var buf: [8][]const u8 = undefined;
-    const argv = A.buildRecordArgv(&buf, "echo hi", "", .user);
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "echo hi", "", .user, null);
     try testing.expectEqual(@as(usize, 4), argv.len);
 }
 
 test "buildRecordArgv: cwd inserts --cwd <value> between start and the line" {
     const A = configure(.{});
-    var buf: [8][]const u8 = undefined;
-    const argv = A.buildRecordArgv(&buf, "ls", "ssh://user@host/srv", .user);
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "ssh://user@host/srv", .user, null);
     try testing.expectEqual(@as(usize, 6), argv.len);
     try testing.expectEqualStrings("--cwd", argv[3]);
     try testing.expectEqualStrings("ssh://user@host/srv", argv[4]);
@@ -765,8 +816,8 @@ test "buildRecordArgv: cwd inserts --cwd <value> between start and the line" {
 
 test "buildRecordArgv: tagging on + cwd + .llm → full 8-slot argv" {
     const A = configure(.{ .tag_llm_author = true });
-    var buf: [8][]const u8 = undefined;
-    const argv = A.buildRecordArgv(&buf, "ls", "ssh://user@host/srv", .llm);
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "ssh://user@host/srv", .llm, null);
     try testing.expectEqual(@as(usize, 8), argv.len);
     try testing.expectEqualStrings("--cwd", argv[3]);
     try testing.expectEqualStrings("--author", argv[5]);
@@ -776,9 +827,48 @@ test "buildRecordArgv: tagging on + cwd + .llm → full 8-slot argv" {
 
 test "buildRecordArgv: custom author_tag_prefix flows through to the tag" {
     const A = configure(.{ .tag_llm_author = true, .author_tag_prefix = "ws01" });
-    var buf: [8][]const u8 = undefined;
-    const argv = A.buildRecordArgv(&buf, "ls", "", .llm);
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "", .llm, null);
     try testing.expectEqualStrings("ws01:llm", argv[4]);
+}
+
+test "buildRecordArgv: intent on with .llm + intent text → --intent before line" {
+    const A = configure(.{ .tag_llm_author = true, .tag_llm_intent = true });
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls -la", "", .llm, "list files in detail");
+    // Slot layout: atuin, history, start, --author, atty:llm,
+    // --intent, "list files in detail", "ls -la"
+    try testing.expectEqual(@as(usize, 8), argv.len);
+    try testing.expectEqualStrings("--intent", argv[5]);
+    try testing.expectEqualStrings("list files in detail", argv[6]);
+    try testing.expectEqualStrings("ls -la", argv[7]);
+}
+
+test "buildRecordArgv: intent flag off + intent text → no --intent" {
+    const A = configure(.{ .tag_llm_author = true, .tag_llm_intent = false });
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "", .llm, "some intent");
+    // No --intent emitted; line is at slot 5 (after the 5-element
+    // prefix: atuin, history, start, --author, atty:llm).
+    try testing.expectEqual(@as(usize, 6), argv.len);
+    try testing.expectEqualStrings("ls", argv[5]);
+}
+
+test "buildRecordArgv: intent on but .user (user-typed) → no --intent" {
+    const A = configure(.{ .tag_llm_intent = true });
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "", .user, "some intent");
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("ls", argv[3]);
+}
+
+test "buildRecordArgv: intent on but null intent slice → no --intent" {
+    const A = configure(.{ .tag_llm_author = true, .tag_llm_intent = true });
+    var buf: [10][]const u8 = undefined;
+    const argv = A.buildRecordArgv(&buf, "ls", "", .llm, null);
+    // Same as no-intent path — 6 slots, ends in the bare line.
+    try testing.expectEqual(@as(usize, 6), argv.len);
+    try testing.expectEqualStrings("ls", argv[5]);
 }
 
 test "Config: tag_llm_author defaults off; author_tag_prefix defaults atty" {
