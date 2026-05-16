@@ -90,14 +90,21 @@ pub const AltScreen = struct {
         return t;
     }
 
-    /// True when the parser is between sequences (`.ground`). The
-    /// proxy uses this with `std.mem.indexOfScalar(0x1B)` to
-    /// fast-path master-output chunks that contain no escape bytes:
-    /// when all OSC/CSI trackers are ground AND the chunk has no
-    /// `\x1B`, the state machines provably can't transition, so
-    /// their per-byte loops are skippable.
-    pub fn isGround(self: *const AltScreen) bool {
+    /// True iff the next escape-free byte chunk is a guaranteed
+    /// no-op — the AltScreen state machine only leaves `.ground`
+    /// on ESC, so a ground tracker + no-escape chunk produces no
+    /// state changes.
+    pub fn canFastPath(self: *const AltScreen) bool {
         return self.state == .ground;
+    }
+
+    /// No-op skip — AltScreen carries no per-feed counters that
+    /// need maintenance during the proxy's fast-path. Defined
+    /// for symmetry with `Osc133.skipBytes` / `Osc7.skipBytes`
+    /// so the call sites all have the same shape.
+    pub fn skipBytes(self: *AltScreen, n: usize) void {
+        _ = self;
+        _ = n;
     }
 
     fn feedByte(self: *AltScreen, b: u8) void {
@@ -309,13 +316,16 @@ test "AltScreen: multi-mode DECSET — only co-modes, no alt-screen, leaves stat
     try testing.expect(!a.takeTransition());
 }
 
-test "AltScreen.isGround — fast-path contract" {
+test "AltScreen.canFastPath — fast-path contract" {
     var a = AltScreen.init();
-    try testing.expect(a.isGround());
+    try testing.expect(a.canFastPath());
     a.feed("plain text with no escapes");
-    try testing.expect(a.isGround());
+    try testing.expect(a.canFastPath());
     a.feed("\x1b[?"); // mid-sequence
-    try testing.expect(!a.isGround());
+    try testing.expect(!a.canFastPath());
     a.feed("1049h");
-    try testing.expect(a.isGround());
+    try testing.expect(a.canFastPath());
+    // skipBytes is a no-op for altscreen — no state churn.
+    a.skipBytes(4096);
+    try testing.expect(a.canFastPath());
 }

@@ -1094,31 +1094,37 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // when the shell emits prompt-zone markers. Stays
                 // dormant otherwise.
                 // Fast path: when the chunk has no escape bytes AND
-                // every OSC/CSI tracker is in `.ground` (between
-                // sequences), the state machines provably can't
-                // transition — feeding each byte through them is
-                // pure overhead. A 4 KB chunk of plain text would
-                // otherwise burn ~50 µs per tracker on per-byte
-                // switch dispatch. Skip + only keep total_bytes_fed
-                // accurate for the OSC-133-active diagnostic.
+                // every OSC/CSI tracker reports `canFastPath()`,
+                // the per-byte state machines provably stay in
+                // `.ground` — feeding each byte is pure overhead.
+                // A 4 KB plain-text chunk otherwise burns ~50 µs
+                // per tracker on switch dispatch.
                 //
-                // Edge bytes ARE counted (osc133.skipBytes) so the
-                // "exec mode needs OSC 133" hint stays honest about
-                // how much output actually flowed.
+                // Each tracker's `canFastPath()` encodes the
+                // tracker-specific safety predicate (osc133 also
+                // checks `phase != .in_input` because plain ASCII
+                // bytes mutate the captured-input buffer in that
+                // phase). Each `skipBytes(n)` does the minimum
+                // per-feed bookkeeping `feed()` would have done
+                // for a no-transition byte stream: bump the
+                // diagnostic counter (osc133), clear the per-feed
+                // capture ring (osc7), nothing (altscreen).
                 //
-                // cursor_tracker doesn't get a fast-path — it
-                // tracks CR/LF/printable-advance for every byte,
-                // not just escapes.
+                // cursor_tracker has no fast-path — it tracks
+                // CR/LF/printable-advance for every byte.
                 const has_esc = std.mem.indexOfScalar(u8, output, 0x1B) != null;
-                const trackers_ground = osc133_tracker.isGround() and
-                    alt_screen.isGround() and
-                    osc7_tracker.isGround();
-                if (has_esc or !trackers_ground) {
+                const can_fast = !has_esc and
+                    osc133_tracker.canFastPath() and
+                    alt_screen.canFastPath() and
+                    osc7_tracker.canFastPath();
+                if (can_fast) {
+                    osc133_tracker.skipBytes(output.len);
+                    alt_screen.skipBytes(output.len);
+                    osc7_tracker.skipBytes(output.len);
+                } else {
                     osc133_tracker.feed(output);
                     alt_screen.feed(output);
                     osc7_tracker.feed(output);
-                } else {
-                    osc133_tracker.skipBytes(output.len);
                 }
                 cursor_tracker.feed(output);
                 // Only surface the row to modules on real TTY runs

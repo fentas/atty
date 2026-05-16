@@ -196,30 +196,27 @@ pub const Osc133 = struct {
         return self.phase == .in_input;
     }
 
-    /// True when the byte-level parser is between sequences
-    /// (`state == .ground`). The proxy uses this with
-    /// `std.mem.indexOfScalar(0x1B)` to fast-path master-output
-    /// chunks that contain no escape bytes: when all OSC/CSI
-    /// trackers are ground AND the chunk has no `\x1B`, the
-    /// state machines provably can't transition, so their
-    /// per-byte loops are skippable.
+    /// True iff the next escape-free byte chunk is a guaranteed
+    /// no-op — the proxy can fast-path past it without invoking
+    /// the per-byte state machine.
     ///
-    /// Note: `phase` (prompt-zone phase: `.at_prompt`, `.in_input`,
-    /// `.in_command`) is independent and DOES NOT need to be
-    /// idle for fast-path — it transitions only on escape-driven
-    /// dispatches, so a ground parser with non-idle phase still
-    /// won't transition on plain ASCII bytes.
-    pub fn isGround(self: *const Osc133) bool {
-        return self.state == .ground;
+    /// Two conditions must hold:
+    ///   - `state == .ground` (no half-parsed CSI / OSC).
+    ///   - `phase != .in_input` (between `;B` and `;C`, plain ASCII
+    ///     bytes ARE processed in the `.ground` arm — they feed
+    ///     `processInputByte()` which mutates the captured-input
+    ///     buffer the proxy's syncFromCapture reads. Fast-pathing
+    ///     here would silently desync atty's view of what the
+    ///     user typed from the shell's echo.)
+    pub fn canFastPath(self: *const Osc133) bool {
+        return self.state == .ground and self.phase != .in_input;
     }
 
     /// Account for `n` skipped bytes when the proxy fast-paths
-    /// past an escape-free chunk in `.ground` state. Keeps the
-    /// `total_bytes_fed` diagnostic counter accurate without
-    /// running the per-byte state machine. No edges are produced
-    /// — only the running byte count is bumped, mirroring what
-    /// `feed()` would have done if every byte stayed in
-    /// `.ground`.
+    /// past an escape-free chunk. Bumps `total_bytes_fed` so the
+    /// "OSC 133 needs setup" diagnostic stays accurate; no edges
+    /// produced, no input captured. Caller must have verified
+    /// `canFastPath()` first.
     pub fn skipBytes(self: *Osc133, n: usize) void {
         self.total_bytes_fed +%= n;
     }
@@ -757,17 +754,35 @@ test "Osc133: malformed 133 (no terminator yet) doesn't crash + keeps state" {
     try testing.expect(o.active);
 }
 
-test "Osc133.isGround + skipBytes — proxy fast-path contract" {
+test "Osc133.canFastPath + skipBytes — proxy fast-path contract" {
     var o = Osc133.init(testing.allocator);
     defer o.deinit();
-    try testing.expect(o.isGround());
+    try testing.expect(o.canFastPath());
     o.skipBytes(1024);
     try testing.expectEqual(@as(usize, 1024), o.total_bytes_fed);
-    try testing.expect(o.isGround()); // skipBytes doesn't touch state
+    try testing.expect(o.canFastPath());
 
-    // Mid-sequence: not ground.
+    // Mid-sequence: not fast-pathable.
     o.feed("\x1b]133");
-    try testing.expect(!o.isGround());
-    o.feed(";A\x07");
-    try testing.expect(o.isGround()); // terminator returns to ground
+    try testing.expect(!o.canFastPath());
+    o.feed(";A\x07"); // ;A → phase=.at_prompt, state→ground
+    try testing.expect(o.canFastPath());
+}
+
+test "Osc133.canFastPath returns false in .in_input phase (regression: input capture)" {
+    // After `;B` opens the input region, plain ASCII bytes
+    // mutate the captured-input buffer via processInputByte —
+    // the proxy's syncFromCapture reads this. Fast-pathing here
+    // would silently desync atty's view of the user-typed
+    // line from the shell's echo, breaking ghost text + Enter-
+    // commit override after a long pasted prompt.
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;A\x07"); // prompt start
+    o.feed("\x1b]133;B\x07"); // input region open
+    try testing.expect(o.inInputPhase());
+    try testing.expect(o.state == .ground); // parser is between sequences
+    try testing.expect(!o.canFastPath()); // but in_input phase blocks fast-path
+    o.feed("hello"); // captured into self.input via .ground arm
+    try testing.expectEqualStrings("hello", o.currentInput());
 }
