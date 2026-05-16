@@ -159,6 +159,25 @@ pub const Pty = struct {
             // why we died.
             childSetup(self.master, self.slave_path) catch std.c._exit(127);
 
+            // execve(2) auto-resets caught-handler signals (WINCH,
+            // CHLD) to SIG_DFL but PRESERVES SIG_IGN. The parent's
+            // SIGPIPE → SIG_IGN disposition would leak into the
+            // user's shell and break `yes | head` / `curl | less` /
+            // any pipeline whose writer expects to die on EPIPE.
+            // Restore default explicitly — it's the only signal we
+            // set to SIG_IGN, so it's the only one execve won't
+            // reset for us.
+            //
+            // Invariant: any write syscall added between this point
+            // and execvp must tolerate EPIPE-as-die rather than
+            // silently swallowing it.
+            const dfl = posix.Sigaction{
+                .handler = .{ .handler = posix.SIG.DFL },
+                .mask = posix.sigemptyset(),
+                .flags = 0,
+            };
+            posix.sigaction(posix.SIG.PIPE, &dfl, null);
+
             // Inject the ATTY env markers so shell rc files can detect
             // "running inside atty" and skip wrapping themselves again.
             injectAttyEnv(atty_pid);

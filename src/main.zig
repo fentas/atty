@@ -349,7 +349,6 @@ fn emitInitSnippet(shell: []const u8) void {
 }
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
-extern "c" fn isatty(fd: c_int) c_int;
 
 const CliOpts = args_mod.CliOpts;
 
@@ -451,7 +450,42 @@ pub fn main(init: std.process.Init) !void {
     try argv_list.append(allocator, null);
     const argv: [*:null]const ?[*:0]const u8 = @ptrCast(argv_list.items.ptr);
 
-    const is_tty = isatty(std.posix.STDOUT_FILENO) != 0 and isatty(std.posix.STDIN_FILENO) != 0;
+    const stdin_tty = std.c.isatty(std.posix.STDIN_FILENO) != 0;
+    const stdout_tty = std.c.isatty(std.posix.STDOUT_FILENO) != 0;
+    const is_tty = stdin_tty and stdout_tty;
+
+    // atty is a TTY-in-the-middle — pipes/redirected stdio leave
+    // the proxy with no terminal to drive, and overlay writes to a
+    // dead pipe accumulate as silently-swallowed `error.WriteFailed`
+    // from the catch-all rendering paths. Refuse up front with an
+    // actionable error rather than starting an interactive session
+    // on an unusable terminal.
+    //
+    // `atty init` / `atty doctor` / `-V` / `-h` exit inside
+    // parseArgs before this check, so init eval'd into a non-tty
+    // context still works.
+    if (!is_tty) {
+        var buf: [512]u8 = undefined;
+        const which: []const u8 = if (!stdin_tty and !stdout_tty)
+            "stdin and stdout are"
+        else if (!stdin_tty)
+            "stdin is"
+        else
+            "stdout is";
+        // ASCII-only message — the fallback is for terminals that
+        // may not render UTF-8 (the case we're bailing on can leave
+        // stderr pointed at a legacy pipe/log).
+        //
+        // `error:` prefix + exit(2) matches the parseArgs unknown-
+        // flag pattern: both are usage failures.
+        const msg = std.fmt.bufPrint(&buf, "error: {s} not a terminal.\n" ++
+            "  atty wraps a shell for interactive use; pipes/redirected stdio leave the\n" ++
+            "  proxy with no terminal to drive. Run atty directly from an interactive\n" ++
+            "  terminal, not through pipes or shell redirections.\n", .{which}) catch
+            "error: stdio is not a terminal.\n";
+        writeStderr(msg);
+        std.process.exit(2);
+    }
 
     const info = try atty.proxy.run(allocator, io, .{
         .argv = argv,

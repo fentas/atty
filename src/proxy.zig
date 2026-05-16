@@ -58,7 +58,15 @@ const buf_size = 4096;
 pub const Args = struct {
     /// argv for the child process. Sentinel-terminated.
     argv: [*:null]const ?[*:0]const u8,
-    /// True if stdout AND stdin are real TTYs.
+    /// True iff stdin AND stdout are real TTYs at the entry point.
+    ///
+    /// Invariant: main.zig refuses to invoke `proxy.run` when this
+    /// would be `false` (see src/main.zig). The numerous
+    /// `if (args.is_tty)` gates below therefore look defensive but
+    /// stay because module fixtures and the e2e harness construct
+    /// `Context` values directly with `is_tty = false` and could
+    /// in theory call into the proxy helpers; keeping the gates
+    /// makes those code paths safe rather than tautological.
     is_tty: bool,
 };
 
@@ -103,6 +111,18 @@ fn installSignalHandlers() void {
     };
     posix.sigaction(posix.SIG.WINCH, &sa, null);
     posix.sigaction(posix.SIG.CHLD, &sa, null);
+
+    // SIGPIPE → ignore. Writes to half-closed fds (e.g. user
+    // detaches the terminal mid-overlay-paint) must surface as
+    // `error.WriteFailed` from writeFully's errno gate so the
+    // proxy can shut down cleanly, never as silent SIGPIPE
+    // termination.
+    const ign = posix.Sigaction{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.PIPE, &ign, null);
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +130,12 @@ fn installSignalHandlers() void {
 // ---------------------------------------------------------------------------
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
+    // Defensive guard. main.zig is the sole caller and refuses to
+    // invoke us when stdio isn't a TTY (src/main.zig). A `@panic`
+    // (rather than `std.debug.assert`) so the invariant survives
+    // ReleaseFast/Small where assertions compile to `unreachable`.
+    if (!args.is_tty) @panic("proxy.run requires args.is_tty (set by main.zig after isatty check)");
+
     // --- PTY + child --------------------------------------------------------
     var pty = try Pty.open(allocator);
     defer pty.deinit();
