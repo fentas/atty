@@ -103,6 +103,16 @@ pub const Turn = struct {
 /// sizes through as runtime params) keeps callers stack-friendly:
 /// they can `var parsed: Response = .{}` inline without an
 /// allocator.
+/// Max number of multi-choice options atty parses from an
+/// `action=question` reply. Capped at 9 because `ghost_pick`'s
+/// Ctrl+1..9 / Esc+1..9 bindings address up to 9 entries — a
+/// 10th option would be unreachable from the keyboard.
+pub const max_choices = 9;
+/// Per-choice text cap. Anything longer gets truncated. 256 bytes
+/// is roughly one terminal line at typical widths; longer
+/// choices would wrap and confuse the pick-list rendering.
+pub const choice_max_len = 256;
+
 pub fn Response(comptime max_response_bytes: comptime_int) type {
     return struct {
         const Self = @This();
@@ -116,9 +126,18 @@ pub fn Response(comptime max_response_bytes: comptime_int) type {
         reason_len: usize = 0,
         /// `action=question` payload — the prompt text. Surfaced
         /// in the hint row; the user's free-form answer at the
-        /// shell prompt becomes the next `.user` turn.
+        /// shell prompt becomes the next `.user` turn (free-text
+        /// path), OR the picked choice text (multi-choice path).
         question_buf: [max_response_bytes]u8 = undefined,
         question_len: usize = 0,
+        /// Multi-choice answer options for `action=question`.
+        /// Optional — when omitted the user replies free-text.
+        /// When present, atty renders them as a pick-list and
+        /// `ghost_pick` (Ctrl+1..9 / Esc+1..9) selects an option
+        /// as the answer.
+        choices_storage: [max_choices][choice_max_len]u8 = undefined,
+        choices_lens: [max_choices]usize = [_]usize{0} ** max_choices,
+        choices_count: usize = 0,
 
         pub fn command(self: *const Self) []const u8 {
             return self.command_buf[0..self.command_len];
@@ -131,6 +150,11 @@ pub fn Response(comptime max_response_bytes: comptime_int) type {
         }
         pub fn question(self: *const Self) []const u8 {
             return self.question_buf[0..self.question_len];
+        }
+        /// Read one choice by index. Out-of-range returns empty.
+        pub fn choice(self: *const Self, idx: usize) []const u8 {
+            if (idx >= self.choices_count) return &.{};
+            return self.choices_storage[idx][0..self.choices_lens[idx]];
         }
     };
 }
@@ -164,6 +188,10 @@ pub fn parseResponse(
         description: ?[]const u8 = null,
         reason: ?[]const u8 = null,
         question: ?[]const u8 = null,
+        /// Multi-choice options for `action=question`. Capped at
+        /// `max_choices` items; the rest are silently dropped (no
+        /// way to address >9 entries from the keyboard anyway).
+        choices: ?[]const []const u8 = null,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -196,6 +224,15 @@ pub fn parseResponse(
         const n = @min(q.len, out.question_buf.len);
         @memcpy(out.question_buf[0..n], q[0..n]);
         out.question_len = n;
+    }
+    if (parsed.value.choices) |choices| {
+        const take = @min(choices.len, max_choices);
+        for (choices[0..take], 0..) |choice_str, i| {
+            const n = @min(choice_str.len, choice_max_len);
+            @memcpy(out.choices_storage[i][0..n], choice_str[0..n]);
+            out.choices_lens[i] = n;
+        }
+        out.choices_count = take;
     }
 }
 
@@ -304,6 +341,40 @@ test "parseResponse: done action with reason" {
     try parseResponse(R, testing.allocator, "{\"action\":\"done\",\"reason\":\"task complete\"}", &r);
     try testing.expectEqual(Action.done, r.action);
     try testing.expectEqualStrings("task complete", r.reason());
+}
+
+test "parseResponse: question action with choices array (multi-choice)" {
+    const R = Response(4096);
+    var r: R = .{};
+    try parseResponse(R, testing.allocator, "{\"action\":\"question\",\"question\":\"Which approach?\",\"choices\":[\"approach A\",\"approach B\",\"approach C\"]}", &r);
+    try testing.expectEqual(Action.question, r.action);
+    try testing.expectEqualStrings("Which approach?", r.question());
+    try testing.expectEqual(@as(usize, 3), r.choices_count);
+    try testing.expectEqualStrings("approach A", r.choice(0));
+    try testing.expectEqualStrings("approach B", r.choice(1));
+    try testing.expectEqualStrings("approach C", r.choice(2));
+    try testing.expectEqualStrings("", r.choice(3)); // out-of-range → empty
+}
+
+test "parseResponse: choices beyond max_choices get silently dropped" {
+    // 10 choices but max_choices is 9 — keyboard can only address
+    // 9 anyway (Ctrl+1..9), so we cap rather than error.
+    const R = Response(4096);
+    var r: R = .{};
+    try parseResponse(R, testing.allocator, "{\"action\":\"question\",\"question\":\"?\",\"choices\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\",\"j\"]}", &r);
+    try testing.expectEqual(@as(usize, max_choices), r.choices_count);
+    try testing.expectEqualStrings("a", r.choice(0));
+    try testing.expectEqualStrings("i", r.choice(8));
+}
+
+test "parseResponse: oversized choice text gets truncated to choice_max_len" {
+    const R = Response(4096);
+    var r: R = .{};
+    const long_choice = "a" ** (choice_max_len + 50);
+    var json_buf: [4096]u8 = undefined;
+    const json = try std.fmt.bufPrint(&json_buf, "{{\"action\":\"question\",\"question\":\"?\",\"choices\":[\"{s}\"]}}", .{long_choice});
+    try parseResponse(R, testing.allocator, json, &r);
+    try testing.expectEqual(@as(usize, choice_max_len), r.choices_lens[0]);
 }
 
 test "parseResponse: question action with question text" {
