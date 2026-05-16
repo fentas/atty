@@ -58,7 +58,15 @@ const buf_size = 4096;
 pub const Args = struct {
     /// argv for the child process. Sentinel-terminated.
     argv: [*:null]const ?[*:0]const u8,
-    /// True if stdout AND stdin are real TTYs.
+    /// True iff stdin AND stdout are real TTYs at the entry point.
+    ///
+    /// Invariant: main.zig refuses to invoke `proxy.run` when this
+    /// would be `false` (see src/main.zig). The numerous
+    /// `if (args.is_tty)` gates below therefore look defensive but
+    /// stay because module fixtures and the e2e harness construct
+    /// `Context` values directly with `is_tty = false` and could
+    /// in theory call into the proxy helpers; keeping the gates
+    /// makes those code paths safe rather than tautological.
     is_tty: bool,
 };
 
@@ -122,6 +130,12 @@ fn installSignalHandlers() void {
 // ---------------------------------------------------------------------------
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
+    // Defensive: main.zig is the sole caller, and it refuses to
+    // invoke us when stdio isn't a TTY. An assertion surfaces any
+    // future caller that bypasses that gate rather than letting
+    // the proxy half-run on a non-interactive fd pair.
+    std.debug.assert(args.is_tty);
+
     // --- PTY + child --------------------------------------------------------
     var pty = try Pty.open(allocator);
     defer pty.deinit();
