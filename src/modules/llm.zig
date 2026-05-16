@@ -298,6 +298,23 @@ pub fn configure(comptime cfg: Config) type {
             /// reported, but the user has at least had a chance
             /// for the model to self-correct.
             dialog_parse_retry_count: u8 = 0,
+            /// Stored answer choices for the active question-mode
+            /// turn. Populated by `handleDialogResponse` on
+            /// `action=question` with `choices: [...]` JSON.
+            /// Cleared on dialog reset and when the user submits
+            /// their answer (free-text Enter OR ghost_pick). The
+            /// `provideGhostList` hook reads from here to render
+            /// the pick-list when state is
+            /// `.awaiting_question_answer`.
+            question_choices_storage: [dialog.max_choices][dialog.choice_max_len]u8 = undefined,
+            question_choices_lens: [dialog.max_choices]usize = [_]usize{0} ** dialog.max_choices,
+            question_choices_count: usize = 0,
+            /// Scratch storage for the `[]const []const u8` slice
+            /// `provideGhostList` returns. The slices point into
+            /// `question_choices_storage`. Per-call rebuilt so
+            /// callers see a stable snapshot for the duration of
+            /// the hook.
+            question_choices_slices: [dialog.max_choices][]const u8 = undefined,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -1392,8 +1409,28 @@ pub fn configure(comptime cfg: Config) type {
                     // disarms — the answer is the user's, not the
                     // LLM's, so no auto-submit timer.
                     const q = parsed.question();
+                    // Multi-choice: copy choices into Runtime-
+                    // owned storage so they outlive `parsed`. The
+                    // `provideGhostList` hook reads from here when
+                    // the state machine is awaiting an answer.
+                    rt.question_choices_count = parsed.choices_count;
+                    for (0..parsed.choices_count) |i| {
+                        const choice = parsed.choice(i);
+                        const copy_len = @min(choice.len, rt.question_choices_storage[i].len);
+                        @memcpy(rt.question_choices_storage[i][0..copy_len], choice[0..copy_len]);
+                        rt.question_choices_lens[i] = copy_len;
+                    }
                     if (q.len > 0) {
-                        latchHint(rt, q);
+                        // When choices are present, append a
+                        // discoverable footer hint so users know
+                        // they can use Ctrl+1..9 to pick.
+                        if (parsed.choices_count > 0) {
+                            var msg_buf: [512]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&msg_buf, "{s} — Ctrl+1..{d} to pick, or type", .{ q, parsed.choices_count }) catch q;
+                            latchHint(rt, msg);
+                        } else {
+                            latchHint(rt, q);
+                        }
                     } else {
                         latchHint(rt, "LLM asked a question without text — answer or cancel.");
                     }
@@ -1824,6 +1861,7 @@ pub fn configure(comptime cfg: Config) type {
             rt.pending_description_len = 0;
             rt.last_assistant_json_len = 0;
             rt.dialog_parse_retry_count = 0;
+            rt.question_choices_count = 0;
             rt.in_flight = false;
             rt.auto_mode_active = false;
             rt.auto_exec_armed = false;
@@ -1907,6 +1945,32 @@ pub fn configure(comptime cfg: Config) type {
             if (!rt.hint_pending) return null;
             rt.hint_pending = false;
             return rt.hint_buf[0..rt.hint_len];
+        }
+
+        /// Multi-choice answer pick-list. Active when the LLM
+        /// emitted `action=question` with a `choices: [...]` array
+        /// — atty renders the choices via the same ghost_list path
+        /// atuin uses, and `Ctrl+1..9` / `Esc+1..9` substitutes the
+        /// picked choice text into the prompt. The user then
+        /// presses Enter to submit (existing `awaiting_question_answer`
+        /// path treats Enter as the answer turn).
+        ///
+        /// Returns null when:
+        ///   - State isn't `.awaiting_question_answer`.
+        ///   - Question was emitted without a `choices` array
+        ///     (free-text answer expected).
+        ///   - The user already started typing a free-text reply
+        ///     (line non-empty) — the choices would shadow atuin's
+        ///     history matches otherwise; we yield priority back.
+        pub fn provideGhostList(rt: *Runtime, ctx: *m.Context) m.Error!?[]const []const u8 {
+            if (rt.dialog_state != .awaiting_question_answer) return null;
+            if (rt.question_choices_count == 0) return null;
+            const line = ctx.line.current();
+            if (line.len > 0) return null;
+            for (0..rt.question_choices_count) |i| {
+                rt.question_choices_slices[i] = rt.question_choices_storage[i][0..rt.question_choices_lens[i]];
+            }
+            return rt.question_choices_slices[0..rt.question_choices_count];
         }
 
         /// Sibling of `provideHintText` — surfaces a latched error
