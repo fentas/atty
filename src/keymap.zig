@@ -150,6 +150,18 @@ pub const Action = union(enum) {
     /// scrolling past." For deep review use Alt+Shift+C (full
     /// overlay).
     llm_inline_chat_toggle,
+    /// Render a one-screen cheat-sheet of every keybinding atty
+    /// surfaces — pulled from `config.keymap.bindings`. Scrolls into
+    /// shell history (like the LLM conclusion banner) so it stays
+    /// available in scrollback without commandeering the screen.
+    ///
+    /// **Not bound by default.** The shipped `Alt+H` binding triggers
+    /// the LLM-mode help (`llm_exec_toggle_help`), which falls
+    /// through to this renderer at the proxy when NOT in AI mode —
+    /// so `Alt+H` does the right thing in both contexts via a single
+    /// keybinding. User configs that want a dedicated, unconditional
+    /// cheat-sheet key can bind this action directly (e.g. `Alt+?`).
+    show_help,
 };
 
 pub const Binding = struct {
@@ -159,6 +171,17 @@ pub const Binding = struct {
     /// won't trigger.
     bytes: []const u8,
     action: Action,
+    /// Human-readable label for the key (e.g. "Alt+C", "Ctrl+Shift+I").
+    /// Surfaced by the Alt+H help overlay. Optional — empty means
+    /// "don't surface in help" (use for dual-encoding siblings like
+    /// the legacy + CSI-u variants of the same chord; only one of the
+    /// pair should advertise itself in help).
+    label: []const u8 = "",
+    /// One-line description of what the action does. Surfaced by the
+    /// Alt+H help overlay alongside the key label. Empty (the default)
+    /// suppresses the entry — useful for internal / advanced bindings
+    /// the user shouldn't see in the cheat-sheet.
+    description: []const u8 = "",
 };
 
 /// Linear scan over `bindings` looking for an exact byte match against
@@ -230,6 +253,19 @@ test "match requires byte-exact equality (chunked reads don't trigger)" {
     const bs = [_]Binding{.{ .bytes = "\x1b[C", .action = .ghost_accept }};
     try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b["));
     try std.testing.expectEqual(@as(?Action, null), match(&bs, "\x1b[Cx"));
+}
+
+test "Binding: label + description default to empty (backwards compatible)" {
+    // Existing user configs that build bindings without setting
+    // label/description must still compile. The Alt+H help renderer
+    // skips entries with either field empty.
+    const b: Binding = .{ .bytes = "\x06", .action = .ghost_accept };
+    try std.testing.expectEqualStrings("", b.label);
+    try std.testing.expectEqualStrings("", b.description);
+
+    const labelled: Binding = .{ .bytes = "\x06", .action = .ghost_accept, .label = "Ctrl+F", .description = "accept ghost" };
+    try std.testing.expectEqualStrings("Ctrl+F", labelled.label);
+    try std.testing.expectEqualStrings("accept ghost", labelled.description);
 }
 
 test "Action.ghost_pick carries the index as a payload" {

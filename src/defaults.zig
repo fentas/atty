@@ -92,7 +92,12 @@ pub const Keymap = struct {
     /// requires kitty kbd; on legacy terminals the kernel collapses
     /// it to plain Tab and there's no portable way to disambiguate.
     bindings: []const atty.keymap.Binding = &.{
-        .{ .bytes = atty.keymap.key("Right"), .action = .ghost_accept },
+        // Labels + descriptions feed the Alt+H help cheat-sheet.
+        // First non-empty entry per action wins; dual-encoded
+        // siblings (legacy + kitty kbd) leave the second blank to
+        // avoid double-listing. Empty label OR description hides
+        // the entry from help entirely.
+        .{ .bytes = atty.keymap.key("Right"), .action = .ghost_accept, .label = "Right", .description = "accept the full ghost suggestion" },
         .{ .bytes = atty.keymap.key("End"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+F"), .action = .ghost_accept },
         .{ .bytes = atty.keymap.key("Ctrl+Tab"), .action = .ghost_accept },
@@ -100,8 +105,8 @@ pub const Keymap = struct {
         // (fish's section-by-section partial-accept). Useful when
         // the LATER part of the ghost is correct but the middle
         // needs editing — successive presses walk through.
-        .{ .bytes = atty.keymap.key("Ctrl+Right"), .action = .ghost_accept_word },
-        .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle },
+        .{ .bytes = atty.keymap.key("Ctrl+Right"), .action = .ghost_accept_word, .label = "Ctrl+Right", .description = "accept one word of the ghost suggestion" },
+        .{ .bytes = atty.keymap.key("Ctrl+Shift+I"), .action = .incognito_toggle, .label = "Ctrl+Shift+I", .description = "toggle incognito (no atuin/history recording)" },
         // Alt+i — DUAL binding (legacy ESC+letter + kitty kbd CSI-u).
         // Same reason as the Esc bindings below: keymap matching
         // happens BEFORE the CSI-u → legacy translation in the
@@ -113,7 +118,7 @@ pub const Keymap = struct {
         // LLM binding below.
         .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
         .{ .bytes = "\x1b[105;3u", .action = .incognito_toggle },
-        .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match },
+        .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match, .label = "Ctrl+Shift+D", .description = "delete the current ghost match from history" },
 
         // LLM exec mode — action keys live INSIDE "AI mode" (when
         // line_state starts with `#: `). The llm_exec module gates
@@ -128,19 +133,19 @@ pub const Keymap = struct {
         // Without the CSI-u form the binding is dead on every
         // terminal that speaks kitty kbd (default-on per
         // `Terminal.enable_kitty_keyboard`).
-        .{ .bytes = atty.keymap.key("Alt+a"), .action = .llm_exec_single },
+        .{ .bytes = atty.keymap.key("Alt+a"), .action = .llm_exec_single, .label = "Alt+A", .description = "LLM: single-shot (one command, no dialog)" },
         .{ .bytes = "\x1b[97;3u", .action = .llm_exec_single },
-        .{ .bytes = atty.keymap.key("Alt+s"), .action = .llm_exec_dialog },
+        .{ .bytes = atty.keymap.key("Alt+s"), .action = .llm_exec_dialog, .label = "Alt+S", .description = "LLM: dialog mode (multi-turn with exec/observe loop)" },
         .{ .bytes = "\x1b[115;3u", .action = .llm_exec_dialog },
         // Alt+Shift+s → terminals without kitty kbd emit Alt+S
         // (capital) as ESC + S by the metaSendsEscape convention;
         // with kitty kbd, the encoding is `\x1b[115;4u` (lowercase
         // 's' keycode + alt+shift modifier).
-        .{ .bytes = atty.keymap.key("Alt+S"), .action = .llm_exec_auto },
+        .{ .bytes = atty.keymap.key("Alt+S"), .action = .llm_exec_auto, .label = "Alt+Shift+S", .description = "LLM: auto-exec mode (dialog + auto-confirm each step)" },
         .{ .bytes = "\x1b[115;4u", .action = .llm_exec_auto },
-        .{ .bytes = atty.keymap.key("Alt+m"), .action = .llm_exec_cycle_model },
+        .{ .bytes = atty.keymap.key("Alt+m"), .action = .llm_exec_cycle_model, .label = "Alt+M", .description = "cycle through LLM models in config.models" },
         .{ .bytes = "\x1b[109;3u", .action = .llm_exec_cycle_model },
-        .{ .bytes = atty.keymap.key("Alt+h"), .action = .llm_exec_toggle_help },
+        .{ .bytes = atty.keymap.key("Alt+h"), .action = .llm_exec_toggle_help, .label = "Alt+H", .description = "show this help (or LLM-mode help when in #: prompt)" },
         .{ .bytes = "\x1b[104;3u", .action = .llm_exec_toggle_help },
         // Alt+C — toggle the INLINE chat panel (reserved rows
         // above the statusbar; shell stays visible). The default
@@ -151,14 +156,14 @@ pub const Keymap = struct {
         // Dual legacy + kitty kbd CSI-u form per the pattern above;
         // Alt+Shift+c uses the same `\x1b[99;<mod>u` encoding with
         // modifier 4 (alt+shift).
-        .{ .bytes = atty.keymap.key("Alt+c"), .action = .llm_inline_chat_toggle },
+        .{ .bytes = atty.keymap.key("Alt+c"), .action = .llm_inline_chat_toggle, .label = "Alt+C", .description = "toggle inline chat panel (shell stays visible)" },
         .{ .bytes = "\x1b[99;3u", .action = .llm_inline_chat_toggle },
-        .{ .bytes = atty.keymap.key("Alt+C"), .action = .llm_chat_overlay_toggle },
+        .{ .bytes = atty.keymap.key("Alt+C"), .action = .llm_chat_overlay_toggle, .label = "Alt+Shift+C", .description = "toggle full-screen chat overlay" },
         .{ .bytes = "\x1b[99;4u", .action = .llm_chat_overlay_toggle },
         // Cancel works everywhere — not gated on AI mode (a
         // running exec loop can extend past the AI-mode entry
         // and the cancel is the safety lever for it).
-        .{ .bytes = atty.keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel },
+        .{ .bytes = atty.keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel, .label = "Ctrl+Shift+X", .description = "cancel any active LLM exec / dialog / auto" },
         // Esc — bare-key shortcut for the same cancel action. The
         // module's onAction handler is gated on AI-mode-or-
         // pending-work, so a stray Esc outside AI mode falls

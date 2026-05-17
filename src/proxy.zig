@@ -838,11 +838,33 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // them as mojibake or digit-argument.
                             if (!did_pick) swallow_after_binding = true;
                         },
+                        .show_help => {
+                            // Render the keybindings cheat-sheet into
+                            // shell history. Module-agnostic — pulls
+                            // from config.keymap.bindings and prints
+                            // labels + descriptions. Always swallows
+                            // the key so the meta-bytes don't leak.
+                            renderHelp(&out_buf) catch {};
+                            swallow_after_binding = true;
+                        },
+                        .llm_exec_toggle_help => {
+                            // Hand to the LLM module first (it has
+                            // AI-mode-only help with current model +
+                            // endpoint). When NOT in AI mode the LLM
+                            // returns false; fall through to the
+                            // module-agnostic cheat-sheet so Alt+H
+                            // always does SOMETHING useful.
+                            if (D.dispatchAction(&runtimes, &ctx, act)) {
+                                swallow_after_binding = true;
+                            } else {
+                                renderHelp(&out_buf) catch {};
+                                swallow_after_binding = true;
+                            }
+                        },
                         .llm_exec_single,
                         .llm_exec_dialog,
                         .llm_exec_auto,
                         .llm_exec_cycle_model,
-                        .llm_exec_toggle_help,
                         .llm_exec_cancel,
                         .llm_chat_overlay_toggle,
                         .llm_inline_chat_toggle,
@@ -1822,5 +1844,44 @@ fn renderGhostList(rts: *D.Runtimes, ctx: *module.Context, list: *GhostList, out
 fn deactivateGhostList(list: *GhostList, out_buf: []u8) !void {
     var w: std.Io.Writer = .fixed(out_buf);
     list.deactivate(&w) catch return;
+    if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+}
+
+/// Render a one-screen cheat-sheet of every keybinding in
+/// `config.keymap.bindings` with a non-empty `label` + `description`.
+/// Format: dim chrome with a mauve ✨ atty title, cyan keys, dim
+/// description text — same palette as the LLM conclusion banner.
+/// Scrolls into shell history like a regular command's output, so
+/// the user can scroll back to it.
+///
+/// Bindings with empty `label` OR empty `description` are skipped —
+/// that's how the dual-encoded sibling bindings (legacy + kitty-kbd)
+/// avoid double-listing the same chord.
+fn renderHelp(out_buf: []u8) !void {
+    var w: std.Io.Writer = .fixed(out_buf);
+    // Title line — single `\r\n` ahead so the banner attaches at
+    // column 1 to the next row (matches conclusion banner pattern).
+    try w.writeAll("\r\n\x1B[2m\u{256D}\u{2500} \x1B[22;38;5;141m\u{2728} atty\x1B[39;2m \u{00B7} keybindings \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n");
+
+    // Track which actions we've already printed so dual-encoded
+    // sibling bindings (legacy + kitty-kbd) don't double-list. The
+    // first non-empty label/description for a given action wins.
+    var seen_actions: [std.meta.fields(keymap.Action).len]bool = @splat(false);
+
+    for (config.keymap.bindings) |bind| {
+        if (bind.label.len == 0 or bind.description.len == 0) continue;
+        const idx: usize = @intFromEnum(bind.action);
+        if (idx >= seen_actions.len or seen_actions[idx]) continue;
+        seen_actions[idx] = true;
+        // "│ Alt+C            open inline chat panel"
+        // Key in bold-cyan (14 cols left-padded for alignment),
+        // description in dim prose.
+        try w.print(
+            "\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m{s:<16}\x1B[0;2m {s}\x1B[0m\r\n",
+            .{ bind.label, bind.description },
+        );
+    }
+
+    try w.writeAll("\x1B[2m\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n");
     if (w.end > 0) try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
 }
