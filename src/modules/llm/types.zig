@@ -322,6 +322,38 @@ pub const Config = struct {
     /// Set to 0 to disable retry (revert to the pre-retry abort
     /// behaviour).
     dialog_parse_retry_max: u8 = 2,
+    /// Path to a chat-history file. When set, atty:
+    ///   • At attach: loads the LAST `history_turns_max` turns from
+    ///     the file (NDJSON, one object per line) into the in-memory
+    ///     ring — so the chat scrollback + dialog context survive
+    ///     across atty sessions.
+    ///   • On every `pushTurn`: appends the new turn as one NDJSON
+    ///     line to the file.
+    ///   • On `dialogReset` (`.done` / `Ctrl+Shift+X`): the in-memory
+    ///     ring clears, but the FILE is preserved — so next session
+    ///     still picks up the history.
+    ///
+    /// Empty string (the default) disables persistence — chat lives
+    /// only in RAM and dies on atty exit.
+    ///
+    /// **Tilde NOT expanded**: write the full path or use `$HOME`
+    /// at config-write time. The path is opened with `O_APPEND |
+    /// O_CREAT`; parent directories must already exist.
+    ///
+    /// **File format**:
+    /// ```
+    /// {"kind":"user","content":"list zig files"}
+    /// {"kind":"assistant_exec","content":"{...JSON envelope...}"}
+    /// {"kind":"observation","content":"main.zig\nbuild.zig"}
+    /// ```
+    /// One turn per line. `kind` ∈ {`user`, `assistant_exec`,
+    /// `observation`}. Unknown kinds are silently skipped on load
+    /// (forward-compat for future Turn taxonomy).
+    ///
+    /// **No rotation** — the user is responsible for capping growth
+    /// (e.g. logrotate). Atty only reads the tail at startup, so a
+    /// 10 GB file is fine at runtime; just slow to attach.
+    chat_persist_path: []const u8 = "",
     /// Inline chat panel — how many rows the panel claims above
     /// the statusbar when `Alt+C` opens it. The bottom row is the
     /// input prompt (`> _`), the rows above it scroll back through

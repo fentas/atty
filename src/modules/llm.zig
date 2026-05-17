@@ -40,6 +40,7 @@ const Pty = pty_mod.Pty;
 const parse = @import("llm/parse.zig");
 const types = @import("llm/types.zig");
 const dialog = @import("llm/dialog.zig");
+const chat_persist = @import("llm/chat_persist.zig");
 const worker_mod_ns = @import("llm/worker.zig");
 const env_mod_ns = @import("llm/env.zig");
 const nowMs = @import("_lib.zig").nowMs;
@@ -149,7 +150,22 @@ pub fn configure(comptime cfg: Config) type {
         // helpers are otherwise free of cfg-level dependencies. See
         // llm/dialog.zig's `Module()` for the body.
         const dialog_helpers = dialog.Module(cfg, Runtime);
-        const pushTurn = dialog_helpers.pushTurn;
+        /// Wrapper around `dialog_helpers.pushTurn` that ALSO appends
+        /// the new turn to `cfg.chat_persist_path` (when set) so the
+        /// chat history survives across atty sessions. Best-effort:
+        /// disk failures are silent (the in-memory push has already
+        /// succeeded by the time we attempt the append).
+        ///
+        /// The loader in `attach` deliberately calls
+        /// `dialog_helpers.pushTurn` DIRECTLY (not this wrapper) —
+        /// otherwise it would re-append every loaded turn to the
+        /// file on every startup, doubling content each run.
+        fn pushTurn(rt: *Runtime, kind: dialog.TurnKind, content: []u8) !void {
+            try dialog_helpers.pushTurn(rt, kind, content);
+            if (cfg.chat_persist_path.len > 0) {
+                _ = chat_persist.appendTurn(rt.allocator, cfg.chat_persist_path, kind, content);
+            }
+        }
         const freeTurns = dialog_helpers.freeTurns;
         const appendCaptured = dialog_helpers.appendCaptured;
         const advancePastMarker = dialog_helpers.advancePastMarker;
@@ -498,7 +514,7 @@ pub fn configure(comptime cfg: Config) type {
             else
                 try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name, context_blob });
 
-            return .{
+            var rt: Runtime = .{
                 .allocator = allocator,
                 .io = io,
                 .shared = shared,
@@ -511,6 +527,37 @@ pub fn configure(comptime cfg: Config) type {
                 .captured_output = captured_output,
                 .last_assistant_json = last_assistant_json,
             };
+
+            // Chat-history persistence — load the last N turns from
+            // disk into the ring so the chat panel + dialog context
+            // pick up where the previous session left off. Best-
+            // effort: a missing / unreadable file is silent (chat
+            // simply starts empty). Cap at the ring capacity so
+            // we never push past `cfg.history_turns_max`.
+            if (cfg.chat_persist_path.len > 0) {
+                // Read budget: a few MB is plenty for the LAST N
+                // turns at typical sizes. Anything larger means the
+                // user has a long-running log; the helper reads only
+                // up to this cap and walks the tail.
+                const max_bytes: usize = 4 * 1024 * 1024;
+                var loaded = chat_persist.loadLastTurns(allocator, cfg.chat_persist_path, cfg.history_turns_max, max_bytes) catch {
+                    // I/O or parse failure → start fresh.
+                    return rt;
+                };
+                defer loaded.deinit(allocator);
+                for (loaded.items) |t| {
+                    // pushTurn takes ownership of `content`; on
+                    // failure (OOM during the truncation dupe) free
+                    // the content so we don't leak. The for-loop
+                    // continues so we get partial-history-restore
+                    // rather than all-or-nothing.
+                    dialog_helpers.pushTurn(&rt, t.kind, t.content) catch {
+                        allocator.free(t.content);
+                    };
+                }
+            }
+
+            return rt;
         }
 
         pub fn detach(rt: *Runtime, io: std.Io) void {

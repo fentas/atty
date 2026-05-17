@@ -34,6 +34,7 @@ test {
     _ = @import("modules/llm/types.zig");
     _ = @import("modules/llm/worker.zig");
     _ = @import("modules/llm/env.zig");
+    _ = @import("modules/llm/chat_persist.zig");
     _ = @import("modules/guardrail.zig");
     _ = @import("modules/history.zig");
     _ = @import("test/e2e/vt.zig");
