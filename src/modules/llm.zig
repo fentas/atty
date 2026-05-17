@@ -2199,11 +2199,17 @@ pub fn configure(comptime cfg: Config) type {
             // Compose the per-request context blob: static OS info
             // (cached at attach) + dynamic pwd/git (rebuilt each call
             // via cheap stat()/read()) + user-listed env vars from
-            // `cfg.context_env_vars`. Skipped when
-            // `cfg.system_context.enabled = false`; in that case we
-            // fall back to the legacy `rt.context_blob` directly.
+            // `cfg.context_env_vars`. Skipped when:
+            //   - `cfg.system_context.enabled = false` (user opted out),
+            //   - `ctx.incognito = true` (privacy contract — toggling
+            //     Ctrl+Shift+I should suppress environment leakage,
+            //     not just history recording. PWD + branch names can
+            //     carry project / customer / ticket identifiers).
+            // In either case fall back to the legacy `rt.context_blob`
+            // (just the user-listed env vars) so the user keeps the
+            // context they explicitly opted into.
             const composed_context: []u8 = blk: {
-                if (!cfg.system_context.enabled) {
+                if (!cfg.system_context.enabled or ctx.incognito) {
                     break :blk rt.allocator.dupe(u8, rt.context_blob) catch break :blk &.{};
                 }
                 const cwd = if (cfg.system_context.pwd) cwdHint(ctx) else "";

@@ -33,6 +33,7 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*]u8;
+extern "c" fn system(command: [*:0]const u8) c_int;
 
 const O_RDONLY: c_int = 0;
 const F_OK: c_int = 0;
@@ -167,14 +168,66 @@ const GitHead = struct {
     branch: []u8, // owned by caller
 };
 
-/// Read `<cwd>/.git/HEAD` (NOT walking ancestors — caller can
-/// retry with `<cwd>/..` if they care). Returns the symbolic ref's
-/// short name (e.g. "master"), or the abbreviated commit hash for
-/// detached HEAD. Errors when `<cwd>/.git/HEAD` doesn't exist /
-/// isn't readable / is malformed.
+/// Read the current branch from `<cwd>/.git/HEAD`. Handles three
+/// repository shapes:
+///   1. **Plain repo** — `<cwd>/.git` is a directory; HEAD sits at
+///      `<cwd>/.git/HEAD`.
+///   2. **Worktree** — `<cwd>/.git` is a regular file whose contents
+///      are `gitdir: <abs-or-rel-path>` pointing at the worktree's
+///      private git dir under `<main>/.git/worktrees/<name>`. Follow
+///      the indirection once.
+///   3. **Submodule** — same file-with-`gitdir:` indirection as
+///      worktrees, pointing at `<parent>/.git/modules/<name>`.
+///
+/// Returns the symbolic ref's short name (e.g. "master") or the
+/// abbreviated commit hash for detached HEAD ("detached@abc1234").
 fn readGitHead(allocator: std.mem.Allocator, cwd: []const u8) !GitHead {
     var path_buf: [4096]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/.git/HEAD", .{cwd});
+    const dotgit_path = try std.fmt.bufPrintZ(&path_buf, "{s}/.git", .{cwd});
+
+    // Probe `.git`: a directory opens with O_RDONLY (most kernels;
+    // we ALSO read it because if it's actually a file, the read
+    // returns the `gitdir: …` indirection. If it IS a directory the
+    // read returns -1/EISDIR — fall back to the direct HEAD path).
+    const probe_fd = open(dotgit_path.ptr, O_RDONLY);
+    if (probe_fd < 0) return error.FileNotFound;
+    var probe_buf: [4096]u8 = undefined;
+    const probe_n = read(probe_fd, &probe_buf, probe_buf.len);
+    _ = close(probe_fd);
+
+    // `.git` is a directory (read failed or returned 0) → HEAD lives
+    // at `<cwd>/.git/HEAD`.
+    if (probe_n <= 0) {
+        return readHeadAt(allocator, cwd, ".git");
+    }
+
+    // `.git` is a file → parse `gitdir: <path>` and read HEAD from
+    // there. The path can be absolute (`/main/.git/worktrees/foo`)
+    // or relative to `<cwd>` (`../.git/worktrees/foo`).
+    const probe_content = std.mem.trim(u8, probe_buf[0..@as(usize, @intCast(probe_n))], " \t\r\n");
+    if (!std.mem.startsWith(u8, probe_content, "gitdir:")) {
+        return error.MalformedGitFile;
+    }
+    const gitdir_raw = std.mem.trim(u8, probe_content["gitdir:".len..], " \t");
+    if (gitdir_raw.len == 0) return error.MalformedGitFile;
+
+    // Anchor relative `gitdir:` paths to `<cwd>`. `readHeadAt`
+    // composes `<base>/<sub>/HEAD`; we pass cwd + the raw gitdir
+    // for relative paths, "" + the absolute path for absolute ones.
+    if (gitdir_raw[0] == '/') {
+        return readHeadAt(allocator, "", gitdir_raw);
+    }
+    return readHeadAt(allocator, cwd, gitdir_raw);
+}
+
+/// Helper: read HEAD at `<base>/<sub>/HEAD` (or `<sub>/HEAD` when
+/// `base` is empty — for absolute gitdir paths from a worktree).
+fn readHeadAt(allocator: std.mem.Allocator, base: []const u8, sub: []const u8) !GitHead {
+    var path_buf: [4096]u8 = undefined;
+    const path = if (base.len == 0)
+        try std.fmt.bufPrintZ(&path_buf, "{s}/HEAD", .{sub})
+    else
+        try std.fmt.bufPrintZ(&path_buf, "{s}/{s}/HEAD", .{ base, sub });
 
     const fd = open(path.ptr, O_RDONLY);
     if (fd < 0) return error.FileNotFound;
@@ -254,4 +307,70 @@ test "readGitHead: returns branch when run from atty's own repo" {
     const head = readGitHead(testing.allocator, ".") catch return error.SkipZigTest;
     defer testing.allocator.free(head.branch);
     try testing.expect(head.branch.len > 0);
+}
+
+test "readGitHead: follows gitdir: indirection (worktree shape)" {
+    // Build a fake worktree shape in /tmp:
+    //   /tmp/atty-wt-<ts>/main/.git/{HEAD,worktrees/wt/HEAD}
+    //   /tmp/atty-wt-<ts>/wt/.git   ← FILE containing "gitdir: <abs>"
+    // and verify readGitHead on /wt resolves to the worktree's HEAD.
+    var name_buf: [128]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const root = try std.fmt.bufPrint(&name_buf, "/tmp/atty-wt-{x}", .{seed});
+
+    // Cleanup helper — best-effort `rm -rf` via libc.
+    defer cleanup: {
+        var rm_buf: [256]u8 = undefined;
+        const rm_cmd = std.fmt.bufPrintZ(&rm_buf, "rm -rf {s}", .{root}) catch break :cleanup;
+        _ = system(rm_cmd.ptr);
+    }
+
+    // Build the tree.
+    {
+        var sh_buf: [512]u8 = undefined;
+        const sh = std.fmt.bufPrintZ(&sh_buf,
+            \\mkdir -p {s}/main/.git/worktrees/wt {s}/wt &&
+            \\printf 'ref: refs/heads/feature\n' > {s}/main/.git/worktrees/wt/HEAD &&
+            \\printf 'gitdir: {s}/main/.git/worktrees/wt\n' > {s}/wt/.git
+        , .{ root, root, root, root, root }) catch return error.OutOfMemory;
+        _ = system(sh.ptr);
+    }
+
+    // Run the resolver against the fake worktree cwd.
+    var cwd_buf: [256]u8 = undefined;
+    const wt_cwd = try std.fmt.bufPrint(&cwd_buf, "{s}/wt", .{root});
+    const head = try readGitHead(testing.allocator, wt_cwd);
+    defer testing.allocator.free(head.branch);
+    try testing.expectEqualStrings("feature", head.branch);
+}
+
+test "readGitHead: handles relative gitdir: paths" {
+    var name_buf: [128]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec)) +% 1;
+    const root = try std.fmt.bufPrint(&name_buf, "/tmp/atty-relwt-{x}", .{seed});
+    defer cleanup: {
+        var rm_buf: [256]u8 = undefined;
+        const rm_cmd = std.fmt.bufPrintZ(&rm_buf, "rm -rf {s}", .{root}) catch break :cleanup;
+        _ = system(rm_cmd.ptr);
+    }
+    {
+        var sh_buf: [512]u8 = undefined;
+        // Relative gitdir: "../shared-git". cwd will be {root}/wt;
+        // gitdir resolves to {root}/wt/../shared-git == {root}/shared-git.
+        const sh = std.fmt.bufPrintZ(&sh_buf,
+            \\mkdir -p {s}/shared-git {s}/wt &&
+            \\printf 'ref: refs/heads/rel-branch\n' > {s}/shared-git/HEAD &&
+            \\printf 'gitdir: ../shared-git\n' > {s}/wt/.git
+        , .{ root, root, root, root }) catch return error.OutOfMemory;
+        _ = system(sh.ptr);
+    }
+    var cwd_buf: [256]u8 = undefined;
+    const wt_cwd = try std.fmt.bufPrint(&cwd_buf, "{s}/wt", .{root});
+    const head = try readGitHead(testing.allocator, wt_cwd);
+    defer testing.allocator.free(head.branch);
+    try testing.expectEqualStrings("rel-branch", head.branch);
 }
