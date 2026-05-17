@@ -2200,15 +2200,6 @@ pub fn configure(comptime cfg: Config) type {
         /// typing a prefix-matched prompt. One-shot per transition
         /// — we only emit on edges so the terminal doesn't see
         /// redundant OSC traffic on every tick.
-        /// Render the chat overlay's open or close sequence into
-        /// `rt.chat_overlay_buf`. Returns false when the content
-        /// overflows the buffer (caller should not emit a partial
-        /// sequence — better to skip the paint than leave an
-        /// incomplete alt-screen state on the terminal).
-        ///
-        /// Phase 2a renders the existing turn history as text-only
-        /// content above a single-line "Alt+C close" footer. No
-        /// chrome / no input row — those arrive in 2b/2c.
         /// Write `bytes` to `w` filtering out control bytes that
         /// would otherwise hijack the terminal — embedded `\x1B`
         /// in an LLM response would smuggle escape sequences into
@@ -2229,6 +2220,26 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
+        /// Render the chat overlay's open or close sequence into
+        /// `rt.chat_overlay_buf`. Returns false when the content
+        /// overflows the buffer (caller skips the paint rather
+        /// than emitting a partial alt-screen sequence).
+        ///
+        /// Layout (on open):
+        ///   - title bar at row 1 + blank row 2
+        ///   - turns rendered into a DECSTBM scroll region
+        ///     spanning rows 1 .. rows-2 (terminal auto-wraps +
+        ///     scrolls long content within that region)
+        ///   - chat input at row rows-1 + footer at row rows
+        ///     (outside the scroll region so they stay anchored)
+        ///
+        /// **Known limitation:** on terminals with GLOBAL DECSTBM
+        /// scope (rare; most modern terminals isolate DECSTBM
+        /// per-buffer), the close path's `\x1B[r` may wipe the
+        /// statusbar's reserved scroll region until SIGWINCH or
+        /// another paint triggers `sb.activate`. Phase 2c
+        /// (proxy-level overlay surface) will route close through
+        /// the proxy so `sb.reactivate` fires automatically.
         fn paintChatOverlay(rt: *Runtime) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
             if (!rt.chat_overlay_open) {
@@ -2842,8 +2853,17 @@ test "chat overlay (Alt+C): toggle emits alt-screen enter then exit" {
     try testing.expect(std.mem.indexOf(u8, opened.?, "Enter send") != null);
     // DECSTBM scroll region is set so long content can't clobber
     // the input + footer at the bottom (regression for the
-    // "broken overlay" screenshot bug).
-    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[1;") != null); // scroll region open
+    // "broken overlay" screenshot bug). Match `\x1B[1;<digits>r`
+    // — the trailing `r` is the DECSTBM terminator and rules out
+    // false positives from the cursor-home `\x1B[1;1H` also emitted
+    // by the open sequence.
+    {
+        const idx = std.mem.indexOf(u8, opened.?, "\x1B[1;") orelse return error.TestUnexpectedResult;
+        var j = idx + 4;
+        while (j < opened.?.len and opened.?[j] >= '0' and opened.?[j] <= '9') : (j += 1) {}
+        try testing.expect(j < opened.?.len);
+        try testing.expectEqual(@as(u8, 'r'), opened.?[j]);
+    }
     // Cyan chat input prompt glyph (input row).
     try testing.expect(std.mem.indexOf(u8, opened.?, "\u{276F}") != null);
 
