@@ -16,12 +16,14 @@ subset of:
 ```zig
 pub const name: []const u8                          // optional, for logs
 pub const Runtime  : type
+pub const default_bindings: []const Binding         // optional — see below
 pub fn   attach    (allocator, io) !Runtime
 pub fn   detach    (rt: *Runtime, io) void
 pub fn   onInput   (rt: *Runtime, ctx: *Context, input: []const u8) !Action
 pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
 pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
+pub fn   onResize  (rt: *Runtime) void              // optional — re-arm size-aware paints
 pub fn   deleteHistoryMatch(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   provideGhostList(rt: *Runtime, ctx: *Context) !?[]const []const u8
@@ -30,7 +32,9 @@ pub fn   provideHintText(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   provideErrorText(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   provideTermBytes(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   statusText(rt: *Runtime, ctx: *Context) !?[]const u8
-pub fn   isOverlayActive(rt: *Runtime) bool
+pub fn   isOverlayActive(rt: *Runtime) bool         // claims atty's alt-screen
+pub fn   isInlineChatActive(rt: *Runtime) bool      // claims rows above the statusbar
+pub fn   extraReserveRows(rt: *Runtime) u16         // # rows the module wants reserved
 ```
 
 Modules that paint a persistent alt-screen overlay on the user's
@@ -337,6 +341,67 @@ command as if the user had typed it.
 Same one-shot pattern — return bytes once when ready, return
 `null` thereafter. First non-null wins across modules (order =
 declaration order in `config.modules`).
+
+## default_bindings — registering module-owned keys
+
+A module can ship its own default keybindings instead of relying on
+the user to wire them up in `Keymap.bindings`:
+
+```zig
+pub const default_bindings: []const atty.keymap.Binding = &.{
+    .{
+        .bytes = atty.keymap.key("Alt+a"),
+        .action = .llm_exec_single,
+        .label = "Alt+A",
+        .description = "LLM: single-shot",
+    },
+    // dual encoding for kitty-keyboard terminals
+    .{ .bytes = "\x1b[97;3u", .action = .llm_exec_single },
+};
+```
+
+The dispatcher's `all_default_bindings` const comptime-concatenates
+every declaring module's slice. The proxy's stdin matcher consults
+`config.keymap.bindings` first (user wins) AND falls back to the
+module list — so:
+
+- A user who removes a module from their `modules` tuple loses ALL
+  of that module's keys automatically (no manual cleanup).
+- A user who wants to rebind one can still list an override in their
+  own `Keymap.bindings`; first-match precedence keeps their choice.
+- New modules added to the tuple bring their keys without forcing
+  the user to edit config.
+
+**`label` + `description`** feed the `Alt+H` cheat-sheet renderer.
+Leave them empty on dual-encoding siblings (only one entry per
+action variant gets printed — the renderer dedupes by enum tag).
+
+## extraReserveRows — claim rows above the statusbar
+
+Modules that paint a slim panel pinned to the bottom of the user's
+main screen (not an alt-screen overlay) implement
+`extraReserveRows` to advertise how many rows they want reserved:
+
+```zig
+pub fn extraReserveRows(rt: *Runtime) u16 {
+    return if (rt.panel_open) cfg.panel_rows else 0;
+}
+```
+
+The proxy sums every module's response each iteration, clamps to
+`rows-1` so the shell always has at least one row, and applies the
+result via `statusbar.applyReserveRows` (non-screen-clobbering —
+unlike `activate` which emits `ED 2`). Then the panel's
+`provideTermBytes` paint runs into the newly-reserved rows.
+
+Pair with `isInlineChatActive` (bool getter) so the proxy can:
+
+- suppress ghost text from painting INTO the reserved rows
+- skip `line_state.applyInput` for keystrokes the module is
+  swallowing (otherwise the in-flight chat text pollutes the
+  shell-side line model)
+
+The LLM module's Alt+C inline chat panel is the canonical example.
 
 ## provideGhostList — contributing to the multi-row pick list
 
