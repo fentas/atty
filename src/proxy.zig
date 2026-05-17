@@ -1691,7 +1691,11 @@ fn renderGhost(rts: *D.Runtimes, ctx: *module.Context, ghost: *Ghost, out_buf: [
     // bytes that surface on overlay close.
     if (ctx.module_overlay_active) return;
 
-    if (ctx.line.uncertain) {
+    // Suppress ghost when either the line model is uncertain OR the
+    // cursor is mid-line (Left arrow etc.). Painting at a mid-line
+    // cursor would overwrite the character to the cursor's right —
+    // looks like the user just deleted a character.
+    if (ctx.line.uncertain or ctx.line.cursor_moved) {
         if (ghost.visible) try clearGhost(ghost, out_buf);
         return;
     }
@@ -1823,7 +1827,7 @@ fn renderGhostList(rts: *D.Runtimes, ctx: *module.Context, list: *GhostList, out
         return;
     }
 
-    const want = !ctx.line.uncertain and ctx.line.current().len > 0;
+    const want = !ctx.line.uncertain and !ctx.line.cursor_moved and ctx.line.current().len > 0;
     if (!want) {
         if (list.active) try deactivateGhostList(list, out_buf);
         return;

@@ -45,6 +45,26 @@ pub const LineState = struct {
     /// True after we observed an input byte/sequence we don't fully
     /// model. Stays true until the next `submit()`/`reset()`.
     uncertain: bool = false,
+    /// True after the user pressed a cursor-motion key that left
+    /// the cursor MID-LINE — Left arrow most importantly. We don't
+    /// track exact column, only "the cursor isn't at the end of the
+    /// displayed buffer anymore." Cleared on `submit()` (Enter) and
+    /// `reset()` (Ctrl+C / new prompt) — i.e. when there's a fresh
+    /// prompt where the cursor is back at the end of an empty line.
+    ///
+    /// **Why this exists separately from `uncertain`:** OSC 133's
+    /// `syncFromCapture` confirms buffer CONTENT matches what bash
+    /// drew and clears `uncertain`. But OSC 133 doesn't carry cursor
+    /// position, so a Left arrow leaves CONTENT intact (sync clears
+    /// uncertain) while CURSOR has actually moved. Ghost text would
+    /// then re-paint AT the new cursor position, overwriting the
+    /// character to the right of the cursor — looks like deletion.
+    ///
+    /// The flag is read by `renderGhost` (proxy.zig) as an extra
+    /// gate beyond `uncertain`. Other line-state consumers (atuin
+    /// ghost text producer, history, …) can still see `len`/`buffer`
+    /// accurately via OSC sync.
+    cursor_moved: bool = false,
     /// Incremented every time the buffer changes. Providers can compare
     /// against a remembered generation to skip duplicate work.
     generation: u64 = 0,
@@ -107,6 +127,7 @@ pub const LineState = struct {
     pub fn reset(self: *LineState) void {
         self.len = 0;
         self.uncertain = false;
+        self.cursor_moved = false;
         self.generation +%= 1;
         // reset() handles the explicit abort signals (Ctrl-C, Ctrl-D,
         // Ctrl-G) — drop the staged author too because the user is
@@ -224,6 +245,38 @@ pub const LineState = struct {
                 // and a staged `.llm` author on that line would be
                 // wrong. Caller re-stages if it still wants the tag.
                 self.markUncertain();
+                // Cursor-motion CSIs (Left/Right/Home/End) leave the
+                // buffer CONTENT intact but move the cursor off the
+                // end of line. OSC 133 syncFromCapture clears
+                // `uncertain` because content matches, but ghost
+                // rendering at the new cursor position would
+                // overwrite the character to the right of the cursor.
+                // Set the cursor_moved flag so renderGhost suppresses.
+                //
+                // Final-byte taxonomy:
+                //   D = Left, C = Right (xterm cursor-style)
+                //   H = Home, F = End (xterm cursor-style)
+                //   ~ = VT-style Home/End/Delete/PageUp/PageDown — the
+                //       parameter distinguishes them (1/4/3/5/6 etc.).
+                //       Home/End/Delete move the cursor mid-line.
+                //       PageUp/PageDown rarely move the cursor in a
+                //       shell context. Be conservative: tag any `~`
+                //       CSI as a cursor motion. The follow-up cost is
+                //       a slightly over-suppressed ghost for PageUp/
+                //       PageDown — better than the deletion-illusion
+                //       bug.
+                // Skip the flag when the buffer is empty — cursor is
+                // already at col 1 == EOL, no character can be over-
+                // painted. Avoids stickily suppressing ghost when
+                // the user presses Right/Home/End at an empty prompt
+                // (no-op in shells, but flag would persist for the
+                // whole next typing session).
+                if (j < input.len and self.len > 0) {
+                    switch (input[j]) {
+                        'D', 'C', 'H', 'F', '~' => self.cursor_moved = true,
+                        else => {},
+                    }
+                }
                 i = j + 1;
                 continue;
             }
@@ -294,6 +347,12 @@ pub const LineState = struct {
         self.len -= 1;
         if (self.len == 0) {
             self.uncertain = false;
+            // Buffer just emptied — cursor is back at col 1 == EOL
+            // == BOL; nothing to over-paint. Clear `cursor_moved`
+            // so the ghost overlay can re-engage on the next typed
+            // character (instead of staying stickily suppressed
+            // until Enter).
+            self.cursor_moved = false;
             self.pending_author = .user;
             self.pending_intent_len = 0;
         }
@@ -312,6 +371,9 @@ pub const LineState = struct {
         }
         self.len = 0;
         self.uncertain = false;
+        // Same rationale as `backspace`-to-empty above — the line is
+        // gone, so the cursor's "mid-line"ness is meaningless.
+        self.cursor_moved = false;
         self.pending_author = .user;
         self.pending_intent_len = 0;
         self.generation +%= 1;
@@ -337,7 +399,13 @@ pub const LineState = struct {
             self.len = end;
             if (self.len == 0) {
                 self.uncertain = false;
+                // Same rationale as `backspace`/`killLine` empty-result
+                // paths — clear cursor_moved so ghost can re-engage
+                // on the next typed character instead of staying
+                // stickily suppressed.
+                self.cursor_moved = false;
                 self.pending_author = .user;
+                self.pending_intent_len = 0;
             }
             self.generation +%= 1;
         }
@@ -368,6 +436,7 @@ pub const LineState = struct {
         }
         self.len = 0;
         self.uncertain = false;
+        self.cursor_moved = false;
         self.pending_author = .user;
         self.pending_intent_len = 0;
         self.generation +%= 1;
@@ -417,6 +486,134 @@ test "CSI escape marks uncertain" {
     _ = l.applyInput("ls");
     _ = l.applyInput("\x1B[A"); // up arrow
     try std.testing.expect(l.uncertain);
+}
+
+test "Left/Right/Home/End arrows set cursor_moved (ghost render gate)" {
+    // The Left arrow moves the cursor mid-line WITHOUT changing the
+    // buffer. OSC 133 syncFromCapture would otherwise clear
+    // `uncertain` (content matches), and ghost text would then paint
+    // at the new cursor position — overwriting the character to its
+    // right (looks like deletion). The `cursor_moved` flag stays
+    // sticky for renderGhost to gate on.
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    try std.testing.expect(!l.cursor_moved);
+
+    _ = l.applyInput("\x1B[D"); // Left
+    try std.testing.expect(l.cursor_moved);
+
+    l.cursor_moved = false; // simulate a fresh prompt for the next case
+    _ = l.applyInput("\x1B[C"); // Right
+    try std.testing.expect(l.cursor_moved);
+
+    l.cursor_moved = false;
+    _ = l.applyInput("\x1B[H"); // Home
+    try std.testing.expect(l.cursor_moved);
+
+    l.cursor_moved = false;
+    _ = l.applyInput("\x1B[F"); // End
+    try std.testing.expect(l.cursor_moved);
+}
+
+test "Arrow Up does NOT set cursor_moved (history recall replaces buffer)" {
+    // Up/Down change buffer content (history navigation) so the
+    // existing `uncertain → syncFromCapture` recovery path handles
+    // them. They are NOT mid-line cursor motion. Don't tag them so
+    // the ghost can re-render on the new content after sync.
+    var l = LineState{};
+    _ = l.applyInput("ls");
+    _ = l.applyInput("\x1B[A"); // Up — history recall
+    try std.testing.expect(l.uncertain);
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "submit / reset clear cursor_moved" {
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[D"); // Left → cursor_moved
+    try std.testing.expect(l.cursor_moved);
+
+    _ = l.applyInput("\r"); // Enter → submit
+    try std.testing.expect(!l.cursor_moved);
+
+    _ = l.applyInput("again");
+    _ = l.applyInput("\x1B[D");
+    try std.testing.expect(l.cursor_moved);
+    l.reset();
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "VT-form CSI ~ also sets cursor_moved (xterm/libvte Home/End)" {
+    // Many terminals encode Home as `\x1b[1~` and End as `\x1b[4~`
+    // (VT-style) instead of the xterm cursor-style `\x1b[H` / `\x1b[F`.
+    // Either form should suppress ghost.
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1b[1~"); // Home (VT form)
+    try std.testing.expect(l.cursor_moved);
+}
+
+test "killLine clears cursor_moved (empty buffer == EOL)" {
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput("\x15"); // Ctrl+U → killLine
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "empty buffer + Right/Home does NOT set cursor_moved" {
+    // Empty prompt + cursor-motion key is a no-op in shells (cursor
+    // is already at col 1 == BOL == EOL). Setting cursor_moved here
+    // would stickily suppress ghost for the rest of the line the
+    // user is about to type. Skip the flag when buffer is empty.
+    var l = LineState{};
+    _ = l.applyInput("\x1b[C"); // Right at empty prompt
+    try std.testing.expect(!l.cursor_moved);
+    _ = l.applyInput("\x1b[H"); // Home at empty prompt
+    try std.testing.expect(!l.cursor_moved);
+    // Once the user types something, the flag stays correct.
+    _ = l.applyInput("hi");
+    _ = l.applyInput("\x1b[D"); // Left mid-buffer → flag fires
+    try std.testing.expect(l.cursor_moved);
+}
+
+test "killWord-to-empty clears cursor_moved" {
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput("\x17"); // Ctrl+W → killWord, buffer goes to "" (one word)
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "backspace-to-empty clears cursor_moved" {
+    var l = LineState{};
+    _ = l.applyInput("hi");
+    _ = l.applyInput("\x1B[D"); // Left
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput("\x7F\x7F"); // backspace twice → empty
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "syncFromCapture does NOT touch cursor_moved" {
+    // The fix's core invariant: OSC 133 sync clears `uncertain` based
+    // on bash's content view, but it does NOT clear `cursor_moved`
+    // because OSC 133 carries no cursor-position info. renderGhost
+    // gates on `cursor_moved` independently, so a Left arrow stays
+    // ghost-suppressed even after sync re-confirms the content.
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[D"); // Left
+    try std.testing.expect(l.uncertain);
+    try std.testing.expect(l.cursor_moved);
+
+    l.syncFromCapture("hello"); // same content from OSC 133
+    try std.testing.expect(!l.uncertain); // sync cleared it
+    try std.testing.expect(l.cursor_moved); // but NOT cursor_moved
 }
 
 test "Tab marks uncertain (shell completion changes the line behind atty's back)" {
