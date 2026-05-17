@@ -56,40 +56,14 @@ pub const Model = types.Model;
 pub const dialog_ns = dialog;
 pub const worker_ns = worker_mod_ns;
 
-/// Module-registered key bindings. The dispatcher's
-/// `allDefaultBindings()` comptime-collects every module's
-/// `default_bindings` slice into the global keymap. User-supplied
-/// `config.keymap.bindings` win over these via the proxy's
-/// first-match scan — so a user can rebind any of these without
-/// touching this file, and a user who doesn't enable the LLM module
-/// at all gets none of these bindings.
-///
-/// **Dual encoding rationale**: every Alt+letter chord ships TWICE
-/// — once as the legacy `\x1b<letter>` encoding (terminals without
-/// kitty kbd) and once as the kitty kbd CSI-u sibling
-/// `\x1b[<code>;<mod>u` (Ghostty, kitty, foot, WezTerm). Atty's
-/// keymap matching runs BEFORE the CSI-u → legacy translation in
-/// the stdin path, so a single-encoded binding silently misses on
-/// half the terminal ecosystem. Only the legacy form sets `.label`
-/// and `.description` — the CSI-u sibling leaves them blank so the
-/// Alt+H help renderer dedupes by action.
-pub const default_bindings: []const keymap.Binding = &.{
-    .{ .bytes = keymap.key("Alt+a"), .action = .llm_exec_single, .label = "Alt+A", .description = "LLM: single-shot (one command, no dialog)" },
-    .{ .bytes = "\x1b[97;3u", .action = .llm_exec_single },
-    .{ .bytes = keymap.key("Alt+s"), .action = .llm_exec_dialog, .label = "Alt+S", .description = "LLM: dialog mode (multi-turn exec/observe loop)" },
-    .{ .bytes = "\x1b[115;3u", .action = .llm_exec_dialog },
-    .{ .bytes = keymap.key("Alt+S"), .action = .llm_exec_auto, .label = "Alt+Shift+S", .description = "LLM: auto-exec mode (dialog + auto-confirm)" },
-    .{ .bytes = "\x1b[115;4u", .action = .llm_exec_auto },
-    .{ .bytes = keymap.key("Alt+m"), .action = .llm_exec_cycle_model, .label = "Alt+M", .description = "cycle through LLM models in config.models" },
-    .{ .bytes = "\x1b[109;3u", .action = .llm_exec_cycle_model },
-    .{ .bytes = keymap.key("Alt+h"), .action = .llm_exec_toggle_help, .label = "Alt+H", .description = "help (LLM mode hint, or global cheat-sheet)" },
-    .{ .bytes = "\x1b[104;3u", .action = .llm_exec_toggle_help },
-    .{ .bytes = keymap.key("Alt+c"), .action = .llm_inline_chat_toggle, .label = "Alt+C", .description = "toggle inline chat panel (shell stays visible)" },
-    .{ .bytes = "\x1b[99;3u", .action = .llm_inline_chat_toggle },
-    .{ .bytes = keymap.key("Alt+C"), .action = .llm_chat_overlay_toggle, .label = "Alt+Shift+C", .description = "toggle full-screen chat overlay" },
-    .{ .bytes = "\x1b[99;4u", .action = .llm_chat_overlay_toggle },
-    .{ .bytes = keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel, .label = "Ctrl+Shift+X", .description = "cancel any active LLM exec / dialog / auto" },
-};
+// `default_bindings` lives INSIDE the `configure()` return struct
+// — see line ~115 below. The dispatcher's `@hasDecl(M, "default_bindings")`
+// gate inspects the type that's actually stored in `config.modules`
+// (which is `llm.configure(.{ ... })`, the inner struct), not the
+// top-level `modules/llm.zig` file. A top-level decl here would be
+// invisible to the walker and every Alt+letter binding would silently
+// miss. Documenting this anti-pattern explicitly so it doesn't get
+// re-introduced.
 
 pub fn configure(comptime cfg: Config) type {
     // Comptime-validate config invariants that paint code relies on.
@@ -114,6 +88,43 @@ pub fn configure(comptime cfg: Config) type {
     return struct {
         pub const name = "llm";
         pub const config = cfg;
+
+        /// Module-registered key bindings. The dispatcher's
+        /// `all_default_bindings` comptime-collects every module's
+        /// `default_bindings` slice into the global keymap.
+        /// User-supplied `config.keymap.bindings` win over these via
+        /// the proxy's first-match scan — so a user can rebind any
+        /// of these without touching this file, and a user who
+        /// doesn't enable the LLM module at all gets none of these
+        /// bindings.
+        ///
+        /// **Dual encoding rationale**: every Alt+letter chord ships
+        /// TWICE — once as the legacy `\x1b<letter>` (terminals
+        /// without kitty kbd) and once as the kitty kbd CSI-u sibling
+        /// `\x1b[<code>;<mod>u` (Ghostty, kitty, foot, WezTerm).
+        /// Atty's keymap matching runs BEFORE the CSI-u → legacy
+        /// translation in the stdin path, so a single-encoded
+        /// binding silently misses on half the terminal ecosystem.
+        /// Only the legacy form sets `.label` and `.description` —
+        /// the CSI-u sibling leaves them blank so the Alt+H help
+        /// renderer dedupes by action.
+        pub const default_bindings: []const keymap.Binding = &.{
+            .{ .bytes = keymap.key("Alt+a"), .action = .llm_exec_single, .label = "Alt+A", .description = "LLM: single-shot (one command, no dialog)" },
+            .{ .bytes = "\x1b[97;3u", .action = .llm_exec_single },
+            .{ .bytes = keymap.key("Alt+s"), .action = .llm_exec_dialog, .label = "Alt+S", .description = "LLM: dialog mode (multi-turn exec/observe loop)" },
+            .{ .bytes = "\x1b[115;3u", .action = .llm_exec_dialog },
+            .{ .bytes = keymap.key("Alt+S"), .action = .llm_exec_auto, .label = "Alt+Shift+S", .description = "LLM: auto-exec mode (dialog + auto-confirm)" },
+            .{ .bytes = "\x1b[115;4u", .action = .llm_exec_auto },
+            .{ .bytes = keymap.key("Alt+m"), .action = .llm_exec_cycle_model, .label = "Alt+M", .description = "cycle through LLM models in config.models" },
+            .{ .bytes = "\x1b[109;3u", .action = .llm_exec_cycle_model },
+            .{ .bytes = keymap.key("Alt+h"), .action = .llm_exec_toggle_help, .label = "Alt+H", .description = "help (LLM mode hint, or global cheat-sheet)" },
+            .{ .bytes = "\x1b[104;3u", .action = .llm_exec_toggle_help },
+            .{ .bytes = keymap.key("Alt+c"), .action = .llm_inline_chat_toggle, .label = "Alt+C", .description = "toggle inline chat panel (shell stays visible)" },
+            .{ .bytes = "\x1b[99;3u", .action = .llm_inline_chat_toggle },
+            .{ .bytes = keymap.key("Alt+C"), .action = .llm_chat_overlay_toggle, .label = "Alt+Shift+C", .description = "toggle full-screen chat overlay" },
+            .{ .bytes = "\x1b[99;4u", .action = .llm_chat_overlay_toggle },
+            .{ .bytes = keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel, .label = "Ctrl+Shift+X", .description = "cancel any active LLM exec / dialog / auto" },
+        };
 
         // HTTP worker thread + request/response plumbing extracted
         // to `llm/worker.zig`. The factory call binds `cfg` into

@@ -1273,3 +1273,39 @@ test "allDefaultBindings: empty when no module declares default_bindings" {
     const D = Dispatcher(&.{ ModuleWithoutBindings, NoReserveModule });
     try testing.expectEqual(@as(usize, 0), D.all_default_bindings.len);
 }
+
+// Regression: real modules wrap their definition in `pub fn configure(cfg) type`
+// — the LLM module returns an inner struct from `configure(.{...})`, and THAT
+// inner struct is what lands in `config.modules`. `default_bindings` must live
+// INSIDE the returned struct, not at the wrapping file's top level, or the
+// dispatcher's `@hasDecl(M, "default_bindings")` gate silently misses it.
+fn FactoryModule(comptime tag: u8) type {
+    return struct {
+        pub const name = "factory";
+        pub const Runtime = struct {};
+        pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+            return .{};
+        }
+        pub fn detach(_: *Runtime, _: std.Io) void {}
+        pub const default_bindings: []const keymap.Binding = &.{
+            .{ .bytes = &[_]u8{tag}, .action = .ghost_accept, .label = "Factory", .description = "from factory" },
+        };
+    };
+}
+
+test "allDefaultBindings: picks up bindings from configure()-style factory modules" {
+    // Exercise the actual code shape user configs use:
+    //   pub const modules = .{ atty.modules.llm.configure(.{ ... }) };
+    // where `configure` returns a parameterised type that carries
+    // `default_bindings`. If the walker only inspected the top-level
+    // file (not the returned type), Alt+C/Alt+S/etc. would silently
+    // miss for every user — exactly the regression that shipped with
+    // PR #70 before this fix.
+    const FA = FactoryModule('A');
+    const FB = FactoryModule('B');
+    const D = Dispatcher(&.{ FA, FB });
+    const all = D.all_default_bindings;
+    try testing.expectEqual(@as(usize, 2), all.len);
+    try testing.expectEqualSlices(u8, "A", all[0].bytes);
+    try testing.expectEqualSlices(u8, "B", all[1].bytes);
+}
