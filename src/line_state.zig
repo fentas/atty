@@ -252,9 +252,22 @@ pub const LineState = struct {
                 // rendering at the new cursor position would
                 // overwrite the character to the right of the cursor.
                 // Set the cursor_moved flag so renderGhost suppresses.
+                //
+                // Final-byte taxonomy:
+                //   D = Left, C = Right (xterm cursor-style)
+                //   H = Home, F = End (xterm cursor-style)
+                //   ~ = VT-style Home/End/Delete/PageUp/PageDown — the
+                //       parameter distinguishes them (1/4/3/5/6 etc.).
+                //       Home/End/Delete move the cursor mid-line.
+                //       PageUp/PageDown rarely move the cursor in a
+                //       shell context. Be conservative: tag any `~`
+                //       CSI as a cursor motion. The follow-up cost is
+                //       a slightly over-suppressed ghost for PageUp/
+                //       PageDown — better than the deletion-illusion
+                //       bug.
                 if (j < input.len) {
                     switch (input[j]) {
-                        'D', 'C', 'H', 'F' => self.cursor_moved = true,
+                        'D', 'C', 'H', 'F', '~' => self.cursor_moved = true,
                         else => {},
                     }
                 }
@@ -328,6 +341,12 @@ pub const LineState = struct {
         self.len -= 1;
         if (self.len == 0) {
             self.uncertain = false;
+            // Buffer just emptied — cursor is back at col 1 == EOL
+            // == BOL; nothing to over-paint. Clear `cursor_moved`
+            // so the ghost overlay can re-engage on the next typed
+            // character (instead of staying stickily suppressed
+            // until Enter).
+            self.cursor_moved = false;
             self.pending_author = .user;
             self.pending_intent_len = 0;
         }
@@ -346,6 +365,9 @@ pub const LineState = struct {
         }
         self.len = 0;
         self.uncertain = false;
+        // Same rationale as `backspace`-to-empty above — the line is
+        // gone, so the cursor's "mid-line"ness is meaningless.
+        self.cursor_moved = false;
         self.pending_author = .user;
         self.pending_intent_len = 0;
         self.generation +%= 1;
@@ -506,6 +528,36 @@ test "submit / reset clear cursor_moved" {
     _ = l.applyInput("\x1B[D");
     try std.testing.expect(l.cursor_moved);
     l.reset();
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "VT-form CSI ~ also sets cursor_moved (xterm/libvte Home/End)" {
+    // Many terminals encode Home as `\x1b[1~` and End as `\x1b[4~`
+    // (VT-style) instead of the xterm cursor-style `\x1b[H` / `\x1b[F`.
+    // Either form should suppress ghost.
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1b[1~"); // Home (VT form)
+    try std.testing.expect(l.cursor_moved);
+}
+
+test "killLine clears cursor_moved (empty buffer == EOL)" {
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput("\x15"); // Ctrl+U → killLine
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "backspace-to-empty clears cursor_moved" {
+    var l = LineState{};
+    _ = l.applyInput("hi");
+    _ = l.applyInput("\x1B[D"); // Left
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput("\x7F\x7F"); // backspace twice → empty
+    try std.testing.expectEqual(@as(usize, 0), l.len);
     try std.testing.expect(!l.cursor_moved);
 }
 
