@@ -35,6 +35,8 @@ const std = @import("std");
 const m = @import("../module.zig");
 const keymap = @import("../keymap.zig");
 const Osc133 = @import("../osc133.zig").Osc133;
+const pty_mod = @import("../pty.zig");
+const Pty = pty_mod.Pty;
 const parse = @import("llm/parse.zig");
 const types = @import("llm/types.zig");
 const dialog = @import("llm/dialog.zig");
@@ -919,6 +921,24 @@ pub fn configure(comptime cfg: Config) type {
                     rt.chat_overlay_paint_pending = true;
                     return true;
                 },
+                .llm_inline_chat_toggle => {
+                    // Inline chat mode — reserves rows above the
+                    // statusbar for a slim chat panel; shell stays
+                    // visible. Implemented in the next PR. For now
+                    // the action is bound + claimed (so the
+                    // keystroke doesn't reach the shell as
+                    // mojibake), and the user sees a hint.
+                    //
+                    // Stderr fallback because the statusbar hint
+                    // surface is gated on `config.statusbar.enabled`
+                    // (defaults off in config.def.zig) — without
+                    // this stderr line, pressing Alt+C with no
+                    // statusbar would silently swallow the key.
+                    latchHint(rt, "inline chat coming in next PR — use Alt+Shift+C for the full overlay");
+                    const stub_msg = "atty: inline chat (Alt+C) coming in next PR — use Alt+Shift+C for the full overlay now\n";
+                    _ = std.c.write(2, stub_msg, stub_msg.len);
+                    return true;
+                },
                 .llm_exec_cancel => {
                     // Only claim consumed when there's actual
                     // state to clear — otherwise the user's
@@ -1575,11 +1595,11 @@ pub fn configure(comptime cfg: Config) type {
                                     // open overlay.
                                     rt.conclusion_pending = false;
                                 } else {
-                                    latchHint(rt, "✨ LLM done — Alt+C to open chat");
+                                    latchHint(rt, "✨ LLM done — Alt+Shift+C to open chat");
                                 }
                             },
                             .notify => {
-                                latchHint(rt, "✨ LLM suggests follow-up — Alt+C to open chat");
+                                latchHint(rt, "✨ LLM suggests follow-up — Alt+Shift+C to open chat");
                             },
                             .never => {},
                         }
@@ -1639,7 +1659,7 @@ pub fn configure(comptime cfg: Config) type {
                                 rt.chat_overlay_paint_pending = true;
                             },
                             .notify => {
-                                latchHint(rt, "✨ LLM suggests overlay for this answer — Alt+C to open chat");
+                                latchHint(rt, "✨ LLM suggests overlay for this answer — Alt+Shift+C to open chat");
                             },
                             .never => {},
                         }
@@ -2180,33 +2200,89 @@ pub fn configure(comptime cfg: Config) type {
         /// typing a prefix-matched prompt. One-shot per transition
         /// — we only emit on edges so the terminal doesn't see
         /// redundant OSC traffic on every tick.
+        /// Write `bytes` to `w` filtering out control bytes that
+        /// would otherwise hijack the terminal — embedded `\x1B`
+        /// in an LLM response would smuggle escape sequences into
+        /// our overlay paint, breaking the layout (the screenshot
+        /// bug). Tabs and printable bytes pass through; newlines
+        /// become spaces so each turn renders on a single visual
+        /// line that the terminal wraps naturally inside the
+        /// scroll region.
+        fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) !void {
+            for (bytes) |b| {
+                if (b == 0x1B or b == 0x7F or (b < 0x20 and b != 0x09)) {
+                    // Replace newline with space; drop all other
+                    // C0 + ESC + DEL silently.
+                    if (b == 0x0A or b == 0x0D) try w.writeAll(" ") else continue;
+                } else {
+                    try w.writeByte(b);
+                }
+            }
+        }
+
         /// Render the chat overlay's open or close sequence into
         /// `rt.chat_overlay_buf`. Returns false when the content
-        /// overflows the buffer (caller should not emit a partial
-        /// sequence — better to skip the paint than leave an
-        /// incomplete alt-screen state on the terminal).
+        /// overflows the buffer (caller skips the paint rather
+        /// than emitting a partial alt-screen sequence).
         ///
-        /// Phase 2a renders the existing turn history as text-only
-        /// content above a single-line "Alt+C close" footer. No
-        /// chrome / no input row — those arrive in 2b/2c.
+        /// Layout (on open):
+        ///   - title bar at row 1 + blank row 2
+        ///   - turns rendered into a DECSTBM scroll region
+        ///     spanning rows 1 .. rows-2 (terminal auto-wraps +
+        ///     scrolls long content within that region)
+        ///   - chat input at row rows-1 + footer at row rows
+        ///     (outside the scroll region so they stay anchored)
+        ///
+        /// **Known limitation:** on terminals with GLOBAL DECSTBM
+        /// scope (rare; most modern terminals isolate DECSTBM
+        /// per-buffer), the close path's `\x1B[r` may wipe the
+        /// statusbar's reserved scroll region until SIGWINCH or
+        /// another paint triggers `sb.activate`. Phase 2c
+        /// (proxy-level overlay surface) will route close through
+        /// the proxy so `sb.reactivate` fires automatically.
         fn paintChatOverlay(rt: *Runtime) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
             if (!rt.chat_overlay_open) {
-                // Close: restore cursor visibility (paired with the
-                // hide we emit on open below) THEN leave the alt
+                // Close: reset scroll region (the alt-screen had its
+                // own DECSTBM but resetting before exit is defensive
+                // for terminals that don't isolate per-buffer scroll
+                // regions); restore cursor visibility; leave alt
                 // screen. The order matters — the shell expects its
                 // cursor back; doing it after the alt-screen exit
                 // would briefly flash the cursor on the underlying
                 // screen at row/col (1,1) before the shell repaints.
-                w.writeAll("\x1B[?25h\x1B[?1049l") catch return false;
+                w.writeAll("\x1B[r\x1B[?25h\x1B[?1049l") catch return false;
                 rt.chat_overlay_buf_len = w.end;
                 return true;
             }
+
+            // Query terminal size so we can pin footer + input at
+            // the bottom rows and confine turn rendering inside a
+            // DECSTBM scroll region (rows 1..rows-2). Without this
+            // bound, long assistant turns wrap past the screen and
+            // the absolute-positioned footer at `\x1B[999;1H`
+            // collides with the wrapped content above it — the
+            // user-visible "broken overlay" bug.
+            //
+            // Falls back to a conservative 24×80 if the ioctl
+            // fails (won't in practice on a TTY — main.zig refuses
+            // non-TTY stdio — but defensive).
+            const size = Pty.querySize(std.posix.STDOUT_FILENO) catch
+                pty_mod.WinSize{ .rows = 24, .cols = 80, .xpixel = 0, .ypixel = 0 };
+            const rows: u16 = if (size.rows > 4) size.rows else 4;
+            const content_bottom: u16 = rows - 2;
+            // `size.cols` available but unused — phase 2c will use
+            // it for per-row wrap calculations once we model turn
+            // rendering at the codepoint level instead of relying
+            // on the terminal's auto-wrap inside the scroll region.
+
             // Open: enter alt screen, hide the real terminal cursor
             // (the input row paints its own reverse-video block
             // cursor; without `?25l` the real cursor parks adjacent
-            // to it and the user sees two), clear, home cursor.
-            w.writeAll("\x1B[?1049h\x1B[?25l\x1B[2J\x1B[1;1H") catch return false;
+            // to it and the user sees two), clear, set scroll region
+            // to rows 1..content_bottom (leaves the last two rows
+            // free for input + footer), cursor home.
+            w.print("\x1B[?1049h\x1B[?25l\x1B[2J\x1B[1;{d}r\x1B[1;1H", .{content_bottom}) catch return false;
             // Title bar — dim chrome so it reads as frame, not content.
             // Coloured icon picks up the same fg=141 used in the
             // statusbar AI hint (consistent visual vocabulary).
@@ -2224,13 +2300,14 @@ pub fn configure(comptime cfg: Config) type {
                         .observation => "\x1B[2mOutput:\x1B[0m ",
                     };
                     w.writeAll(prefix) catch return false;
-                    // Bound turn content rendered to ~512 chars so a
-                    // single huge JSON envelope doesn't blow the
-                    // overlay buffer. Real chat UX in 2b/2c can do
-                    // word-wrapping + structured assistant-turn
-                    // rendering (parsed action / description).
+                    // Sanitize: strip embedded ESC / control bytes
+                    // so a model that sneaks `\x1B[…` into its
+                    // reason field can't hijack our overlay paint.
+                    // Cap to ~512 chars rendered so a huge JSON
+                    // envelope doesn't fill the screen with one
+                    // turn; truncation marker dimmed.
                     const slice = if (turn.content.len > 512) turn.content[0..512] else turn.content;
-                    w.writeAll(slice) catch return false;
+                    writeSanitized(&w, slice) catch return false;
                     if (turn.content.len > 512) {
                         w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m") catch return false;
                     }
@@ -2239,44 +2316,40 @@ pub fn configure(comptime cfg: Config) type {
                 if (has_conclusion and !has_turns) {
                     // Fallback: when the dialog already wrapped up
                     // (turns wiped on dialogReset) but the
-                    // conclusion banner survived, surface it as the
-                    // overlay's content. Rare path but defends
-                    // against the empty-overlay-after-action=done
-                    // case.
+                    // conclusion banner survived, surface it as
+                    // the overlay's content. Conclusion was built
+                    // by atty so it's safe to write unsanitized.
                     w.writeAll(rt.conclusion_buf[0..rt.conclusion_len]) catch return false;
                     w.writeAll("\r\n") catch return false;
                 }
             }
 
-            // Chat input row + close hint anchored at the bottom.
-            // Layout from bottom up:
-            //   bottom row    → "[Alt+C close · Enter send]"
-            //   bottom-1 row  → "❯ <input>_"
+            // Input row + footer hint anchored at the bottom rows,
+            // OUTSIDE the scroll region so they don't move when
+            // turn content overflows + scrolls.
             //
-            // `\x1B[999;1H` parks at the largest plausible row
-            // (terminals clamp to actual rows); we paint the close
-            // hint there, then `\x1B[1A` up one row + `\x1B[2K`
-            // clear it for the input row.
-            w.writeAll("\x1B[999;1H\x1B[2K\x1B[2m[Alt+C close \u{00B7} Enter send]\x1B[0m") catch return false;
-            w.writeAll("\x1B[1A\x1B[2K") catch return false;
-            // Cyan prompt glyph + the typed input, then a block
-            // cursor indicator so the user sees where they're
-            // typing.
+            //   row `rows-1`   → "❯ <input>█"
+            //   row `rows`     → "[Alt+Shift+C close · Enter send]"
+            //
+            // Each absolute-positioned + line-cleared so any
+            // pre-existing terminal state on those rows can't
+            // bleed through.
+            w.print("\x1B[{d};1H\x1B[2K", .{rows - 1}) catch return false;
             w.writeAll("\x1B[22;1;38;5;14m\u{276F}\x1B[0m ") catch return false;
             if (rt.chat_input_len > 0) {
-                // Visible-on-row budget — long lines truncate at
-                // the head so the tail (where the user is typing)
-                // stays visible. Wrapping is phase 2c.
                 const visible = if (rt.chat_input_len > 512)
                     rt.chat_input_buf[rt.chat_input_len - 512 .. rt.chat_input_len]
                 else
                     rt.chat_input_buf[0..rt.chat_input_len];
-                w.writeAll(visible) catch return false;
+                writeSanitized(&w, visible) catch return false;
             }
             // Block-cursor indicator (reverse-video space) so the
             // typing position reads as a "real" cursor even though
             // we never move the actual terminal cursor here.
             w.writeAll("\x1B[7m \x1B[0m") catch return false;
+
+            w.print("\x1B[{d};1H\x1B[2K", .{rows}) catch return false;
+            w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send]\x1B[0m") catch return false;
             rt.chat_overlay_buf_len = w.end;
             return true;
         }
@@ -2776,8 +2849,21 @@ test "chat overlay (Alt+C): toggle emits alt-screen enter then exit" {
     try testing.expect(std.mem.indexOf(u8, opened.?, "atty chat") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "You:") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "explain X") != null);
-    try testing.expect(std.mem.indexOf(u8, opened.?, "[Alt+C close") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "[Alt+Shift+C close") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "Enter send") != null);
+    // DECSTBM scroll region is set so long content can't clobber
+    // the input + footer at the bottom (regression for the
+    // "broken overlay" screenshot bug). Match `\x1B[1;<digits>r`
+    // — the trailing `r` is the DECSTBM terminator and rules out
+    // false positives from the cursor-home `\x1B[1;1H` also emitted
+    // by the open sequence.
+    {
+        const idx = std.mem.indexOf(u8, opened.?, "\x1B[1;") orelse return error.TestUnexpectedResult;
+        var j = idx + 4;
+        while (j < opened.?.len and opened.?[j] >= '0' and opened.?[j] <= '9') : (j += 1) {}
+        try testing.expect(j < opened.?.len);
+        try testing.expectEqual(@as(u8, 'r'), opened.?[j]);
+    }
     // Cyan chat input prompt glyph (input row).
     try testing.expect(std.mem.indexOf(u8, opened.?, "\u{276F}") != null);
 
@@ -2790,7 +2876,10 @@ test "chat overlay (Alt+C): toggle emits alt-screen enter then exit" {
     // Cursor-show + alt-screen exit, in that order (real cursor
     // was hidden on open so the overlay's reverse-video block
     // cursor wasn't doubled).
-    try testing.expectEqualStrings("\x1B[?25h\x1B[?1049l", closed.?);
+    // Close emits DECSTBM reset (defensive — even though
+    // alt-screen exit should restore the primary screen's
+    // scroll region), then show-cursor, then alt-screen exit.
+    try testing.expectEqualStrings("\x1B[r\x1B[?25h\x1B[?1049l", closed.?);
 }
 
 test "chat overlay: onInput swallows all keystrokes while open" {

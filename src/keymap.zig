@@ -131,20 +131,25 @@ pub const Action = union(enum) {
     /// but no action has fired yet (in which case it's equivalent
     /// to Esc).
     llm_exec_cancel,
-    /// Re-emit the LLM session conclusion (the formatted summary
-    /// printed above the next prompt when the LLM finished a
-    /// dialog). Default Alt+C. Useful to recall the result of a
-    /// completed session that has scrolled out of view. No-op
-    /// when no conclusion has been captured yet (i.e. before the
-    /// first `action=done` in this atty session).
+    /// Open/close the FULL-SCREEN chat overlay — atty's alt-screen
+    /// takes over the terminal and renders the LLM conversation +
+    /// chat input. Default **Alt+Shift+C**. Useful for focused
+    /// review of long conversations / structured assistant
+    /// rendering.
     ///
-    /// Phase 1 of the chat-overlay design (per
-    /// docs/llm-exec-mode-followups.md): re-display only. Phase 2
-    /// will turn this into a persistent overlay with chat input +
-    /// LLM round-trip + context controls. The action variant is
-    /// added now so the keymap surface is stable across the
-    /// two-PR rollout.
+    /// `Alt+C` (without Shift) is reserved for the lighter-weight
+    /// inline chat mode (see `llm_inline_chat_toggle`) that keeps
+    /// the shell visible above a reserved chat strip — that's the
+    /// default for casual back-and-forth.
     llm_chat_overlay_toggle,
+    /// Open/close the INLINE chat mode — reserves N rows above the
+    /// statusbar for a slim chat panel; the shell stays visible
+    /// above the reservation and keystrokes route to the chat
+    /// input. Default **Alt+C**. The inline mode is for "ask the
+    /// LLM something while the current command's output is still
+    /// scrolling past." For deep review use Alt+Shift+C (full
+    /// overlay).
+    llm_inline_chat_toggle,
 };
 
 pub const Binding = struct {
