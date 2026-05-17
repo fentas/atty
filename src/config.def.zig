@@ -102,6 +102,7 @@ const atty = @import("atty");
 //         //     "PATH_BASE",          //   alongside the prompt — one-line
 //         //     "PROJECT",            //   "KEY=value, …" appended to the
 //         // },                        //   user message
+//         // .inline_chat_rows = 10,   // Alt+C panel height in rows (>=3)
 //     }),
 // };
 

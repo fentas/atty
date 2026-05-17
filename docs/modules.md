@@ -38,8 +38,11 @@ outer terminal (via `provideTermBytes` emitting `\x1B[?1049h`) must
 implement `isOverlayActive` so the proxy can divert PTY-master
 output into a ring buffer while the overlay is up — without it,
 shell output writes to STDOUT clobber the overlay's painted
-content. The LLM module's chat overlay (`Alt+C`) is the current
-example.
+content. The LLM module's full chat overlay (`Alt+Shift+C`) is the
+current example. The inline chat panel (`Alt+C`) takes a different
+path — it grows the statusbar reservation via `extraReserveRows`
+rather than taking over the alt-screen, so it does NOT implement
+`isOverlayActive` (the shell stays visible above the panel).
 
 The framework introspects each module via `@hasDecl` at comptime —
 missing hooks are statically eliminated from the dispatch loop, not
