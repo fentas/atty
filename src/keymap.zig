@@ -151,11 +151,16 @@ pub const Action = union(enum) {
     /// overlay).
     llm_inline_chat_toggle,
     /// Render a one-screen cheat-sheet of every keybinding atty
-    /// surfaces — pulled from `config.keymap.bindings` AND any
-    /// module-registered `default_bindings`. Default **Alt+H**.
-    /// Scrolls into shell history (like the LLM conclusion banner),
-    /// so it stays available in scrollback without commandeering
-    /// the screen.
+    /// surfaces — pulled from `config.keymap.bindings`. Scrolls into
+    /// shell history (like the LLM conclusion banner) so it stays
+    /// available in scrollback without commandeering the screen.
+    ///
+    /// **Not bound by default.** The shipped `Alt+H` binding triggers
+    /// the LLM-mode help (`llm_exec_toggle_help`), which falls
+    /// through to this renderer at the proxy when NOT in AI mode —
+    /// so `Alt+H` does the right thing in both contexts via a single
+    /// keybinding. User configs that want a dedicated, unconditional
+    /// cheat-sheet key can bind this action directly (e.g. `Alt+?`).
     show_help,
 };
 
