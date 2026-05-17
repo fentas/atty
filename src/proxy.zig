@@ -668,7 +668,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // the line uncertain and we'd lose the chance to act.
                 var accept_buf: [4096]u8 = undefined;
                 var swallow_after_binding = false;
-                const matched_action = keymap.match(config.keymap.bindings, input);
+                // User bindings first (so a user-listed override wins),
+                // then module-registered defaults from `D.allDefaultBindings()`
+                // (the LLM module registers its own Alt+A/Alt+C/etc.).
+                // First-match-wins via the linear scan in `keymap.match`.
+                const matched_action = keymap.match(config.keymap.bindings, input) orelse
+                    keymap.match(D.allDefaultBindings(), input);
                 // `var` so the llm-action arm can clear it when a
                 // match didn't consume — that lets the CSI-u
                 // cleanup at the bottom still translate / drop the
@@ -1868,18 +1873,28 @@ fn renderHelp(out_buf: []u8) !void {
     // first non-empty label/description for a given action wins.
     var seen_actions: [std.meta.fields(keymap.Action).len]bool = @splat(false);
 
-    for (config.keymap.bindings) |bind| {
-        if (bind.label.len == 0 or bind.description.len == 0) continue;
-        const idx: usize = @intFromEnum(bind.action);
-        if (idx >= seen_actions.len or seen_actions[idx]) continue;
-        seen_actions[idx] = true;
-        // "│ Alt+C            open inline chat panel"
-        // Key in bold-cyan (14 cols left-padded for alignment),
-        // description in dim prose.
-        try w.print(
-            "\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m{s:<16}\x1B[0;2m {s}\x1B[0m\r\n",
-            .{ bind.label, bind.description },
-        );
+    // Walk user bindings first, then module-registered defaults.
+    // First non-empty label/description per action variant wins —
+    // matches the keystroke-dispatch precedence (user overrides
+    // module defaults at match-time too).
+    const lists: [2][]const keymap.Binding = .{
+        config.keymap.bindings,
+        D.allDefaultBindings(),
+    };
+    for (lists) |list| {
+        for (list) |bind| {
+            if (bind.label.len == 0 or bind.description.len == 0) continue;
+            const idx: usize = @intFromEnum(bind.action);
+            if (idx >= seen_actions.len or seen_actions[idx]) continue;
+            seen_actions[idx] = true;
+            // "│ Alt+C            open inline chat panel"
+            // Key in bold-cyan (16 cols left-padded for alignment),
+            // description in dim prose.
+            try w.print(
+                "\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m{s:<16}\x1B[0;2m {s}\x1B[0m\r\n",
+                .{ bind.label, bind.description },
+            );
+        }
     }
 
     try w.writeAll("\x1B[2m\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n");
