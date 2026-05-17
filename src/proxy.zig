@@ -1508,6 +1508,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         // screen's physical bottom.
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
+                            // Re-evaluate reserve in case a same-iteration
+                            // stdin toggle (Alt+C) bumped `extraReserveRows`
+                            // AFTER the iteration-top reservation block
+                            // already ran. Without this re-check, the
+                            // SIGWINCH branch's `sb.activate` below
+                            // would set DECSTBM at the OLD reservation,
+                            // and the subsequent inline-panel paint
+                            // would see `ctx.statusbar_reserve == base`
+                            // and bail with "terminal too small".
+                            const want_extra_now = D.extraReserveRows(&runtimes);
+                            const want_reserve_now: u16 = blk: {
+                                const sum = std.math.add(u16, sb.baseReserveRows(), want_extra_now) catch sb.rows;
+                                if (sum >= sb.rows) break :blk if (sb.rows > 1) sb.rows - 1 else 1;
+                                break :blk sum;
+                            };
+                            if (want_reserve_now != sb.reserve_rows) sb.setReserveRows(want_reserve_now);
+                            ctx.statusbar_reserve = sb.reserve_rows;
+                            ctx.terminal_rows = sb.rows;
+                            ctx.terminal_cols = sb.cols;
                             cursor_tracker.setMaxRows(sb.effectiveRows());
                             // While an alt-screen TUI is running the
                             // statusbar is suspended and the app owns
