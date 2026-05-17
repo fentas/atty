@@ -39,6 +39,36 @@ pub const EnterAction = enum {
     auto,
 };
 
+/// Auto-detected system context — toggleable per-source. The
+/// values atty gathers from each source land in the system prompt
+/// under a `System:` heading so the model can pick the right
+/// package manager / cwd-relative path / branch-aware advice.
+///
+/// **What each source provides:**
+///   - `os`: `/etc/os-release` PRETTY_NAME + `uname -srm`.
+///     Resolved ONCE at attach (cached on Runtime).
+///   - `pwd`: current working directory at REQUEST time. Sourced
+///     from atty's subprocess tracker (which follows OSC 7 / `;C`
+///     edges) so it reflects bash's view, not atty's own cwd.
+///   - `git`: `<cwd>/.git/HEAD` parsed for the current branch (or
+///     abbreviated commit hash if detached). No `git status`
+///     subprocess — atty never blocks on the user's `.git` size.
+///
+/// Defaults: all on. Disable any source by setting the matching
+/// field to `false`. Disable ALL by setting `enabled = false`.
+pub const SystemContext = struct {
+    /// Master switch. `false` → atty gathers NO auto-context;
+    /// system prompt still gets `context_env_vars` (user-listed).
+    enabled: bool = true,
+    /// Include OS pretty-name + kernel + arch.
+    os: bool = true,
+    /// Include current working directory.
+    pwd: bool = true,
+    /// Include git branch when `<cwd>/.git/HEAD` is readable.
+    /// No subprocess fired — pure file read.
+    git: bool = true,
+};
+
 /// One entry in `Config.models`. `name` is required (it's what the
 /// HTTP request body sends as `"model":"…"`); everything else is
 /// optional with `null` = "fall back to the matching `Config.*`
@@ -171,6 +201,19 @@ pub const Config = struct {
     /// = no context. `PATH_BASE` is the canonical example — a
     /// project's "what does this user mean by 'here'" anchor.
     context_env_vars: []const []const u8 = &.{},
+    /// Auto-detected system context appended to the system prompt
+    /// alongside `context_env_vars`. The shell's PS1 typically
+    /// advertises this info (cwd, git branch, …) but the local
+    /// model never sees PS1 — atty surfaces it directly so the
+    /// model stops suggesting `apt` on Arch or `cd ~` when the
+    /// user is already in their project.
+    ///
+    /// All sub-knobs default to `true`. Set the relevant one to
+    /// `false` to opt out of a specific source (e.g. on a huge
+    /// monorepo where reading `.git/HEAD` per-request is still
+    /// fine but you want to skip the OS info because you've
+    /// hand-tuned `system_prompt` already).
+    system_context: SystemContext = .{},
     /// When true, change the terminal cursor's colour while the
     /// user is typing a prompt that starts with `prefix`. atty
     /// emits OSC 12 (set cursor colour) on transition into match,

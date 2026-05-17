@@ -41,6 +41,7 @@ const parse = @import("llm/parse.zig");
 const types = @import("llm/types.zig");
 const dialog = @import("llm/dialog.zig");
 const chat_persist = @import("llm/chat_persist.zig");
+const sys_context = @import("llm/sys_context.zig");
 const worker_mod_ns = @import("llm/worker.zig");
 const env_mod_ns = @import("llm/env.zig");
 const nowMs = @import("_lib.zig").nowMs;
@@ -257,6 +258,13 @@ pub fn configure(comptime cfg: Config) type {
             /// `context_env_vars` are configured or none of them
             /// are set in the environment. Owned by the runtime.
             context_blob: []u8 = &.{},
+            /// Cached static system info (OS pretty-name + uname).
+            /// Resolved ONCE at attach by `sys_context.gatherStatic`
+            /// so we don't `read("/etc/os-release")` per request.
+            /// Empty when `cfg.system_context.enabled` is false OR
+            /// the underlying syscalls / file reads failed.
+            /// Owned by the runtime; freed in detach.
+            os_info: []u8 = &.{},
             /// Resolved chat-history file path — used by the
             /// pushTurn-wrapper to append every turn. Empty when
             /// persistence is disabled or path resolution failed
@@ -565,6 +573,15 @@ pub fn configure(comptime cfg: Config) type {
             errdefer allocator.free(shell_name);
             const context_blob = try resolveContextEnv(allocator);
             errdefer allocator.free(context_blob);
+            // Static system context cached at attach — OS pretty-name +
+            // kernel/arch. Resolved once so each LLM request doesn't
+            // re-read /etc/os-release. Best-effort: failures land as
+            // an empty slice, which `sys_context.compose` then skips.
+            const os_info: []u8 = blk: {
+                if (!cfg.system_context.enabled or !cfg.system_context.os) break :blk try allocator.dupe(u8, "");
+                break :blk sys_context.gatherStatic(allocator) catch try allocator.dupe(u8, "");
+            };
+            errdefer allocator.free(os_info);
 
             // Skip the worker thread entirely in inert mode. With
             // no endpoint we'll never call the worker, and onInput
@@ -584,6 +601,7 @@ pub fn configure(comptime cfg: Config) type {
                 .api_key = api_key,
                 .shell = shell_name,
                 .context_blob = context_blob,
+                .os_info = os_info,
                 .osc133_capture = Osc133.init(allocator),
                 .captured_output = captured_output,
                 .last_assistant_json = last_assistant_json,
@@ -667,6 +685,7 @@ pub fn configure(comptime cfg: Config) type {
             rt.allocator.free(rt.api_key);
             rt.allocator.free(rt.shell);
             rt.allocator.free(rt.context_blob);
+            rt.allocator.free(rt.os_info);
         }
 
         // ---- hooks --------------------------------------------------------
@@ -2144,6 +2163,17 @@ pub fn configure(comptime cfg: Config) type {
 
         /// exceeds `cfg.body_buf_bytes` (the conversation has
         /// outgrown the shared buffer — user needs to cancel).
+        /// Resolve a working-directory hint for the sys_context
+        /// gatherer. atty's subprocess tracker captures bash's cwd
+        /// via OSC 7 + `;C` commits — we surface the topmost
+        /// frame's path. Returns empty when nothing has been
+        /// tracked yet (sys_context falls back to `getcwd()`).
+        fn cwdHint(ctx: *m.Context) []const u8 {
+            const tr = ctx.subprocess orelse return "";
+            const top = tr.current() orelse return "";
+            return top.cwd();
+        }
+
         fn fireDialogRequest(rt: *Runtime, ctx: *m.Context) !void {
             // Selected model (entry in `cfg.models`, else the
             // single-fallback `cfg.model`). `current_model_idx >=
@@ -2166,6 +2196,23 @@ pub fn configure(comptime cfg: Config) type {
                 break :blk rt.turns[rt.turns_len - cap .. rt.turns_len];
             };
 
+            // Compose the per-request context blob: static OS info
+            // (cached at attach) + dynamic pwd/git (rebuilt each call
+            // via cheap stat()/read()) + user-listed env vars from
+            // `cfg.context_env_vars`. Skipped when
+            // `cfg.system_context.enabled = false`; in that case we
+            // fall back to the legacy `rt.context_blob` directly.
+            const composed_context: []u8 = blk: {
+                if (!cfg.system_context.enabled) {
+                    break :blk rt.allocator.dupe(u8, rt.context_blob) catch break :blk &.{};
+                }
+                const cwd = if (cfg.system_context.pwd) cwdHint(ctx) else "";
+                const dyn = sys_context.gatherDynamic(rt.allocator, cwd, cfg.system_context.git) catch &.{};
+                defer rt.allocator.free(dyn);
+                break :blk sys_context.compose(rt.allocator, rt.os_info, dyn, rt.context_blob) catch &.{};
+            };
+            defer rt.allocator.free(composed_context);
+
             // Build the JSON body OUTSIDE the mutex (allocator work,
             // potentially expensive). In fixture mode the worker
             // discards the body entirely, so skip the serialization
@@ -2176,7 +2223,7 @@ pub fn configure(comptime cfg: Config) type {
                     model_for_request,
                     effective_dialog_system_prompt,
                     rt.shell,
-                    rt.context_blob,
+                    composed_context,
                     turn_slice,
                 );
                 if (body.len > cfg.body_buf_bytes) {
@@ -3349,6 +3396,7 @@ fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
     rt.allocator.free(rt.api_key);
     rt.allocator.free(rt.shell);
     rt.allocator.free(rt.context_blob);
+    rt.allocator.free(rt.os_info);
     rt.allocator.destroy(rt.captured_output);
     rt.allocator.destroy(rt.last_assistant_json);
 }
