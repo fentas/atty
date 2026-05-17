@@ -924,13 +924,19 @@ pub fn configure(comptime cfg: Config) type {
                 .llm_inline_chat_toggle => {
                     // Inline chat mode — reserves rows above the
                     // statusbar for a slim chat panel; shell stays
-                    // visible. Implemented in the next PR
-                    // (proxy-level overlay surface). For now the
-                    // action is bound + claimed so the keymap is
-                    // stable, and the user sees a hint pointing
-                    // at the full-screen overlay until inline is
-                    // live.
-                    latchHint(rt, "inline chat (Alt+C) coming in next PR — for now use Alt+Shift+C for the full overlay");
+                    // visible. Implemented in the next PR. For now
+                    // the action is bound + claimed (so the
+                    // keystroke doesn't reach the shell as
+                    // mojibake), and the user sees a hint.
+                    //
+                    // Stderr fallback because the statusbar hint
+                    // surface is gated on `config.statusbar.enabled`
+                    // (defaults off in config.def.zig) — without
+                    // this stderr line, pressing Alt+C with no
+                    // statusbar would silently swallow the key.
+                    latchHint(rt, "inline chat coming in next PR — use Alt+Shift+C for the full overlay");
+                    const stub_msg = "atty: inline chat (Alt+C) coming in next PR — use Alt+Shift+C for the full overlay now\n";
+                    _ = std.c.write(2, stub_msg, stub_msg.len);
                     return true;
                 },
                 .llm_exec_cancel => {
@@ -2253,9 +2259,11 @@ pub fn configure(comptime cfg: Config) type {
             const size = Pty.querySize(std.posix.STDOUT_FILENO) catch
                 pty_mod.WinSize{ .rows = 24, .cols = 80, .xpixel = 0, .ypixel = 0 };
             const rows: u16 = if (size.rows > 4) size.rows else 4;
-            const cols: u16 = if (size.cols > 16) size.cols else 16;
-            _ = cols;
             const content_bottom: u16 = rows - 2;
+            // `size.cols` available but unused — phase 2c will use
+            // it for per-row wrap calculations once we model turn
+            // rendering at the codepoint level instead of relying
+            // on the terminal's auto-wrap inside the scroll region.
 
             // Open: enter alt screen, hide the real terminal cursor
             // (the input row paints its own reverse-video block
@@ -2310,7 +2318,7 @@ pub fn configure(comptime cfg: Config) type {
             // turn content overflows + scrolls.
             //
             //   row `rows-1`   → "❯ <input>█"
-            //   row `rows`     → "[Alt+C close · Enter send]"
+            //   row `rows`     → "[Alt+Shift+C close · Enter send]"
             //
             // Each absolute-positioned + line-cleared so any
             // pre-existing terminal state on those rows can't
