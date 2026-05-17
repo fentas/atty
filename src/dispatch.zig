@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const module = @import("module.zig");
+const keymap = @import("keymap.zig");
 
 pub const Action = module.Action;
 pub const Context = module.Context;
@@ -223,6 +224,35 @@ pub fn Dispatcher(comptime modules: anytype) type {
                 }
             }
             return false;
+        }
+
+        /// Comptime-concatenate every module's `default_bindings`
+        /// decl into a single slice. Modules opt in by declaring a
+        /// `pub const default_bindings: []const keymap.Binding = &.{ ... }`
+        /// at the top level — the dispatcher pulls them all into the
+        /// global keymap so each module owns the documentation +
+        /// defaults for the keys it cares about.
+        ///
+        /// The proxy uses the result alongside `config.keymap.bindings`:
+        ///   - User config bindings (`config.keymap.bindings`) win
+        ///     because they're scanned first by `keymap.match`.
+        ///   - Module bindings are the fallback for any key the user
+        ///     hasn't claimed.
+        /// So a user can rebind any module action without editing the
+        /// module, AND new modules can add bindings without forcing
+        /// the user to edit their config to enable them.
+        pub const all_default_bindings: []const keymap.Binding = blk: {
+            var list: []const keymap.Binding = &.{};
+            for (modules) |M| {
+                if (@hasDecl(M, "default_bindings")) list = list ++ M.default_bindings;
+            }
+            break :blk list;
+        };
+
+        /// Backwards-compatible accessor wrapping `all_default_bindings`.
+        /// Prefer the const directly when called from comptime.
+        pub fn allDefaultBindings() []const keymap.Binding {
+            return all_default_bindings;
         }
 
         /// Saturating sum of every module's `extraReserveRows` hook.
@@ -1205,4 +1235,41 @@ test "notifyResize: fires onResize on declaring modules only" {
     D.notifyResize(&rts);
     D.notifyResize(&rts);
     try testing.expectEqual(@as(usize, 2), rts[0].resize_count);
+}
+
+const ModuleWithBindings = struct {
+    pub const name = "with-bindings";
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub const default_bindings: []const keymap.Binding = &.{
+        .{ .bytes = "\x01", .action = .ghost_accept, .label = "Test+A", .description = "test alpha" },
+        .{ .bytes = "\x02", .action = .incognito_toggle, .label = "Test+B", .description = "test beta" },
+    };
+};
+
+const ModuleWithoutBindings = struct {
+    pub const name = "no-bindings";
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+};
+
+test "allDefaultBindings: comptime-concatenates declaring modules' bindings, skips non-declaring" {
+    const D = Dispatcher(&.{ ModuleWithBindings, ModuleWithoutBindings });
+    const all = D.all_default_bindings;
+    try testing.expectEqual(@as(usize, 2), all.len);
+    try testing.expectEqual(keymap.Action.ghost_accept, all[0].action);
+    try testing.expectEqual(keymap.Action.incognito_toggle, all[1].action);
+    try testing.expectEqualStrings("Test+A", all[0].label);
+    try testing.expectEqualStrings("test alpha", all[0].description);
+}
+
+test "allDefaultBindings: empty when no module declares default_bindings" {
+    const D = Dispatcher(&.{ ModuleWithoutBindings, NoReserveModule });
+    try testing.expectEqual(@as(usize, 0), D.all_default_bindings.len);
 }

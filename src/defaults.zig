@@ -120,50 +120,14 @@ pub const Keymap = struct {
         .{ .bytes = "\x1b[105;3u", .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match, .label = "Ctrl+Shift+D", .description = "delete the current ghost match from history" },
 
-        // LLM exec mode — action keys live INSIDE "AI mode" (when
-        // line_state starts with `#: `). The llm_exec module gates
-        // on its own internal `ai_mode` flag, so these bindings
-        // fire at any time but no-op outside AI mode. See
-        // `docs/llm-exec-mode-design.md` for the full design.
-        //
-        // Each Alt+letter has TWO bindings — see the Alt+i comment
-        // above. The CSI-u companions follow kitty's encoding:
-        //   Alt+<lower>   →  `\x1b[<code>;3u`  (mod 3 = alt)
-        //   Alt+Shift+<x> →  `\x1b[<code>;4u`  (mod 4 = alt+shift)
-        // Without the CSI-u form the binding is dead on every
-        // terminal that speaks kitty kbd (default-on per
-        // `Terminal.enable_kitty_keyboard`).
-        .{ .bytes = atty.keymap.key("Alt+a"), .action = .llm_exec_single, .label = "Alt+A", .description = "LLM: single-shot (one command, no dialog)" },
-        .{ .bytes = "\x1b[97;3u", .action = .llm_exec_single },
-        .{ .bytes = atty.keymap.key("Alt+s"), .action = .llm_exec_dialog, .label = "Alt+S", .description = "LLM: dialog mode (multi-turn with exec/observe loop)" },
-        .{ .bytes = "\x1b[115;3u", .action = .llm_exec_dialog },
-        // Alt+Shift+s → terminals without kitty kbd emit Alt+S
-        // (capital) as ESC + S by the metaSendsEscape convention;
-        // with kitty kbd, the encoding is `\x1b[115;4u` (lowercase
-        // 's' keycode + alt+shift modifier).
-        .{ .bytes = atty.keymap.key("Alt+S"), .action = .llm_exec_auto, .label = "Alt+Shift+S", .description = "LLM: auto-exec mode (dialog + auto-confirm each step)" },
-        .{ .bytes = "\x1b[115;4u", .action = .llm_exec_auto },
-        .{ .bytes = atty.keymap.key("Alt+m"), .action = .llm_exec_cycle_model, .label = "Alt+M", .description = "cycle through LLM models in config.models" },
-        .{ .bytes = "\x1b[109;3u", .action = .llm_exec_cycle_model },
-        .{ .bytes = atty.keymap.key("Alt+h"), .action = .llm_exec_toggle_help, .label = "Alt+H", .description = "show this help (or LLM-mode help when in #: prompt)" },
-        .{ .bytes = "\x1b[104;3u", .action = .llm_exec_toggle_help },
-        // Alt+C — toggle the INLINE chat panel (reserved rows
-        // above the statusbar; shell stays visible). The default
-        // entry point for casual back-and-forth.
-        // Alt+Shift+C — toggle the FULL-SCREEN chat overlay
-        // (alt-screen, takes over the terminal). For focused
-        // review of long conversations.
-        // Dual legacy + kitty kbd CSI-u form per the pattern above;
-        // Alt+Shift+c uses the same `\x1b[99;<mod>u` encoding with
-        // modifier 4 (alt+shift).
-        .{ .bytes = atty.keymap.key("Alt+c"), .action = .llm_inline_chat_toggle, .label = "Alt+C", .description = "toggle inline chat panel (shell stays visible)" },
-        .{ .bytes = "\x1b[99;3u", .action = .llm_inline_chat_toggle },
-        .{ .bytes = atty.keymap.key("Alt+C"), .action = .llm_chat_overlay_toggle, .label = "Alt+Shift+C", .description = "toggle full-screen chat overlay" },
-        .{ .bytes = "\x1b[99;4u", .action = .llm_chat_overlay_toggle },
-        // Cancel works everywhere — not gated on AI mode (a
-        // running exec loop can extend past the AI-mode entry
-        // and the cancel is the safety lever for it).
-        .{ .bytes = atty.keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel, .label = "Ctrl+Shift+X", .description = "cancel any active LLM exec / dialog / auto" },
+        // LLM-module bindings live on the module itself (see
+        // `atty.modules.llm.default_bindings`). The dispatcher's
+        // `allDefaultBindings()` comptime-collects them into the
+        // global keymap whenever the user's `modules` tuple includes
+        // the LLM module — so a user who doesn't enable LLM gets
+        // none of those keys, and a user who wants to rebind one
+        // can still list an override in their own `Keymap.bindings`
+        // (user wins via first-match scan).
         // Esc — bare-key shortcut for the same cancel action. The
         // module's onAction handler is gated on AI-mode-or-
         // pending-work, so a stray Esc outside AI mode falls
