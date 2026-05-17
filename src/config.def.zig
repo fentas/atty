@@ -102,6 +102,20 @@ const atty = @import("atty");
 //         //     "PATH_BASE",          //   alongside the prompt — one-line
 //         //     "PROJECT",            //   "KEY=value, …" appended to the
 //         // },                        //   user message
+//         //                           // ⚠ DO NOT list secret-bearing vars
+//         //                           //   here (AWS_ACCESS_KEY_ID, GH_TOKEN,
+//         //                           //   anything *_TOKEN / *_KEY / *_SECRET).
+//         //                           //   The values ship verbatim to the
+//         //                           //   model — local Ollama is OK, hosted
+//         //                           //   APIs are not.
+//         // .system_context = .{      // auto-detected env (default ON)
+//         //     .enabled = true,      //   master switch
+//         //     .os = true,           //   /etc/os-release + uname → static
+//         //     .pwd = true,          //   bash's cwd via OSC 7 / subprocess
+//         //     .git = true,          //   branch from <cwd>/.git/HEAD
+//         // },                        //   (works in worktrees + submodules)
+//         //                           // Suppressed entirely when atty is in
+//         //                           // incognito mode (Ctrl+Shift+I).
 //         // .inline_chat_rows = 10,   // Alt+C panel height in rows (>=3)
 //         // .chat_persist_enabled = true,
 //         //                           // Persist chat history across atty
