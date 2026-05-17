@@ -2609,8 +2609,15 @@ pub fn configure(comptime cfg: Config) type {
             // Pad the divider with horizontal-line characters across
             // the rest of the row. cols_usize floor at 20 to avoid
             // pathological zero-width panes.
-            const label_visible: usize = if (ctx.incognito) 25 else 12; // "🕶 atty chat (incognito) ─" / "✨ atty chat ─"
-            const trail_target: usize = if (cols_usize > label_visible + 24) cols_usize - label_visible - 24 else 4;
+            // 🕶 / ✨ render double-width in Ghostty/kitty/foot/wezterm;
+            // "(incognito)" adds 12 cols, label trailer `─ ` adds 2.
+            const label_visible: usize = if (ctx.incognito) 26 else 15;
+            // " Alt+C close · Enter send" is 25 visible cols.
+            const trail_min_clearance: usize = 25;
+            const trail_target: usize = if (cols_usize > label_visible + trail_min_clearance)
+                cols_usize - label_visible - trail_min_clearance
+            else
+                4;
             var i: usize = 0;
             while (i < trail_target) : (i += 1) {
                 w.writeAll("\u{2500}") catch return false;

@@ -359,6 +359,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // the user knows when output was truncated.
     var overlay_ring_state: overlay_ring.RingBuf(overlay_ring.default_size) = .{};
     var prev_overlay_active: bool = false;
+    // Tracks the requested reservation from the previous iteration so
+    // the clamp-hint surface only fires on edges, not every tick.
+    var prev_requested_reserve: u16 = 0;
 
     var ctx = module.Context{
         .allocator = allocator,
@@ -449,18 +452,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (requested >= sb.rows) break :blk if (sb.rows > 1) sb.rows - 1 else 1;
                 break :blk requested;
             };
-            if (requested != want_reserve and want_extra > 0) {
-                // Surface a hint so the user knows the inline panel
-                // was squeezed below its configured size. Only fires
-                // when the request was actually shrunk AND a module
-                // requested extra rows (i.e. it's the module's
-                // request that triggered the clamp, not the base
-                // already exceeding the screen).
+            // Edge-detect: surface the clamp hint only when the
+            // requested reservation actually changed (not every
+            // tick). `setHint` unconditionally invalidates the
+            // statusbar's dedup tracker, so without this gate
+            // every iteration would repaint the hint row.
+            if (requested != want_reserve and want_extra > 0 and requested != prev_requested_reserve) {
                 var msg_buf: [128]u8 = undefined;
                 if (std.fmt.bufPrint(&msg_buf, "terminal too small — inline panel clamped (using {d} rows of {d} requested)", .{ want_reserve - sb.baseReserveRows(), want_extra })) |msg| {
                     sb.setHint(msg, config.statusbar.hint_ttl_ms);
                 } else |_| {}
             }
+            prev_requested_reserve = requested;
             if (want_reserve != sb.reserve_rows and !alt_screen.active) {
                 var w_re: std.Io.Writer = .fixed(&out_buf);
                 // Clear any visible ghost text BEFORE shrinking /
