@@ -39,6 +39,41 @@ pub const EnterAction = enum {
     auto,
 };
 
+/// One entry in `Config.models`. `name` is required (it's what the
+/// HTTP request body sends as `"model":"…"`); everything else is
+/// optional with `null` = "fall back to the matching `Config.*`
+/// default." This struct is intentionally extensible — adding a new
+/// optional field stays backwards-compatible with existing user
+/// configs.
+///
+/// Usage in a user config:
+/// ```
+/// const qwen_coder: atty.modules.llm.Model = .{
+///     .name = "qwen3-coder:30b",
+///     // history_turns_max omitted → ring default
+/// };
+/// const gemma: atty.modules.llm.Model = .{
+///     .name = "gemma3:4b",
+///     .history_turns_max = 3,   // small context window
+/// };
+/// // …
+/// .models = &.{ qwen_coder, gemma }
+/// ```
+pub const Model = struct {
+    /// Model identifier sent in the request body's `"model"` field.
+    /// Required; the comptime check in `configure()` errors on empty
+    /// names. Examples: `"llama3:8b"`, `"qwen3-coder:30b"`,
+    /// `"gpt-5-mini"`.
+    name: []const u8,
+    /// Trim the conversation to at most this many turns when
+    /// sending to THIS model. Useful for small-context models that
+    /// can't fit the default ring (`Config.history_turns_max`).
+    /// `null` means use the ring's full population. Hard-capped at
+    /// the ring capacity — values larger than
+    /// `Config.history_turns_max` have no effect.
+    history_turns_max: ?usize = null,
+};
+
 /// Compile-time configuration for the LLM module. Every field has a
 /// reasonable default; override only what your endpoint / model /
 /// shell needs.
@@ -64,10 +99,23 @@ pub const Config = struct {
     /// backward compat with configs that pre-date `models[]`.
     model: []const u8 = "llama3:8b",
     /// Configured model list — `Alt+M` cycles through this with
-    /// wrap-around. First entry is the default at startup.
-    /// Empty (default) → use the single `model` field above.
-    /// Example: `&.{ "qwen3-coder", "gpt-5-mini", "llama3:70b" }`.
-    models: []const []const u8 = &.{},
+    /// wrap-around. First entry is the default at startup. Empty
+    /// (default) → use the single `model` field above.
+    ///
+    /// Each entry is a `Model` struct so per-model knobs (context
+    /// window, future temperature/top_p, …) travel with the name
+    /// as one unit. Bare strings won't compile; declare each model
+    /// as `.{ .name = "..." }` at minimum.
+    ///
+    /// Example:
+    /// ```
+    /// .models = &.{
+    ///     .{ .name = "qwen3-coder:30b" },
+    ///     .{ .name = "gemma3:4b", .history_turns_max = 3 },
+    ///     .{ .name = "llama3:70b" },
+    /// },
+    /// ```
+    models: []const Model = &.{},
     /// Shell name for the user-prompt template. `null` → derive
     /// from `$SHELL` basename at attach time.
     shell: ?[]const u8 = null,
