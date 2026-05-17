@@ -147,8 +147,13 @@ fn readOsReleasePretty(allocator: std.mem.Allocator) ![]u8 {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (std.mem.startsWith(u8, trimmed, "PRETTY_NAME=")) {
             var value = trimmed["PRETTY_NAME=".len..];
-            // Strip surrounding double-quotes if present.
-            if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
+            // Strip matching surrounding quotes. Per os-release(5)
+            // both double and single quotes are spec-legal — no
+            // mainstream distro uses single quotes, but cheap to
+            // handle.
+            if (value.len >= 2 and ((value[0] == '"' and value[value.len - 1] == '"') or
+                (value[0] == '\'' and value[value.len - 1] == '\'')))
+            {
                 value = value[1 .. value.len - 1];
             }
             if (value.len == 0) return error.NotFound;
