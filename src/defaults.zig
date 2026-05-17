@@ -142,12 +142,19 @@ pub const Keymap = struct {
         .{ .bytes = "\x1b[109;3u", .action = .llm_exec_cycle_model },
         .{ .bytes = atty.keymap.key("Alt+h"), .action = .llm_exec_toggle_help },
         .{ .bytes = "\x1b[104;3u", .action = .llm_exec_toggle_help },
-        // Alt+C — re-emit the last LLM session conclusion. Phase 1
-        // of the chat-overlay rollout (the key surface is stable;
-        // phase 2 turns this into a persistent chat panel). Dual
-        // legacy + kitty kbd CSI-u form per the pattern above.
-        .{ .bytes = atty.keymap.key("Alt+c"), .action = .llm_chat_overlay_toggle },
-        .{ .bytes = "\x1b[99;3u", .action = .llm_chat_overlay_toggle },
+        // Alt+C — toggle the INLINE chat panel (reserved rows
+        // above the statusbar; shell stays visible). The default
+        // entry point for casual back-and-forth.
+        // Alt+Shift+C — toggle the FULL-SCREEN chat overlay
+        // (alt-screen, takes over the terminal). For focused
+        // review of long conversations.
+        // Dual legacy + kitty kbd CSI-u form per the pattern above;
+        // Alt+Shift+c uses the same `\x1b[99;<mod>u` encoding with
+        // modifier 4 (alt+shift).
+        .{ .bytes = atty.keymap.key("Alt+c"), .action = .llm_inline_chat_toggle },
+        .{ .bytes = "\x1b[99;3u", .action = .llm_inline_chat_toggle },
+        .{ .bytes = atty.keymap.key("Alt+C"), .action = .llm_chat_overlay_toggle },
+        .{ .bytes = "\x1b[99;4u", .action = .llm_chat_overlay_toggle },
         // Cancel works everywhere — not gated on AI mode (a
         // running exec loop can extend past the AI-mode entry
         // and the cancel is the safety lever for it).
