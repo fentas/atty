@@ -49,6 +49,16 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 pub const Config = types.Config;
 
 pub fn configure(comptime cfg: Config) type {
+    // Comptime-validate config invariants that paint code relies on.
+    // `inline_chat_rows < 3` would underflow `panel_rows - 2` in
+    // `paintInlineChat` (one row each for divider + input → at least
+    // one scrollback row needs panel_rows >= 3). Surface the bug at
+    // build time, not at first Alt+C press.
+    comptime {
+        if (cfg.inline_chat_rows < 3) {
+            @compileError("Config.inline_chat_rows must be >= 3 (divider + at least one scrollback row + input row)");
+        }
+    }
     return struct {
         pub const name = "llm";
         pub const config = cfg;
@@ -1027,6 +1037,22 @@ pub fn configure(comptime cfg: Config) type {
                     // focus moves into the panel's input row. Mutually
                     // exclusive with the full overlay — opening one
                     // closes the other so cursor focus is unambiguous.
+                    //
+                    // Refuse to open when there's no statusbar: the
+                    // panel's row reservation goes through the
+                    // statusbar's DECSTBM machinery; without it the
+                    // shell scrolls through the panel and the user's
+                    // keystrokes are swallowed with no visible
+                    // feedback. statusbar_reserve is null in that
+                    // case (proxy didn't populate it). Closing while
+                    // already open is still allowed — paint will
+                    // emit the DECRC.
+                    if (!rt.chat_inline_open and ctx.statusbar_reserve == null) {
+                        latchHint(rt, "inline chat needs the statusbar — set `config.statusbar.enabled = true`");
+                        const no_sb_msg = "atty: inline chat needs the statusbar — set `config.statusbar.enabled = true`\n";
+                        _ = std.c.write(2, no_sb_msg, no_sb_msg.len);
+                        return true;
+                    }
                     if (rt.chat_overlay_open) {
                         // Close the overlay first; its exit sequence
                         // lands via provideTermBytes on the next tick.
@@ -3272,6 +3298,14 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
         .line = &line,
         .scratch = &scratch,
         .is_tty = false,
+        // Pretend a statusbar exists — the toggle handler refuses
+        // to open inline chat when statusbar_reserve is null
+        // (round 5 fix); these tests focus on the toggle/paint path,
+        // not the no-statusbar guard.
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
     };
 
     // Closed by default — no reserve request, getter reports false.
@@ -3286,6 +3320,12 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     try testing.expect(rt.chat_inline_paint_pending);
     try testing.expect(L.isInlineChatActive(&rt));
     try testing.expect(L.extraReserveRows(&rt) >= 3);
+
+    // Simulate the proxy growing the reservation in response: the
+    // real proxy bumps `ctx.statusbar_reserve` to base + extra on
+    // the next iteration top. Without this, paintInlineChat would
+    // bail because `live_reserve == base_reserve` (no panel room).
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
 
     // Paint must render the divider chrome + input prompt glyph.
     // (Cannot pin the exact CUP rows because tty size isn't
@@ -3308,6 +3348,40 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     const closed = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(closed != null);
     try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[u") != null);
+}
+
+test "inline chat: Alt+C refuses to open when there's no statusbar" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        // No statusbar_reserve / terminal_rows = null — mimics
+        // `config.statusbar.enabled = false` (the default).
+    };
+
+    const consumed = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(consumed); // action claimed (key stays out of shell)
+    try testing.expect(!rt.chat_inline_open); // but refused to open
+    try testing.expect(rt.hint_pending); // hint surfaces explaining why
+    rt.hint_pending = false;
 }
 
 test "inline chat: pushTurn arms paint latch when inline open (response auto-repaints)" {
@@ -3407,6 +3481,10 @@ test "inline chat: Alt+C closes overlay first if it was open (mutually exclusive
         .line = &line,
         .scratch = &scratch,
         .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
     };
 
     rt.chat_overlay_open = true;
