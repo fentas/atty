@@ -534,7 +534,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
                 }
             }
-            if (!inSubprocess(&alt_screen, &osc133_tracker)) {
+            // Suppress ghost surfaces while the inline chat panel is
+            // open: the panel claims the bottom rows and parks the
+            // cursor in its input row; an unrelated ghost overlay
+            // would paint OVER the panel chrome.
+            if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes)) {
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             }
@@ -1442,7 +1446,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
-                if (!inSubprocess(&alt_screen, &osc133_tracker)) {
+                if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes)) {
                     renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                     renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
                 }

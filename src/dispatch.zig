@@ -211,6 +211,20 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return false;
         }
 
+        /// Mirror of `anyOverlayActive` for inline panels — modules
+        /// that grow the statusbar reservation report via
+        /// `isInlineChatActive`. The proxy uses this to suppress
+        /// surfaces that would otherwise paint inside the panel
+        /// (ghost text, ghost list).
+        pub fn anyInlineChatActive(rts: *Runtimes) bool {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "isInlineChatActive")) {
+                    if (M.isInlineChatActive(rts[i])) return true;
+                }
+            }
+            return false;
+        }
+
         /// Saturating sum of every module's `extraReserveRows` hook.
         /// The proxy clamps the result to `rows-1` before applying.
         pub fn extraReserveRows(rts: *Runtimes) u16 {

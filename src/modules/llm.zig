@@ -3310,6 +3310,41 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[u") != null);
 }
 
+test "inline chat: pushTurn arms paint latch when inline open (response auto-repaints)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    // Simulate "panel is open, LLM response just landed and pushed
+    // an assistant_exec turn." pushTurn must re-arm the inline paint
+    // latch so the next term-bytes tick re-renders chrome with the
+    // new turn visible — without this the panel sits stale until
+    // the next keystroke.
+    rt.chat_inline_open = true;
+    rt.chat_inline_paint_pending = false;
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, "echo hi"));
+    try testing.expect(rt.chat_inline_paint_pending);
+
+    // Same for the overlay (existing behaviour, regression guard).
+    rt.chat_inline_open = false;
+    rt.chat_overlay_open = true;
+    rt.chat_overlay_paint_pending = false;
+    try helpers.pushTurn(&rt, .observation, try testing.allocator.dupe(u8, "ok"));
+    try testing.expect(rt.chat_overlay_paint_pending);
+}
+
 test "inline chat: Alt+Shift+C closes inline panel first if it was open (mutually exclusive — reverse direction)" {
     const L = configure(.{
         .api_base = "http://test/v1",
