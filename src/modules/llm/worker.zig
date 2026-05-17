@@ -636,7 +636,7 @@ pub fn Module(comptime cfg: Config) type {
                 shared.mutex.unlock(io);
 
                 const model_for_request: []const u8 = if (idx < cfg.models.len)
-                    cfg.models[idx]
+                    cfg.models[idx].name
                 else
                     cfg.model;
 

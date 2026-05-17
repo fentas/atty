@@ -47,6 +47,7 @@ const nowMs = @import("_lib.zig").nowMs;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
 pub const Config = types.Config;
+pub const Model = types.Model;
 
 pub fn configure(comptime cfg: Config) type {
     // Comptime-validate config invariants that paint code relies on.
@@ -57,6 +58,15 @@ pub fn configure(comptime cfg: Config) type {
     comptime {
         if (cfg.inline_chat_rows < 3) {
             @compileError("Config.inline_chat_rows must be >= 3 (divider + at least one scrollback row + input row)");
+        }
+        // Every entry in `cfg.models` MUST have a non-empty `name`
+        // — an empty model name produces a malformed HTTP request
+        // (`"model":""` either errors at the endpoint or routes to
+        // an unintended default). Catch it at build time.
+        for (cfg.models, 0..) |mdl, i| {
+            if (mdl.name.len == 0) {
+                @compileError(std.fmt.comptimePrint("Config.models[{d}].name is empty — every model entry needs a non-empty name", .{i}));
+            }
         }
     }
     return struct {
@@ -945,7 +955,7 @@ pub fn configure(comptime cfg: Config) type {
                     // hint will also reflect the new model on the
                     // next tick (statusText appends the current
                     // pick when models.len > 0).
-                    const new_model = cfg.models[rt.current_model_idx];
+                    const new_model = cfg.models[rt.current_model_idx].name;
                     var msg_buf: [128]u8 = undefined;
                     const msg = std.fmt.bufPrint(&msg_buf, "model: {s}", .{new_model}) catch new_model;
                     latchHint(rt, msg);
@@ -970,7 +980,7 @@ pub fn configure(comptime cfg: Config) type {
                     // bufPrint calls into disjoint subslices.
                     var buf: [256]u8 = undefined;
                     const current: []const u8 = if (cfg.models.len > 0)
-                        cfg.models[rt.current_model_idx]
+                        cfg.models[rt.current_model_idx].name
                     else
                         cfg.model;
                     // Cycle info lives in the first 32 bytes of buf.
@@ -2001,10 +2011,26 @@ pub fn configure(comptime cfg: Config) type {
         /// exceeds `cfg.body_buf_bytes` (the conversation has
         /// outgrown the shared buffer — user needs to cancel).
         fn fireDialogRequest(rt: *Runtime, ctx: *m.Context) !void {
-            const model_for_request: []const u8 = if (rt.current_model_idx < cfg.models.len)
+            // Selected model (entry in `cfg.models`, else the
+            // single-fallback `cfg.model`). `current_model_idx >=
+            // cfg.models.len` is defensive — Alt+M wraps so it
+            // shouldn't happen, but if it does fall back to the
+            // legacy single name rather than indexing OOB.
+            const sel: ?Model = if (rt.current_model_idx < cfg.models.len)
                 cfg.models[rt.current_model_idx]
             else
-                cfg.model;
+                null;
+            const model_for_request: []const u8 = if (sel) |s| s.name else cfg.model;
+
+            // Per-model context trim. When the selected `Model` sets
+            // `history_turns_max`, send only the LAST N turns —
+            // useful for small-context models that can't fit the
+            // full ring. No-op when null or no models[] configured.
+            const turn_slice: []const dialog.Turn = blk: {
+                const cap = (sel orelse break :blk rt.turns[0..rt.turns_len]).history_turns_max orelse break :blk rt.turns[0..rt.turns_len];
+                if (rt.turns_len <= cap) break :blk rt.turns[0..rt.turns_len];
+                break :blk rt.turns[rt.turns_len - cap .. rt.turns_len];
+            };
 
             // Build the JSON body OUTSIDE the mutex (allocator work,
             // potentially expensive). In fixture mode the worker
@@ -2017,7 +2043,7 @@ pub fn configure(comptime cfg: Config) type {
                     effective_dialog_system_prompt,
                     rt.shell,
                     rt.context_blob,
-                    rt.turns[0..rt.turns_len],
+                    turn_slice,
                 );
                 if (body.len > cfg.body_buf_bytes) {
                     rt.allocator.free(body);
@@ -2314,7 +2340,7 @@ pub fn configure(comptime cfg: Config) type {
                 // the static hint is fine — no point baking the
                 // single name into the bar.
                 if (cfg.models.len > 0) {
-                    const pick = cfg.models[rt.current_model_idx];
+                    const pick = cfg.models[rt.current_model_idx].name;
                     // Same shape as ai_idle_hint but with the
                     // current model name interpolated after `Alt+M`.
                     // Fallback drops to the static hint if the
