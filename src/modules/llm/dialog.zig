@@ -528,6 +528,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
             rt.turns[rt.turns_len] = .{ .kind = kind, .content = final_content };
             rt.turns_len += 1;
+
+            // Re-arm whichever chat surface is open so the new turn
+            // renders on the next term-bytes tick. Without this an
+            // LLM response that lands while the panel is open sits
+            // stale until the next keystroke (or polling tick).
+            // Mutual exclusion means only one of these flips at a
+            // time in practice. `@hasField` makes pushTurn reusable
+            // by test fixtures with minimal Runtime shapes.
+            if (comptime @hasField(Runtime, "chat_inline_open")) {
+                if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+            }
+            if (comptime @hasField(Runtime, "chat_overlay_open")) {
+                if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+            }
         }
 
         /// Free every turn's content + reset the count. Called on

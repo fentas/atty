@@ -359,6 +359,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // the user knows when output was truncated.
     var overlay_ring_state: overlay_ring.RingBuf(overlay_ring.default_size) = .{};
     var prev_overlay_active: bool = false;
+    // Tracks the requested reservation from the previous iteration so
+    // the clamp-hint surface only fires on edges, not every tick.
+    var prev_requested_reserve: u16 = 0;
 
     var ctx = module.Context{
         .allocator = allocator,
@@ -434,6 +437,64 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         // whether to flush.
         ctx.module_overlay_active = D.anyOverlayActive(&runtimes);
 
+        // Inline-panel reservation. Modules can request extra rows
+        // above the statusbar via `extraReserveRows` (LLM inline
+        // chat). On the toggle edge: re-emit DECSTBM via
+        // `sb.applyReserveRows` (non-screen-clobbering) so the shell
+        // stops scrolling into the panel rows. The actual panel
+        // content comes through `provideTermBytes` on the same
+        // iteration.
+        if (statusbar) |*sb| {
+            const want_extra = D.extraReserveRows(&runtimes);
+            const requested: u16 = std.math.add(u16, sb.baseReserveRows(), want_extra) catch sb.rows;
+            const want_reserve: u16 = blk: {
+                // Clamp so the shell always has at least 1 row.
+                if (requested >= sb.rows) break :blk if (sb.rows > 1) sb.rows - 1 else 1;
+                break :blk requested;
+            };
+            // Edge-detect: surface the clamp hint only when the
+            // requested reservation actually changed (not every
+            // tick). `setHint` unconditionally invalidates the
+            // statusbar's dedup tracker, so without this gate
+            // every iteration would repaint the hint row.
+            if (requested != want_reserve and want_extra > 0 and requested != prev_requested_reserve) {
+                var msg_buf: [128]u8 = undefined;
+                if (std.fmt.bufPrint(&msg_buf, "terminal too small — inline panel clamped (using {d} rows of {d} requested)", .{ want_reserve - sb.baseReserveRows(), want_extra })) |msg| {
+                    sb.setHint(msg, config.statusbar.hint_ttl_ms);
+                } else |_| {}
+            }
+            prev_requested_reserve = requested;
+            if (want_reserve != sb.reserve_rows and !alt_screen.active) {
+                var w_re: std.Io.Writer = .fixed(&out_buf);
+                // Clear any visible ghost text BEFORE shrinking /
+                // growing the reservation. The shell's prompt row
+                // would otherwise still show stale ghost bytes (the
+                // suppression branch below stops new paints but
+                // can't erase what's already on the wire).
+                if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
+                sb.applyReserveRows(&w_re, want_reserve) catch {};
+                cursor_tracker.setMaxRows(sb.effectiveRows());
+                if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
+                // SIGWINCH the slave so bash's readline learns
+                // the new "visible" row count. We pass the FULL
+                // size — DECSTBM constrains scroll, the slave
+                // size stays full per the startup-init comment.
+                if (args.is_tty) if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                    _ = pty.setSize(s) catch {};
+                } else |_| {};
+            }
+            // Plumb base + live reservation + terminal geometry onto
+            // Context so paint hooks (paintInlineChat) read truth
+            // instead of guessing the user's `statusbar.reserve_rows`
+            // config and ioctl-ing for size again. Refreshed every
+            // iteration so a SIGWINCH that updated `sb.rows` propagates
+            // before the next paint.
+            ctx.statusbar_base_reserve = sb.baseReserveRows();
+            ctx.statusbar_reserve = sb.reserve_rows;
+            ctx.terminal_rows = sb.rows;
+            ctx.terminal_cols = sb.cols;
+        }
+
         // ---- timeout → tick ----------------------------------------------
         if (n == 0) {
             const now = nowMs();
@@ -494,7 +555,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
                 }
             }
-            if (!inSubprocess(&alt_screen, &osc133_tracker)) {
+            // Suppress ghost surfaces while the inline chat panel is
+            // open: the panel claims the bottom rows and parks the
+            // cursor in its input row; an unrelated ghost overlay
+            // would paint OVER the panel chrome.
+            if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes)) {
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             }
@@ -866,19 +931,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // path handles repaint/deactivate when content
                 // changes.
                 //
-                // Skip `line_state.applyInput` while an alt-screen
-                // TUI is active. The keystrokes are going to that
-                // TUI, not to the shell prompt, so feeding them
-                // into line_state's prefix model is meaningless —
-                // and the CSI-u-passthrough path for REPORT_ALL_
-                // KEYS TUIs (atuin, lazygit, …) pushes raw CSI
-                // sequences for every plain letter, which
-                // applyInput would mark as `uncertain` and leave
-                // ghost text suppressed at the next shell prompt.
-                // The alt-screen-exit path resets line_state for
-                // the same reason: anything we accumulated during
-                // the TUI run is stale.
-                if (!alt_screen.active) {
+                // Skip `line_state.applyInput` while:
+                //   • an alt-screen TUI is active — keystrokes are
+                //     going to that TUI, not to the shell prompt.
+                //   • the inline chat panel is open — keystrokes are
+                //     consumed by the panel's input buffer (onInput
+                //     returns `.swallow`); feeding them through
+                //     line_state would pollute the shell-prompt
+                //     model with chat prose, breaking atuin/history
+                //     ghost text after the user closes the panel.
+                //   • The full chat overlay's alt-screen swap also
+                //     hits the alt_screen.active branch above; no
+                //     separate gate needed.
+                // The CSI-u-passthrough path for REPORT_ALL_KEYS
+                // TUIs pushes raw CSI sequences which applyInput
+                // would mark as `uncertain` and leave ghost text
+                // suppressed at the next shell prompt — same
+                // rationale.
+                if (!alt_screen.active and !D.anyInlineChatActive(&runtimes)) {
                     _ = line_state.applyInput(input);
                 }
 
@@ -1402,7 +1472,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
-                if (!inSubprocess(&alt_screen, &osc133_tracker)) {
+                if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes)) {
                     renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                     renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
                 }
@@ -1438,6 +1508,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         // screen's physical bottom.
                         if (statusbar) |*sb| {
                             sb.onResize(s.rows, s.cols);
+                            // Re-evaluate reserve in case a same-iteration
+                            // stdin toggle (Alt+C) bumped `extraReserveRows`
+                            // AFTER the iteration-top reservation block
+                            // already ran. Without this re-check, the
+                            // SIGWINCH branch's `sb.activate` below
+                            // would set DECSTBM at the OLD reservation,
+                            // and the subsequent inline-panel paint
+                            // would see `ctx.statusbar_reserve == base`
+                            // and bail with "terminal too small".
+                            const want_extra_now = D.extraReserveRows(&runtimes);
+                            const want_reserve_now: u16 = blk: {
+                                const sum = std.math.add(u16, sb.baseReserveRows(), want_extra_now) catch sb.rows;
+                                if (sum >= sb.rows) break :blk if (sb.rows > 1) sb.rows - 1 else 1;
+                                break :blk sum;
+                            };
+                            if (want_reserve_now != sb.reserve_rows) sb.setReserveRows(want_reserve_now);
+                            ctx.statusbar_reserve = sb.reserve_rows;
+                            ctx.terminal_rows = sb.rows;
+                            ctx.terminal_cols = sb.cols;
                             cursor_tracker.setMaxRows(sb.effectiveRows());
                             // While an alt-screen TUI is running the
                             // statusbar is suspended and the app owns
@@ -1449,6 +1538,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 var w: std.Io.Writer = .fixed(&out_buf);
                                 sb.activate(&w) catch {};
                                 try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+                                // Inline panels read terminal size at
+                                // paint time; SIGWINCH has just
+                                // changed it. Without arming the
+                                // module-side repaint latch the panel
+                                // chrome stays at the old geometry
+                                // until the next keystroke / response.
+                                D.notifyResize(&runtimes);
+                                // Drain term bytes immediately so the
+                                // panel re-renders at the new geometry
+                                // BEFORE control returns to the poll —
+                                // otherwise sb.activate's per-row
+                                // erase has left the reserved zone
+                                // blank until the next tick_interval_ms
+                                // (~50 ms).
+                                if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                                    if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+                                }
                             }
                         } else {
                             cursor_tracker.setMaxRows(s.rows);

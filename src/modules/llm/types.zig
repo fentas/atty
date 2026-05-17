@@ -274,4 +274,14 @@ pub const Config = struct {
     /// Set to 0 to disable retry (revert to the pre-retry abort
     /// behaviour).
     dialog_parse_retry_max: u8 = 2,
+    /// Inline chat panel — how many rows the panel claims above
+    /// the statusbar when `Alt+C` opens it. The bottom row is the
+    /// input prompt (`> _`), the rows above it scroll back through
+    /// recent turns. Bumped to 10 by default — enough to read the
+    /// last assistant response (often 4-6 wrapped lines on a typical
+    /// 80-col terminal) plus the user turn that prompted it, leaving
+    /// room for the input row + a leading divider. Tune down for
+    /// tiny terminals or up for a wider history view. Minimum 3 —
+    /// less than that and there's no scrollback at all.
+    inline_chat_rows: u16 = 10,
 };

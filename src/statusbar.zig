@@ -45,6 +45,12 @@ pub const StatusBar = struct {
     /// How many rows are reserved at the bottom. The *last* row holds
     /// the rendered text; rows above are blank padding.
     reserve_rows: u16,
+    /// Init-time `reserve_rows` snapshot. Modules (inline chat) may
+    /// expand the live reservation via `setReserveRows` for their
+    /// own panel rows, then restore by calling `setReserveRows(base_reserve_rows)`.
+    /// Initialised in every constructor; mutating it after init
+    /// loses the "back to default" reference, so don't.
+    base_reserve_rows: u16,
     /// Style applied to the status text.
     style: Style,
 
@@ -122,8 +128,81 @@ pub const StatusBar = struct {
             .rows = rows,
             .cols = cols,
             .reserve_rows = reserve_rows,
+            .base_reserve_rows = reserve_rows,
             .style = style,
         };
+    }
+
+    /// Dynamically grow / shrink the reservation — used by modules
+    /// that want to paint a panel above the status text (inline
+    /// chat mode). The caller is responsible for triggering
+    /// `applyReserveRows` so the new reservation takes effect
+    /// (new DECSTBM + cleared rows). `base_reserve_rows` records the
+    /// original value at init time so callers can restore to
+    /// "default statusbar only" without remembering what config said.
+    pub fn setReserveRows(self: *StatusBar, n: u16) void {
+        self.reserve_rows = n;
+        self.last_valid = false;
+        self.last_hint_valid = false;
+    }
+
+    /// Apply a reservation change without clobbering the user's
+    /// visible screen. `activate()` is too aggressive for runtime
+    /// growth/shrinkage — it emits `ED 2` which clears the whole
+    /// screen including the shell history above the reservation;
+    /// what the user expects on `Alt+C → inline panel` is for the
+    /// panel to appear over the BOTTOM rows while everything above
+    /// stays visible.
+    ///
+    /// Algorithm:
+    ///   1. Save cursor.
+    ///   2. If `n < old_reserve` (shrinking), clear the rows ABOUT
+    ///      to be released back to the shell — without this, panel
+    ///      chrome lingers in the shell area until the next prompt
+    ///      redraw paints over it.
+    ///   3. Update `reserve_rows = n` + DECSTBM with the new bottom.
+    ///   4. Clear the rows inside the new reservation (so old
+    ///      content doesn't show through the panel paint).
+    ///   5. Restore cursor.
+    ///
+    /// Caller should re-emit panel content (e.g. via
+    /// `provideTermBytes`) after this, and re-propagate
+    /// `effectiveRows()` to any cursor-tracker.
+    pub fn applyReserveRows(self: *StatusBar, w: *std.Io.Writer, n: u16) std.Io.Writer.Error!void {
+        const old_reserve = self.reserve_rows;
+        if (n == old_reserve) return;
+
+        try w.writeAll("\x1B[s"); // DECSC
+
+        // Shrinking — wipe the soon-to-be-released rows so panel
+        // chrome doesn't bleed through into the shell area.
+        if (n < old_reserve and self.rows > old_reserve) {
+            const old_top: u16 = self.rows - old_reserve + 1;
+            const new_top: u16 = if (self.rows > n) self.rows - n + 1 else self.rows;
+            var r = old_top;
+            while (r < new_top) : (r += 1) {
+                try w.print("\x1B[{d};1H\x1B[K", .{r});
+            }
+        }
+
+        self.setReserveRows(n);
+        try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
+
+        // Erase the new reservation so the next paint (panel
+        // content / statusbar text) starts on a clean canvas.
+        var r2: u16 = self.effectiveRows() + 1;
+        while (r2 <= self.rows) : (r2 += 1) {
+            try w.print("\x1B[{d};1H\x1B[K", .{r2});
+        }
+
+        try w.writeAll("\x1B[u"); // DECRC
+    }
+
+    /// Read-only access to the init-time reserve_rows. Modules
+    /// use this to compute "default + N for my panel" without
+    /// needing to know the static config value themselves.
+    pub fn baseReserveRows(self: *const StatusBar) u16 {
+        return self.base_reserve_rows;
     }
 
     /// Variant that lets the caller override `error_style` while
@@ -136,6 +215,7 @@ pub const StatusBar = struct {
             .rows = rows,
             .cols = cols,
             .reserve_rows = reserve_rows,
+            .base_reserve_rows = reserve_rows,
             .style = style,
             .error_style = error_style,
         };
@@ -149,6 +229,7 @@ pub const StatusBar = struct {
             .rows = rows,
             .cols = cols,
             .reserve_rows = reserve_rows,
+            .base_reserve_rows = reserve_rows,
             .style = style,
             .error_style = error_style,
             .hint_style = hint_style,
@@ -383,19 +464,20 @@ pub const StatusBar = struct {
         // `hint_unchanged` stays false forever and every tick emits
         // a save/restore-cursor pair pointlessly).
         if (!hint_unchanged) {
-            // Derive the hint row from `effectiveRows()`, which
-            // already clamps to at least 1 when `reserve_rows >
-            // rows`. That makes the hint surface keep working in
-            // pathological geometry (e.g. rows=3 + reserve_rows=5
-            // → effectiveRows=1, hint_row=2, status at rows=3)
-            // instead of silently disappearing. Two conditions
-            // must hold for the paint:
-            //   • `reserve_rows >= 2` so the bar is asking for
-            //     more than just the status row,
-            //   • `effectiveRows + 1 < rows` so the hint row
-            //     sits ABOVE the status row, never overlapping.
-            const hint_row: u16 = self.effectiveRows() + 1;
-            if (self.reserve_rows >= 2 and hint_row < self.rows) {
+            // Anchor the hint row to `base_reserve_rows` (the
+            // init-time reservation), NOT the live `reserve_rows`
+            // — modules that grow the reservation for an inline
+            // panel (chat) take the *top* rows of the expansion and
+            // leave the hint pinned just above the status row at
+            // its original position. When `rows <= base_reserve_rows`
+            // (pathological tiny terminal) fall back to the
+            // `effectiveRows`-based formula so the hint stays
+            // visible instead of underflowing.
+            const hint_row: u16 = if (self.rows > self.base_reserve_rows)
+                self.rows - self.base_reserve_rows + 1
+            else
+                self.effectiveRows() + 1;
+            if (self.base_reserve_rows >= 2 and hint_row < self.rows) {
                 try w.print("\x1B[{d};1H\x1B[K", .{hint_row});
                 switch (hint_kind) {
                     .err => {
@@ -498,6 +580,80 @@ test "setTransient overrides text_buf for the TTL window" {
     const out = buf[0..w.end];
     try testing.expect(std.mem.indexOf(u8, out, "deleted: foo") != null);
     try testing.expect(std.mem.indexOf(u8, out, "atty") == null);
+}
+
+test "applyReserveRows: no-op when n == current reserve_rows" {
+    var b = StatusBar.init(24, 80, 3, .{});
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.applyReserveRows(&w, 3);
+    try testing.expectEqual(@as(usize, 0), w.end);
+    try testing.expectEqual(@as(u16, 3), b.reserve_rows);
+}
+
+test "applyReserveRows grows reservation without screen-clear (no ED 2)" {
+    // Growing the reservation must NOT emit `\x1B[2J` (whole-screen
+    // clear). That would wipe the user's visible shell history when
+    // they press Alt+C — the very thing inline chat is meant to
+    // preserve. Tightens the contract added in PR #64 review.
+    var b = StatusBar.init(24, 80, 3, .{});
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.applyReserveRows(&w, 13); // base=3 → live=13 (inline +10)
+    const out = buf[0..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[2J") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[1;11r") != null); // DECSTBM new top
+    try testing.expectEqual(@as(u16, 13), b.reserve_rows);
+    // base_reserve_rows must NOT change (hint stays anchored).
+    try testing.expectEqual(@as(u16, 3), b.baseReserveRows());
+}
+
+test "applyReserveRows shrinks: clears just-released rows" {
+    // Closing the inline panel: rows that used to belong to the
+    // (larger) reservation must be wiped so the panel chrome doesn't
+    // linger in the now-shell area until the next prompt redraw.
+    var b = StatusBar.init(24, 80, 13, .{}); // grown state
+    b.base_reserve_rows = 3; // mimic post-init "base recorded" state
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.applyReserveRows(&w, 3);
+    const out = buf[0..w.end];
+
+    // The just-released rows (12..21, i.e. rows-12 through rows-3 with
+    // rows=24) should each be CUP+EL erased. Spot-check row 12 (old
+    // top of reservation) and row 21 (one above new top).
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[12;1H\x1B[K") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[21;1H\x1B[K") != null);
+    try testing.expectEqual(@as(u16, 3), b.reserve_rows);
+}
+
+test "hint row anchors to base_reserve_rows after setReserveRows growth" {
+    // With base=3 and an inline panel adding 10, the live reservation
+    // is 13 — but the hint must STAY at `rows - base + 1` = 22, not
+    // slide up to `rows - 13 + 1` = 12. That's how the inline panel
+    // claims the top rows of the expansion without overlapping the
+    // hint surface.
+    var b = StatusBar.initFull(
+        24,
+        80,
+        3,
+        .{ .dim = true },
+        .{ .dim = true, .fg = 1 },
+        .{ .italic = true },
+    );
+    b.setText("atty");
+    b.setHint("explanation", 5_000);
+    b.setReserveRows(13); // simulate inline panel grown
+
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.render(&w);
+    const out = buf[0..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1H") != null); // hint still at row 22
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[12;1H") == null); // not row 12
+    try testing.expect(std.mem.indexOf(u8, out, "explanation") != null);
 }
 
 test "setHint paints into the hint row with hint_style (dim by default)" {

@@ -211,6 +211,53 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return false;
         }
 
+        /// Mirror of `anyOverlayActive` for inline panels — modules
+        /// that grow the statusbar reservation report via
+        /// `isInlineChatActive`. The proxy uses this to suppress
+        /// surfaces that would otherwise paint inside the panel
+        /// (ghost text, ghost list).
+        pub fn anyInlineChatActive(rts: *Runtimes) bool {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "isInlineChatActive")) {
+                    if (M.isInlineChatActive(rts[i])) return true;
+                }
+            }
+            return false;
+        }
+
+        /// Saturating sum of every module's `extraReserveRows` hook.
+        /// The proxy clamps the result to `rows-1` before applying.
+        pub fn extraReserveRows(rts: *Runtimes) u16 {
+            var total: u16 = 0;
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "extraReserveRows")) {
+                    total = std.math.add(u16, total, M.extraReserveRows(rts[i])) catch std.math.maxInt(u16);
+                }
+            }
+            return total;
+        }
+
+        /// Notify size-aware modules that the terminal just resized
+        /// (after SIGWINCH + statusbar re-activate). Modules with an
+        /// `onResize` hook re-arm their paint latch so the next
+        /// term-bytes tick repaints at the new geometry.
+        ///
+        /// **Signature contract**: modules must declare
+        /// `pub fn onResize(rt: *Runtime) void` — single-argument.
+        /// Don't confuse with `StatusBar.onResize(rows, cols)` in
+        /// `src/statusbar.zig` which is statusbar-internal and takes
+        /// the new dimensions; the dispatcher pulls fresh dimensions
+        /// off `Context` instead, so module hooks need none. A
+        /// future module-side declaration with extra args would
+        /// silently bind only `rt` here.
+        pub fn notifyResize(rts: *Runtimes) void {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "onResize")) {
+                    M.onResize(rts[i]);
+                }
+            }
+        }
+
         /// Sibling of `gatherHintText` for error notifications.
         /// Same one-shot, first-non-null semantics, but the proxy
         /// pushes the result into the statusbar's *error* slot which
@@ -1103,4 +1150,59 @@ test "dispatchOutput fans out to every module with onOutput" {
     try D.dispatchOutput(&rts, &ctx, "second");
 
     try testing.expectEqualStrings("first second", rts[0].seen.items);
+}
+
+const ReserveRowsClaimer = struct {
+    pub const name = "reserve-claimer";
+    pub const Runtime = struct {
+        rows_wanted: u16 = 0,
+        resize_count: usize = 0,
+    };
+
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn extraReserveRows(rt: *Runtime) u16 {
+        return rt.rows_wanted;
+    }
+    pub fn onResize(rt: *Runtime) void {
+        rt.resize_count += 1;
+    }
+};
+
+const NoReserveModule = struct {
+    pub const name = "no-reserve";
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    // Deliberately no extraReserveRows / onResize — exercises the
+    // comptime @hasDecl gate.
+};
+
+test "extraReserveRows: sums declaring modules, skips non-declaring ones, saturates" {
+    const D = Dispatcher(&.{ ReserveRowsClaimer, NoReserveModule });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    try testing.expectEqual(@as(u16, 0), D.extraReserveRows(&rts));
+
+    rts[0].rows_wanted = 7;
+    try testing.expectEqual(@as(u16, 7), D.extraReserveRows(&rts));
+
+    // Saturating-add: u16.max + 1 would wrap but must clamp instead.
+    rts[0].rows_wanted = std.math.maxInt(u16);
+    try testing.expectEqual(@as(u16, std.math.maxInt(u16)), D.extraReserveRows(&rts));
+}
+
+test "notifyResize: fires onResize on declaring modules only" {
+    const D = Dispatcher(&.{ ReserveRowsClaimer, NoReserveModule });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    D.notifyResize(&rts);
+    D.notifyResize(&rts);
+    try testing.expectEqual(@as(usize, 2), rts[0].resize_count);
 }

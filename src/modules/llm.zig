@@ -49,6 +49,16 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 pub const Config = types.Config;
 
 pub fn configure(comptime cfg: Config) type {
+    // Comptime-validate config invariants that paint code relies on.
+    // `inline_chat_rows < 3` would underflow `panel_rows - 2` in
+    // `paintInlineChat` (one row each for divider + input → at least
+    // one scrollback row needs panel_rows >= 3). Surface the bug at
+    // build time, not at first Alt+C press.
+    comptime {
+        if (cfg.inline_chat_rows < 3) {
+            @compileError("Config.inline_chat_rows must be >= 3 (divider + at least one scrollback row + input row)");
+        }
+    }
     return struct {
         pub const name = "llm";
         pub const config = cfg;
@@ -96,7 +106,8 @@ pub fn configure(comptime cfg: Config) type {
             \\{"action":"exec","command":"<single-line shell command>","description":"<one short sentence>"}
             \\{"action":"done","reason":"<one short sentence>"}
             \\{"action":"question","question":"<short question>","options":["<opt1>","<opt2>"]}
-            \\Optional advisory flag for any of the above shapes: add `"open_chat": true` when the user would benefit from following up in atty's chat overlay — e.g. you finished but the reason is a long explanation the user might want to react to, or the question expects a free-form clarification rather than a one-token answer. Use sparingly; the flag is a request, not a guarantee (user policy may auto-open, notify, or ignore it).
+            \\Optional advisory flag for any of the above shapes: add `"open_chat": true` when the user would benefit from following up in atty's chat surface — e.g. you finished but the reason is a long explanation the user might want to react to, or the question expects a free-form clarification rather than a one-token answer. Use sparingly; the flag is a request, not a guarantee (user policy may auto-open, notify, or ignore it).
+            \\The user can be talking to you from one of two chat surfaces (Alt+C inline panel above the statusbar, or Alt+Shift+C full overlay) — both route through the same dialog state and the same `action=exec` injection path, so a command you return WILL land at the user's shell prompt regardless of which surface they used. Treat chat input as conversational follow-up to the running dialog.
             \\Never wrap the JSON in markdown fences. Never add prose around it. The command must be a single line, runnable as-is in the user's shell.
         ;
 
@@ -356,7 +367,7 @@ pub fn configure(comptime cfg: Config) type {
             /// `action=done`. Formatted as a multi-line block
             /// suitable for inline emission via the term-bytes
             /// hook (`provideTermBytes`). Persists across the
-            /// dialog reset so `Alt+C` can re-emit it. Cleared
+            /// dialog reset so `Alt+Shift+C` can re-emit it. Cleared
             /// only on `detach` and on a fresh `action=done`
             /// (which overwrites). Empty `conclusion_len == 0`
             /// means no completed dialog yet this session.
@@ -365,24 +376,18 @@ pub fn configure(comptime cfg: Config) type {
             /// Latched flag — set by `handleDialogResponse` on
             /// `action=done` so the next `provideTermBytes` tick
             /// emits the conclusion banner (auto-show behaviour).
-            /// Cleared after emission. The `Alt+C` action
+            /// Cleared after emission. The `Alt+Shift+C` action
             /// re-arms this flag for an explicit re-emit.
             conclusion_pending: bool = false,
 
-            // ── Chat overlay (phase 2a) ──────────────────────────
+            // ── Chat overlay (phase 2a — Alt+Shift+C) ───────────
             //
             // Persistent alt-screen overlay showing the LLM
-            // conversation history. Alt+C toggles open/close; while
+            // conversation history. Alt+Shift+C toggles open/close
+            // (Alt+C is the inline panel — see fields below). While
             // open, `onInput` swallows every keystroke so they don't
-            // reach the shell (basic gate — full input handling
-            // arrives in phase 2b). The OSC 1049 enter/exit pair is
+            // reach the shell. The OSC 1049 enter/exit pair is
             // emitted via `provideTermBytes`.
-            //
-            // Phase 2a scope: render-only — no chat input, no
-            // round-trip, no auto-open. The user manually toggles
-            // with Alt+C and sees the existing `turns[]` ring +
-            // captured conclusion. Closes restore the underlying
-            // shell screen unchanged.
             chat_overlay_open: bool = false,
             /// Set whenever the overlay needs to paint (just
             /// opened, or just closed → need to emit the exit
@@ -406,6 +411,41 @@ pub fn configure(comptime cfg: Config) type {
             /// last char just gets dropped; no error).
             chat_input_buf: [1024]u8 = undefined,
             chat_input_len: usize = 0,
+
+            // ── Inline chat panel (Alt+C) ────────────────────────
+            //
+            // Alt+C — opens a slim chat panel ABOVE the statusbar
+            // in the user's main screen (no alt-screen swap). The
+            // shell stays visible above; the panel reserves N rows
+            // at the bottom for a few lines of recent conversation
+            // + a chat input row. Cursor focus moves to the input
+            // row while open; statusbar.setReserveRows grows the
+            // reservation, statusbar.applyReserveRows updates DECSTBM, and
+            // the inline panel paints into the rows above the hint.
+            // Closing restores the base reservation and returns the
+            // cursor to the shell at the saved position.
+            //
+            // The full overlay (Alt+Shift+C) is still available and
+            // mutually-exclusive — opening one closes the other.
+            chat_inline_open: bool = false,
+            /// Flag the proxy reads via `extraReserveRows` — the
+            /// proxy compares it to the live reserve baseline and
+            /// emits `setReserveRows + activate` on the open/close
+            /// transition so DECSTBM is updated before the first
+            /// inline-panel paint.
+            chat_inline_paint_pending: bool = false,
+            /// Sized like the overlay's `chat_overlay_buf`. The
+            /// inline panel is smaller (~8 rows × 200 cols) so 4 KB
+            /// is plenty; matching the overlay's buffer keeps the
+            /// rendering helpers fungible.
+            chat_inline_buf: [4096]u8 = undefined,
+            chat_inline_buf_len: usize = 0,
+            /// Input buffer for inline chat — separate from
+            /// `chat_input_buf` so the user can have an in-flight
+            /// edit in the overlay AND in the inline panel without
+            /// the two clobbering each other on toggle.
+            chat_inline_input_buf: [1024]u8 = undefined,
+            chat_inline_input_len: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -507,11 +547,74 @@ pub fn configure(comptime cfg: Config) type {
             // and fires a dialog request. Backspace pops the
             // last byte. Other control bytes are dropped (no
             // Ctrl+A / Ctrl+E / arrow-key editing in 2b; that
-            // is left for phase 2c).
+            // is a future follow-up — see PR series #195).
             //
             // Keymap actions (Alt+C close, Esc, Ctrl+Shift+X)
             // dispatch in the proxy BEFORE this hook fires, so
             // the user can still close the overlay even mid-typing.
+            // Inline chat panel — same input model as the overlay,
+            // but writes into `chat_inline_input_buf` and flips the
+            // inline paint latch. Mutually exclusive with the
+            // overlay; the action handler guarantees only one can
+            // be open at a time.
+            if (rt.chat_inline_open) {
+                for (input) |byte| switch (byte) {
+                    0x0D, 0x0A => {
+                        var trimmed_len = rt.chat_inline_input_len;
+                        while (trimmed_len > 0 and (rt.chat_inline_input_buf[trimmed_len - 1] == ' ' or rt.chat_inline_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
+                        if (trimmed_len == 0) {
+                            rt.chat_inline_input_len = 0;
+                            rt.chat_inline_paint_pending = true;
+                            continue;
+                        }
+                        rt.chat_inline_input_len = trimmed_len;
+
+                        const can_fire = !rt.in_flight and
+                            (rt.dialog_state == .idle or
+                                rt.dialog_state == .awaiting_question_answer);
+                        if (!can_fire) {
+                            latchHint(rt, "request in flight — wait for the response, or Ctrl+Shift+X to cancel");
+                            rt.chat_inline_paint_pending = true;
+                            continue;
+                        }
+
+                        const copy = rt.allocator.dupe(u8, rt.chat_inline_input_buf[0..rt.chat_inline_input_len]) catch {
+                            latchErr(rt, "out of memory submitting chat turn");
+                            rt.chat_inline_input_len = 0;
+                            rt.chat_inline_paint_pending = true;
+                            continue;
+                        };
+                        pushTurn(rt, .user, copy) catch {
+                            rt.allocator.free(copy);
+                            latchErr(rt, "out of memory submitting chat turn");
+                            rt.chat_inline_input_len = 0;
+                            rt.chat_inline_paint_pending = true;
+                            continue;
+                        };
+                        rt.chat_inline_input_len = 0;
+                        fireDialogRequest(rt, ctx) catch {
+                            latchErr(rt, "couldn't send chat turn — see status");
+                        };
+                        rt.chat_inline_paint_pending = true;
+                    },
+                    0x08, 0x7F => {
+                        if (rt.chat_inline_input_len > 0) {
+                            rt.chat_inline_input_len -= 1;
+                            rt.chat_inline_paint_pending = true;
+                        }
+                    },
+                    0x20...0x7E => {
+                        if (rt.chat_inline_input_len < rt.chat_inline_input_buf.len) {
+                            rt.chat_inline_input_buf[rt.chat_inline_input_len] = byte;
+                            rt.chat_inline_input_len += 1;
+                            rt.chat_inline_paint_pending = true;
+                        }
+                    },
+                    else => {},
+                };
+                return .swallow;
+            }
+
             if (rt.chat_overlay_open) {
                 for (input) |byte| switch (byte) {
                     0x0D, 0x0A => {
@@ -894,8 +997,7 @@ pub fn configure(comptime cfg: Config) type {
                     // overlay rendering the conversation history.
                     // Open shows turns + conclusion in a chrome-free
                     // text view; close exits the alt screen and
-                    // restores the underlying shell. No chat input
-                    // yet — that arrives in phase 2b.
+                    // restores the underlying shell.
                     if (!rt.chat_overlay_open) {
                         const has_content = rt.turns_len > 0 or rt.conclusion_len > 0;
                         if (!has_content) {
@@ -905,6 +1007,14 @@ pub fn configure(comptime cfg: Config) type {
                             // tells them how to populate it.
                             latchHint(rt, "no LLM session to recall — run a dialog (Alt+S) first");
                             return true;
+                        }
+                        // Mutual exclusion — if the inline panel is
+                        // open, close it first so cursor focus is
+                        // unambiguous and `extraReserveRows` returns
+                        // to zero. Mirror of the inline-toggle arm.
+                        if (rt.chat_inline_open) {
+                            rt.chat_inline_open = false;
+                            rt.chat_inline_paint_pending = true;
                         }
                         rt.chat_overlay_open = true;
                         // Disarm the conclusion auto-emit latch —
@@ -922,21 +1032,42 @@ pub fn configure(comptime cfg: Config) type {
                     return true;
                 },
                 .llm_inline_chat_toggle => {
-                    // Inline chat mode — reserves rows above the
-                    // statusbar for a slim chat panel; shell stays
-                    // visible. Implemented in the next PR. For now
-                    // the action is bound + claimed (so the
-                    // keystroke doesn't reach the shell as
-                    // mojibake), and the user sees a hint.
+                    // Inline chat panel — slim chat surface above the
+                    // statusbar. Shell stays visible above; cursor
+                    // focus moves into the panel's input row. Mutually
+                    // exclusive with the full overlay — opening one
+                    // closes the other so cursor focus is unambiguous.
                     //
-                    // Stderr fallback because the statusbar hint
-                    // surface is gated on `config.statusbar.enabled`
-                    // (defaults off in config.def.zig) — without
-                    // this stderr line, pressing Alt+C with no
-                    // statusbar would silently swallow the key.
-                    latchHint(rt, "inline chat coming in next PR — use Alt+Shift+C for the full overlay");
-                    const stub_msg = "atty: inline chat (Alt+C) coming in next PR — use Alt+Shift+C for the full overlay now\n";
-                    _ = std.c.write(2, stub_msg, stub_msg.len);
+                    // Refuse to open when there's no statusbar: the
+                    // panel's row reservation goes through the
+                    // statusbar's DECSTBM machinery; without it the
+                    // shell scrolls through the panel and the user's
+                    // keystrokes are swallowed with no visible
+                    // feedback. statusbar_reserve is null in that
+                    // case (proxy didn't populate it). Closing while
+                    // already open is still allowed — paint will
+                    // emit the DECRC.
+                    if (!rt.chat_inline_open and ctx.statusbar_reserve == null) {
+                        latchHint(rt, "inline chat needs the statusbar — set `config.statusbar.enabled = true`");
+                        const no_sb_msg = "atty: inline chat needs the statusbar — set `config.statusbar.enabled = true`\n";
+                        _ = std.c.write(2, no_sb_msg, no_sb_msg.len);
+                        return true;
+                    }
+                    if (rt.chat_overlay_open) {
+                        // Close the overlay first; its exit sequence
+                        // lands via provideTermBytes on the next tick.
+                        rt.chat_overlay_open = false;
+                        rt.chat_overlay_paint_pending = true;
+                    }
+                    rt.chat_inline_open = !rt.chat_inline_open;
+                    rt.chat_inline_paint_pending = true;
+                    if (rt.chat_inline_open) {
+                        // Disarm the conclusion auto-emit latch so the
+                        // banner doesn't fire while inline chat is
+                        // active — the user is already chatting, the
+                        // separate banner would clutter the panel.
+                        rt.conclusion_pending = false;
+                    }
                     return true;
                 },
                 .llm_exec_cancel => {
@@ -2101,14 +2232,49 @@ pub fn configure(comptime cfg: Config) type {
             Wrap.key("Esc") ++ " / " ++ Wrap.key("Ctrl+Shift+X") ++ " to exit";
         const thinking_hint = Wrap.icon("\u{1F9E0}") ++ " thinking\u{2026}";
 
-        /// Reports whether the chat overlay (Alt+C) currently owns
-        /// atty's alt-screen on the user's outer terminal. The
-        /// proxy queries this each master-read tick to decide
-        /// whether to write shell output to stdout (overlay closed)
-        /// or buffer it in the ring buffer for replay on close
-        /// (overlay open).
+        /// Reports whether the full chat overlay (Alt+Shift+C)
+        /// currently owns atty's alt-screen on the user's outer
+        /// terminal. The proxy queries this each master-read tick
+        /// to decide whether to write shell output to stdout
+        /// (overlay closed) or buffer it in the ring buffer for
+        /// replay on close (overlay open). Distinct from
+        /// `isInlineChatActive` (Alt+C) which doesn't claim the
+        /// whole screen.
         pub fn isOverlayActive(rt: *Runtime) bool {
             return rt.chat_overlay_open;
+        }
+
+        /// Reports whether the inline chat panel (Alt+C) is currently
+        /// claiming rows above the statusbar. Distinct from
+        /// `isOverlayActive` because inline mode does NOT take over
+        /// the screen — shell output keeps flowing in the rows above
+        /// the panel, so the proxy must NOT divert master output into
+        /// the overlay ring buffer. Used by the proxy to drive
+        /// `sb.applyReserveRows` on toggle edges.
+        pub fn isInlineChatActive(rt: *Runtime) bool {
+            return rt.chat_inline_open;
+        }
+
+        /// Rows the inline chat panel wants reserved *above* the
+        /// statusbar's base reservation. Returns 0 when the panel is
+        /// closed; otherwise `cfg.inline_chat_rows` so the proxy can
+        /// add it to `sb.baseReserveRows()` and re-apply DECSTBM. The
+        /// proxy clamps if the request would leave the shell with
+        /// fewer than 1 visible row.
+        pub fn extraReserveRows(rt: *Runtime) u16 {
+            if (!rt.chat_inline_open) return 0;
+            return cfg.inline_chat_rows;
+        }
+
+        /// SIGWINCH hook — dispatcher calls this after the statusbar
+        /// has been re-activated at the new geometry. We arm the
+        /// inline-panel paint latch (if the panel is open) so the
+        /// next term-bytes tick re-renders chrome + input at the
+        /// updated row/column positions. Cheap no-op when closed.
+        pub fn onResize(rt: *Runtime) void {
+            if (rt.chat_inline_open) {
+                rt.chat_inline_paint_pending = true;
+            }
         }
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -2271,10 +2437,10 @@ pub fn configure(comptime cfg: Config) type {
                 pty_mod.WinSize{ .rows = 24, .cols = 80, .xpixel = 0, .ypixel = 0 };
             const rows: u16 = if (size.rows > 4) size.rows else 4;
             const content_bottom: u16 = rows - 2;
-            // `size.cols` available but unused — phase 2c will use
-            // it for per-row wrap calculations once we model turn
-            // rendering at the codepoint level instead of relying
-            // on the terminal's auto-wrap inside the scroll region.
+            // `size.cols` available but unused — wrap calculations
+            // are a future follow-up (codepoint-level turn rendering
+            // instead of relying on the terminal's auto-wrap inside
+            // the scroll region).
 
             // Open: enter alt screen, hide the real terminal cursor
             // (the input row paints its own reverse-video block
@@ -2354,7 +2520,197 @@ pub fn configure(comptime cfg: Config) type {
             return true;
         }
 
+        /// Paint the inline chat panel into the rows the statusbar
+        /// has just reserved above the hint row. The proxy is
+        /// responsible for emitting `setReserveRows + activate`
+        /// before this paint runs — `activate` blanks the reserved
+        /// zone and re-anchors DECSTBM so the shell stops scrolling
+        /// into the panel.
+        ///
+        /// Layout, top→bottom (panel rows = `cfg.inline_chat_rows`,
+        /// e.g. 10):
+        ///
+        ///   • divider row — dim icon + "atty chat" label + Alt+C hint
+        ///   • scrollback rows — recent turns (assistant + user),
+        ///     wrap auto-handled by terminal inside the bounds set
+        ///     by per-row CUP + EL
+        ///   • input row — `❯ <typed text>█` with reverse-video block cursor
+        ///
+        /// Close: emits an empty paint plus a DECSC/DECRC pair so
+        /// the cursor returns to the shell's previous position
+        /// after the proxy's `setReserveRows(base) + activate` has
+        /// shrunk the reservation back. (The proxy clears the freed
+        /// rows itself via `activate`; the paint doesn't need to.)
+        fn paintInlineChat(rt: *Runtime, ctx: *m.Context) bool {
+            var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
+            if (!rt.chat_inline_open) {
+                // Close: DECRC the cursor we saved on open. The
+                // proxy already redrew the reserved zone via
+                // `applyReserveRows(base)` so nothing else needs
+                // writing here.
+                w.writeAll("\x1B[u") catch return false;
+                rt.chat_inline_buf_len = w.end;
+                return true;
+            }
+
+            // Read terminal + statusbar geometry from Context — the
+            // proxy refreshes these every iteration so a SIGWINCH
+            // and any inline-reservation clamp are already reflected.
+            // Fall back to a defensive query / 24×80 default for
+            // non-TTY callers (unit tests).
+            const total_rows: u16 = ctx.terminal_rows orelse blk: {
+                const s = Pty.querySize(std.posix.STDOUT_FILENO) catch
+                    pty_mod.WinSize{ .rows = 24, .cols = 80, .xpixel = 0, .ypixel = 0 };
+                break :blk if (s.rows > 4) s.rows else 4;
+            };
+            const total_cols: u16 = ctx.terminal_cols orelse 80;
+            const base_reserve: u16 = ctx.statusbar_base_reserve orelse 3;
+            // `statusbar_reserve` carries the proxy's clamp when
+            // the terminal is too small for base + inline_chat_rows;
+            // panel_rows = live - base derives the true (possibly
+            // clamped) panel height.
+            const live_reserve: u16 = ctx.statusbar_reserve orelse
+                (base_reserve + cfg.inline_chat_rows);
+            if (live_reserve <= base_reserve or total_rows <= live_reserve) {
+                // Terminal too small to fit any panel rows on top of
+                // the base reservation, or the proxy clamped us into
+                // a no-op. Roll the open flag back so the user isn't
+                // trapped — proxy will shrink the reservation next
+                // tick.
+                w.writeAll("\x1B[u") catch return false;
+                rt.chat_inline_buf_len = w.end;
+                return false;
+            }
+            const panel_rows: u16 = live_reserve - base_reserve;
+            const top_row: u16 = total_rows - live_reserve + 1;
+            const input_row: u16 = top_row + panel_rows - 1;
+
+            // Save cursor (proxy's `activate` has just moved it
+            // home but the user's underlying shell will repaint on
+            // the next master byte; we need to restore something
+            // sensible on close).
+            w.writeAll("\x1B[s") catch return false;
+
+            // Top divider row — dim chrome + mauve icon + cyan
+            // shortcut, matching the overlay's visual vocabulary.
+            // In incognito mode, swap the ✨ sparkle for a 🕶 glasses
+            // glyph (`\u{1F576}`) so the user sees at a glance that
+            // their typing won't be recorded locally. NOTE: incognito
+            // gates LOCAL recording (atuin / shell history); chat
+            // prompts STILL go to the remote LLM API. The visual cue
+            // is "won't be saved here," not "won't leave this box."
+            const cols_usize: usize = total_cols;
+            w.print("\x1B[{d};1H\x1B[2K", .{top_row}) catch return false;
+            const title: []const u8 = if (ctx.incognito)
+                "\x1B[2m\x1B[22;38;5;141m\u{1F576}\x1B[39;2m atty chat (incognito) \u{2500}"
+            else
+                "\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}";
+            w.writeAll(title) catch return false;
+            // Pad the divider with horizontal-line characters across
+            // the rest of the row. cols_usize floor at 20 to avoid
+            // pathological zero-width panes.
+            // 🕶 / ✨ render double-width in Ghostty/kitty/foot/wezterm;
+            // "(incognito)" adds 12 cols, label trailer `─ ` adds 2.
+            const label_visible: usize = if (ctx.incognito) 26 else 15;
+            // " Alt+C close · Enter send" is 25 visible cols.
+            const trail_min_clearance: usize = 25;
+            const trail_target: usize = if (cols_usize > label_visible + trail_min_clearance)
+                cols_usize - label_visible - trail_min_clearance
+            else
+                4;
+            var i: usize = 0;
+            while (i < trail_target) : (i += 1) {
+                w.writeAll("\u{2500}") catch return false;
+            }
+            w.writeAll(" \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m") catch return false;
+
+            // Scrollback rows — fill from oldest visible turn to
+            // most recent, each on its own row, truncated to fit
+            // the available cols. Walk turns oldest→newest into a
+            // row budget so the MOST RECENT lines anchor at the
+            // bottom (above input) and older turns scroll off the
+            // top.
+            const scrollback_rows: u16 = panel_rows - 2; // reserve top divider + input row
+            var row: u16 = top_row + 1;
+            // Blank-clear every scrollback row up front so prior
+            // chat content doesn't leak when the turns shrink.
+            var r: u16 = row;
+            while (r < input_row) : (r += 1) {
+                w.print("\x1B[{d};1H\x1B[2K", .{r}) catch return false;
+            }
+
+            // Build a list of rendered "lines" (one line per turn
+            // for now — wrapping is a future follow-up). Render the
+            // last N where N = scrollback_rows.
+            const start_turn: usize = if (rt.turns_len > scrollback_rows) rt.turns_len - scrollback_rows else 0;
+            row = top_row + 1;
+            const max_inline_visible: usize = if (cols_usize > 12) cols_usize - 6 else 40;
+            for (rt.turns[start_turn..rt.turns_len]) |turn| {
+                if (row >= input_row) break;
+                w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
+                const prefix: []const u8 = switch (turn.kind) {
+                    .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
+                    .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
+                    .observation => "\x1B[2mOutput:\x1B[0m ",
+                };
+                w.writeAll(prefix) catch return false;
+                const slice = if (turn.content.len > max_inline_visible)
+                    turn.content[0..max_inline_visible]
+                else
+                    turn.content;
+                writeSanitized(&w, slice) catch return false;
+                if (turn.content.len > max_inline_visible) {
+                    w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m") catch return false;
+                }
+                row += 1;
+            }
+            if (rt.turns_len == 0) {
+                w.print("\x1B[{d};1H\x1B[2K", .{top_row + 1}) catch return false;
+                w.writeAll("  \x1B[2m(empty \u{2014} type a prompt below \u{00B7} Enter to ask)\x1B[0m") catch return false;
+            }
+
+            // Input row — `❯ <input>█` with reverse-video block
+            // cursor. Always painted last so the actual terminal
+            // cursor (positioned by the final CUP at the end of
+            // this paint) sits adjacent to it.
+            w.print("\x1B[{d};1H\x1B[2K", .{input_row}) catch return false;
+            w.writeAll("\x1B[22;1;38;5;14m\u{276F}\x1B[0m ") catch return false;
+            if (rt.chat_inline_input_len > 0) {
+                const visible = if (rt.chat_inline_input_len > 512)
+                    rt.chat_inline_input_buf[rt.chat_inline_input_len - 512 .. rt.chat_inline_input_len]
+                else
+                    rt.chat_inline_input_buf[0..rt.chat_inline_input_len];
+                writeSanitized(&w, visible) catch return false;
+            }
+            w.writeAll("\x1B[7m \x1B[0m") catch return false;
+
+            rt.chat_inline_buf_len = w.end;
+            return true;
+        }
+
         pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            // Inline chat panel — takes precedence over the
+            // alt-screen overlay because they're mutually exclusive
+            // (the action handler enforces this) and the inline
+            // panel is what the user is interacting with when its
+            // paint latch is set.
+            if (rt.chat_inline_paint_pending) {
+                rt.chat_inline_paint_pending = false;
+                if (paintInlineChat(rt, ctx)) {
+                    return rt.chat_inline_buf[0..rt.chat_inline_buf_len];
+                }
+                // Paint failed (terminal too small or buffer
+                // overflow). Roll the open flag back so the input
+                // swallow releases and the proxy shrinks the
+                // reservation on the next tick. Surface a hint so
+                // the failure isn't silent.
+                if (rt.chat_inline_open) {
+                    rt.chat_inline_open = false;
+                    latchErr(rt, "inline chat: terminal too small or paint buffer overflow");
+                    const inline_overflow_msg = "atty: inline chat: terminal too small or paint buffer overflow\n";
+                    _ = std.c.write(2, inline_overflow_msg, inline_overflow_msg.len);
+                }
+            }
             // Chat overlay paint (phase 2a) takes precedence over
             // the conclusion + cursor-colour paths. The overlay's
             // alt-screen lives at the outer terminal, while
@@ -2771,7 +3127,7 @@ test "resolveApiBase priority — env wins when cfg.api_base is empty" {
     try testing.expectEqualStrings("http://from-env:1234/v1", rt.api_base);
 }
 
-test "chat overlay (Alt+C): refuses to open when no conversation exists" {
+test "chat overlay (Alt+Shift+C): refuses to open when no conversation exists" {
     const L = configure(.{
         .api_base = "http://test/v1",
         .api_base_env = "ATTY_TEST_NEVER",
@@ -2796,8 +3152,8 @@ test "chat overlay (Alt+C): refuses to open when no conversation exists" {
         .is_tty = false,
     };
 
-    // Fresh runtime — no turns, no conclusion. Alt+C should hint-
-    // and-no-op rather than open an empty overlay.
+    // Fresh runtime — no turns, no conclusion. Alt+Shift+C should
+    // hint-and-no-op rather than open an empty overlay.
     const consumed = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
     try testing.expect(consumed);
     try testing.expect(!rt.chat_overlay_open);
@@ -2805,7 +3161,7 @@ test "chat overlay (Alt+C): refuses to open when no conversation exists" {
     rt.hint_pending = false; // drain the latch so the next test starts clean
 }
 
-test "chat overlay (Alt+C): toggle emits alt-screen enter then exit" {
+test "chat overlay (Alt+Shift+C): toggle emits alt-screen enter then exit" {
     const L = configure(.{
         .api_base = "http://test/v1",
         .api_base_env = "ATTY_TEST_NEVER",
@@ -2934,6 +3290,267 @@ test "chat overlay: onInput swallows all keystrokes while open" {
     try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\r"));
     try testing.expectEqual(@as(usize, 0), rt.chat_input_len);
     try testing.expectEqual(@as(usize, 1), rt.turns_len);
+}
+
+test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        // Pretend a statusbar exists — the toggle handler refuses
+        // to open inline chat when statusbar_reserve is null
+        // (round 5 fix); these tests focus on the toggle/paint path,
+        // not the no-statusbar guard.
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    // Closed by default — no reserve request, getter reports false.
+    try testing.expectEqual(@as(u16, 0), L.extraReserveRows(&rt));
+    try testing.expect(!L.isInlineChatActive(&rt));
+
+    // Toggle open — reserve grows by `cfg.inline_chat_rows`, the
+    // inline-active getter flips, and the paint latch is armed.
+    const consumed = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(consumed);
+    try testing.expect(rt.chat_inline_open);
+    try testing.expect(rt.chat_inline_paint_pending);
+    try testing.expect(L.isInlineChatActive(&rt));
+    try testing.expect(L.extraReserveRows(&rt) >= 3);
+
+    // Simulate the proxy growing the reservation in response: the
+    // real proxy bumps `ctx.statusbar_reserve` to base + extra on
+    // the next iteration top. Without this, paintInlineChat would
+    // bail because `live_reserve == base_reserve` (no panel room).
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // Paint must render the divider chrome + input prompt glyph.
+    // (Cannot pin the exact CUP rows because tty size isn't
+    // queryable in the test environment — paintInlineChat falls
+    // back to 24×80 so the input row lands somewhere in 1..24.)
+    const opened = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(opened != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "atty chat") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\u{276F}") != null); // input ❯
+    try testing.expect(std.mem.indexOf(u8, opened.?, "Alt+C") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "Enter") != null);
+    // Save-cursor on open so close can restore.
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[s") != null);
+
+    // Toggle closed — reserve request returns to zero, paint emits
+    // the saved-cursor restore + leaves clearing to the proxy.
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expectEqual(@as(u16, 0), L.extraReserveRows(&rt));
+    const closed = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(closed != null);
+    try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[u") != null);
+}
+
+test "inline chat: Alt+C refuses to open when there's no statusbar" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        // No statusbar_reserve / terminal_rows = null — mimics
+        // `config.statusbar.enabled = false` (the default).
+    };
+
+    const consumed = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(consumed); // action claimed (key stays out of shell)
+    try testing.expect(!rt.chat_inline_open); // but refused to open
+    try testing.expect(rt.hint_pending); // hint surfaces explaining why
+    rt.hint_pending = false;
+}
+
+test "inline chat: pushTurn arms paint latch when inline open (response auto-repaints)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    // Simulate "panel is open, LLM response just landed and pushed
+    // an assistant_exec turn." pushTurn must re-arm the inline paint
+    // latch so the next term-bytes tick re-renders chrome with the
+    // new turn visible — without this the panel sits stale until
+    // the next keystroke.
+    rt.chat_inline_open = true;
+    rt.chat_inline_paint_pending = false;
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, "echo hi"));
+    try testing.expect(rt.chat_inline_paint_pending);
+
+    // Same for the overlay (existing behaviour, regression guard).
+    rt.chat_inline_open = false;
+    rt.chat_overlay_open = true;
+    rt.chat_overlay_paint_pending = false;
+    try helpers.pushTurn(&rt, .observation, try testing.allocator.dupe(u8, "ok"));
+    try testing.expect(rt.chat_overlay_paint_pending);
+}
+
+test "inline chat: Alt+Shift+C closes inline panel first if it was open (mutually exclusive — reverse direction)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Seed content so the overlay-toggle handler doesn't refuse to
+    // open with "no LLM session to recall".
+    const helpers = dialog.Module(L.config, L.Runtime);
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "first prompt"));
+    defer helpers.freeTurns(&rt);
+
+    rt.chat_inline_open = true;
+    _ = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(rt.chat_overlay_open);
+    try testing.expect(rt.chat_inline_paint_pending);
+    try testing.expect(rt.chat_overlay_paint_pending);
+}
+
+test "inline chat: Alt+C closes overlay first if it was open (mutually exclusive)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    rt.chat_overlay_open = true;
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(!rt.chat_overlay_open);
+    try testing.expect(rt.chat_inline_open);
+    // Both paint latches set — overlay must emit its alt-screen
+    // exit, inline must emit its first paint, in some order on
+    // subsequent term-bytes calls.
+    try testing.expect(rt.chat_overlay_paint_pending);
+    try testing.expect(rt.chat_inline_paint_pending);
+}
+
+test "inline chat: onInput swallows keystrokes into chat_inline_input_buf when open" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    rt.chat_inline_open = true;
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "ping"));
+    try testing.expectEqualStrings("ping", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    // Backspace pops.
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x08"));
+    try testing.expectEqualStrings("pin", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    // The overlay buffer must not be touched (mutually exclusive).
+    try testing.expectEqual(@as(usize, 0), rt.chat_input_len);
 }
 
 test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
