@@ -103,6 +103,12 @@ const atty = @import("atty");
 //         //     "PROJECT",            //   "KEY=value, …" appended to the
 //         // },                        //   user message
 //         // .inline_chat_rows = 10,   // Alt+C panel height in rows (>=3)
+//         // .chat_persist_path = "/home/me/.local/share/atty/chat.jsonl",
+//         //                           // persist chat history across atty
+//         //                           // sessions. Format: NDJSON. Load
+//         //                           // last history_turns_max at attach;
+//         //                           // append on every push. User
+//         //                           // manages rotation.
 //     }),
 // };
 
