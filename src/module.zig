@@ -160,6 +160,23 @@ pub const Context = struct {
     /// cursor placement.
     cursor_row: ?u16 = null,
 
+    /// Statusbar's init-time reservation (`config.statusbar.reserve_rows`),
+    /// or null when there is no statusbar (non-TTY, disabled). Inline
+    /// panels read this to anchor their bottom edge one row above the
+    /// statusbar hint row instead of guessing the user's config.
+    statusbar_base_reserve: ?u16 = null,
+    /// Statusbar's CURRENT reservation, post any expansion an inline
+    /// panel requested AND any proxy clamp (when the terminal would
+    /// be left with <1 shell row). Null when no statusbar. Panel
+    /// paints derive their top row from
+    /// `terminal_rows - statusbar_reserve + 1`.
+    statusbar_reserve: ?u16 = null,
+    /// Terminal row count, or null when no TTY. Cached on every
+    /// dispatch so modules don't have to ioctl for their own paints.
+    terminal_rows: ?u16 = null,
+    /// Terminal column count. Same null-on-non-TTY semantics.
+    terminal_cols: ?u16 = null,
+
     /// Convenience wrapper around `formatCwd` — modules call this
     /// from `onLineCommit` when they want a `--cwd` string that
     /// reflects the user's current location. When subprocess is

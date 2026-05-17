@@ -437,10 +437,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         // Inline-panel reservation. Modules can request extra rows
         // above the statusbar via `extraReserveRows` (LLM inline
         // chat). On the toggle edge: re-emit DECSTBM via
-        // `sb.activate` so the shell stops scrolling into the
-        // panel rows, then mark statusbar dirty so renderStatus
-        // repaints the bottom rows. The actual panel content comes
-        // through `provideTermBytes` on the same iteration.
+        // `sb.applyReserveRows` (non-screen-clobbering) so the shell
+        // stops scrolling into the panel rows. The actual panel
+        // content comes through `provideTermBytes` on the same
+        // iteration.
         if (statusbar) |*sb| {
             const want_extra = D.extraReserveRows(&runtimes);
             const want_reserve: u16 = blk: {
@@ -450,10 +450,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 break :blk sum;
             };
             if (want_reserve != sb.reserve_rows and !alt_screen.active) {
-                sb.setReserveRows(want_reserve);
-                cursor_tracker.setMaxRows(sb.effectiveRows());
                 var w_re: std.Io.Writer = .fixed(&out_buf);
-                sb.activate(&w_re) catch {};
+                sb.applyReserveRows(&w_re, want_reserve) catch {};
+                cursor_tracker.setMaxRows(sb.effectiveRows());
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
                 // SIGWINCH the slave so bash's readline learns
                 // the new "visible" row count. We pass the FULL
@@ -463,6 +462,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     _ = pty.setSize(s) catch {};
                 } else |_| {};
             }
+            // Plumb base + live reservation + terminal geometry onto
+            // Context so paint hooks (paintInlineChat) read truth
+            // instead of guessing the user's `statusbar.reserve_rows`
+            // config and ioctl-ing for size again. Refreshed every
+            // iteration so a SIGWINCH that updated `sb.rows` propagates
+            // before the next paint.
+            ctx.statusbar_base_reserve = sb.baseReserveRows();
+            ctx.statusbar_reserve = sb.reserve_rows;
+            ctx.terminal_rows = sb.rows;
+            ctx.terminal_cols = sb.cols;
         }
 
         // ---- timeout → tick ----------------------------------------------
@@ -1480,6 +1489,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 var w: std.Io.Writer = .fixed(&out_buf);
                                 sb.activate(&w) catch {};
                                 try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
+                                // Inline panels read terminal size at
+                                // paint time; SIGWINCH has just
+                                // changed it. Without arming the
+                                // module-side repaint latch the panel
+                                // chrome stays at the old geometry
+                                // until the next keystroke / response.
+                                D.notifyResize(&runtimes);
                             }
                         } else {
                             cursor_tracker.setMaxRows(s.rows);

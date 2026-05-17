@@ -211,18 +211,8 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return false;
         }
 
-        /// Sums each module's `extraReserveRows` hook to compute how
-        /// many ADDITIONAL bottom rows the statusbar should reserve
-        /// for inline module panels (LLM inline chat, future). The
-        /// proxy compares the result to the current live reservation
-        /// each tick and emits `sb.setReserveRows + sb.activate` on
-        /// the edge so DECSTBM stays correct.
-        ///
-        /// Saturating add — if two modules each request 30 rows and
-        /// the total wraps u16, the helper returns u16 max instead
-        /// of wrapping. The proxy applies its own "shell needs >= 1
-        /// row" clamp afterwards, so the worst case is the shell
-        /// being squeezed to a single line.
+        /// Saturating sum of every module's `extraReserveRows` hook.
+        /// The proxy clamps the result to `rows-1` before applying.
         pub fn extraReserveRows(rts: *Runtimes) u16 {
             var total: u16 = 0;
             inline for (modules, 0..) |M, i| {
@@ -231,6 +221,18 @@ pub fn Dispatcher(comptime modules: anytype) type {
                 }
             }
             return total;
+        }
+
+        /// Notify size-aware modules that the terminal just resized
+        /// (after SIGWINCH + sb.activate). Modules with an `onResize`
+        /// hook re-arm their paint latch so the next term-bytes tick
+        /// repaints at the new geometry.
+        pub fn notifyResize(rts: *Runtimes) void {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "onResize")) {
+                    M.onResize(rts[i]);
+                }
+            }
         }
 
         /// Sibling of `gatherHintText` for error notifications.
@@ -1125,4 +1127,59 @@ test "dispatchOutput fans out to every module with onOutput" {
     try D.dispatchOutput(&rts, &ctx, "second");
 
     try testing.expectEqualStrings("first second", rts[0].seen.items);
+}
+
+const ReserveRowsClaimer = struct {
+    pub const name = "reserve-claimer";
+    pub const Runtime = struct {
+        rows_wanted: u16 = 0,
+        resize_count: usize = 0,
+    };
+
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn extraReserveRows(rt: *Runtime) u16 {
+        return rt.rows_wanted;
+    }
+    pub fn onResize(rt: *Runtime) void {
+        rt.resize_count += 1;
+    }
+};
+
+const NoReserveModule = struct {
+    pub const name = "no-reserve";
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    // Deliberately no extraReserveRows / onResize — exercises the
+    // comptime @hasDecl gate.
+};
+
+test "extraReserveRows: sums declaring modules, skips non-declaring ones, saturates" {
+    const D = Dispatcher(&.{ ReserveRowsClaimer, NoReserveModule });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    try testing.expectEqual(@as(u16, 0), D.extraReserveRows(&rts));
+
+    rts[0].rows_wanted = 7;
+    try testing.expectEqual(@as(u16, 7), D.extraReserveRows(&rts));
+
+    // Saturating-add: u16.max + 1 would wrap but must clamp instead.
+    rts[0].rows_wanted = std.math.maxInt(u16);
+    try testing.expectEqual(@as(u16, std.math.maxInt(u16)), D.extraReserveRows(&rts));
+}
+
+test "notifyResize: fires onResize on declaring modules only" {
+    const D = Dispatcher(&.{ ReserveRowsClaimer, NoReserveModule });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    D.notifyResize(&rts);
+    D.notifyResize(&rts);
+    try testing.expectEqual(@as(usize, 2), rts[0].resize_count);
 }
