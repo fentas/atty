@@ -211,6 +211,28 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return false;
         }
 
+        /// Sums each module's `extraReserveRows` hook to compute how
+        /// many ADDITIONAL bottom rows the statusbar should reserve
+        /// for inline module panels (LLM inline chat, future). The
+        /// proxy compares the result to the current live reservation
+        /// each tick and emits `sb.setReserveRows + sb.activate` on
+        /// the edge so DECSTBM stays correct.
+        ///
+        /// Saturating add — if two modules each request 30 rows and
+        /// the total wraps u16, the helper returns u16 max instead
+        /// of wrapping. The proxy applies its own "shell needs >= 1
+        /// row" clamp afterwards, so the worst case is the shell
+        /// being squeezed to a single line.
+        pub fn extraReserveRows(rts: *Runtimes) u16 {
+            var total: u16 = 0;
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "extraReserveRows")) {
+                    total = std.math.add(u16, total, M.extraReserveRows(rts[i])) catch std.math.maxInt(u16);
+                }
+            }
+            return total;
+        }
+
         /// Sibling of `gatherHintText` for error notifications.
         /// Same one-shot, first-non-null semantics, but the proxy
         /// pushes the result into the statusbar's *error* slot which

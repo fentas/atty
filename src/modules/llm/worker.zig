@@ -84,7 +84,7 @@ pub fn Module(comptime cfg: Config) type {
         pub const atty_preamble: []const u8 =
             \\You are running inside atty, a PTY proxy that wraps the user's interactive shell. The user typed a prompt prefixed with `#: ` and pressed Alt+A (single-shot mode).
             \\
-            \\Context — use ONLY when the user is explicitly asking a meta-question about atty itself: atty offers dialog mode (Alt+S — multi-step back-and-forth, JSON envelopes with `action=exec/done/question`), auto-exec (Alt+Shift+S — same as dialog with auto-confirm), and a chat overlay (Alt+C). For all other prompts, treat this as a pure shell task.
+            \\Context — use ONLY when the user is explicitly asking a meta-question about atty itself: atty offers dialog mode (Alt+S — multi-step back-and-forth, JSON envelopes with `action=exec/done/question`), auto-exec (Alt+Shift+S — same as dialog with auto-confirm), an inline chat panel pinned above the statusbar (Alt+C — shell stays visible), and a full chat overlay (Alt+Shift+C — alt-screen takeover). Both chat surfaces share the same conversation history, route input into the same dialog state, and accept the same `open_chat` advisory hint when you want the user to follow up there. From either chat surface, returning an `action=exec` envelope in dialog mode injects the command at the user's shell prompt (auto-armed in Alt+Shift+S mode). For all other prompts, treat this as a pure shell task.
         ;
 
         /// The task-shaping section — replaceable via

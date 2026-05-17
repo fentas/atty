@@ -45,6 +45,12 @@ pub const StatusBar = struct {
     /// How many rows are reserved at the bottom. The *last* row holds
     /// the rendered text; rows above are blank padding.
     reserve_rows: u16,
+    /// Init-time `reserve_rows` snapshot. Modules (inline chat) may
+    /// expand the live reservation via `setReserveRows` for their
+    /// own panel rows, then restore by calling `setReserveRows(base_reserve_rows)`.
+    /// Initialised in every constructor; mutating it after init
+    /// loses the "back to default" reference, so don't.
+    base_reserve_rows: u16,
     /// Style applied to the status text.
     style: Style,
 
@@ -122,8 +128,29 @@ pub const StatusBar = struct {
             .rows = rows,
             .cols = cols,
             .reserve_rows = reserve_rows,
+            .base_reserve_rows = reserve_rows,
             .style = style,
         };
+    }
+
+    /// Dynamically grow / shrink the reservation — used by modules
+    /// that want to paint a panel above the status text (inline
+    /// chat mode). The caller is responsible for triggering an
+    /// `activate` so the new reservation takes effect (new DECSTBM
+    /// + cleared rows). `base_reserve_rows` records the original
+    /// value at init time so callers can restore to "default
+    /// statusbar only" without remembering what config said.
+    pub fn setReserveRows(self: *StatusBar, n: u16) void {
+        self.reserve_rows = n;
+        self.last_valid = false;
+        self.last_hint_valid = false;
+    }
+
+    /// Read-only access to the init-time reserve_rows. Modules
+    /// use this to compute "default + N for my panel" without
+    /// needing to know the static config value themselves.
+    pub fn baseReserveRows(self: *const StatusBar) u16 {
+        return self.base_reserve_rows;
     }
 
     /// Variant that lets the caller override `error_style` while
@@ -136,6 +163,7 @@ pub const StatusBar = struct {
             .rows = rows,
             .cols = cols,
             .reserve_rows = reserve_rows,
+            .base_reserve_rows = reserve_rows,
             .style = style,
             .error_style = error_style,
         };
@@ -149,6 +177,7 @@ pub const StatusBar = struct {
             .rows = rows,
             .cols = cols,
             .reserve_rows = reserve_rows,
+            .base_reserve_rows = reserve_rows,
             .style = style,
             .error_style = error_style,
             .hint_style = hint_style,
@@ -383,19 +412,20 @@ pub const StatusBar = struct {
         // `hint_unchanged` stays false forever and every tick emits
         // a save/restore-cursor pair pointlessly).
         if (!hint_unchanged) {
-            // Derive the hint row from `effectiveRows()`, which
-            // already clamps to at least 1 when `reserve_rows >
-            // rows`. That makes the hint surface keep working in
-            // pathological geometry (e.g. rows=3 + reserve_rows=5
-            // → effectiveRows=1, hint_row=2, status at rows=3)
-            // instead of silently disappearing. Two conditions
-            // must hold for the paint:
-            //   • `reserve_rows >= 2` so the bar is asking for
-            //     more than just the status row,
-            //   • `effectiveRows + 1 < rows` so the hint row
-            //     sits ABOVE the status row, never overlapping.
-            const hint_row: u16 = self.effectiveRows() + 1;
-            if (self.reserve_rows >= 2 and hint_row < self.rows) {
+            // Anchor the hint row to `base_reserve_rows` (the
+            // init-time reservation), NOT the live `reserve_rows`
+            // — modules that grow the reservation for an inline
+            // panel (chat) take the *top* rows of the expansion and
+            // leave the hint pinned just above the status row at
+            // its original position. When `rows <= base_reserve_rows`
+            // (pathological tiny terminal) fall back to the
+            // `effectiveRows`-based formula so the hint stays
+            // visible instead of underflowing.
+            const hint_row: u16 = if (self.rows > self.base_reserve_rows)
+                self.rows - self.base_reserve_rows + 1
+            else
+                self.effectiveRows() + 1;
+            if (self.base_reserve_rows >= 2 and hint_row < self.rows) {
                 try w.print("\x1B[{d};1H\x1B[K", .{hint_row});
                 switch (hint_kind) {
                     .err => {

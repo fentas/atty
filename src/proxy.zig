@@ -434,6 +434,37 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         // whether to flush.
         ctx.module_overlay_active = D.anyOverlayActive(&runtimes);
 
+        // Inline-panel reservation. Modules can request extra rows
+        // above the statusbar via `extraReserveRows` (LLM inline
+        // chat). On the toggle edge: re-emit DECSTBM via
+        // `sb.activate` so the shell stops scrolling into the
+        // panel rows, then mark statusbar dirty so renderStatus
+        // repaints the bottom rows. The actual panel content comes
+        // through `provideTermBytes` on the same iteration.
+        if (statusbar) |*sb| {
+            const want_extra = D.extraReserveRows(&runtimes);
+            const want_reserve: u16 = blk: {
+                const sum = std.math.add(u16, sb.baseReserveRows(), want_extra) catch sb.rows;
+                // Clamp so the shell always has at least 1 row.
+                if (sum >= sb.rows) break :blk if (sb.rows > 1) sb.rows - 1 else 1;
+                break :blk sum;
+            };
+            if (want_reserve != sb.reserve_rows and !alt_screen.active) {
+                sb.setReserveRows(want_reserve);
+                cursor_tracker.setMaxRows(sb.effectiveRows());
+                var w_re: std.Io.Writer = .fixed(&out_buf);
+                sb.activate(&w_re) catch {};
+                if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
+                // SIGWINCH the slave so bash's readline learns
+                // the new "visible" row count. We pass the FULL
+                // size — DECSTBM constrains scroll, the slave
+                // size stays full per the startup-init comment.
+                if (args.is_tty) if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                    _ = pty.setSize(s) catch {};
+                } else |_| {};
+            }
+        }
+
         // ---- timeout → tick ----------------------------------------------
         if (n == 0) {
             const now = nowMs();
