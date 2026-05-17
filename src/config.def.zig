@@ -103,12 +103,18 @@ const atty = @import("atty");
 //         //     "PROJECT",            //   "KEY=value, …" appended to the
 //         // },                        //   user message
 //         // .inline_chat_rows = 10,   // Alt+C panel height in rows (>=3)
-//         // .chat_persist_path = "/home/me/.local/share/atty/chat.jsonl",
-//         //                           // persist chat history across atty
-//         //                           // sessions. Format: NDJSON. Load
-//         //                           // last history_turns_max at attach;
-//         //                           // append on every push. User
-//         //                           // manages rotation.
+//         // .chat_persist_enabled = true,
+//         //                           // Persist chat history across atty
+//         //                           // sessions. NDJSON, one turn/line.
+//         // .chat_persist_path = "",  // Empty → atty picks
+//         //                           // $XDG_DATA_HOME/atty/chat.jsonl
+//         //                           // (fallback $HOME/.local/share/atty/).
+//         //                           // Override for per-project log files.
+//         // .chat_persist_max_bytes = 8 * 1024 * 1024,
+//         //                           // Soft cap. When exceeded atty
+//         //                           // tail-truncates at a line boundary
+//         //                           // on the next append (atomic
+//         //                           // tmp+rename). 0 = no cap.
 //     }),
 // };
 

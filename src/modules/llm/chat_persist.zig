@@ -31,12 +31,127 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
+extern "c" fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) c_int;
+extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
 const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;
 const O_CREAT: c_int = 0o100;
 const O_APPEND: c_int = 0o2000;
 const FILE_MODE: c_int = 0o600;
+const DIR_MODE: c_uint = 0o700;
+
+// Minimal stat struct — we only need st_size. Layout matches Linux's
+// `struct stat` (the kernel definition; libc passes it through). On
+// non-Linux this would need to be revisited; atty is Linux-only.
+const Stat = extern struct {
+    _pad: [48]u8,
+    size: i64,
+    _pad2: [80]u8,
+};
+
+/// Resolve the persistence file path. Returns owned memory.
+///
+///   • `explicit_path` non-empty → use verbatim (no tilde expansion).
+///   • `explicit_path` empty → derive `${XDG_DATA_HOME}/atty/chat.jsonl`,
+///     falling back to `${HOME}/.local/share/atty/chat.jsonl`. Creates
+///     the parent directory (mode 0700) so the first append succeeds.
+///
+/// Returns an empty slice when neither XDG_DATA_HOME nor HOME is set.
+pub fn resolvePath(allocator: std.mem.Allocator, explicit_path: []const u8) ![]u8 {
+    if (explicit_path.len > 0) return allocator.dupe(u8, explicit_path);
+
+    const xdg = blk: {
+        const p = getenv("XDG_DATA_HOME") orelse break :blk null;
+        const s = std.mem.span(p);
+        if (s.len == 0) break :blk null;
+        break :blk s;
+    };
+    var dir_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer dir_buf.deinit();
+    if (xdg) |x| {
+        try dir_buf.writer.print("{s}/atty", .{x});
+    } else {
+        const home_p = getenv("HOME") orelse return allocator.dupe(u8, "");
+        const home = std.mem.span(home_p);
+        if (home.len == 0) return allocator.dupe(u8, "");
+        try dir_buf.writer.print("{s}/.local/share/atty", .{home});
+    }
+    const dir = dir_buf.written();
+
+    // Create the directory tree (idempotent; ignore EEXIST).
+    const dir_z = try allocator.dupeZ(u8, dir);
+    defer allocator.free(dir_z);
+    _ = mkdir(dir_z.ptr, DIR_MODE);
+
+    return std.fmt.allocPrint(allocator, "{s}/chat.jsonl", .{dir});
+}
+
+/// Truncate the persistence file to its newest content, keeping at
+/// most `keep_bytes` worth of full NDJSON lines. Atomic via
+/// tmp+rename so a crash mid-rotation can't corrupt the file.
+/// Caller invokes BEFORE appending the next line.
+///
+/// Best-effort: any error (file missing, rename fails) is swallowed
+/// — the worst case is the file growing past the cap for another
+/// turn until the next call. Returns true when rotation actually
+/// ran (file exceeded the cap AND truncation succeeded).
+pub fn rotateIfExceeded(allocator: std.mem.Allocator, path: []const u8, keep_bytes: usize) bool {
+    if (path.len == 0 or keep_bytes == 0) return false;
+    const path_z = allocator.dupeZ(u8, path) catch return false;
+    defer allocator.free(path_z);
+
+    // Check current size — open + fstat.
+    const fd_r = open(path_z.ptr, O_RDONLY);
+    if (fd_r < 0) return false;
+    var st: Stat = undefined;
+    if (fstat(fd_r, &st) != 0) {
+        _ = close(fd_r);
+        return false;
+    }
+    const cur_size: usize = if (st.size > 0) @intCast(st.size) else 0;
+    if (cur_size <= keep_bytes) {
+        _ = close(fd_r);
+        return false;
+    }
+
+    // Seek to the keep window, read forward to find the first \n
+    // (so we keep WHOLE lines), then read the rest into memory and
+    // rewrite the file.
+    const start_off: i64 = @intCast(cur_size - keep_bytes);
+    _ = lseek(fd_r, start_off, 0); // SEEK_SET = 0
+    var tail: std.ArrayList(u8) = .empty;
+    defer tail.deinit(allocator);
+    var chunk: [16 * 1024]u8 = undefined;
+    while (true) {
+        const got = read(fd_r, &chunk, chunk.len);
+        if (got <= 0) break;
+        tail.appendSlice(allocator, chunk[0..@as(usize, @intCast(got))]) catch {
+            _ = close(fd_r);
+            return false;
+        };
+    }
+    _ = close(fd_r);
+
+    // Drop everything up to the first \n to ensure we start at a
+    // full-line boundary.
+    const trim_at = std.mem.indexOfScalar(u8, tail.items, '\n');
+    const kept: []const u8 = if (trim_at) |i| tail.items[i + 1 ..] else &.{};
+
+    // Atomic rewrite: write to tmp, fsync (best-effort), rename.
+    const tmp_path = std.fmt.allocPrint(allocator, "{s}.atty-tmp", .{path}) catch return false;
+    defer allocator.free(tmp_path);
+    const tmp_z = allocator.dupeZ(u8, tmp_path) catch return false;
+    defer allocator.free(tmp_z);
+    const fd_w = open(tmp_z.ptr, O_WRONLY | O_CREAT | 0o1000, FILE_MODE); // 0o1000 = O_TRUNC
+    if (fd_w < 0) return false;
+    const wn = write(fd_w, kept.ptr, kept.len);
+    _ = close(fd_w);
+    if (wn != @as(isize, @intCast(kept.len))) return false;
+    return rename(tmp_z.ptr, path_z.ptr) == 0;
+}
 
 /// Append one turn to the file as a single NDJSON line. Best-effort:
 /// errors are swallowed (callers in the hot pushTurn path don't want
@@ -275,6 +390,64 @@ test "loadLastTurns: caps at max_turns (keeps newest)" {
     try testing.expectEqualStrings("t3", loaded.items[0].content);
     try testing.expectEqualStrings("t4", loaded.items[1].content);
     try testing.expectEqualStrings("t5", loaded.items[2].content);
+}
+
+test "rotateIfExceeded: trims to keep_bytes worth of whole lines" {
+    var name_buf: [64]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-rotate-{x}.jsonl", .{seed});
+    const name_z = try testing.allocator.dupeZ(u8, name);
+    defer testing.allocator.free(name_z);
+    defer _ = std.c.unlink(name_z.ptr);
+
+    // Write 10 turns. Each NDJSON line is roughly 40 bytes
+    // (`{"kind":"user","content":"tN"}\n`).
+    var i: u8 = 0;
+    while (i < 10) : (i += 1) {
+        var content_buf: [4]u8 = undefined;
+        const c = std.fmt.bufPrint(&content_buf, "t{d:0>2}", .{i}) catch unreachable;
+        _ = appendTurn(testing.allocator, name, .user, c);
+    }
+
+    // Rotate to keep ~200 bytes — should drop the oldest entries.
+    const rotated = rotateIfExceeded(testing.allocator, name, 200);
+    try testing.expect(rotated);
+
+    var loaded = try loadLastTurns(testing.allocator, name, 100, 1 << 20);
+    defer {
+        for (loaded.items) |t| testing.allocator.free(t.content);
+        loaded.deinit(testing.allocator);
+    }
+    // Expect fewer than 10 turns and the newest (t09) to be the
+    // last one. The boundary is "first whole line at or after
+    // (cur_size - keep_bytes)" — exact count depends on byte
+    // layout, so we assert the bound + newest-preserved invariant.
+    try testing.expect(loaded.items.len > 0);
+    try testing.expect(loaded.items.len < 10);
+    try testing.expectEqualStrings("t09", loaded.items[loaded.items.len - 1].content);
+}
+
+test "rotateIfExceeded: no-op when file size <= keep_bytes" {
+    var name_buf: [64]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec)) +% 17;
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-rotate-noop-{x}.jsonl", .{seed});
+    const name_z = try testing.allocator.dupeZ(u8, name);
+    defer testing.allocator.free(name_z);
+    defer _ = std.c.unlink(name_z.ptr);
+
+    _ = appendTurn(testing.allocator, name, .user, "short");
+    // Cap is generous; nothing to do.
+    try testing.expect(!rotateIfExceeded(testing.allocator, name, 1 << 20));
+}
+
+test "resolvePath: explicit path is returned verbatim" {
+    const path = try resolvePath(testing.allocator, "/tmp/explicit-test.jsonl");
+    defer testing.allocator.free(path);
+    try testing.expectEqualStrings("/tmp/explicit-test.jsonl", path);
 }
 
 test "loadLastTurns: skips malformed lines (forward-compat)" {

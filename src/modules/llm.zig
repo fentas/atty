@@ -151,10 +151,16 @@ pub fn configure(comptime cfg: Config) type {
         // llm/dialog.zig's `Module()` for the body.
         const dialog_helpers = dialog.Module(cfg, Runtime);
         /// Wrapper around `dialog_helpers.pushTurn` that ALSO appends
-        /// the new turn to `cfg.chat_persist_path` (when set) so the
-        /// chat history survives across atty sessions. Best-effort:
-        /// disk failures are silent (the in-memory push has already
+        /// the new turn to the resolved `rt.chat_persist_path` (set
+        /// by `attach` when `cfg.chat_persist_enabled`) so the chat
+        /// history survives across atty sessions. Best-effort: disk
+        /// failures are silent (the in-memory push has already
         /// succeeded by the time we attempt the append).
+        ///
+        /// Before appending, rotate the file if it has grown past
+        /// `cfg.chat_persist_max_bytes` (when set). The rotation
+        /// uses tmp+rename so a crash mid-rotation leaves the
+        /// original intact.
         ///
         /// The loader in `attach` deliberately calls
         /// `dialog_helpers.pushTurn` DIRECTLY (not this wrapper) —
@@ -162,8 +168,11 @@ pub fn configure(comptime cfg: Config) type {
         /// file on every startup, doubling content each run.
         fn pushTurn(rt: *Runtime, kind: dialog.TurnKind, content: []u8) !void {
             try dialog_helpers.pushTurn(rt, kind, content);
-            if (cfg.chat_persist_path.len > 0) {
-                _ = chat_persist.appendTurn(rt.allocator, cfg.chat_persist_path, kind, content);
+            if (rt.chat_persist_path.len > 0) {
+                if (cfg.chat_persist_max_bytes > 0) {
+                    _ = chat_persist.rotateIfExceeded(rt.allocator, rt.chat_persist_path, cfg.chat_persist_max_bytes);
+                }
+                _ = chat_persist.appendTurn(rt.allocator, rt.chat_persist_path, kind, content);
             }
         }
         const freeTurns = dialog_helpers.freeTurns;
@@ -202,6 +211,12 @@ pub fn configure(comptime cfg: Config) type {
             /// `context_env_vars` are configured or none of them
             /// are set in the environment. Owned by the runtime.
             context_blob: []u8 = &.{},
+            /// Resolved chat-history file path — used by the
+            /// pushTurn-wrapper to append every turn. Empty when
+            /// persistence is disabled or path resolution failed
+            /// (no HOME / XDG_DATA_HOME and no explicit override).
+            /// Owned by the runtime; freed in detach.
+            chat_persist_path: []u8 = &.{},
             /// Copy of the response surfaced via pollShellInput.
             /// Owned by the runtime; valid until the next poll.
             inject_buf: [cfg.max_response_bytes]u8 = undefined,
@@ -528,32 +543,30 @@ pub fn configure(comptime cfg: Config) type {
                 .last_assistant_json = last_assistant_json,
             };
 
-            // Chat-history persistence — load the last N turns from
-            // disk into the ring so the chat panel + dialog context
-            // pick up where the previous session left off. Best-
-            // effort: a missing / unreadable file is silent (chat
-            // simply starts empty). Cap at the ring capacity so
-            // we never push past `cfg.history_turns_max`.
-            if (cfg.chat_persist_path.len > 0) {
-                // Read budget: a few MB is plenty for the LAST N
-                // turns at typical sizes. Anything larger means the
-                // user has a long-running log; the helper reads only
-                // up to this cap and walks the tail.
-                const max_bytes: usize = 4 * 1024 * 1024;
-                var loaded = chat_persist.loadLastTurns(allocator, cfg.chat_persist_path, cfg.history_turns_max, max_bytes) catch {
-                    // I/O or parse failure → start fresh.
-                    return rt;
-                };
-                defer loaded.deinit(allocator);
-                for (loaded.items) |t| {
-                    // pushTurn takes ownership of `content`; on
-                    // failure (OOM during the truncation dupe) free
-                    // the content so we don't leak. The for-loop
-                    // continues so we get partial-history-restore
-                    // rather than all-or-nothing.
-                    dialog_helpers.pushTurn(&rt, t.kind, t.content) catch {
-                        allocator.free(t.content);
+            // Chat-history persistence — when enabled, resolve the
+            // path (default: ${XDG_DATA_HOME}/atty/chat.jsonl) and
+            // load the last N turns from disk into the ring so the
+            // chat panel + dialog context pick up where the previous
+            // session left off. Best-effort: any I/O / path-resolve
+            // failure leaves the ring empty AND disables further
+            // persistence (chat_persist_path stays `&.{}`).
+            if (cfg.chat_persist_enabled) {
+                const resolved = chat_persist.resolvePath(allocator, cfg.chat_persist_path) catch &.{};
+                if (resolved.len > 0) {
+                    rt.chat_persist_path = resolved;
+                    const max_bytes: usize = 4 * 1024 * 1024;
+                    var loaded = chat_persist.loadLastTurns(allocator, resolved, cfg.history_turns_max, max_bytes) catch {
+                        return rt;
                     };
+                    defer loaded.deinit(allocator);
+                    for (loaded.items) |t| {
+                        // Direct dialog_helpers.pushTurn (not the
+                        // wrapper) so loaded turns don't re-append
+                        // to the file on every startup.
+                        dialog_helpers.pushTurn(&rt, t.kind, t.content) catch {
+                            allocator.free(t.content);
+                        };
+                    }
                 }
             }
 
@@ -578,6 +591,7 @@ pub fn configure(comptime cfg: Config) type {
             // worker-owned state below.
             rt.allocator.destroy(rt.captured_output);
             rt.allocator.destroy(rt.last_assistant_json);
+            if (rt.chat_persist_path.len > 0) rt.allocator.free(rt.chat_persist_path);
             if (rt.thread) |t| {
                 {
                     rt.shared.mutex.lockUncancelable(io);
