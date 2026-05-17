@@ -218,12 +218,41 @@ command — Right / End / Ctrl+F to accept, multi-row pick list if
 configured. Ctrl+Shift+D's `delete_history_match` works on the
 prompt too.
 
+## Chat surfaces
+
+Two parallel UIs render the same conversation ring — pick the one that fits the moment.
+
+- **`Alt+C` — inline chat panel.** Reserves N rows above the statusbar (default 10) for a slim chat strip. The shell stays visible above the panel; cursor focus moves into the panel's input row. For casual back-and-forth while still watching command output scroll above.
+- **`Alt+Shift+C` — full chat overlay.** Takes over the screen via alt-screen swap. Bigger view of the conversation history, structured assistant rendering, more room. For focused review of long sessions.
+
+Both share the same `turns[]` ring + dialog state, so an `action=exec` envelope returned while either surface is open injects the suggested command at the user's shell prompt. The two surfaces are mutually exclusive — opening one closes the other so cursor focus is unambiguous.
+
+## Keybindings
+
+Press **`Alt+H`** any time to scroll the full cheat-sheet into shell history. The shipped LLM bindings (registered on the module via `default_bindings`, so they only fire when the LLM module is enabled):
+
+| Key             | Action                                                    |
+|-----------------|-----------------------------------------------------------|
+| `Alt+A`         | Single-shot prompt (one command, no dialog).              |
+| `Alt+S`         | Dialog mode (multi-turn exec/observe loop).               |
+| `Alt+Shift+S`   | Auto-exec (dialog + auto-confirm each step).              |
+| `Alt+M`         | Cycle through `config.models`.                            |
+| `Alt+C`         | Toggle inline chat panel.                                 |
+| `Alt+Shift+C`   | Toggle full-screen chat overlay.                          |
+| `Alt+H`         | Show this cheat-sheet (LLM-mode hint when in `#: `).      |
+| `Ctrl+Shift+X`  | Cancel any active exec / dialog / auto.                   |
+
+Override any of these by listing a different `bytes` for the same `action` in `Keymap.bindings` — the user list wins via first-match.
+
 ## Configuration reference
+
+### Core
 
 | Field                         | Default                                  | What it does                                                                          |
 |-------------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
 | `prefix`                      | `"#: "`                                  | Trigger. `#` is a shell comment so missed dispatches are silent no-ops, not executed. |
-| `model`                       | `"llama3:8b"`                            | Model name passed in the request body.                                                |
+| `model`                       | `"llama3:8b"`                            | Single-model fallback. Used when `models` is empty.                                   |
+| `models`                      | `&.{}`                                   | List of `Model` structs (see below). `Alt+M` cycles through them.                     |
 | `shell`                       | `null`                                   | Shell name for the user-prompt template. `null` → basename of `$SHELL`.               |
 | `api_base`                    | `""`                                     | Static endpoint URL. Wins over env vars when non-empty.                               |
 | `api_base_env`                | `"LLM_API_BASE"`                         | Env-var name for the primary endpoint.                                                |
@@ -231,16 +260,60 @@ prompt too.
 | `api_key_env`                 | `"LLM_API_KEY"`                          | Env-var name for the optional `Authorization: Bearer …` token.                        |
 | `with_explanation`            | `true`                                   | Ask model for an explanation + fenced command; show explanation in the hint row.      |
 | `system_prompt`               | `""`                                     | Override the canned system prompt. Empty → canned prompt for the `with_explanation` mode. |
+| `dialog_system_prompt`        | `""`                                     | Override the dialog-mode JSON-envelope system prompt. Empty → canned.                  |
 | `context_env_vars`            | `&.{}`                                   | Env vars whose values get appended to the user message as `Context: KEY=value, …`.    |
+| `enter_action`                | `.none`                                  | What Enter on `#: …` does. `.none` (default), `.single`, `.dialog`, `.auto`.          |
+| `auto_delay_ms`               | `800`                                    | Auto-exec confirm delay (ms) for `Alt+Shift+S`. Any keystroke aborts.                 |
+| `history_turns_max`           | `8`                                      | Ring capacity. The model sees at most this many recent turns per request.             |
+| `dialog_parse_retry_max`      | `2`                                      | How many times atty re-prompts the model when a JSON envelope fails to parse.         |
+
+### Chat surfaces
+
+| Field                         | Default                                  | What it does                                                                          |
+|-------------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
+| `inline_chat_rows`            | `10`                                     | Rows the Alt+C inline panel claims above the statusbar. Minimum 3 (comptime-checked). |
+| `overlay_open_policy`         | `.notify`                                | What to do when the model emits `"open_chat": true`. `.always` / `.notify` / `.never`. |
+
+### Persistence — survive across sessions
+
+| Field                         | Default                                  | What it does                                                                          |
+|-------------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
+| `chat_persist_enabled`        | `false`                                  | Master switch. Default off — chat lives in RAM only.                                  |
+| `chat_persist_path`           | `""`                                     | NDJSON file path. Empty + enabled → `${XDG_DATA_HOME}/atty/chat.jsonl` (fallback `${HOME}/.local/share/atty/chat.jsonl`); parent directory is auto-created. |
+| `chat_persist_max_bytes`      | `0`                                      | Soft cap. When the file grows past this, atty rewrites it tail-truncated at a line boundary (atomic tmp+rename) on the next append. `0` disables rotation. |
+
+### Visual signals
+
+| Field                         | Default                                  | What it does                                                                          |
+|-------------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
 | `prefix_signal_cursor`        | `true`                                   | Emit OSC 12 / 112 cursor-colour transitions while prefix matches.                     |
 | `prefix_signal_cursor_color`  | `"cyan"`                                 | OSC 12 colour. Named (`cyan`) or `#RRGGBB` / `rgb:RR/GG/BB`.                           |
 | `prefix_signal_status`        | `true`                                   | Show `prefix_signal_status_text` in the status bar while prefix matches.              |
 | `prefix_signal_status_text`   | `"✨ prompt"`                            | Status-bar text shown during a prefix match.                                          |
+
+### Buffer sizes (tune for big models)
+
+| Field                         | Default                                  | What it does                                                                          |
+|-------------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
 | `timeout_ms`                  | `30_000`                                 | Stored; not yet wired into `client.fetch` (deferred to a follow-up).                  |
 | `max_response_bytes`          | `4096`                                   | Cap on the parsed command size.                                                       |
 | `max_prompt_bytes`            | `2048`                                   | Cap on prompt-body size. Longer inputs ignored as "likely paste, not a task."         |
-| `enter_action`                | `.none`                                  | What Enter on `#: …` does. `.none` (default), `.single`, `.dialog`, `.auto`. `.none` is the safe default — Alt+A / Alt+S / Alt+Shift+S are the explicit triggers. |
-| `auto_delay_ms`               | `800`                                    | Auto-exec confirm delay (ms) for `Alt+Shift+S`. Any keystroke aborts.                  |
+| `max_turn_bytes`              | `4096`                                   | Cap on the bytes stored per ring entry. Longer turns truncate.                        |
+
+### `Model` struct (entries in `models`)
+
+```zig
+.models = &.{
+    .{ .name = "qwen3-coder:30b" },
+    .{ .name = "gemma3:4b", .history_turns_max = 3 },  // small-context trim
+    .{ .name = "llama3:70b" },
+},
+```
+
+| Field                | Default  | What it does                                                                       |
+|----------------------|----------|------------------------------------------------------------------------------------|
+| `name`               | required | Model identifier sent in the HTTP request body's `"model"` field.                  |
+| `history_turns_max`  | `null`   | Per-model trim — only the last N turns get sent to this model. Useful for mixing a 32k-token coder model with a small 4-bit local model in the same `Alt+M` cycle. `null` means "use the full ring." |
 
 ## Security notes
 
