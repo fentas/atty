@@ -13,12 +13,12 @@
 //!     Cost: one open + small read of `/etc/os-release`, one uname()
 //!     syscall.
 //!
-//!   • **Dynamic** (`gatherDynamic`) — cwd + git state (branch,
-//!     dirty-or-clean flag when reachable cheaply). Rebuilt on every
-//!     LLM request. Cost: a few stat()s + a tiny read of
-//!     `<cwd>/.git/HEAD`. No `git status` subprocess by default —
-//!     the slow per-prompt invocation that lights up I/O on huge
-//!     monorepos.
+//!   • **Dynamic** (`gatherDynamic`) — cwd + git branch. Rebuilt on
+//!     every LLM request. Cost: a stat() + a tiny read of
+//!     `<cwd>/.git/HEAD` (or the resolved gitdir for worktrees /
+//!     submodules). No `git status` subprocess — the slow
+//!     per-prompt invocation that lights up I/O on huge monorepos;
+//!     dirty-flag support is deferred to a future opt-in.
 //!
 //! The composed blob is appended to the system prompt under a
 //! `System:` heading by `dialog.buildRequestBody` /
