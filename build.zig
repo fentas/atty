@@ -127,6 +127,37 @@ pub fn build(b: *std.Build) void {
     itest_step.dependOn(&run_integration_tests.step);
 
     // -------------------------------------------------------------------------
+    // Live-Ollama tests
+    //
+    // Hits a REAL `OLLAMA_HOST` / `LLM_API_BASE` endpoint instead of mocking
+    // HTTP. Each test starts with a reachability probe and skips (rather
+    // than fails) when the endpoint isn't responding — so CI without
+    // Ollama just sees "X skipped".
+    //
+    //     OLLAMA_HOST=http://localhost:11434 zig build ollama
+    //     ATTY_TEST_MODEL=qwen2.5:3b zig build ollama
+    // -------------------------------------------------------------------------
+    const ollama_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test/ollama_live.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "atty", .module = atty_module },
+            },
+        }),
+    });
+    const run_ollama_tests = b.addRunArtifact(ollama_tests);
+    // Skip the build-cache hit when the user supplies env vars — Zig
+    // caches based on inputs, and the env is part of runtime, so a
+    // stale cached binary would silently reuse an old probe result.
+    // `has_side_effects` tells the build graph "don't dedupe me."
+    run_ollama_tests.has_side_effects = true;
+    const ollama_step = b.step("ollama", "Run live-Ollama tests (skip when OLLAMA_HOST unreachable)");
+    ollama_step.dependOn(&run_ollama_tests.step);
+
+    // -------------------------------------------------------------------------
     // E2E framework
     //
     // Builds a standalone runner that spawns `atty` under a controlled PTY,

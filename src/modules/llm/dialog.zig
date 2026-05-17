@@ -640,7 +640,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// needed.
         ///
         /// Format (statusbar-style palette: mauve brand + cyan
-        /// accent + dim chrome). Leading `\n\n` so the banner never
+        /// accent + dim chrome). Leading `\r\n` so the banner never
         /// glues to the prompt line above it:
         ///
         ///     <blank>
@@ -653,9 +653,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// bytes); realistic reasons are 100-200 bytes.
         pub fn captureConclusion(rt: *Runtime, reason: []const u8, execs: usize, obs: usize, turns: usize) void {
             var w: std.Io.Writer = .fixed(&rt.conclusion_buf);
-            // Two leading newlines so the banner sits in its own
-            // visual block — without them it glues to the previous
-            // prompt's command output / cursor position.
+            // Single `\r\n` so the banner starts at column 1 on the
+            // row immediately under the shell's prompt redraw — no
+            // visible blank rows between the prompt and the banner.
+            // The `\r` is critical: bare `\n` only moves down (cursor
+            // keeps its column from the prompt), which produced an
+            // indented banner that read as broken.
             //
             // Palette (matches statusbar.zig icon + shortcut
             // styling from PR #53):
@@ -663,14 +666,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             //   - fg 14 + bold (cyan): success ✓ + the numeric
             //     counts so they jump out of the dim chrome
             //   - dim: border characters, prose
-            //
-            // Combined CSI form throughout (`\x1B[22;38;5;141m`)
-            // — saves bytes vs separated escapes, matches the
-            // statusbar's compression pattern.
-            //
-            // Top line: dim corner + dim dash + space + MAUVE
-            // "✨ atty" + dim "· LLM session complete " + dim
-            // dashes.
             //
             // Column accounting (for symmetric framing with the
             // bottom border):
@@ -680,7 +675,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             //   --- subtotal: 34 cols of fixed prefix ---
             //   25 trailing dashes → 59 cols total
             //   Bottom: ╰(1) + 58 dashes = 59 cols. Matches.
-            w.writeAll("\n\n\x1B[2m\u{256D}\u{2500} \x1B[22;38;5;141m\u{2728} atty\x1B[39;2m \u{00B7} LLM session complete ") catch {};
+            w.writeAll("\r\n\x1B[2m\u{256D}\u{2500} \x1B[22;38;5;141m\u{2728} atty\x1B[39;2m \u{00B7} LLM session complete ") catch {};
             w.writeAll(conclusion_border_dashes[0..(25 * 3)]) catch {};
             w.writeAll("\x1B[0m\r\n") catch {};
 
@@ -785,9 +780,11 @@ test "Module.captureConclusion writes reason + counts into the buffer" {
     // Styled palette: mauve brand glyph + cyan success accent.
     try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;38;5;141m") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1;38;5;14m") != null);
-    // Two leading newlines so the banner stays separated from the
-    // prompt line above it.
-    try testing.expect(std.mem.startsWith(u8, out, "\n\n"));
+    // Single `\r\n` so the banner attaches directly to the next row
+    // at column 1 (no blank gap, no carry-over indent from the
+    // prompt's cursor column).
+    try testing.expect(std.mem.startsWith(u8, out, "\r\n"));
+    try testing.expect(!std.mem.startsWith(u8, out, "\n\n"));
 }
 
 test "Module.captureConclusion falls back to 'done' when reason is empty" {
