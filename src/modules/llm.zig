@@ -1595,11 +1595,11 @@ pub fn configure(comptime cfg: Config) type {
                                     // open overlay.
                                     rt.conclusion_pending = false;
                                 } else {
-                                    latchHint(rt, "✨ LLM done — Alt+C to open chat");
+                                    latchHint(rt, "✨ LLM done — Alt+Shift+C to open chat");
                                 }
                             },
                             .notify => {
-                                latchHint(rt, "✨ LLM suggests follow-up — Alt+C to open chat");
+                                latchHint(rt, "✨ LLM suggests follow-up — Alt+Shift+C to open chat");
                             },
                             .never => {},
                         }
@@ -1659,7 +1659,7 @@ pub fn configure(comptime cfg: Config) type {
                                 rt.chat_overlay_paint_pending = true;
                             },
                             .notify => {
-                                latchHint(rt, "✨ LLM suggests overlay for this answer — Alt+C to open chat");
+                                latchHint(rt, "✨ LLM suggests overlay for this answer — Alt+Shift+C to open chat");
                             },
                             .never => {},
                         }
