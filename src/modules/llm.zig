@@ -402,7 +402,7 @@ pub fn configure(comptime cfg: Config) type {
             chat_input_buf: [1024]u8 = undefined,
             chat_input_len: usize = 0,
 
-            // ── Inline chat panel (phase 2c) ─────────────────────
+            // ── Inline chat panel (Alt+C) ────────────────────────
             //
             // Alt+C — opens a slim chat panel ABOVE the statusbar
             // in the user's main screen (no alt-screen swap). The
@@ -410,7 +410,7 @@ pub fn configure(comptime cfg: Config) type {
             // at the bottom for a few lines of recent conversation
             // + a chat input row. Cursor focus moves to the input
             // row while open; statusbar.setReserveRows grows the
-            // reservation, statusbar.activate re-emits DECSTBM, and
+            // reservation, statusbar.applyReserveRows updates DECSTBM, and
             // the inline panel paints into the rows above the hint.
             // Closing restores the base reservation and returns the
             // cursor to the shell at the saved position.
@@ -537,7 +537,7 @@ pub fn configure(comptime cfg: Config) type {
             // and fires a dialog request. Backspace pops the
             // last byte. Other control bytes are dropped (no
             // Ctrl+A / Ctrl+E / arrow-key editing in 2b; that
-            // is left for phase 2c).
+            // is a future follow-up — see PR series #195).
             //
             // Keymap actions (Alt+C close, Esc, Ctrl+Shift+X)
             // dispatch in the proxy BEFORE this hook fires, so
@@ -2224,7 +2224,7 @@ pub fn configure(comptime cfg: Config) type {
         /// the screen — shell output keeps flowing in the rows above
         /// the panel, so the proxy must NOT divert master output into
         /// the overlay ring buffer. Used by the proxy to drive
-        /// `setReserveRows` + `statusbar.activate` on toggle edges.
+        /// `sb.applyReserveRows` on toggle edges.
         pub fn isInlineChatActive(rt: *Runtime) bool {
             return rt.chat_inline_open;
         }
@@ -2411,10 +2411,10 @@ pub fn configure(comptime cfg: Config) type {
                 pty_mod.WinSize{ .rows = 24, .cols = 80, .xpixel = 0, .ypixel = 0 };
             const rows: u16 = if (size.rows > 4) size.rows else 4;
             const content_bottom: u16 = rows - 2;
-            // `size.cols` available but unused — phase 2c will use
-            // it for per-row wrap calculations once we model turn
-            // rendering at the codepoint level instead of relying
-            // on the terminal's auto-wrap inside the scroll region.
+            // `size.cols` available but unused — wrap calculations
+            // are a future follow-up (codepoint-level turn rendering
+            // instead of relying on the terminal's auto-wrap inside
+            // the scroll region).
 
             // Open: enter alt screen, hide the real terminal cursor
             // (the input row paints its own reverse-video block
@@ -2597,7 +2597,7 @@ pub fn configure(comptime cfg: Config) type {
             }
 
             // Build a list of rendered "lines" (one line per turn
-            // for now — wrapping comes in phase 2c). Render the
+            // for now — wrapping is a future follow-up). Render the
             // last N where N = scrollback_rows.
             const start_turn: usize = if (rt.turns_len > scrollback_rows) rt.turns_len - scrollback_rows else 0;
             row = top_row + 1;

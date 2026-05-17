@@ -224,9 +224,18 @@ pub fn Dispatcher(comptime modules: anytype) type {
         }
 
         /// Notify size-aware modules that the terminal just resized
-        /// (after SIGWINCH + sb.activate). Modules with an `onResize`
-        /// hook re-arm their paint latch so the next term-bytes tick
-        /// repaints at the new geometry.
+        /// (after SIGWINCH + statusbar re-activate). Modules with an
+        /// `onResize` hook re-arm their paint latch so the next
+        /// term-bytes tick repaints at the new geometry.
+        ///
+        /// **Signature contract**: modules must declare
+        /// `pub fn onResize(rt: *Runtime) void` — single-argument.
+        /// Don't confuse with `StatusBar.onResize(rows, cols)` in
+        /// `src/statusbar.zig` which is statusbar-internal and takes
+        /// the new dimensions; the dispatcher pulls fresh dimensions
+        /// off `Context` instead, so module hooks need none. A
+        /// future module-side declaration with extra args would
+        /// silently bind only `rt` here.
         pub fn notifyResize(rts: *Runtimes) void {
             inline for (modules, 0..) |M, i| {
                 if (comptime @hasDecl(M, "onResize")) {
