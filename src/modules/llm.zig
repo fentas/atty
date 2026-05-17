@@ -504,6 +504,14 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn detach(rt: *Runtime, io: std.Io) void {
+            // If the inline chat panel is open at shutdown, the
+            // current paint left the real cursor hidden (`?25l`).
+            // Without showing it again, the user's shell-after-exit
+            // would have an invisible cursor until `tput cnorm` /
+            // `reset`. Always-restore is safe: `?25h` is idempotent.
+            if (rt.chat_inline_open) {
+                _ = std.c.write(1, "\x1B[?25h", 6);
+            }
             freeTurns(rt);
             rt.osc133_capture.deinit();
             // Heap-promoted Runtime buffers are owned by the main
