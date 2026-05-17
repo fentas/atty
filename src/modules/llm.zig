@@ -2593,13 +2593,23 @@ pub fn configure(comptime cfg: Config) type {
 
             // Top divider row — dim chrome + mauve icon + cyan
             // shortcut, matching the overlay's visual vocabulary.
+            // In incognito mode, swap the ✨ sparkle for a 🕶 glasses
+            // glyph (`\u{1F576}`) so the user sees at a glance that
+            // their typing won't be recorded locally. NOTE: incognito
+            // gates LOCAL recording (atuin / shell history); chat
+            // prompts STILL go to the remote LLM API. The visual cue
+            // is "won't be saved here," not "won't leave this box."
             const cols_usize: usize = total_cols;
             w.print("\x1B[{d};1H\x1B[2K", .{top_row}) catch return false;
-            w.writeAll("\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}") catch return false;
+            const title: []const u8 = if (ctx.incognito)
+                "\x1B[2m\x1B[22;38;5;141m\u{1F576}\x1B[39;2m atty chat (incognito) \u{2500}"
+            else
+                "\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}";
+            w.writeAll(title) catch return false;
             // Pad the divider with horizontal-line characters across
             // the rest of the row. cols_usize floor at 20 to avoid
             // pathological zero-width panes.
-            const label_visible: usize = 12; // "✨ atty chat ─"
+            const label_visible: usize = if (ctx.incognito) 25 else 12; // "🕶 atty chat (incognito) ─" / "✨ atty chat ─"
             const trail_target: usize = if (cols_usize > label_visible + 24) cols_usize - label_visible - 24 else 4;
             var i: usize = 0;
             while (i < trail_target) : (i += 1) {

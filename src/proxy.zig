@@ -443,12 +443,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         // iteration.
         if (statusbar) |*sb| {
             const want_extra = D.extraReserveRows(&runtimes);
+            const requested: u16 = std.math.add(u16, sb.baseReserveRows(), want_extra) catch sb.rows;
             const want_reserve: u16 = blk: {
-                const sum = std.math.add(u16, sb.baseReserveRows(), want_extra) catch sb.rows;
                 // Clamp so the shell always has at least 1 row.
-                if (sum >= sb.rows) break :blk if (sb.rows > 1) sb.rows - 1 else 1;
-                break :blk sum;
+                if (requested >= sb.rows) break :blk if (sb.rows > 1) sb.rows - 1 else 1;
+                break :blk requested;
             };
+            if (requested != want_reserve and want_extra > 0) {
+                // Surface a hint so the user knows the inline panel
+                // was squeezed below its configured size. Only fires
+                // when the request was actually shrunk AND a module
+                // requested extra rows (i.e. it's the module's
+                // request that triggered the clamp, not the base
+                // already exceeding the screen).
+                var msg_buf: [128]u8 = undefined;
+                if (std.fmt.bufPrint(&msg_buf, "terminal too small — inline panel clamped (using {d} rows of {d} requested)", .{ want_reserve - sb.baseReserveRows(), want_extra })) |msg| {
+                    sb.setHint(msg, config.statusbar.hint_ttl_ms);
+                } else |_| {}
+            }
             if (want_reserve != sb.reserve_rows and !alt_screen.active) {
                 var w_re: std.Io.Writer = .fixed(&out_buf);
                 // Clear any visible ghost text BEFORE shrinking /
@@ -1511,6 +1523,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 // chrome stays at the old geometry
                                 // until the next keystroke / response.
                                 D.notifyResize(&runtimes);
+                                // Drain term bytes immediately so the
+                                // panel re-renders at the new geometry
+                                // BEFORE control returns to the poll —
+                                // otherwise sb.activate's per-row
+                                // erase has left the reserved zone
+                                // blank until the next tick_interval_ms
+                                // (~50 ms).
+                                if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                                    if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+                                }
                             }
                         } else {
                             cursor_tracker.setMaxRows(s.rows);

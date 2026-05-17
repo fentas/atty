@@ -582,6 +582,15 @@ test "setTransient overrides text_buf for the TTL window" {
     try testing.expect(std.mem.indexOf(u8, out, "atty") == null);
 }
 
+test "applyReserveRows: no-op when n == current reserve_rows" {
+    var b = StatusBar.init(24, 80, 3, .{});
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.applyReserveRows(&w, 3);
+    try testing.expectEqual(@as(usize, 0), w.end);
+    try testing.expectEqual(@as(u16, 3), b.reserve_rows);
+}
+
 test "applyReserveRows grows reservation without screen-clear (no ED 2)" {
     // Growing the reservation must NOT emit `\x1B[2J` (whole-screen
     // clear). That would wipe the user's visible shell history when
