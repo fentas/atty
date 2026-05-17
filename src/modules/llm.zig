@@ -49,6 +49,12 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 pub const Config = types.Config;
 pub const Model = types.Model;
 
+/// Submodule re-exports for tests + advanced users that want to
+/// drive the HTTP worker or dialog envelope outside of `configure`.
+/// Stable for internal use; not part of the public Suckless contract.
+pub const dialog_ns = dialog;
+pub const worker_ns = worker_mod_ns;
+
 pub fn configure(comptime cfg: Config) type {
     // Comptime-validate config invariants that paint code relies on.
     // `inline_chat_rows < 3` would underflow `panel_rows - 2` in
@@ -508,6 +514,14 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn detach(rt: *Runtime, io: std.Io) void {
+            // If the inline chat panel is open at shutdown, the
+            // current paint left the real cursor hidden (`?25l`).
+            // Without showing it again, the user's shell-after-exit
+            // would have an invisible cursor until `tput cnorm` /
+            // `reset`. Always-restore is safe: `?25h` is idempotent.
+            if (rt.chat_inline_open) {
+                _ = std.c.write(1, "\x1B[?25h", 6);
+            }
             freeTurns(rt);
             rt.osc133_capture.deinit();
             // Heap-promoted Runtime buffers are owned by the main
@@ -1755,6 +1769,19 @@ pub fn configure(comptime cfg: Config) type {
                     // onLineCommit / fireDialogRequest). Auto-exec
                     // disarms — the answer is the user's, not the
                     // LLM's, so no auto-submit timer.
+                    //
+                    // ALSO push the assistant turn so the question
+                    // appears in chat-mode scrollback (Alt+C / Alt+Shift+C)
+                    // — not just as a transient hint at the bottom.
+                    // Falling back to "atty asked a question" when
+                    // dupe OOMs keeps the chat-scrollback story
+                    // intact without abort-on-OOM.
+                    if (rt.last_assistant_json_len > 0) {
+                        const assistant_copy = rt.allocator.dupe(u8, rt.last_assistant_json[0..rt.last_assistant_json_len]) catch null;
+                        if (assistant_copy) |copy| {
+                            pushTurn(rt, .assistant_exec, copy) catch rt.allocator.free(copy);
+                        }
+                    }
                     const q = parsed.question();
                     // Multi-choice: copy choices into Runtime-
                     // owned storage so they outlive `parsed`. The
@@ -2107,17 +2134,46 @@ pub fn configure(comptime cfg: Config) type {
             errdefer rt.allocator.free(assistant_copy);
             try pushTurn(rt, .assistant_exec, assistant_copy);
 
-            // Build the corrective user turn. Kept short — most
-            // models react better to a terse correction than a
-            // wall of meta-commentary.
+            // Detect specific drift patterns we've seen in practice
+            // so the corrective turn can be CONCRETE about the fix
+            // instead of generic "use valid JSON." Concrete examples
+            // help small models converge faster than abstract specs.
+            //   • trailing `{...}` after the main object — the
+            //     `{"open_chat": true}` second-object drift the user
+            //     hit in image #5. Model treats the advisory flag as
+            //     a separate envelope.
+            //   • markdown fences (```json …``` wrappers).
+            //   • prose preamble ("Sure! Here you go:") before the JSON.
+            const concrete_hint: []const u8 = blk: {
+                if (std.mem.indexOf(u8, bad_reply, "} {") != null or
+                    std.mem.indexOf(u8, bad_reply, "}\n{") != null or
+                    std.mem.indexOf(u8, bad_reply, "}\r\n{") != null)
+                {
+                    break :blk " You emitted TWO JSON objects. The `open_chat` field must be INSIDE the same object as `action`, e.g. {\"action\":\"question\",\"question\":\"…\",\"open_chat\":true} — NOT a separate {\"open_chat\":true} appended after.";
+                }
+                if (std.mem.indexOf(u8, bad_reply, "```") != null) {
+                    break :blk " Drop the ```json fence — emit the raw object.";
+                }
+                // Heuristic for prose preamble: first non-whitespace
+                // char isn't `{`.
+                var i: usize = 0;
+                while (i < bad_reply.len and (bad_reply[i] == ' ' or bad_reply[i] == '\n' or bad_reply[i] == '\r' or bad_reply[i] == '\t')) : (i += 1) {}
+                if (i < bad_reply.len and bad_reply[i] != '{') {
+                    break :blk " Drop any prose before the `{` — the FIRST non-whitespace character must be `{`.";
+                }
+                break :blk "";
+            };
+
+            // Build the corrective user turn. Includes the exact
+            // reason + (when we detected it) a concrete example fix.
             const corrective = try std.fmt.allocPrint(
                 rt.allocator,
-                "Your previous reply {s}. Reply STRICTLY with JSON: " ++
+                "Your previous reply {s}.{s} Reply STRICTLY with JSON ON ONE LINE: " ++
                     "{{\"action\":\"exec\",\"command\":\"…\",\"description\":\"…\"}} " ++
                     "or {{\"action\":\"done\",\"reason\":\"…\"}} " ++
                     "or {{\"action\":\"question\",\"question\":\"…\"}}. " ++
-                    "No prose. No markdown fences. No code blocks.",
-                .{reason},
+                    "No prose. No markdown fences. No code blocks. ONE object only.",
+                .{ reason, concrete_hint },
             );
             errdefer rt.allocator.free(corrective);
             try pushTurn(rt, .user, corrective);
@@ -2567,14 +2623,98 @@ pub fn configure(comptime cfg: Config) type {
         /// after the proxy's `setReserveRows(base) + activate` has
         /// shrunk the reservation back. (The proxy clears the freed
         /// rows itself via `activate`; the paint doesn't need to.)
+        /// Render a turn's content for the chat scrollback. When
+        /// the assistant produced a JSON envelope (the dialog
+        /// protocol shape), extract the human-meaningful field —
+        /// `description`+`command` for exec, `reason` for done,
+        /// `question` for question — and present it as prose +
+        /// a dim command preview. Falls back to the raw content
+        /// when parsing fails (single-mode replies, prose drift).
+        ///
+        /// `max_visible` caps the visible cols on a single row;
+        /// longer content gets a "[…]" ellipsis. The actual row
+        /// CUP + clear is done by the caller; we only emit content
+        /// bytes (and SGR resets).
+        fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize) !void {
+            const c = turn.content;
+            // Quick shape check: assistant turns from the dialog
+            // protocol always start with `{` and contain `"action"`.
+            // Avoids a full JSON parse on every paint for user /
+            // observation turns whose contents are free prose.
+            const looks_like_envelope = turn.kind == .assistant_exec and
+                c.len > 2 and
+                c[0] == '{' and
+                std.mem.indexOf(u8, c, "\"action\"") != null;
+            if (!looks_like_envelope) {
+                const slice = if (c.len > max_visible) c[0..max_visible] else c;
+                try writeSanitized(w, slice);
+                if (c.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                return;
+            }
+            // Parse with the dialog parser so any "open_chat as
+            // separate object" or trailing-prose drift falls back
+            // to the raw render (which at least surfaces what the
+            // model emitted instead of vanishing). Allocator: a
+            // local fixed-buffer stream avoids touching the
+            // dialog allocator from a paint hook.
+            const R = dialog.Response(cfg.max_response_bytes);
+            var parsed: R = .{};
+            // `parseResponse` needs an allocator — the JSON parser
+            // walks the tree once. The paint hook doesn't have a
+            // long-lived allocator handy; use a heap fallback for
+            // the typical small envelope. On any parse error,
+            // fall through to raw rendering.
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
+                const slice = if (c.len > max_visible) c[0..max_visible] else c;
+                try writeSanitized(w, slice);
+                if (c.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                return;
+            };
+            // Per-action rendering — keep it one row each.
+            switch (parsed.action) {
+                .exec => {
+                    const cmd = parsed.command();
+                    const desc = parsed.description();
+                    if (desc.len > 0) {
+                        try writeSanitized(w, if (desc.len > max_visible / 2) desc[0..(max_visible / 2)] else desc);
+                        try w.writeAll(" \x1B[2m\u{2192}\x1B[0m ");
+                    }
+                    // Command in cyan-on-default to stand out as the
+                    // actionable bit.
+                    try w.writeAll("\x1B[22;38;5;14m");
+                    const cmd_room: usize = if (max_visible > 20) max_visible - 20 else max_visible;
+                    try writeSanitized(w, if (cmd.len > cmd_room) cmd[0..cmd_room] else cmd);
+                    try w.writeAll("\x1B[0m");
+                    if (cmd.len > cmd_room) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                },
+                .question => {
+                    const q = parsed.question();
+                    const slice = if (q.len > max_visible) q[0..max_visible] else q;
+                    try w.writeAll("\x1B[3m"); // italic
+                    try writeSanitized(w, slice);
+                    try w.writeAll("\x1B[0m");
+                    if (q.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                },
+                .done => {
+                    const r = parsed.reason();
+                    try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m "); // mauve check
+                    const slice = if (r.len > max_visible) r[0..max_visible] else r;
+                    try writeSanitized(w, slice);
+                    if (r.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                },
+            }
+        }
+
         fn paintInlineChat(rt: *Runtime, ctx: *m.Context) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
             if (!rt.chat_inline_open) {
-                // Close: DECRC the cursor we saved on open. The
-                // proxy already redrew the reserved zone via
-                // `applyReserveRows(base)` so nothing else needs
-                // writing here.
-                w.writeAll("\x1B[u") catch return false;
+                // Close: show the real cursor again and DECRC to
+                // the position saved on open. The proxy already
+                // redrew the reserved zone via `applyReserveRows(base)`
+                // so nothing else needs writing here.
+                w.writeAll("\x1B[?25h\x1B[u") catch return false;
                 rt.chat_inline_buf_len = w.end;
                 return true;
             }
@@ -2603,7 +2743,7 @@ pub fn configure(comptime cfg: Config) type {
                 // a no-op. Roll the open flag back so the user isn't
                 // trapped — proxy will shrink the reservation next
                 // tick.
-                w.writeAll("\x1B[u") catch return false;
+                w.writeAll("\x1B[?25h\x1B[u") catch return false;
                 rt.chat_inline_buf_len = w.end;
                 return false;
             }
@@ -2611,11 +2751,14 @@ pub fn configure(comptime cfg: Config) type {
             const top_row: u16 = total_rows - live_reserve + 1;
             const input_row: u16 = top_row + panel_rows - 1;
 
-            // Save cursor (proxy's `activate` has just moved it
-            // home but the user's underlying shell will repaint on
-            // the next master byte; we need to restore something
-            // sensible on close).
-            w.writeAll("\x1B[s") catch return false;
+            // Save cursor + hide the real one. The real cursor needs
+            // to remain in the shell area (so bash's echo of an
+            // injected exec command lands at the SHELL PROMPT, not
+            // the chat input row). We draw a block-cursor glyph in
+            // the input row as the visible marker; the real cursor
+            // sits invisibly back at the shell's prompt position via
+            // DECRC at the END of this paint.
+            w.writeAll("\x1B[?25l\x1B[s") catch return false;
 
             // Top divider row — dim chrome + mauve icon + cyan
             // shortcut, matching the overlay's visual vocabulary.
@@ -2680,14 +2823,7 @@ pub fn configure(comptime cfg: Config) type {
                     .observation => "\x1B[2mOutput:\x1B[0m ",
                 };
                 w.writeAll(prefix) catch return false;
-                const slice = if (turn.content.len > max_inline_visible)
-                    turn.content[0..max_inline_visible]
-                else
-                    turn.content;
-                writeSanitized(&w, slice) catch return false;
-                if (turn.content.len > max_inline_visible) {
-                    w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m") catch return false;
-                }
+                renderTurnContent(&w, turn, max_inline_visible) catch return false;
                 row += 1;
             }
             if (rt.turns_len == 0) {
