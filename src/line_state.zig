@@ -265,7 +265,13 @@ pub const LineState = struct {
                 //       a slightly over-suppressed ghost for PageUp/
                 //       PageDown — better than the deletion-illusion
                 //       bug.
-                if (j < input.len) {
+                // Skip the flag when the buffer is empty — cursor is
+                // already at col 1 == EOL, no character can be over-
+                // painted. Avoids stickily suppressing ghost when
+                // the user presses Right/Home/End at an empty prompt
+                // (no-op in shells, but flag would persist for the
+                // whole next typing session).
+                if (j < input.len and self.len > 0) {
                     switch (input[j]) {
                         'D', 'C', 'H', 'F', '~' => self.cursor_moved = true,
                         else => {},
@@ -393,7 +399,13 @@ pub const LineState = struct {
             self.len = end;
             if (self.len == 0) {
                 self.uncertain = false;
+                // Same rationale as `backspace`/`killLine` empty-result
+                // paths — clear cursor_moved so ghost can re-engage
+                // on the next typed character instead of staying
+                // stickily suppressed.
+                self.cursor_moved = false;
                 self.pending_author = .user;
+                self.pending_intent_len = 0;
             }
             self.generation +%= 1;
         }
@@ -547,6 +559,32 @@ test "killLine clears cursor_moved (empty buffer == EOL)" {
     _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true
     try std.testing.expect(l.cursor_moved);
     _ = l.applyInput("\x15"); // Ctrl+U → killLine
+    try std.testing.expectEqual(@as(usize, 0), l.len);
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "empty buffer + Right/Home does NOT set cursor_moved" {
+    // Empty prompt + cursor-motion key is a no-op in shells (cursor
+    // is already at col 1 == BOL == EOL). Setting cursor_moved here
+    // would stickily suppress ghost for the rest of the line the
+    // user is about to type. Skip the flag when buffer is empty.
+    var l = LineState{};
+    _ = l.applyInput("\x1b[C"); // Right at empty prompt
+    try std.testing.expect(!l.cursor_moved);
+    _ = l.applyInput("\x1b[H"); // Home at empty prompt
+    try std.testing.expect(!l.cursor_moved);
+    // Once the user types something, the flag stays correct.
+    _ = l.applyInput("hi");
+    _ = l.applyInput("\x1b[D"); // Left mid-buffer → flag fires
+    try std.testing.expect(l.cursor_moved);
+}
+
+test "killWord-to-empty clears cursor_moved" {
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput("\x17"); // Ctrl+W → killWord, buffer goes to "" (one word)
     try std.testing.expectEqual(@as(usize, 0), l.len);
     try std.testing.expect(!l.cursor_moved);
 }
