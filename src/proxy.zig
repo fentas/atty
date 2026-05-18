@@ -516,26 +516,33 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Bash never sees these bytes (they go to STDOUT,
                 // not pty.master). The cursor_tracker is updated
                 // post-fact via the DSR-6n that fires below.
+                var post_scroll_row: ?u16 = null;
+                var post_scroll_col: ?u16 = null;
                 if (args.is_tty and want_reserve > sb.reserve_rows) {
                     const new_bottom: u16 = if (sb.rows > want_reserve) sb.rows - want_reserve else 1;
                     const cur_row: u16 = cursor_tracker.currentRow();
                     const cur_col: u16 = cursor_tracker.currentCol();
                     if (cur_row > new_bottom) {
                         const scroll_n: u16 = cur_row - new_bottom;
-                        // Position at the OLD bottom-of-scroll-region
-                        // first so the `\n` series scrolls within the
-                        // existing region. (cursor_tracker.max_rows is
-                        // already `sb.effectiveRows()`, i.e. old_bottom.)
                         w_re.print("\x1B[{d};1H", .{cur_row}) catch {};
                         var nl: u16 = 0;
                         while (nl < scroll_n) : (nl += 1) {
                             w_re.writeAll("\n") catch {};
                         }
-                        // CUP to (new prompt row, original col) so
-                        // bash's next echo lands where the user
-                        // expects.
                         w_re.print("\x1B[{d};{d}H", .{ new_bottom, cur_col }) catch {};
                         trace.log(.paint, "panel-grow scroll-up: from row={d} col={d} by {d}", .{ cur_row, cur_col, scroll_n });
+                        // After the scroll the cursor lands at
+                        // (new_bottom, cur_col). Propagate to the
+                        // tracker AND `ctx` so the panel paint that
+                        // runs later in this iteration captures the
+                        // POST-scroll snapshot — without this the
+                        // panel's `inlineRestorePos` would CUP back
+                        // to the pre-scroll row, which is now in the
+                        // panel zone, and bash's next prompt redraw
+                        // would chase it (prompt visibly walks UP
+                        // each redraw).
+                        post_scroll_row = new_bottom;
+                        post_scroll_col = cur_col;
                     }
                 }
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
@@ -552,6 +559,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // dispatch.
                 if (args.is_tty) DsrParser.writeQuery(&w_re) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
+                if (post_scroll_row) |r| {
+                    const c: u16 = post_scroll_col orelse 1;
+                    cursor_tracker.setPosition(r, c);
+                    ctx.cursor_row = r;
+                    ctx.cursor_col = c;
+                }
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
                 // SIGWINCH is intentionally NOT sent on reservation
                 // toggles. The slave's TIOCGWINSZ size is unchanged

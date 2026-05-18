@@ -496,6 +496,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 return true;
             }
 
+            // Lazy snapshot of the shell prompt position — the toggle
+            // action handler set both to 0 as a defer marker because
+            // the proxy's reservation-grow path runs AFTER the action
+            // but BEFORE this paint, and may have scrolled the prompt
+            // up to make room. By paint time `ctx.cursor_row/col`
+            // already reflect the post-scroll position (proxy updates
+            // them right after emitting the scroll-up sequence), so
+            // we capture HERE to land the restore CUP on the prompt's
+            // new row instead of stale pre-scroll geometry.
+            if (rt.chat_open_cursor_row == 0) {
+                rt.chat_open_cursor_row = ctx.cursor_row orelse 0;
+                rt.chat_open_cursor_col = ctx.cursor_col orelse 0;
+            }
+
             // Read terminal + statusbar geometry from Context — the
             // proxy refreshes these every iteration so a SIGWINCH
             // and any inline-reservation clamp are already reflected.
