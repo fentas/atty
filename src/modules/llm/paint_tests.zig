@@ -906,3 +906,102 @@ test "inline scroll: nonzero inline offset windows the visible turns + emits ind
     try testing.expect(std.mem.indexOf(u8, bytes2.?, "INL-NEWEST") != null);
     try testing.expect(std.mem.indexOf(u8, bytes2.?, "more turn") == null);
 }
+
+test "inline chat: open paint CUP-restores to (row, col) snapshot — not col 1" {
+    // Regression guard: pre-cursor_col-tracking, the close paint
+    // emitted `\x1B[<row>;1H` which landed bash's next echo at the
+    // start of the prompt row, on top of the PS1 chrome. With the
+    // snapshot now capturing the prompt-end column from OSC 133
+    // `;B`, the restore CUP includes the col so the cursor parks
+    // where bash's input region begins.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+        .cursor_row = 8,
+        .cursor_col = 4, // e.g. cursor after `~ ) ` prompt
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
+    try testing.expectEqual(@as(u16, 4), rt.chat_open_cursor_col);
+
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const opened = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(opened != null);
+    // CUP must include BOTH row and col.
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[8;4H") != null);
+    // The legacy col-1 form must NOT appear at that row.
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[8;1H") == null);
+
+    // Close also uses (row, col).
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    const closed = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(closed != null);
+    try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[8;4H") != null);
+}
+
+test "inline chat: col snapshot 0 → falls back to col 1" {
+    // When `ctx.cursor_col` is null at open (cursor_tracker unwired
+    // / non-TTY), the snapshot stays 0 and the restore CUP uses col
+    // 1 as a defensive default. Existing tests that don't set
+    // cursor_col rely on this fallback.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+        .cursor_row = 8,
+        // cursor_col left null
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_col);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const opened = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(opened != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[8;1H") != null);
+}

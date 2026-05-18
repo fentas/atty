@@ -553,6 +553,13 @@ pub fn configure(comptime cfg: Config) type {
             /// so the close paint's CUP can still target it; the
             /// next open overwrites unconditionally.
             chat_open_cursor_row: u16 = 0,
+            /// Companion to `chat_open_cursor_row` — the column where
+            /// the prompt's input region ends (post-PS1). Without
+            /// this, Ctrl+Up restores the cursor to column 1 and
+            /// bash's next echoed keystroke lands at the start of
+            /// the prompt row, not after the prompt characters.
+            /// 0 sentinel = unknown; paint falls back to col 1.
+            chat_open_cursor_col: u16 = 0,
             /// True when the user's keystroke focus is inside the
             /// inline chat panel (default whenever the panel opens).
             /// `Ctrl+Up` flips it to false → focus moves to the shell
