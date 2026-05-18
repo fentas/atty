@@ -34,20 +34,30 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const cursor_set_seq = "\x1B]12;" ++ cfg.prefix_signal_cursor_color ++ "\x07";
         const cursor_reset_seq = "\x1B]112\x07";
 
-        /// Write `bytes` to `w` filtering out control bytes that
-        /// would otherwise hijack the terminal — embedded `\x1B`
-        /// in an LLM response would smuggle escape sequences into
-        /// our overlay paint, breaking the layout (the screenshot
-        /// bug). Tabs and printable bytes pass through; newlines
-        /// become spaces so each turn renders on a single visual
-        /// line that the terminal wraps naturally inside the
-        /// scroll region.
+        /// Write `bytes` to `w` filtering out anything a terminal
+        /// could read as a control directive — defense against an
+        /// LLM smuggling escape sequences into our paint:
+        ///   - C0 controls + DEL (0x00-0x1F + 0x7F): all dropped,
+        ///     newlines collapse to single spaces so a turn stays
+        ///     on one visual row inside the DECSTBM region.
+        ///   - C1 controls (0x80-0x9F): dropped. Most modern
+        ///     terminals don't honour 8-bit CSI (0x9B) but a few
+        ///     historical ones do; cheap insurance.
+        ///   - UTF-8 encoding of C1 (0xC2 followed by 0x80-0x9F):
+        ///     drop the pair so the same codepoint can't sneak
+        ///     through the multi-byte form.
+        ///   - Tab (0x09) and printable ASCII pass through.
         fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) !void {
-            for (bytes) |b| {
+            var i: usize = 0;
+            while (i < bytes.len) : (i += 1) {
+                const b = bytes[i];
                 if (b == 0x1B or b == 0x7F or (b < 0x20 and b != 0x09)) {
-                    // Replace newline with space; drop all other
-                    // C0 + ESC + DEL silently.
                     if (b == 0x0A or b == 0x0D) try w.writeAll(" ") else continue;
+                } else if (b >= 0x80 and b <= 0x9F) {
+                    continue;
+                } else if (b == 0xC2 and i + 1 < bytes.len and bytes[i + 1] >= 0x80 and bytes[i + 1] <= 0x9F) {
+                    i += 1; // skip the continuation byte too
+                    continue;
                 } else {
                     try w.writeByte(b);
                 }
