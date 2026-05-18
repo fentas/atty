@@ -924,3 +924,55 @@ test "inline chat: Enter with refused-fire clamps cursor when trailing whitespac
     try testing.expect(rt.chat_inline_input_cursor <= rt.chat_inline_input_len);
     try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
 }
+
+test "inline chat: chunk ending mid-CSI doesn't spin AND doesn't insert literal `[`" {
+    // Regression guard: a chunk ending with `ESC [ 3` (partial
+    // Delete sequence) used to make parseChatKey return .none
+    // without advancing `i`, sending the caller's
+    // `while (i < input.len)` loop into an infinite spin.
+    // Sibling: a chunk ending with `ESC [` would fall through to
+    // the single-byte path and insert a literal `[` next.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Partial Delete: must terminate (no spin) and not insert anything.
+    _ = try L.onInput(&rt, &ctx, "\x1B[3");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // Partial 3-byte CSI: must NOT insert `[` as printable.
+    _ = try L.onInput(&rt, &ctx, "\x1B[");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // Bare ESC at chunk end: also drained cleanly.
+    _ = try L.onInput(&rt, &ctx, "\x1B");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // A complete CSI in a single chunk still works.
+    _ = try L.onInput(&rt, &ctx, "abc");
+    _ = try L.onInput(&rt, &ctx, "\x1B[3~"); // Delete at end of buffer — no-op
+    try testing.expectEqualStrings("abc", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}

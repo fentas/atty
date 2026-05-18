@@ -96,12 +96,31 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// as a printable insert.
         fn parseChatKey(input: []const u8, i: *usize) ChatKey {
             const b = input[i.*];
+            // Incomplete CSI tail (chunk ends with `ESC` or `ESC [`).
+            // Drain to chunk end so the partial bytes don't get
+            // misread — a lone `[` would otherwise be inserted as a
+            // printable, and `ESC` alone would loop on its
+            // single-byte fallthrough on the next pass.
+            if (b == 0x1B and (i.* + 1 >= input.len or
+                (input[i.* + 1] == '[' and i.* + 2 >= input.len)))
+            {
+                i.* = input.len;
+                return .none;
+            }
             if (b == 0x1B and i.* + 2 < input.len and input[i.* + 1] == '[') {
                 const c = input[i.* + 2];
                 // VT-style `ESC [ <num> ~` (Delete = 3~, Home = 1~/7~,
                 // End = 4~/8~). Need a fourth byte to know which.
                 if (c >= '0' and c <= '9') {
-                    if (i.* + 3 >= input.len) return .none;
+                    // Incomplete VT-style CSI (chunk ended mid-
+                    // sequence, e.g. `ESC [ 3` waiting for `~`).
+                    // Drain to chunk end so the caller's
+                    // `while (i < input.len)` loop terminates —
+                    // returning .none without advancing would spin.
+                    if (i.* + 3 >= input.len) {
+                        i.* = input.len;
+                        return .none;
+                    }
                     const final = input[i.* + 3];
                     if (final == '~') {
                         i.* += 4;
