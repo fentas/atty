@@ -36,7 +36,8 @@ const terminal = @import("terminal.zig");
 const RawMode = terminal.RawMode;
 const slaveIsHiddenInput = terminal.slaveIsHiddenInput;
 const LineState = @import("line_state.zig").LineState;
-const Ghost = @import("ghost.zig").Ghost;
+const ghost_mod = @import("ghost.zig");
+const Ghost = ghost_mod.Ghost;
 const GhostList = @import("ghost_list.zig").GhostList;
 const StatusBar = @import("statusbar.zig").StatusBar;
 const ansi = @import("ansi.zig");
@@ -708,35 +709,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         },
                         .ghost_accept_word => {
                             // Partial accept (fish's section-by-
-                            // section walk). Take the FIRST word
-                            // of the trailing ghost suggestion +
-                            // the trailing whitespace after it.
-                            // Successive presses peel off the next
-                            // word from the (now shorter) ghost.
+                            // section walk). Peel the next "section"
+                            // of the trailing ghost suggestion. A
+                            // section ends at EITHER a space-run OR
+                            // a `/` (path-segment boundary), so
+                            // `cd /home/fentas/github/atty` peels as
+                            // `/home/` → `fentas/` → `github/` →
+                            // `atty` rather than one mega-chunk.
                             //
-                            // Word boundary: skip leading spaces,
-                            // skip non-space chars (the word
-                            // itself), then include trailing space
-                            // run so the next press starts cleanly.
-                            // No-op when no ghost / uncertain line.
+                            // Picker lives in `ghost.nextSectionEnd`
+                            // — fully unit-tested over the rooted
+                            // path / non-slash word / empty / double-
+                            // slash / trailing-slash cases.
                             if (!line_state.uncertain) {
                                 if (D.gatherGhostText(&runtimes, &ctx) catch null) |trailing| {
-                                    if (trailing.len > 0) {
-                                        var end: usize = 0;
-                                        // Skip leading whitespace (rare —
-                                        // usually the ghost starts with
-                                        // a word char).
-                                        while (end < trailing.len and trailing[end] == ' ') end += 1;
-                                        // Consume the word.
-                                        while (end < trailing.len and trailing[end] != ' ') end += 1;
-                                        // Consume the trailing whitespace
-                                        // run so the boundary lands at
-                                        // the next word's first char.
-                                        while (end < trailing.len and trailing[end] == ' ') end += 1;
-                                        if (end > 0 and end <= accept_buf.len) {
-                                            @memcpy(accept_buf[0..end], trailing[0..end]);
-                                            input = accept_buf[0..end];
-                                        }
+                                    const end = ghost_mod.nextSectionEnd(trailing);
+                                    if (end > 0 and end <= accept_buf.len) {
+                                        @memcpy(accept_buf[0..end], trailing[0..end]);
+                                        input = accept_buf[0..end];
                                     }
                                 }
                             }

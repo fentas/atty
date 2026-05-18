@@ -94,6 +94,87 @@ test "trailing rejects shorter suggestion" {
     try std.testing.expect(Ghost.trailing("lsla", "ls") == null);
 }
 
+/// How many bytes from the START of `trailing` constitute the
+/// next "section" for `ghost_accept_word` (Ctrl+Right). A section
+/// ends at the FIRST `/` AFTER an opening segment, or at the
+/// first space-run, whichever comes first. The boundary character
+/// (a single `/` or the whole space-run) is INCLUDED so the next
+/// press lands cleanly on the start of the following section.
+///
+/// Returns 0 when there's nothing accept-worthy (empty input, or
+/// pure leading whitespace consumed but the caller wants a
+/// no-op).
+///
+/// Examples:
+///   `/home/fentas/x`  → 6 (`/home/`)
+///   `git checkout x`  → 4 (`git `)
+///   `foo/`            → 4 (`foo/`)
+///   `foo`             → 3 (`foo`)
+///   `` (empty)        → 0
+///   `/foo`            → 4 (`/foo`)
+pub fn nextSectionEnd(trailing: []const u8) usize {
+    if (trailing.len == 0) return 0;
+    var end: usize = 0;
+    while (end < trailing.len and trailing[end] == ' ') end += 1;
+    // Opening `/` belongs to this segment (`/home/` rather than
+    // `/` + `home/`).
+    if (end < trailing.len and trailing[end] == '/') end += 1;
+    // Segment body — non-space, non-slash.
+    while (end < trailing.len and trailing[end] != ' ' and trailing[end] != '/') end += 1;
+    // Trailing boundary.
+    if (end < trailing.len and trailing[end] == '/') {
+        end += 1;
+    } else {
+        while (end < trailing.len and trailing[end] == ' ') end += 1;
+    }
+    return end;
+}
+
+test "nextSectionEnd: rooted path peels segment + slash" {
+    try std.testing.expectEqual(@as(usize, 6), nextSectionEnd("/home/fentas/x"));
+}
+
+test "nextSectionEnd: non-slash ghost stops at space-run (legacy behaviour)" {
+    try std.testing.expectEqual(@as(usize, 4), nextSectionEnd("git checkout master"));
+}
+
+test "nextSectionEnd: trailing slash included" {
+    try std.testing.expectEqual(@as(usize, 4), nextSectionEnd("foo/"));
+}
+
+test "nextSectionEnd: no slash, no trailing space → whole word" {
+    try std.testing.expectEqual(@as(usize, 3), nextSectionEnd("foo"));
+}
+
+test "nextSectionEnd: empty input → 0" {
+    try std.testing.expectEqual(@as(usize, 0), nextSectionEnd(""));
+}
+
+test "nextSectionEnd: leading slash alone" {
+    try std.testing.expectEqual(@as(usize, 4), nextSectionEnd("/foo"));
+}
+
+test "nextSectionEnd: double slash" {
+    // `//foo` — opening `/`, body is empty (next char is also `/`),
+    // boundary slash consumed. Net 2; next press peels `foo`.
+    try std.testing.expectEqual(@as(usize, 2), nextSectionEnd("//foo"));
+}
+
+test "nextSectionEnd: walks a full path through successive calls" {
+    var s: []const u8 = "/home/fentas/github/atty";
+    const e1 = nextSectionEnd(s);
+    try std.testing.expectEqualStrings("/home/", s[0..e1]);
+    s = s[e1..];
+    const e2 = nextSectionEnd(s);
+    try std.testing.expectEqualStrings("fentas/", s[0..e2]);
+    s = s[e2..];
+    const e3 = nextSectionEnd(s);
+    try std.testing.expectEqualStrings("github/", s[0..e3]);
+    s = s[e3..];
+    const e4 = nextSectionEnd(s);
+    try std.testing.expectEqualStrings("atty", s[0..e4]);
+}
+
 test "show then clear toggles visibility" {
     var g = Ghost.init(std.testing.allocator, .{});
     defer g.deinit();
