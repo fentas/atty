@@ -141,6 +141,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             else => .none,
                         };
                     }
+                    // Modified CSI (e.g. `ESC [ 1 ; 5 D` for
+                    // Ctrl+Left). Skip past `ESC [` + the leading
+                    // digit run + optional params, ending at the
+                    // first byte in `0x40..0x7E` (the CSI final).
+                    // Starting the scan at i.* (still pointing at
+                    // ESC) would treat `[` as the final and leave
+                    // the rest of the sequence to be re-parsed as
+                    // printables.
+                    i.* += 3;
                     while (i.* < input.len) : (i.* += 1) {
                         const x = input[i.*];
                         if (x >= 0x40 and x <= 0x7E) {

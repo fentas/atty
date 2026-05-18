@@ -481,10 +481,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 "\x1B[2;38;5;14m";
             w.writeAll(prompt_style) catch return false;
             w.writeAll("\u{276F}\x1B[0m ") catch return false;
-            // Same cursor-centered 512-byte window the overlay input
-            // uses (~10 lines above): keeps the byte under the cursor
-            // on-screen when the buffer is longer than the visible
-            // row.
+            // Center the cursor in a 512-byte window so long
+            // prompts still show what's under the cursor instead
+            // of dragging the tail off-screen. Same windowing the
+            // overlay input uses.
             {
                 const cur = rt.chat_inline_input_cursor;
                 const len = rt.chat_inline_input_len;
@@ -510,22 +510,36 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
                 if (dim) w.writeAll("\x1B[0m") catch return false;
 
-                if (cur < len and rt.chat_focus_in_panel) {
-                    w.writeAll("\x1B[7m") catch return false;
-                    writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
-                    w.writeAll("\x1B[0m") catch return false;
-                } else if (rt.chat_focus_in_panel) {
-                    w.writeAll("\x1B[7m \x1B[0m") catch return false;
+                // Cursor glyph at the insertion point. Focused →
+                // reverse-video block over the byte under the cursor
+                // (or a blank reverse-video space at EOL). Parked →
+                // dim the byte under the cursor in place so the
+                // tail render below doesn't duplicate it.
+                if (rt.chat_focus_in_panel) {
+                    if (cur < len) {
+                        w.writeAll("\x1B[7m") catch return false;
+                        writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
+                        w.writeAll("\x1B[0m") catch return false;
+                    } else {
+                        w.writeAll("\x1B[7m \x1B[0m") catch return false;
+                    }
                 } else {
-                    w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
+                    if (cur < len) {
+                        w.writeAll("\x1B[2m") catch return false;
+                        writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
+                        w.writeAll("\x1B[0m") catch return false;
+                    } else {
+                        w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
+                    }
                 }
 
-                if (cur + 1 < win_end and rt.chat_focus_in_panel) {
+                // Tail: everything PAST the cursor byte (always
+                // `cur + 1`, never `cur`). Dim when parked so the
+                // unconsumed draft reads as inactive.
+                if (cur + 1 < win_end) {
+                    if (!rt.chat_focus_in_panel) w.writeAll("\x1B[2m") catch return false;
                     writeSanitized(&w, rt.chat_inline_input_buf[cur + 1 .. win_end]) catch return false;
-                } else if (cur < win_end and !rt.chat_focus_in_panel) {
-                    w.writeAll("\x1B[2m") catch return false;
-                    writeSanitized(&w, rt.chat_inline_input_buf[cur..win_end]) catch return false;
-                    w.writeAll("\x1B[0m") catch return false;
+                    if (!rt.chat_focus_in_panel) w.writeAll("\x1B[0m") catch return false;
                 }
             }
             // Park the real terminal cursor on the shell row — the

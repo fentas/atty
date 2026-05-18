@@ -877,16 +877,19 @@ test "overlay chat: cursor movement + mid-line insert + Ctrl+W mirror the inline
     // Ctrl+E then Ctrl+W → kills "bar".
     _ = try L.onInput(&rt, &ctx, "\x05\x17");
     try testing.expectEqualStrings("expl!ain foo ", rt.chat_input_buf[0..rt.chat_input_len]);
-    // Ctrl+D closes the overlay (regression guard for PR #89).
+    // Ctrl+D closes the overlay — `.close` must return `.swallow`
+    // immediately so trailing bytes don't land in the now-closed
+    // buffer.
     _ = try L.onInput(&rt, &ctx, "\x04");
     try testing.expect(!rt.chat_overlay_open);
 }
 
 test "inline chat: Enter with refused-fire clamps cursor when trailing whitespace was trimmed" {
-    // Regression guard: PR #93 round-1 review caught that trimming
-    // trailing whitespace could leave the cursor past the new EOL.
-    // If can_fire = false (request in flight), the buffer survives
-    // and a later paint or edit would index out of bounds.
+    // Invariant: trimming trailing whitespace must leave the cursor
+    // within `[0, chat_inline_input_len]`. When submission is
+    // refused (request in flight) the buffer survives, and a stale
+    // out-of-range cursor would index past EOL on the next paint or
+    // edit.
     const L = configure(.{
         .api_base = "http://test/v1",
         .api_base_env = "ATTY_TEST_NEVER",
@@ -975,4 +978,54 @@ test "inline chat: chunk ending mid-CSI doesn't spin AND doesn't insert literal 
     _ = try L.onInput(&rt, &ctx, "abc");
     _ = try L.onInput(&rt, &ctx, "\x1B[3~"); // Delete at end of buffer — no-op
     try testing.expectEqualStrings("abc", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "inline chat: modified CSI (`ESC [ 1 ; 5 D`) doesn't leak its tail as printables" {
+    // Invariant: parseChatKey must consume the WHOLE CSI sequence
+    // for unrecognised modified keys (Ctrl+Left etc.), not just
+    // `ESC [`. A premature return mid-sequence would leave the
+    // remaining bytes (digits + params) to be reparsed as
+    // printables on the next loop iteration.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Ctrl+Left arrow: `ESC [ 1 ; 5 D`. Unrecognised (we only
+    // handle plain Left/Right/Home/End and VT-style ~ sequences).
+    // The whole 6-byte sequence must be consumed silently.
+    _ = try L.onInput(&rt, &ctx, "\x1B[1;5D");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // Same shape but with a recognised final wrapped in params —
+    // still consumed as a single sequence, not insert-leaked.
+    _ = try L.onInput(&rt, &ctx, "\x1B[1;2C"); // Shift+Right
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // A plain CSI right afterwards still works.
+    _ = try L.onInput(&rt, &ctx, "hello");
+    _ = try L.onInput(&rt, &ctx, "\x1B[D"); // Left
+    try testing.expectEqual(@as(usize, 4), rt.chat_inline_input_cursor);
 }
