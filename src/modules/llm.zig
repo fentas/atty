@@ -2981,13 +2981,8 @@ pub fn configure(comptime cfg: Config) type {
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
 
             if (!rt.chat_inline_open) {
-                // Close paint. DECRC alone is unreliable here: the
-                // proxy's `applyReserveRows` wraps its own row-erase
-                // in DECSC/DECRC and clobbers the single save slot,
-                // so a bare DECRC restores to wherever the panel's
-                // last paint parked the cursor (the input row at the
-                // bottom of the reservation). CUP via the snapshot
-                // helper is unambiguous and slot-independent.
+                // CUP via inlineRestoreRow — DECRC is clobbered by
+                // applyReserveRows upstream.
                 const ct_rows: u16 = ctx.terminal_rows orelse 24;
                 const ct_base: u16 = ctx.statusbar_base_reserve orelse 3;
                 const restore_row = inlineRestoreRow(rt, ct_rows, ct_base);
@@ -3151,14 +3146,9 @@ pub fn configure(comptime cfg: Config) type {
             } else {
                 w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
             }
-            // The block-cursor glyph painted above the input is a
-            // static visual marker — the REAL terminal cursor must
-            // sit on the shell prompt row when the paint returns, so
-            // bash's echo of any keystroke / prompt redraw / exec
-            // injection lands at the prompt and not inside the panel
-            // reservation. CUP via the snapshot helper survives the
-            // DECSC overwrites coming from `applyReserveRows` and
-            // `renderStatus` upstream.
+            // The block-cursor glyph above is a static visual marker;
+            // park the real terminal cursor back on the shell row so
+            // echoed bytes land at the prompt. See inlineRestoreRow.
             const restore_row_open = inlineRestoreRow(rt, total_rows, base_reserve);
             w.print("\x1B[{d};1H", .{restore_row_open}) catch return false;
 
