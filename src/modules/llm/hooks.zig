@@ -603,13 +603,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // Default: focus starts in the panel (matches
                         // the previous always-swallow behaviour).
                         rt.chat_focus_in_panel = true;
-                        // Capture the shell prompt row at open time so
-                        // every subsequent paint (including the close
-                        // paint after the next toggle) can land the
-                        // real terminal cursor back on it. Re-open
-                        // with no live cursor_row leaves this at 0,
-                        // which the helper treats as "use fallback".
-                        rt.chat_open_cursor_row = ctx.cursor_row orelse 0;
                     }
                     return true;
                 },

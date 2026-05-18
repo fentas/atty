@@ -293,35 +293,26 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
         }
 
-        /// Compute the row the real terminal cursor should sit at
-        /// after every paintInlineChat call. Pulls from the snapshot
-        /// taken at open time (`rt.chat_open_cursor_row`), falling
-        /// back to the bottom of the shell scroll region when the
-        /// snapshot is unknown OR was clamped past the shell area
-        /// (defensive against cursor_tracker drift / SIGWINCH races).
-        ///
-        /// Anchors to `total_rows - base_reserve` (a row that's
-        /// stable across panel open/close) — DO NOT switch to a
-        /// live-reserve denominator, that would move the fallback
-        /// between open and close and break the close-paint's
-        /// ability to land on the same row the open paint used.
-        fn inlineRestoreRow(rt: *Runtime, total_rows: u16, base_reserve: u16) u16 {
-            const shell_bottom: u16 = if (total_rows > base_reserve) total_rows - base_reserve else 1;
-            if (rt.chat_open_cursor_row == 0) return shell_bottom;
-            if (rt.chat_open_cursor_row > shell_bottom) return shell_bottom;
-            return rt.chat_open_cursor_row;
-        }
-
         fn paintInlineChat(rt: *Runtime, ctx: *m.Context) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
 
             if (!rt.chat_inline_open) {
-                // CUP via inlineRestoreRow — DECRC is clobbered by
-                // applyReserveRows upstream.
-                const ct_rows: u16 = ctx.terminal_rows orelse 24;
-                const ct_base: u16 = ctx.statusbar_base_reserve orelse 3;
-                const restore_row = inlineRestoreRow(rt, ct_rows, ct_base);
-                w.print("\x1B[?25h\x1B[{d};1H", .{restore_row}) catch return false;
+                // Close: just show the cursor. We previously CUP'd
+                // to a snapshot row taken at open time, but that
+                // snapshot only captured row (not column) AND went
+                // stale whenever shell output scrolled between open
+                // and close — both made the cursor land at the
+                // wrong place AND broke command injection (bash
+                // echoes the injected bytes wherever the cursor is).
+                //
+                // No restore is imperfect — the cursor will sit at
+                // wherever paint last left it inside the (now-
+                // collapsed) reservation, invisible until the user's
+                // next keystroke triggers bash to redraw its prompt.
+                // The next keystroke fixes it; injection paths add
+                // their own positioning. Better than confidently
+                // wrong placement.
+                w.writeAll("\x1B[?25h") catch return false;
                 rt.chat_inline_buf_len = w.end;
                 return true;
             }
@@ -481,12 +472,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             } else {
                 w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
             }
-            // The block-cursor glyph above is a static visual marker;
-            // park the real terminal cursor back on the shell row so
-            // echoed bytes land at the prompt. See inlineRestoreRow.
-            const restore_row_open = inlineRestoreRow(rt, total_rows, base_reserve);
-            w.print("\x1B[{d};1H", .{restore_row_open}) catch return false;
-
+            // The block-cursor glyph above is a static visual marker.
+            // We no longer emit a CUP back to a "shell row" snapshot
+            // here — the row + column it pointed to went stale as
+            // soon as shell output (or bash itself) moved the cursor,
+            // and the resulting wrong-place CUP caused command-
+            // injection bytes to land in random rows. Bash's own
+            // cursor model is the truth; the next keystroke retriggers
+            // its redraw and lands the cursor where it actually
+            // belongs.
             rt.chat_inline_buf_len = w.end;
             return true;
         }

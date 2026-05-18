@@ -519,19 +519,6 @@ pub fn configure(comptime cfg: Config) type {
             // The full overlay (Alt+Shift+C) is still available and
             // mutually-exclusive — opening one closes the other.
             chat_inline_open: bool = false,
-            /// Snapshot of `ctx.cursor_row` taken when the panel
-            /// opens. The shell prompt row is load-bearing for paint:
-            /// the real terminal cursor must end every paint here so
-            /// echoed bytes land at the prompt, not inside the panel
-            /// reservation. DECSC is unreliable upstream — proxy
-            /// `applyReserveRows` runs its own DECSC/DECRC and
-            /// overwrites the single slot. Explicit CUP via this
-            /// snapshot survives. 0 sentinel = unknown (non-TTY,
-            /// cursor_tracker unwired); the paint falls back to
-            /// `shell_bottom`. Intentionally preserved through close
-            /// so the close paint's CUP can still target it; the
-            /// next open overwrites unconditionally.
-            chat_open_cursor_row: u16 = 0,
             /// True when the user's keystroke focus is inside the
             /// inline chat panel (default whenever the panel opens).
             /// `Ctrl+Up` flips it to false → focus moves to the shell
