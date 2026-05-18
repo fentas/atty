@@ -17,6 +17,7 @@ const linux = std.os.linux;
 const config = @import("config");
 const dispatch = @import("dispatch.zig");
 const module = @import("module.zig");
+const trace = @import("trace.zig");
 const io_helpers = @import("proxy/io.zig");
 const containsEnter = io_helpers.containsEnter;
 const writeAll = io_helpers.writeAll;
@@ -575,6 +576,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             const read_n = posix.read(posix.STDIN_FILENO, &read_buf) catch 0;
             if (read_n > 0) {
                 var input: []const u8 = read_buf[0..read_n];
+                trace.logBytes(.input, "stdin_read", input);
+                trace.log(.altscreen, "alt_screen.active={} module_overlay_active={}", .{ alt_screen.active, ctx.module_overlay_active });
 
                 // PASSWORD-INPUT FAST PATH: when the slave PTY is in
                 // canonical hidden-input mode (ICANON=on AND ECHO=off
@@ -930,10 +933,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 var legacy_buf: [8]u8 = undefined;
                 if (!matched_binding and config.terminal.enable_kitty_keyboard and keymap.isCsiU(input)) {
                     if (keymap.csiUToLegacy(input, &legacy_buf)) |legacy| {
+                        trace.logBytes(.csiu, "csiu_translated_to_legacy", legacy);
                         input = legacy;
                     } else if (!alt_screen.active) {
+                        trace.log(.csiu, "csiu_unmapped_dropped (not in alt-screen)", .{});
                         swallow_after_binding = true;
+                    } else {
+                        trace.logBytes(.csiu, "csiu_unmapped_passthrough_to_alt_screen", input);
                     }
+                } else if (!matched_binding and config.terminal.enable_kitty_keyboard) {
+                    trace.log(.csiu, "isCsiU=false on input (forwarded as-is)", .{});
                 }
 
                 if (swallow_after_binding) {
@@ -995,10 +1004,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
                 const action = D.dispatchInput(&runtimes, &ctx, input) catch .forward;
                 switch (action) {
-                    .forward => try writeAll(pty.master, input),
-                    .swallow => {},
-                    .replace => |bytes| try writeAll(pty.master, bytes),
-                    .replace_commit => |bytes| try writeAll(pty.master, bytes),
+                    .forward => {
+                        trace.logBytes(.forward, "master_write_forward", input);
+                        try writeAll(pty.master, input);
+                    },
+                    .swallow => {
+                        trace.log(.dispatch, "swallowed by module", .{});
+                    },
+                    .replace => |bytes| {
+                        trace.logBytes(.forward, "master_write_replace", bytes);
+                        try writeAll(pty.master, bytes);
+                    },
+                    .replace_commit => |bytes| {
+                        trace.logBytes(.forward, "master_write_replace_commit", bytes);
+                        try writeAll(pty.master, bytes);
+                    },
                 }
 
                 // Fire onLineCommit if Enter was pressed during this read
@@ -1175,6 +1195,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             const read_n = posix.read(pty.master, &read_buf) catch 0;
             if (read_n > 0) {
                 const output = read_buf[0..read_n];
+                trace.logBytes(.input, "master_read", output);
+                const alt_before = alt_screen.active;
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
                 // List sits below the prompt — shell echo lands on
@@ -1221,6 +1243,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // — matches the null-on-non-TTY contract on
                 // `Context.cursor_row` and the startup gate above.
                 if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
+                if (alt_before != alt_screen.active) {
+                    trace.log(.altscreen, "alt_screen transition: {}->{}", .{ alt_before, alt_screen.active });
+                }
+                if (args.is_tty) {
+                    trace.log(.cursor, "cursor_tracker.currentRow={?}", .{ctx.cursor_row});
+                }
                 // Mirror the shell-side alt-screen state onto the
                 // Context so modules can refuse to open their own
                 // overlay on top of a running TUI (nvim, k9s, less).

@@ -10,6 +10,7 @@ test {
     _ = @import("dispatch.zig");
     _ = @import("line_state.zig");
     _ = @import("ansi.zig");
+    _ = @import("trace.zig");
     _ = @import("ghost.zig");
     _ = @import("ghost_list.zig");
     _ = @import("osc133.zig");
