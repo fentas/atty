@@ -1674,19 +1674,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // recover.
                 var reactivate_buf: [16384]u8 = undefined;
                 var w2: std.Io.Writer = .fixed(&reactivate_buf);
-                var reactivate_ok = false;
-                if (sb.reactivate(&w2)) {
-                    // The stdout write also has to succeed before we
-                    // trust the scroll region is restored. A broken-
-                    // pipe or partial-write here would leave the same
-                    // failure mode we're guarding against — defer
-                    // the flush in that case too.
-                    if (w2.end == 0) {
-                        reactivate_ok = true;
-                    } else if (writeAll(posix.STDOUT_FILENO, reactivate_buf[0..w2.end])) {
-                        reactivate_ok = true;
-                    } else |_| {}
-                } else |_| {}
+                // The stdout write has to succeed too before we
+                // trust the scroll region is restored — a broken-
+                // pipe or partial-write would leave the same
+                // failure mode we're guarding against, so defer the
+                // flush in that case too.
+                const reactivate_ok = blk: {
+                    sb.reactivate(&w2) catch break :blk false;
+                    if (w2.end == 0) break :blk true;
+                    writeAll(posix.STDOUT_FILENO, reactivate_buf[0..w2.end]) catch break :blk false;
+                    break :blk true;
+                };
                 if (reactivate_ok) {
                     overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
                     overlay_ring_pending_flush = false;
@@ -1709,12 +1707,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             if (statusbar) |*sb| {
                 var reactivate_buf: [16384]u8 = undefined;
                 var w2: std.Io.Writer = .fixed(&reactivate_buf);
-                if (sb.reactivate(&w2)) {
-                    if (w2.end == 0 or (writeAll(posix.STDOUT_FILENO, reactivate_buf[0..w2.end]) catch null) != null) {
-                        overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
-                        overlay_ring_pending_flush = false;
-                    }
-                } else |_| {}
+                const retry_ok = blk: {
+                    sb.reactivate(&w2) catch break :blk false;
+                    if (w2.end == 0) break :blk true;
+                    writeAll(posix.STDOUT_FILENO, reactivate_buf[0..w2.end]) catch break :blk false;
+                    break :blk true;
+                };
+                if (retry_ok) {
+                    overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
+                    overlay_ring_pending_flush = false;
+                }
             } else {
                 overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
                 overlay_ring_pending_flush = false;
