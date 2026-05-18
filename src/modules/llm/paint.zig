@@ -188,9 +188,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// width above), question prompts in italic with
         /// optional choice list, done banners with a check glyph.
         /// User + observation turns stay flat — they're free prose.
-        /// Parse failures fall back to writing the raw bytes so the
-        /// user sees what the model actually emitted instead of an
-        /// empty turn.
+        /// Parse failures fall back to writing the raw envelope
+        /// through `writeSanitized` (so embedded ESC bytes can't
+        /// hijack the paint and newlines collapse to spaces),
+        /// capped at 1024 bytes with a dim `[…truncated]` marker.
+        /// The point is the user sees SOMETHING the model emitted
+        /// rather than a blank turn — even if it's not pretty.
         fn renderOverlayTurnContent(w: *std.Io.Writer, allocator: std.mem.Allocator, turn: dialog.Turn) !void {
             // Bound the per-field render so a 4096-byte command
             // doesn't wrap into 50+ rows and push the input row off
