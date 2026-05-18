@@ -503,15 +503,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // prompt ends up above the new reservation instead
                 // of getting over-painted by the panel chrome.
                 //
-                // We emit `\n` × N AT the cursor's current row to
-                // trigger scroll-up at the bottom of the CURRENT
-                // DECSTBM region (still full-shell-area at this
-                // point — applyReserveRows below is what shrinks
-                // it). Each `\n` at the bottom-of-region scrolls
-                // by one. Then CUP the cursor to the new prompt
-                // row, using the column the cursor_tracker recorded
-                // (post-PS1 — without this the cursor lands at col 1
-                // on top of the prompt chrome).
+                // We emit `\n` × N AT the BOTTOM of the current
+                // DECSTBM region — that's the only row where LF
+                // actually scrolls (LF anywhere else just advances
+                // the cursor). The cursor's CURRENT row doesn't
+                // matter for the scroll itself; we use it only to
+                // compute `scroll_n` and to know which column to
+                // restore to afterward.
                 //
                 // Bash never sees these bytes (they go to STDOUT,
                 // not pty.master). The cursor_tracker is updated
@@ -524,13 +522,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     const cur_col: u16 = cursor_tracker.currentCol();
                     if (cur_row > new_bottom) {
                         const scroll_n: u16 = cur_row - new_bottom;
-                        w_re.print("\x1B[{d};1H", .{cur_row}) catch {};
+                        const region_bottom: u16 = sb.effectiveRows();
+                        w_re.print("\x1B[{d};1H", .{region_bottom}) catch {};
                         var nl: u16 = 0;
                         while (nl < scroll_n) : (nl += 1) {
                             w_re.writeAll("\n") catch {};
                         }
                         w_re.print("\x1B[{d};{d}H", .{ new_bottom, cur_col }) catch {};
-                        trace.log(.paint, "panel-grow scroll-up: from row={d} col={d} by {d}", .{ cur_row, cur_col, scroll_n });
+                        trace.log(.paint, "panel-grow scroll-up: from row={d} col={d} by {d} (at region_bottom={d})", .{ cur_row, cur_col, scroll_n, region_bottom });
                         // After the scroll the cursor lands at
                         // (new_bottom, cur_col). Propagate to the
                         // tracker AND `ctx` so the panel paint that
