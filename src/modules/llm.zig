@@ -494,11 +494,19 @@ pub fn configure(comptime cfg: Config) type {
             /// paint bytes have been returned.
             chat_overlay_paint_pending: bool = false,
             /// Rendered overlay bytes ready for `provideTermBytes`
-            /// to return. Sized for chrome + ~24 rows of conversation
-            /// text + SGR styling overhead. Longer conversations
-            /// truncate at the top (FIFO eviction already capped by
-            /// `cfg.history_turns_max`).
-            chat_overlay_buf: [4096]u8 = undefined,
+            /// to return. Worst-case sizing under the structured
+            /// renderer:
+            ///   - exec turn:     ~800 B (256 desc + 480 cmd + SGR)
+            ///   - done turn:     ~310 B (256 reason + SGR)
+            ///   - question turn: ~3.0 KB (480 prompt + 9 × 256 choice + SGR)
+            ///   - user/obs:      ~1.1 KB (1024 cap)
+            /// The pathological case is all questions; cap that at
+            /// ~3.5 KB/turn (including SGR + framing slack) and scale
+            /// with `cfg.history_turns_max`. Extra 8 KB covers the
+            /// alt-screen chrome (title bar, footer, input row,
+            /// status hints). Overflow falls back to skip-the-paint,
+            /// so it stays safe even past the worst case.
+            chat_overlay_buf: [cfg.history_turns_max * 3584 + 8192]u8 = undefined,
             chat_overlay_buf_len: usize = 0,
             /// Chat input buffer — keystrokes accumulated while
             /// the overlay is open. Enter submits as a new

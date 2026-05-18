@@ -34,20 +34,48 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const cursor_set_seq = "\x1B]12;" ++ cfg.prefix_signal_cursor_color ++ "\x07";
         const cursor_reset_seq = "\x1B]112\x07";
 
-        /// Write `bytes` to `w` filtering out control bytes that
-        /// would otherwise hijack the terminal — embedded `\x1B`
-        /// in an LLM response would smuggle escape sequences into
-        /// our overlay paint, breaking the layout (the screenshot
-        /// bug). Tabs and printable bytes pass through; newlines
-        /// become spaces so each turn renders on a single visual
-        /// line that the terminal wraps naturally inside the
-        /// scroll region.
+        /// Write `bytes` to `w` filtering out anything a terminal
+        /// could read as a control directive — defense against an
+        /// LLM smuggling escape sequences into our paint:
+        ///   - C0 controls + DEL (0x00-0x1F + 0x7F): all dropped,
+        ///     newlines collapse to single spaces so a turn stays
+        ///     on one visual row inside the DECSTBM region.
+        ///   - C1 controls (0x80-0x9F): dropped. Most modern
+        ///     terminals don't honour 8-bit CSI (0x9B) but a few
+        ///     historical ones do; cheap insurance.
+        ///   - UTF-8 encoding of C1 (0xC2 followed by 0x80-0x9F):
+        ///     drop the pair so the same codepoint can't sneak
+        ///     through the multi-byte form. A 0xC2 that's NOT
+        ///     followed by a valid continuation byte (0x80-0xBF) is
+        ///     also dropped — emitting it alone would land
+        ///     malformed UTF-8 on the user's terminal.
+        ///   - Tab (0x09) and printable ASCII pass through.
         fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) !void {
-            for (bytes) |b| {
+            var i: usize = 0;
+            while (i < bytes.len) : (i += 1) {
+                const b = bytes[i];
                 if (b == 0x1B or b == 0x7F or (b < 0x20 and b != 0x09)) {
-                    // Replace newline with space; drop all other
-                    // C0 + ESC + DEL silently.
                     if (b == 0x0A or b == 0x0D) try w.writeAll(" ") else continue;
+                } else if (b >= 0x80 and b <= 0x9F) {
+                    continue;
+                } else if (b == 0xC2) {
+                    if (i + 1 >= bytes.len) continue; // lone 0xC2 → drop
+                    const next = bytes[i + 1];
+                    if (next >= 0x80 and next <= 0x9F) {
+                        // UTF-8 encoding of C1 control → drop pair.
+                        i += 1;
+                        continue;
+                    }
+                    if (next < 0x80 or next > 0xBF) {
+                        // Not a valid UTF-8 continuation — drop the
+                        // 0xC2; let `next` be re-examined on the
+                        // next iteration so its own gates apply.
+                        continue;
+                    }
+                    // 0xC2 + valid non-C1 continuation (e.g. NBSP).
+                    try w.writeByte(b);
+                    try w.writeByte(next);
+                    i += 1;
                 } else {
                     try w.writeByte(b);
                 }
@@ -134,23 +162,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
                 for (rt.turns[0..tail_end]) |turn| {
+                    // Structured render: the alt-screen has rows to
+                    // spare, so split the envelope into readable
+                    // lines instead of dumping raw JSON.
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
                         .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
                         .observation => "\x1B[2mOutput:\x1B[0m ",
                     };
                     w.writeAll(prefix) catch return false;
-                    // Sanitize: strip embedded ESC / control bytes
-                    // so a model that sneaks `\x1B[…` into its
-                    // reason field can't hijack our overlay paint.
-                    // Cap to ~512 chars rendered so a huge JSON
-                    // envelope doesn't fill the screen with one
-                    // turn; truncation marker dimmed.
-                    const slice = if (turn.content.len > 512) turn.content[0..512] else turn.content;
-                    writeSanitized(&w, slice) catch return false;
-                    if (turn.content.len > 512) {
-                        w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m") catch return false;
-                    }
+                    renderOverlayTurnContent(&w, rt.allocator, turn) catch return false;
                     w.writeAll("\r\n\r\n") catch return false;
                 }
                 if (has_conclusion and !has_turns) {
@@ -226,39 +247,117 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return true;
         }
 
-        /// Paint the inline chat panel into the rows the statusbar
-        /// has just reserved above the hint row. The proxy is
-        /// responsible for emitting `setReserveRows + activate`
-        /// before this paint runs — `activate` blanks the reserved
-        /// zone and re-anchors DECSTBM so the shell stops scrolling
-        /// into the panel.
-        ///
-        /// Layout, top→bottom (panel rows = `cfg.inline_chat_rows`,
-        /// e.g. 10):
-        ///
-        ///   • divider row — dim icon + "atty chat" label + Alt+C hint
-        ///   • scrollback rows — recent turns (assistant + user),
-        ///     wrap auto-handled by terminal inside the bounds set
-        ///     by per-row CUP + EL
-        ///   • input row — `❯ <typed text>█` with reverse-video block cursor
-        ///
-        /// Close: emits an empty paint plus a DECSC/DECRC pair so
-        /// the cursor returns to the shell's previous position
-        /// after the proxy's `setReserveRows(base) + activate` has
-        /// shrunk the reservation back. (The proxy clears the freed
-        /// rows itself via `activate`; the paint doesn't need to.)
-        /// Render a turn's content for the chat scrollback. When
-        /// the assistant produced a JSON envelope (the dialog
-        /// protocol shape), extract the human-meaningful field —
-        /// `description`+`command` for exec, `reason` for done,
-        /// `question` for question — and present it as prose +
-        /// a dim command preview. Falls back to the raw content
-        /// when parsing fails (single-mode replies, prose drift).
-        ///
-        /// `max_visible` caps the visible cols on a single row;
-        /// longer content gets a "[…]" ellipsis. The actual row
-        /// CUP + clear is done by the caller; we only emit content
-        /// bytes (and SGR resets).
+        /// Overlay-mode structured turn rendering. The overlay has
+        /// the full screen, so assistant_exec turns get spread across
+        /// multiple rows: description on row 1, command on row 2
+        /// (cyan, indented `      $ ` to align with the prefix
+        /// width above), question prompts in italic with
+        /// optional choice list, done banners with a check glyph.
+        /// User + observation turns stay flat — they're free prose.
+        /// Parse failures fall back to writing the raw envelope
+        /// through `writeSanitized` (so embedded ESC bytes can't
+        /// hijack the paint and newlines collapse to spaces),
+        /// capped at 1024 bytes with a dim `[…truncated]` marker.
+        /// The point is the user sees SOMETHING the model emitted
+        /// rather than a blank turn — even if it's not pretty.
+        fn renderOverlayTurnContent(w: *std.Io.Writer, allocator: std.mem.Allocator, turn: dialog.Turn) !void {
+            // Bound the per-field render so a 4096-byte command
+            // doesn't wrap into 50+ rows and push the input row off
+            // the alt-screen. Capped at 480 visible cols (~6 wraps
+            // on an 80-col terminal); longer content gets a dim
+            // ellipsis marker so the user can open the full
+            // command in their shell if they want to see it all.
+            const overlay_field_cap: usize = 480;
+            const c = turn.content;
+            const looks_like_envelope = turn.kind == .assistant_exec and
+                c.len > 2 and
+                c[0] == '{' and
+                std.mem.indexOf(u8, c, "\"action\"") != null;
+            if (!looks_like_envelope) {
+                const slice = if (c.len > 1024) c[0..1024] else c;
+                try writeSanitized(w, slice);
+                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                return;
+            }
+            // Heap-arena off the runtime allocator so the stack
+            // frame stays small regardless of `cfg.max_response_bytes`
+            // (the `Response` struct alone is `2 * max_response_bytes`
+            // + change). One arena per call, deinit on return.
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const R = dialog.Response(cfg.max_response_bytes);
+            const parsed = arena.allocator().create(R) catch {
+                const slice = if (c.len > 1024) c[0..1024] else c;
+                try writeSanitized(w, slice);
+                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                return;
+            };
+            parsed.* = .{};
+            dialog.parseResponse(R, arena.allocator(), c, parsed) catch {
+                const slice = if (c.len > 1024) c[0..1024] else c;
+                try writeSanitized(w, slice);
+                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                return;
+            };
+
+            switch (parsed.action) {
+                .exec => {
+                    const desc = parsed.description();
+                    const cmd = parsed.command();
+                    if (desc.len > 0) {
+                        const dslice = if (desc.len > overlay_field_cap) desc[0..overlay_field_cap] else desc;
+                        try writeSanitized(w, dslice);
+                        if (desc.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    }
+                    // Always break to a new row before the command —
+                    // otherwise an empty description would land the
+                    // `$ <cmd>` on the same row as the `atty:` prefix,
+                    // breaking the two-row layout invariant.
+                    try w.writeAll("\r\n");
+                    try w.writeAll("\x1B[2m      $ \x1B[0m\x1B[22;1;38;5;14m");
+                    const cslice = if (cmd.len > overlay_field_cap) cmd[0..overlay_field_cap] else cmd;
+                    try writeSanitized(w, cslice);
+                    try w.writeAll("\x1B[0m");
+                    if (cmd.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                },
+                .question => {
+                    const q = parsed.question();
+                    const qslice = if (q.len > overlay_field_cap) q[0..overlay_field_cap] else q;
+                    try w.writeAll("\x1B[3m");
+                    try writeSanitized(w, qslice);
+                    try w.writeAll("\x1B[0m");
+                    if (q.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (parsed.choices_count > 0) {
+                        var i: usize = 0;
+                        while (i < parsed.choices_count) : (i += 1) {
+                            try w.writeAll("\r\n");
+                            var num: [16]u8 = undefined;
+                            const np = std.fmt.bufPrint(&num, "\x1B[2m   {d}.\x1B[0m ", .{i + 1}) catch unreachable;
+                            try w.writeAll(np);
+                            const choice = parsed.choice(i);
+                            const cslice2 = if (choice.len > overlay_field_cap) choice[0..overlay_field_cap] else choice;
+                            try writeSanitized(w, cslice2);
+                            if (choice.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                        }
+                    }
+                },
+                .done => {
+                    const r = parsed.reason();
+                    const rslice = if (r.len > overlay_field_cap) r[0..overlay_field_cap] else r;
+                    try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m ");
+                    try writeSanitized(w, rslice);
+                    if (r.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                },
+            }
+        }
+
+        /// Inline-panel single-row turn renderer — the panel's
+        /// scrollback rows are precious, so each turn gets exactly
+        /// one row. `max_visible` caps the visible cols; longer
+        /// content gets a "[…]" ellipsis. Parses the envelope when
+        /// the shape suggests one and falls back to raw content
+        /// otherwise. The caller positions the row (CUP + clear);
+        /// this function only emits content bytes (and SGR resets).
         fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize) !void {
             const c = turn.content;
             // Quick shape check: assistant turns from the dialog
@@ -350,6 +449,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return rt.chat_open_cursor_row;
         }
 
+        /// Paint the inline chat panel into the rows the statusbar
+        /// has just reserved above the hint row. The proxy is
+        /// responsible for emitting `setReserveRows + activate`
+        /// before this paint runs — `activate` blanks the reserved
+        /// zone and re-anchors DECSTBM so the shell stops scrolling
+        /// into the panel.
+        ///
+        /// Layout, top→bottom (panel rows = `cfg.inline_chat_rows`,
+        /// e.g. 10):
+        ///
+        ///   • divider row — dim icon + "atty chat" label + Alt+C hint
+        ///   • scrollback rows — recent turns (assistant + user),
+        ///     wrap auto-handled by terminal inside the bounds set
+        ///     by per-row CUP + EL
+        ///   • input row — `❯ <typed text>█` with reverse-video block cursor
+        ///
+        /// Close: emits an empty paint plus a DECSC/DECRC pair so
+        /// the cursor returns to the shell's previous position
+        /// after the proxy's `setReserveRows(base) + activate` has
+        /// shrunk the reservation back. (The proxy clears the freed
+        /// rows itself via `activate`; the paint doesn't need to.)
         fn paintInlineChat(rt: *Runtime, ctx: *m.Context) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
 
