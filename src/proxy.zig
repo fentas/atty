@@ -262,7 +262,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         }
         break :blk CursorTracker.init(rows, cols);
     };
-
     // DSR-6n reply interceptor. atty issues `\x1B[6n` at key moments
     // (inline panel open, SIGWINCH, post-command `;D`) to ground-
     // truth the cursor position; the terminal replies on stdin with
