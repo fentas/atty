@@ -42,10 +42,20 @@ src/
 │   ├── _lib.zig          shared helpers for built-in modules (nowMs, ListBuilder)
 │   ├── atuin.zig         async worker; ghost + record + sync + pick list
 │   ├── guardrail.zig     dangerous-command confirmation
-│   └── history.zig       shell-native ~/.bash_history fallback + pick list
+│   ├── history.zig       shell-native ~/.bash_history fallback + pick list
+│   └── security_guard/   pre-Enter Tier-1 + UDS client to atty-guard sidecar
 └── test/
     ├── integration.zig   real-PTY tests (zig build itest)
     └── e2e/              .e2e DSL scenarios + VT-grid diff harness
+
+atty-guard/                  Rust sidecar daemon — UDS + Tier-1/Tier-2 +
+│                            future eBPF LSM backstop. Optional install
+│                            via atty-guard/contrib/install.sh.
+├── Cargo.toml
+├── README.md
+├── contrib/                 systemd-user unit + installer
+├── ebpf/                    V2-B kernel C source (skeleton; impl ahead)
+└── src/                     Rust daemon: classifier/protocol/server/threat_map
 
 tests/e2e/<name>/scenario.e2e + tests/e2e/<name>/golden/{env.toml,cast.json,...}
 ```

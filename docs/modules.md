@@ -492,6 +492,40 @@ For `provideGhostText` the *first non-null* result wins, so order
 expresses priority. There's no negotiation between modules — a later
 module is asked only if every earlier one returned null.
 
+### `security_guard` — pre-Enter dangerous-command intercept
+
+A second module in the guardrail family. Where `guardrail` matches a comptime list of patterns with a fixed `confirm`/`block`/`warn` behaviour, `security_guard` aims at supply-chain / drive-by-install shapes (`curl … | sh`, `npm install <flagged-pkg>`, `bash -c "<long-b64>"`) and is engineered for opt-in plus a tightening V2 path:
+
+| Layer  | What runs                                                                            |
+|--------|--------------------------------------------------------------------------------------|
+| V1     | In-proc Tier-1 patterns + per-user SHA-256 trust cache. `[y]es / [t]rust / cancel`.  |
+| V2-A   | `atty-guard` Rust sidecar mirrors Tier-1; gains in-mem PID → ThreatLevel map.        |
+| V2-D   | atty queries the sidecar over UDS before its own in-proc patterns. Graceful fallback.|
+| V2-E   | `atty-guard/contrib/install.sh` + hardened `atty-guard.service` user unit.           |
+| V2-C   | Pluggable Tier-2: `--tier2 stub|heuristic` (4 extra regex rules); `onnx` follows.   |
+| V2-B   | eBPF LSM hook + execve tracepoint backstop (skeleton landed; impl ahead).            |
+
+Default: disabled. Opt in via:
+
+```zig
+pub const modules = .{
+    atty.modules.security_guard.configure(.{ .enabled = true }),
+    atty.modules.guardrail.configure(.{}),
+    atty.modules.history.configure(.{}),
+};
+```
+
+Optional sidecar (after `atty-guard/contrib/install.sh`):
+
+```zig
+.security_guard.configure(.{
+    .enabled = true,
+    .daemon_socket_path = "/run/user/1000/atty-guard.sock",
+}),
+```
+
+Full architecture: `docs/security-guard-design.md`. Daemon: `atty-guard/`.
+
 ### Composing two ghost providers
 
 With both atuin and history enabled:
