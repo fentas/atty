@@ -827,13 +827,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // Default: focus starts in the panel (matches
                         // the previous always-swallow behaviour).
                         rt.chat_focus_in_panel = true;
-                        // Capture the shell prompt row at open time so
-                        // every subsequent paint (including the close
-                        // paint after the next toggle) can land the
-                        // real terminal cursor back on it. Re-open
-                        // with no live cursor_row leaves this at 0,
-                        // which the helper treats as "use fallback".
+                        // Capture the shell prompt position at open
+                        // time so every subsequent paint (including
+                        // the close paint after the next toggle)
+                        // can land the real terminal cursor on the
+                        // prompt's input region (after PS1, not col 1).
+                        // 0 sentinel = no live tracker value; the
+                        // helper treats those as "use fallback".
                         rt.chat_open_cursor_row = ctx.cursor_row orelse 0;
+                        rt.chat_open_cursor_col = ctx.cursor_col orelse 0;
                     }
                     return true;
                 },

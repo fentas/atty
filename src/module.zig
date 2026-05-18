@@ -160,6 +160,20 @@ pub const Context = struct {
     /// cursor placement.
     cursor_row: ?u16 = null,
 
+    /// Best-effort cursor column (1-based), updated from the same
+    /// `cursor_tracker` model as `cursor_row`. The OSC 133 `;B`
+    /// snapshot anchors this for the prompt-end case (used by the
+    /// inline chat panel's Ctrl+Up restore — without col, the
+    /// cursor would land at column 1 instead of after PS1).
+    ///
+    /// Null when atty isn't on a TTY OR when the tracker hasn't
+    /// seen output yet. Consumers that need authoritative
+    /// positioning should issue a DSR-6n query at the sensitive
+    /// moment and let the reply update the model — most modules
+    /// don't need to, since the printable-byte advance + OSC 133
+    /// anchors track typing accurately for the common case.
+    cursor_col: ?u16 = null,
+
     /// Statusbar's init-time reservation (`config.statusbar.reserve_rows`),
     /// or null when there is no statusbar (non-TTY, disabled). Inline
     /// panels read this to anchor their bottom edge one row above the

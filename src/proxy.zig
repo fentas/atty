@@ -398,6 +398,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         // tracker's row would be meaningless to consumers — matches
         // the contract documented on `Context.cursor_row`.
         .cursor_row = if (args.is_tty) cursor_tracker.currentRow() else null,
+        .cursor_col = if (args.is_tty) cursor_tracker.currentCol() else null,
     };
 
     var pfds = [_]posix.pollfd{
@@ -495,6 +496,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // can't erase what's already on the wire).
                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
                 trace.log(.paint, "applyReserveRows want={d} current={d}", .{ want_reserve, sb.reserve_rows });
+                // Reservation transition is a sensitive moment for
+                // cursor accuracy — fire DSR-6n so the next stdin
+                // read refreshes `cursor_tracker` with the terminal's
+                // ground truth. The reply lands on stdin and gets
+                // filtered by `dsr_parser.feed` before bash sees it.
+                if (args.is_tty) DsrParser.writeQuery(&w_re) catch {};
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
@@ -1298,7 +1305,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Only surface the row to modules on real TTY runs
                 // — matches the null-on-non-TTY contract on
                 // `Context.cursor_row` and the startup gate above.
-                if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
+                if (args.is_tty) {
+                    ctx.cursor_row = cursor_tracker.currentRow();
+                    ctx.cursor_col = cursor_tracker.currentCol();
+                }
                 if (alt_before != alt_screen.active) {
                     trace.log(.altscreen, "alt_screen transition: {}->{}", .{ alt_before, alt_screen.active });
                 }
@@ -1353,7 +1363,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 // not the most recent one.
                                 subprocess_tracker.onCommandStart(pending_launches.pop(), allocator, io);
                             },
-                            .cmd_end => subprocess_tracker.onCommandEnd(),
+                            .cmd_end => {
+                                subprocess_tracker.onCommandEnd();
+                                // Command just finished — its output
+                                // may have scrolled the cursor wildly
+                                // (or left it mid-screen via raw mode).
+                                // Fire DSR-6n so the tracker
+                                // re-anchors on the new prompt's row
+                                // before the next sensitive op.
+                                if (args.is_tty) {
+                                    var w_dsr: std.Io.Writer = .fixed(&out_buf);
+                                    if (DsrParser.writeQuery(&w_dsr)) {
+                                        if (w_dsr.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_dsr.end]) catch {};
+                                    } else |_| {}
+                                }
+                            },
                             .prompt_start_implicit_end => {
                                 // Partial-emitter implicit close
                                 // (Ghostty-style: `;A` instead of
@@ -1662,7 +1686,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         } else {
                             cursor_tracker.setMaxRows(s.rows);
                         }
-                        if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
+                        if (args.is_tty) {
+                            ctx.cursor_row = cursor_tracker.currentRow();
+                            ctx.cursor_col = cursor_tracker.currentCol();
+                        }
                         // Always pass the FULL size — slimming would
                         // bake the statusbar reservation into the
                         // slave's TIOCGWINSZ, breaking any inner TUI

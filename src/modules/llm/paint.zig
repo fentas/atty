@@ -430,23 +430,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
         }
 
-        /// Compute the row the real terminal cursor should sit at
-        /// after every paintInlineChat call. Pulls from the snapshot
-        /// taken at open time (`rt.chat_open_cursor_row`), falling
-        /// back to the bottom of the shell scroll region when the
-        /// snapshot is unknown OR was clamped past the shell area
-        /// (defensive against cursor_tracker drift / SIGWINCH races).
+        /// Compute the (row, col) position the real terminal cursor
+        /// should sit at after every paintInlineChat call. Pulls
+        /// from the snapshot taken at open time
+        /// (`chat_open_cursor_row` + `chat_open_cursor_col`), falls
+        /// back to (shell_bottom, 1) when the snapshot is unknown
+        /// OR the row was clamped past the shell area (defensive
+        /// against cursor_tracker drift / SIGWINCH races).
         ///
-        /// Anchors to `total_rows - base_reserve` (a row that's
+        /// Row anchors to `total_rows - base_reserve` (a row that's
         /// stable across panel open/close) — DO NOT switch to a
         /// live-reserve denominator, that would move the fallback
         /// between open and close and break the close-paint's
         /// ability to land on the same row the open paint used.
-        fn inlineRestoreRow(rt: *Runtime, total_rows: u16, base_reserve: u16) u16 {
+        ///
+        /// Col uses the snapshot directly (with 1 fallback): the
+        /// open paint captures `prompt_end_col` from the OSC 133
+        /// `;B` anchor, so subsequent paints CUP back to where the
+        /// user's typing would resume — not col 1 (which would
+        /// place the cursor at the start of the prompt row, on top
+        /// of the PS1 chrome).
+        fn inlineRestorePos(rt: *Runtime, total_rows: u16, base_reserve: u16) struct { row: u16, col: u16 } {
             const shell_bottom: u16 = if (total_rows > base_reserve) total_rows - base_reserve else 1;
-            if (rt.chat_open_cursor_row == 0) return shell_bottom;
-            if (rt.chat_open_cursor_row > shell_bottom) return shell_bottom;
-            return rt.chat_open_cursor_row;
+            const row: u16 = blk: {
+                if (rt.chat_open_cursor_row == 0) break :blk shell_bottom;
+                if (rt.chat_open_cursor_row > shell_bottom) break :blk shell_bottom;
+                break :blk rt.chat_open_cursor_row;
+            };
+            const col: u16 = if (rt.chat_open_cursor_col == 0) 1 else rt.chat_open_cursor_col;
+            return .{ .row = row, .col = col };
         }
 
         /// Paint the inline chat panel into the rows the statusbar
@@ -474,12 +486,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
 
             if (!rt.chat_inline_open) {
-                // CUP via inlineRestoreRow — DECRC is clobbered by
+                // CUP via inlineRestorePos — DECRC is clobbered by
                 // applyReserveRows upstream.
                 const ct_rows: u16 = ctx.terminal_rows orelse 24;
                 const ct_base: u16 = ctx.statusbar_base_reserve orelse 3;
-                const restore_row = inlineRestoreRow(rt, ct_rows, ct_base);
-                w.print("\x1B[?25h\x1B[{d};1H", .{restore_row}) catch return false;
+                const pos = inlineRestorePos(rt, ct_rows, ct_base);
+                w.print("\x1B[?25h\x1B[{d};{d}H", .{ pos.row, pos.col }) catch return false;
                 rt.chat_inline_buf_len = w.end;
                 return true;
             }
@@ -694,9 +706,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
             // Park the real terminal cursor on the shell row — the
             // block-cursor glyph above is purely visual. See
-            // inlineRestoreRow for the row math.
-            const restore_row_open = inlineRestoreRow(rt, total_rows, base_reserve);
-            w.print("\x1B[{d};1H", .{restore_row_open}) catch return false;
+            // inlineRestorePos for the row + col math.
+            const restore_pos_open = inlineRestorePos(rt, total_rows, base_reserve);
+            w.print("\x1B[{d};{d}H", .{ restore_pos_open.row, restore_pos_open.col }) catch return false;
 
             rt.chat_inline_buf_len = w.end;
             return true;
