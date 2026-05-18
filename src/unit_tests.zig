@@ -40,6 +40,7 @@ test {
     _ = @import("modules/llm/sys_context.zig");
     _ = @import("modules/guardrail.zig");
     _ = @import("modules/history.zig");
+    _ = @import("modules/security_guard.zig");
     _ = @import("test/e2e/vt.zig");
     _ = @import("test/e2e/dsl.zig");
     _ = @import("test/e2e/snapshot.zig");
