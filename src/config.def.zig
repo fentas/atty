@@ -155,13 +155,20 @@ const atty = @import("atty");
 //     atty.modules.history.configure(.{}),
 // };
 //
-// // Customise the trust cache location or skip the static-pattern check
-// // in incognito mode:
+// // Customise the trust cache location, skip the static-pattern check
+// // in incognito mode, or point at an `atty-guard` sidecar daemon:
 // // atty.modules.security_guard.configure(.{
 // //     .enabled = true,
 // //     .trust_cache_path = "~/.cache/atty/security_trust.txt",
 // //     .skip_in_incognito = false,  // protect EVERYWHERE; incognito
 // //                                  // only stops *recording*.
+// //     // Opt into the V2 atty-guard sidecar. When set + reachable,
+// //     // every Enter queries the daemon BEFORE in-proc patterns; any
+// //     // I/O error falls back to the V1 static rules and latches the
+// //     // session into in-proc-only mode. Build atty-guard from the
+// //     // `atty-guard/` Rust crate at the repo root.
+// //     .daemon_socket_path = "",       // e.g. "/run/user/1000/atty-guard.sock"
+// //     .daemon_timeout_ms = 50,        // per-classify keystroke budget
 // // }),
 
 // ───── Proxy ────────────────────────────────────────────────────────────

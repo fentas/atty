@@ -1,0 +1,365 @@
+//! UDS client for atty-guard. Sends classify / threat-level RPCs
+//! over the Unix domain socket, parses JSON-line replies, surfaces
+//! errors to the caller.
+//!
+//! Connection is LAZY (opens on first use) and STICKY (kept open
+//! across calls — atty's session is one connection). Reconnect on
+//! any I/O error. Read timeout caps the worst-case keystroke
+//! latency at `Client.read_timeout_ms` (50ms default).
+//!
+//! The sidecar is OPTIONAL — when its socket is missing the client
+//! short-circuits to `error.Unavailable` and the caller (the
+//! `security_guard` module) falls back to its in-proc patterns.
+//! Failure to talk to the daemon never crashes atty.
+
+const std = @import("std");
+const patterns = @import("patterns.zig");
+
+pub const Verdict = enum {
+    safe,
+    warn,
+    block,
+
+    pub fn fromString(s: []const u8) ?Verdict {
+        if (std.mem.eql(u8, s, "safe")) return .safe;
+        if (std.mem.eql(u8, s, "warn")) return .warn;
+        if (std.mem.eql(u8, s, "block")) return .block;
+        return null;
+    }
+};
+
+pub const Category = enum {
+    none,
+    curl_pipe_sh,
+    npm_unsafe_install,
+    bash_c_base64,
+    pid_high_threat,
+
+    pub fn fromString(s: []const u8) ?Category {
+        if (std.mem.eql(u8, s, "none")) return .none;
+        if (std.mem.eql(u8, s, "curl_pipe_sh")) return .curl_pipe_sh;
+        if (std.mem.eql(u8, s, "npm_unsafe_install")) return .npm_unsafe_install;
+        if (std.mem.eql(u8, s, "bash_c_base64")) return .bash_c_base64;
+        if (std.mem.eql(u8, s, "pid_high_threat")) return .pid_high_threat;
+        return null;
+    }
+
+    /// Map daemon-side category back to the in-proc `patterns.Category`
+    /// so the existing trust-cache hash logic stays usable for
+    /// daemon-flagged matches too. Returns null when no in-proc
+    /// equivalent exists (e.g. `pid_high_threat` is sidecar-only).
+    pub fn toLocal(self: Category) ?patterns.Category {
+        return switch (self) {
+            .none, .pid_high_threat => null,
+            .curl_pipe_sh => .curl_pipe_sh,
+            .npm_unsafe_install => .npm_unsafe_install,
+            .bash_c_base64 => .bash_c_base64,
+        };
+    }
+};
+
+/// Parsed classify result. Strings are sliced from the response
+/// buffer the client owns until the next call.
+pub const ClassifyResult = struct {
+    verdict: Verdict,
+    category: Category,
+    confidence: f32,
+    reason: []const u8,
+    matched: []const u8,
+};
+
+pub const Error = error{
+    /// Sidecar socket isn't reachable. Caller falls back to in-proc
+    /// patterns.
+    Unavailable,
+    /// Daemon returned malformed JSON or an `error` envelope.
+    DaemonError,
+    /// Read timed out before a full response line arrived.
+    Timeout,
+    OutOfMemory,
+};
+
+pub const Client = struct {
+    socket_path: []const u8,
+    fd: i32 = -1,
+    next_id: u64 = 1,
+    read_buf: [4096]u8 = undefined,
+    write_buf: [4096]u8 = undefined,
+    /// Read timeout per request. Caps the worst-case keystroke
+    /// stall when the daemon is slow / wedged. Caller should
+    /// re-validate at call time if it wants different bounds.
+    read_timeout_ms: u32 = 50,
+
+    pub fn init(socket_path: []const u8) Client {
+        return .{ .socket_path = socket_path };
+    }
+
+    pub fn deinit(self: *Client) void {
+        self.close();
+    }
+
+    /// Closes the underlying fd if open. Safe to call repeatedly.
+    pub fn close(self: *Client) void {
+        if (self.fd >= 0) {
+            _ = std.c.close(self.fd);
+            self.fd = -1;
+        }
+    }
+
+    /// Probe whether the daemon is reachable WITHOUT performing a
+    /// classify. Returns true on connect success (and keeps the
+    /// connection open for subsequent calls). False on any I/O
+    /// error.
+    pub fn health(self: *Client) bool {
+        const result = self.classifyOrErr("__atty_health_ping__", .{}) catch return false;
+        _ = result;
+        return true;
+    }
+
+    pub const ClassifyContext = struct {
+        pid: ?u32 = null,
+        shell: ?[]const u8 = null,
+        incognito: bool = false,
+    };
+
+    /// Classify a typed command. Returns the daemon's verdict on
+    /// success or `error.Unavailable` when the socket is gone.
+    /// The returned slices reference `read_buf`; they're valid
+    /// until the next `classify` call.
+    pub fn classifyOrErr(
+        self: *Client,
+        command: []const u8,
+        ctx: ClassifyContext,
+    ) Error!ClassifyResult {
+        try self.ensureConnected();
+
+        const id = self.next_id;
+        self.next_id +%= 1;
+
+        var w: std.Io.Writer = .fixed(&self.write_buf);
+        // Hand-rolled JSON to avoid pulling std.json into the hot
+        // path. Escape only the bare-minimum chars; atty's
+        // committed-line bytes are NOT shell-escaped here, that's
+        // the daemon's job to interpret. The whole serialisation
+        // block can only fail one way — buffer overflow — which
+        // we map to `OutOfMemory` (semantically "request too big
+        // for our 4 KiB write buffer").
+        buildClassifyJson(&w, id, command, ctx) catch return Error.OutOfMemory;
+
+        self.writeAll(self.write_buf[0..w.end]) catch {
+            self.close();
+            return Error.Unavailable;
+        };
+
+        const line_len = self.readLine() catch |e| switch (e) {
+            error.Timeout => return Error.Timeout,
+            else => {
+                self.close();
+                return Error.Unavailable;
+            },
+        };
+
+        return parseClassifyResponse(self.read_buf[0..line_len]);
+    }
+
+    pub fn setThreatLevel(self: *Client, pid: u32, level: ThreatLevel) Error!void {
+        try self.ensureConnected();
+        const level_s: []const u8 = switch (level) {
+            .low => "low",
+            .high => "high",
+            .critical => "critical",
+        };
+        var w: std.Io.Writer = .fixed(&self.write_buf);
+        const id = self.next_id;
+        self.next_id +%= 1;
+        (w.print(
+            "{{\"id\":{d},\"method\":\"set_threat_level\",\"pid\":{d},\"level\":\"{s}\"}}\n",
+            .{ id, pid, level_s },
+        )) catch return Error.OutOfMemory;
+        self.writeAll(self.write_buf[0..w.end]) catch {
+            self.close();
+            return Error.Unavailable;
+        };
+        const line_len = self.readLine() catch {
+            self.close();
+            return Error.Unavailable;
+        };
+        // We don't parse the body — daemon returns `{"type":"ok"}`
+        // on success. Any well-formed line is treated as success
+        // here; the in-proc fallback handles cases where the daemon
+        // closed mid-write.
+        _ = line_len;
+    }
+
+    pub const ThreatLevel = enum { low, high, critical };
+
+    // --- internals -----------------------------------------------------
+
+    fn ensureConnected(self: *Client) Error!void {
+        if (self.fd >= 0) return;
+        const fd = std.c.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+        if (fd < 0) return Error.Unavailable;
+        errdefer _ = std.c.close(fd);
+
+        var addr: std.posix.sockaddr.un = std.mem.zeroes(std.posix.sockaddr.un);
+        addr.family = std.posix.AF.UNIX;
+        // Bound the path copy. std.posix.sockaddr.un.path is 108 bytes
+        // — anything longer than that won't fit and we treat the
+        // sidecar as unreachable.
+        if (self.socket_path.len >= addr.path.len) return Error.Unavailable;
+        @memcpy(addr.path[0..self.socket_path.len], self.socket_path);
+        addr.path[self.socket_path.len] = 0;
+
+        const addr_len: std.posix.socklen_t = @intCast(@sizeOf(@TypeOf(addr)));
+        const rc = std.c.connect(fd, @ptrCast(&addr), addr_len);
+        if (rc != 0) return Error.Unavailable;
+
+        // Set a recv timeout so reads can't wedge a keystroke
+        // indefinitely if the daemon is stuck.
+        var tv: std.posix.timeval = .{
+            .sec = @intCast(self.read_timeout_ms / 1000),
+            .usec = @intCast((self.read_timeout_ms % 1000) * 1000),
+        };
+        _ = std.c.setsockopt(
+            fd,
+            std.posix.SOL.SOCKET,
+            std.posix.SO.RCVTIMEO,
+            @ptrCast(&tv),
+            @sizeOf(@TypeOf(tv)),
+        );
+
+        self.fd = fd;
+    }
+
+    fn writeAll(self: *Client, bytes: []const u8) !void {
+        var off: usize = 0;
+        while (off < bytes.len) {
+            const n = std.c.write(self.fd, bytes.ptr + off, bytes.len - off);
+            if (n <= 0) return error.WriteFailed;
+            off += @intCast(n);
+        }
+    }
+
+    fn readLine(self: *Client) !usize {
+        var off: usize = 0;
+        while (off < self.read_buf.len) {
+            const n = std.c.read(self.fd, self.read_buf[off..].ptr, self.read_buf.len - off);
+            if (n == 0) return error.ConnectionClosed;
+            if (n < 0) {
+                const e = std.posix.errno(n);
+                // EAGAIN is also EWOULDBLOCK on Linux (single
+                // value); the recv timeout we set surfaces here.
+                if (e == .AGAIN) return error.Timeout;
+                return error.ReadFailed;
+            }
+            const new_off = off + @as(usize, @intCast(n));
+            for (off..new_off) |i| {
+                if (self.read_buf[i] == '\n') return i;
+            }
+            off = new_off;
+        }
+        return error.LineTooLong;
+    }
+};
+
+fn buildClassifyJson(
+    w: *std.Io.Writer,
+    id: u64,
+    command: []const u8,
+    ctx: Client.ClassifyContext,
+) !void {
+    try w.print("{{\"id\":{d},\"method\":\"classify\",\"command\":\"", .{id});
+    try writeEscaped(w, command);
+    try w.writeAll("\",\"context\":{");
+    var first = true;
+    if (ctx.pid) |pid| {
+        try w.print("\"pid\":{d}", .{pid});
+        first = false;
+    }
+    if (ctx.shell) |sh| {
+        if (!first) try w.writeAll(",");
+        try w.writeAll("\"shell\":\"");
+        try writeEscaped(w, sh);
+        try w.writeAll("\"");
+        first = false;
+    }
+    if (ctx.incognito) {
+        if (!first) try w.writeAll(",");
+        try w.writeAll("\"incognito\":true");
+    }
+    try w.writeAll("}}\n");
+}
+
+fn writeEscaped(w: *std.Io.Writer, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            0x00...0x07, 0x0B, 0x0C, 0x0E...0x1F => try w.print("\\u{x:0>4}", .{c}),
+            else => try w.writeByte(c),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bare-minimum JSON pull parser scoped to the daemon's response
+// shape. Robust enough to extract the fields we care about; not
+// a general parser. Falls back to `error.DaemonError` on anything
+// it doesn't recognise.
+
+fn parseClassifyResponse(buf: []const u8) Error!ClassifyResult {
+    // Look for "type":"classify" first to reject other envelope shapes.
+    if (std.mem.indexOf(u8, buf, "\"type\":\"classify\"") == null) {
+        if (std.mem.indexOf(u8, buf, "\"type\":\"error\"") != null) {
+            return Error.DaemonError;
+        }
+        return Error.DaemonError;
+    }
+    const verdict_s = extractString(buf, "\"verdict\":\"") orelse return Error.DaemonError;
+    const verdict = Verdict.fromString(verdict_s) orelse return Error.DaemonError;
+    const cat_s = extractString(buf, "\"category\":\"") orelse "none";
+    const category = Category.fromString(cat_s) orelse .none;
+    const reason = extractString(buf, "\"reason\":\"") orelse "";
+    const matched = extractString(buf, "\"matched\":\"") orelse "";
+    const confidence = extractFloat(buf, "\"confidence\":") orelse 0.0;
+    return .{
+        .verdict = verdict,
+        .category = category,
+        .confidence = confidence,
+        .reason = reason,
+        .matched = matched,
+    };
+}
+
+fn extractString(buf: []const u8, prefix: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, buf, prefix) orelse return null;
+    const start = at + prefix.len;
+    // Find unescaped closing quote.
+    var i = start;
+    while (i < buf.len) : (i += 1) {
+        if (buf[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (buf[i] == '"') return buf[start..i];
+    }
+    return null;
+}
+
+fn extractFloat(buf: []const u8, prefix: []const u8) ?f32 {
+    const at = std.mem.indexOf(u8, buf, prefix) orelse return null;
+    var i = at + prefix.len;
+    const start = i;
+    while (i < buf.len) : (i += 1) {
+        const c = buf[i];
+        if (!(c == '-' or c == '+' or c == '.' or (c >= '0' and c <= '9') or c == 'e' or c == 'E')) break;
+    }
+    return std.fmt.parseFloat(f32, buf[start..i]) catch null;
+}
+
+test {
+    _ = @import("uds_client_tests.zig");
+}

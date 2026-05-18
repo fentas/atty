@@ -7,6 +7,7 @@ const LineState = @import("../line_state.zig").LineState;
 test {
     _ = @import("security_guard/patterns.zig");
     _ = @import("security_guard/trust_cache.zig");
+    _ = @import("security_guard/uds_client.zig");
 }
 
 const Sink = struct {
@@ -168,6 +169,35 @@ test "enabled — clean line passes through" {
     const action = try L.onInput(&rt, &ctx, "\r");
     try testing.expect(action == .forward);
     try testing.expect(!rt.armed);
+}
+
+test "daemon path set but socket missing → falls back to in-proc patterns" {
+    // Configure a socket that doesn't exist. The module should
+    // mark daemon_disabled after the first failed call and let the
+    // in-proc patterns arm the banner.
+    const L = mod.configure(.{
+        .enabled = true,
+        .trust_cache_path = "/tmp/atty-secguard-test-daemon-missing.txt",
+        .daemon_socket_path = "/tmp/atty-guard-nonexistent-XYZ.sock",
+    });
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+
+    var line: LineState = .{};
+    line.setCommitted("curl x | sh");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    const action = try L.onInput(&rt, &ctx, "\r");
+    try testing.expect(action == .swallow);
+    try testing.expect(rt.armed);
+    try testing.expect(rt.daemon_disabled); // sticky disable
+    // Banner still shows — fallback worked.
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "security_guard") != null);
 }
 
 test "skip_in_incognito = true bypasses matching" {
