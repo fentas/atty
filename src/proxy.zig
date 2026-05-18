@@ -361,6 +361,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // the user knows when output was truncated.
     var overlay_ring_state: overlay_ring.RingBuf(overlay_ring.default_size) = .{};
     var prev_overlay_active: bool = false;
+    // Set when an overlay-close-edge tried to flush the ring but
+    // the reactivate or its stdout write failed and we deferred.
+    // Subsequent iterations and the end-of-run drain check this so
+    // the buffered shell bytes can't be stranded forever just
+    // because `prev_overlay_active` already advanced past the edge.
+    var overlay_ring_pending_flush: bool = false;
     // Tracks the requested reservation from the previous iteration so
     // the clamp-hint surface only fires on edges, not every tick.
     var prev_requested_reserve: u16 = 0;
@@ -1683,9 +1689,35 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 } else |_| {}
                 if (reactivate_ok) {
                     overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
+                    overlay_ring_pending_flush = false;
+                } else {
+                    overlay_ring_pending_flush = true;
                 }
             } else {
                 overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
+                overlay_ring_pending_flush = false;
+            }
+        }
+        // Best-effort retry for a previously-deferred ring flush.
+        // Reactivate again here (cheap, idempotent on success); on
+        // success we drain the stranded bytes. The close-edge sets
+        // `pending_flush` and advances `prev_overlay_active` past
+        // the edge, so without this loop-tail retry the bytes would
+        // stay buffered until the end-of-run drain (or forever, if
+        // the process keeps running).
+        if (overlay_ring_pending_flush and !overlay_active_end) {
+            if (statusbar) |*sb| {
+                var reactivate_buf: [16384]u8 = undefined;
+                var w2: std.Io.Writer = .fixed(&reactivate_buf);
+                if (sb.reactivate(&w2)) {
+                    if (w2.end == 0 or (writeAll(posix.STDOUT_FILENO, reactivate_buf[0..w2.end]) catch null) != null) {
+                        overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
+                        overlay_ring_pending_flush = false;
+                    }
+                } else |_| {}
+            } else {
+                overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
+                overlay_ring_pending_flush = false;
             }
         }
         prev_overlay_active = overlay_active_end;
@@ -1693,10 +1725,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
     // Child died (or POLLHUP/SIGCHLD ended the loop) with the
     // overlay still open — the close-edge inside the loop never
-    // fired. Drain the ring now so the user's terminal isn't
-    // left missing output that the subprocess produced just
-    // before exiting.
-    if (prev_overlay_active) {
+    // fired. Also covers the "close-edge fired but flush was
+    // deferred because reactivate failed" case via the
+    // `overlay_ring_pending_flush` flag, so buffered shell bytes
+    // can't be stranded forever.
+    if (prev_overlay_active or overlay_ring_pending_flush) {
         overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
     }
 
