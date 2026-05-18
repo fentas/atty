@@ -482,18 +482,26 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
                 trace.log(.paint, "applyReserveRows want={d} current={d}", .{ want_reserve, sb.reserve_rows });
 
-                // GROWING + the cursor would land inside the new
-                // reservation zone → scroll shell content UP so the
-                // prompt ends up above the panel. Without this, the
-                // prompt at the bottom row is OVER-PAINTED by the
-                // panel and Ctrl+Up (focus park) lands the cursor
-                // invisibly inside the panel.
+                // GROWING + the cursor sits at or below the new
+                // bottom-of-scroll-region → scroll shell content UP
+                // so the prompt ends up above the panel WITH a
+                // 1-row gap between the prompt and the panel top
+                // (breathing room — the panel chrome doesn't visually
+                // hug the prompt). Without this, the prompt at the
+                // bottom row is OVER-PAINTED by the panel and
+                // Ctrl+Up (focus park) lands the cursor invisibly
+                // inside the panel.
                 if (want_reserve > sb.reserve_rows) {
                     const new_bottom: u16 = if (sb.rows > want_reserve) sb.rows - want_reserve else 1;
                     const old_bottom: u16 = if (sb.rows > sb.reserve_rows) sb.rows - sb.reserve_rows else 1;
                     const cur_row: u16 = cursor_tracker.currentRow();
-                    if (cur_row > new_bottom and cur_row <= old_bottom) {
-                        const scroll_n: u16 = cur_row - new_bottom;
+                    // Target row: one above the new scroll-region
+                    // bottom, leaving a blank line between prompt
+                    // and panel. Clamp so we don't underflow at the
+                    // edge case where new_bottom is row 1.
+                    const target_row: u16 = if (new_bottom > 1) new_bottom - 1 else 1;
+                    if (cur_row > target_row and cur_row <= old_bottom) {
+                        const scroll_n: u16 = cur_row - target_row;
                         // CUP to OLD bottom-of-scroll-region, emit N
                         // newlines (each triggers scroll-up at the
                         // bottom of the DECSTBM region — content moves
@@ -505,7 +513,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         while (i < scroll_n) : (i += 1) {
                             w_re.writeAll("\n") catch {};
                         }
-                        w_re.print("\x1B[{d};1H", .{new_bottom}) catch {};
+                        w_re.print("\x1B[{d};1H", .{target_row}) catch {};
                         // Drain the scroll-up + CUP bytes through the
                         // cursor tracker so it learns the new row.
                         cursor_tracker.feed(out_buf[0..w_re.end]);
