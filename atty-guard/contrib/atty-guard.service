@@ -1,0 +1,50 @@
+[Unit]
+Description=atty security guard sidecar
+Documentation=https://github.com/fentas/atty/blob/master/atty-guard/README.md
+After=default.target
+# Don't fight other security agents during boot — wait until the
+# user session is otherwise quiet before starting.
+Wants=default.target
+
+[Service]
+ExecStart=%h/.local/bin/atty-guard
+Restart=on-failure
+RestartSec=2
+# Daemon is short-running per request and small in memory; restart
+# fast if it crashes so atty sessions don't keep latching daemon_disabled.
+StartLimitIntervalSec=10
+StartLimitBurst=5
+
+# Lockdown — daemon does no FS writes outside the UDS path, no
+# network, no privileges. Tighter than the default systemd
+# protections; matches the threat model from
+# docs/security-guard-design.md.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @reboot @swap @raw-io @cpu-emulation @debug @module
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# Read-write socket directory must remain accessible. systemd
+# user instance already binds $XDG_RUNTIME_DIR; expose it explicitly
+# so the strict ProtectSystem doesn't shadow it.
+ReadWritePaths=%t
+
+[Install]
+WantedBy=default.target

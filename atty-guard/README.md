@@ -28,30 +28,28 @@ The socket file is created with mode `0600` so co-tenant users on the same host 
 
 ### systemd user unit (recommended)
 
-```ini
-# ~/.config/systemd/user/atty-guard.service
-[Unit]
-Description=atty security guard sidecar
-After=default.target
-
-[Service]
-ExecStart=%h/.local/bin/atty-guard
-Restart=on-failure
-RestartSec=2
-# Lock down — daemon does no FS writes, no network, needs only the socket.
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=yes
-PrivateDevices=yes
-RestrictAddressFamilies=AF_UNIX
-
-[Install]
-WantedBy=default.target
-```
+The repo ships a hardened user unit at `contrib/atty-guard.service` plus an installer that copies it into `~/.config/systemd/user/`. After `cargo build --release`:
 
 ```sh
-systemctl --user enable --now atty-guard
+./contrib/install.sh
+```
+
+The installer copies the release binary to `~/.local/bin/atty-guard`, installs the unit, runs `daemon-reload`, and `enable --now`s it. Idempotent — re-running upgrades the binary in place via an atomic tmp+rename so a partially-written binary can't be exec'd.
+
+The unit ships full systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `RestrictAddressFamilies=AF_UNIX`, syscall filter, etc.) so a compromised classifier can't escape the sandbox. See `contrib/atty-guard.service` for the full list.
+
+To uninstall:
+
+```sh
+systemctl --user disable --now atty-guard
+rm -f ~/.local/bin/atty-guard \
+      ~/.config/systemd/user/atty-guard.service
+```
+
+### Manual run (for development / debugging)
+
+```sh
+./target/release/atty-guard -v 2     # verbose logging to stderr
 ```
 
 ## Protocol
