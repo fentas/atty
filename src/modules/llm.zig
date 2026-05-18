@@ -127,12 +127,15 @@ pub fn configure(comptime cfg: Config) type {
             .{ .bytes = keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel, .label = "Ctrl+Shift+X", .description = "cancel any active LLM exec / dialog / auto" },
             // Inline-panel focus jump — works only while the panel is
             // open. Ctrl+Up parks the panel + moves focus to the
-            // shell prompt above; Ctrl+Down brings focus back. Both
-            // ship dual-encoded (legacy CSI + kitty kbd CSI-u).
+            // shell prompt above; Ctrl+Down brings focus back.
+            //
+            // SINGLE-encoded by design (unlike Alt+letter chords).
+            // The kitty kbd disambiguate flag atty pushes (flag 1)
+            // doesn't re-encode arrow keys — modified arrows stay
+            // legacy `\x1b[1;5A` / `\x1b[1;5B` on every terminal we
+            // target. No CSI-u sibling needed.
             .{ .bytes = keymap.key("Ctrl+Up"), .action = .chat_focus_to_shell, .label = "Ctrl+Up", .description = "while inline chat is open: focus shell prompt (panel stays)" },
-            .{ .bytes = "\x1b[1;5A", .action = .chat_focus_to_shell }, // explicit legacy form some terminals emit
             .{ .bytes = keymap.key("Ctrl+Down"), .action = .chat_focus_to_chat, .label = "Ctrl+Down", .description = "while inline chat is open: focus chat input" },
-            .{ .bytes = "\x1b[1;5B", .action = .chat_focus_to_chat },
         };
 
         // HTTP worker thread + request/response plumbing extracted
