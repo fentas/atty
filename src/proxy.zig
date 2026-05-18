@@ -17,6 +17,7 @@ const linux = std.os.linux;
 const config = @import("config");
 const dispatch = @import("dispatch.zig");
 const module = @import("module.zig");
+const trace = @import("trace.zig");
 const io_helpers = @import("proxy/io.zig");
 const containsEnter = io_helpers.containsEnter;
 const writeAll = io_helpers.writeAll;
@@ -473,6 +474,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // suppression branch below stops new paints but
                 // can't erase what's already on the wire).
                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
+                trace.log(.paint, "applyReserveRows want={d} current={d}", .{ want_reserve, sb.reserve_rows });
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
@@ -575,6 +577,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             const read_n = posix.read(posix.STDIN_FILENO, &read_buf) catch 0;
             if (read_n > 0) {
                 var input: []const u8 = read_buf[0..read_n];
+                trace.logBytes(.input, "stdin_read", input);
+                trace.log(.altscreen, "alt_screen.active={} module_overlay_active={}", .{ alt_screen.active, ctx.module_overlay_active });
 
                 // PASSWORD-INPUT FAST PATH: when the slave PTY is in
                 // canonical hidden-input mode (ICANON=on AND ECHO=off
@@ -675,6 +679,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // First-match-wins via the linear scan in `keymap.match`.
                 const matched_action = keymap.match(config.keymap.bindings, input) orelse
                     keymap.match(D.allDefaultBindings(), input);
+                if (matched_action) |act| {
+                    trace.log(.keymap, "matched action={s}", .{@tagName(act)});
+                } else {
+                    trace.log(.keymap, "no match", .{});
+                }
                 // `var` so the llm-action arm can clear it when a
                 // match didn't consume — that lets the CSI-u
                 // cleanup at the bottom still translate / drop the
@@ -930,10 +939,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 var legacy_buf: [8]u8 = undefined;
                 if (!matched_binding and config.terminal.enable_kitty_keyboard and keymap.isCsiU(input)) {
                     if (keymap.csiUToLegacy(input, &legacy_buf)) |legacy| {
+                        trace.logBytes(.csiu, "csiu_translated_to_legacy", legacy);
                         input = legacy;
                     } else if (!alt_screen.active) {
+                        trace.log(.csiu, "csiu_unmapped_dropped (not in alt-screen)", .{});
                         swallow_after_binding = true;
+                    } else {
+                        trace.logBytes(.csiu, "csiu_unmapped_passthrough_to_alt_screen", input);
                     }
+                } else if (!matched_binding and config.terminal.enable_kitty_keyboard) {
+                    trace.log(.csiu, "isCsiU=false on input (forwarded as-is)", .{});
                 }
 
                 if (swallow_after_binding) {
@@ -995,10 +1010,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
                 const action = D.dispatchInput(&runtimes, &ctx, input) catch .forward;
                 switch (action) {
-                    .forward => try writeAll(pty.master, input),
-                    .swallow => {},
-                    .replace => |bytes| try writeAll(pty.master, bytes),
-                    .replace_commit => |bytes| try writeAll(pty.master, bytes),
+                    .forward => {
+                        trace.logBytes(.forward, "master_write_forward", input);
+                        try writeAll(pty.master, input);
+                    },
+                    .swallow => {
+                        trace.log(.dispatch, "swallowed by module", .{});
+                    },
+                    .replace => |bytes| {
+                        trace.logBytes(.forward, "master_write_replace", bytes);
+                        try writeAll(pty.master, bytes);
+                    },
+                    .replace_commit => |bytes| {
+                        trace.logBytes(.forward, "master_write_replace_commit", bytes);
+                        try writeAll(pty.master, bytes);
+                    },
                 }
 
                 // Fire onLineCommit if Enter was pressed during this read
@@ -1175,6 +1201,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             const read_n = posix.read(pty.master, &read_buf) catch 0;
             if (read_n > 0) {
                 const output = read_buf[0..read_n];
+                trace.logBytes(.input, "master_read", output);
+                const alt_before = alt_screen.active;
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
                 // List sits below the prompt — shell echo lands on
@@ -1221,6 +1249,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // — matches the null-on-non-TTY contract on
                 // `Context.cursor_row` and the startup gate above.
                 if (args.is_tty) ctx.cursor_row = cursor_tracker.currentRow();
+                if (alt_before != alt_screen.active) {
+                    trace.log(.altscreen, "alt_screen transition: {}->{}", .{ alt_before, alt_screen.active });
+                }
+                if (args.is_tty) {
+                    trace.log(.cursor, "cursor_tracker.currentRow={?}", .{ctx.cursor_row});
+                }
                 // Mirror the shell-side alt-screen state onto the
                 // Context so modules can refuse to open their own
                 // overlay on top of a running TUI (nvim, k9s, less).
@@ -1720,6 +1754,7 @@ fn renderStatus(
     // — atty's terminal is in alt-screen, and writing the bar's
     // bytes there clobbers the overlay's painted content.
     if (ctx.module_overlay_active) return;
+    trace.log(.paint, "renderStatus reserve={d} cursor_row={?}", .{ sb.reserve_rows, ctx.cursor_row });
 
     // First gather the module contributions into a scratch buffer.
     //
