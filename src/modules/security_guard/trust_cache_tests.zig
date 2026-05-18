@@ -50,3 +50,58 @@ test "TrustCache: contains rejects wrong length" {
     try testing.expect(!cache.contains(hash[0..32]));
     try testing.expect(!cache.contains("nope"));
 }
+
+test "TrustCache: load skips invalid lines, keeps valid ones" {
+    const path = "/tmp/atty-secguard-test-load-mixed.txt";
+    _ = std.c.unlink(path);
+    defer _ = std.c.unlink(path);
+
+    // Write a file with 2 valid + 3 invalid lines.
+    const fd = std.c.open(path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true,
+    }, @as(std.c.mode_t, 0o644));
+    try testing.expect(fd >= 0);
+    const content =
+        "abc\n" ++ // too short
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" ++ // valid 1
+        "ZZ\n" ++ // wrong length
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" ++ // valid 2
+        "0123456789abcdefghijklmnopqrstuvwxyz...not_hex_at_all............\n"; // not hex
+    _ = std.c.write(fd, content.ptr, content.len);
+    _ = std.c.close(fd);
+
+    var cache: mod.TrustCache = .{};
+    defer cache.deinit(testing.allocator);
+    try cache.load(testing.allocator, path);
+
+    try testing.expectEqual(@as(usize, 2), cache.entries.items.len);
+    try testing.expect(cache.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    try testing.expect(cache.contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+}
+
+test "TrustCache: persist + load round-trip" {
+    const path = "/tmp/atty-secguard-test-roundtrip.txt";
+    _ = std.c.unlink(path);
+    defer _ = std.c.unlink(path);
+
+    var cache1: mod.TrustCache = .{};
+    defer cache1.deinit(testing.allocator);
+
+    var hash_buf1: [mod.hex_len]u8 = undefined;
+    var hash_buf2: [mod.hex_len]u8 = undefined;
+    const h1 = mod.hashCategoryMatch(.curl_pipe_sh, "curl x | sh", &hash_buf1);
+    const h2 = mod.hashCategoryMatch(.npm_unsafe_install, "npm install event-stream", &hash_buf2);
+    _ = try cache1.add(testing.allocator, h1);
+    _ = try cache1.add(testing.allocator, h2);
+    try cache1.persist(path);
+
+    // Re-read from disk.
+    var cache2: mod.TrustCache = .{};
+    defer cache2.deinit(testing.allocator);
+    try cache2.load(testing.allocator, path);
+    try testing.expectEqual(@as(usize, 2), cache2.entries.items.len);
+    try testing.expect(cache2.contains(h1));
+    try testing.expect(cache2.contains(h2));
+}

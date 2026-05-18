@@ -171,14 +171,22 @@ fn expandTilde(path: []const u8, out: []u8) ![:0]u8 {
 fn mkdirP(dir: []const u8) !void {
     var path_z_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir_z = std.fmt.bufPrintZ(&path_z_buf, "{s}", .{dir}) catch return error.PathTooLong;
-    // Try mkdir; if it fails for missing parent, recurse.
-    if (std.c.mkdir(dir_z.ptr, 0o755) == 0) return;
-    const e = std.posix.errno(@as(c_int, -1));
+    // Read errno from the actual mkdir return value (not from a
+    // literal sentinel — passing `-1` works in practice but masks
+    // the syscall contract: errno is only meaningful when the
+    // return was the error sentinel, which is what `errno(rc)`
+    // checks for. See std.posix.errno.
+    const rc = std.c.mkdir(dir_z.ptr, 0o755);
+    if (rc == 0) return;
+    const e = std.posix.errno(rc);
     if (e == .EXIST) return;
     if (std.fs.path.dirname(dir)) |parent| {
         if (parent.len < dir.len) {
             try mkdirP(parent);
-            if (std.c.mkdir(dir_z.ptr, 0o755) == 0) return;
+            const rc2 = std.c.mkdir(dir_z.ptr, 0o755);
+            if (rc2 == 0) return;
+            const e2 = std.posix.errno(rc2);
+            if (e2 == .EXIST) return;
         }
     }
     return error.MkdirFailed;
