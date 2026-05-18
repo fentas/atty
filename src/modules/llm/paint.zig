@@ -204,17 +204,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// after the proxy's `setReserveRows(base) + activate` has
         /// shrunk the reservation back. (The proxy clears the freed
         /// rows itself via `activate`; the paint doesn't need to.)
-        /// Render a turn's content for the chat scrollback. When
-        /// the assistant produced a JSON envelope (the dialog
-        /// protocol shape), extract the human-meaningful field —
-        /// `description`+`command` for exec, `reason` for done,
-        /// `question` for question — and present it as prose +
-        /// a dim command preview. Falls back to the raw content
-        /// when parsing fails (single-mode replies, prose drift).
-        ///
-        /// `max_visible` caps the visible cols on a single row;
-        /// longer content gets a "[…]" ellipsis. The actual row
-        /// CUP + clear is done by the caller; we only emit content
         /// Overlay-mode structured turn rendering. The overlay has
         /// the full screen, so assistant_exec turns get spread across
         /// multiple rows: description on row 1, command on row 2
@@ -225,6 +214,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// user sees what the model actually emitted instead of an
         /// empty turn.
         fn renderOverlayTurnContent(w: *std.Io.Writer, turn: dialog.Turn) !void {
+            // Bound the per-field render so a 4096-byte command
+            // doesn't wrap into 50+ rows and push the input row off
+            // the alt-screen. Capped at 480 visible cols (~6 wraps
+            // on an 80-col terminal); longer content gets a dim
+            // ellipsis marker so the user can open the full
+            // command in their shell if they want to see it all.
+            const overlay_field_cap: usize = 480;
             const c = turn.content;
             const looks_like_envelope = turn.kind == .assistant_exec and
                 c.len > 2 and
@@ -236,53 +232,74 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             }
+            // FixedBufferAllocator keeps the parse off the heap and
+            // off the kernel. `cfg.max_response_bytes` + slack covers
+            // the worst-case envelope (one full-size command field +
+            // the small string fields + JSON-parser per-token nodes).
+            var fba_buf: [cfg.max_response_bytes + 4096]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
             const R = dialog.Response(cfg.max_response_bytes);
             var parsed: R = .{};
-            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena.deinit();
-            dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
+            dialog.parseResponse(R, fba.allocator(), c, &parsed) catch {
                 const slice = if (c.len > 1024) c[0..1024] else c;
                 try writeSanitized(w, slice);
                 if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             };
+
             switch (parsed.action) {
                 .exec => {
                     const desc = parsed.description();
                     const cmd = parsed.command();
                     if (desc.len > 0) {
-                        try writeSanitized(w, desc);
+                        const dslice = if (desc.len > overlay_field_cap) desc[0..overlay_field_cap] else desc;
+                        try writeSanitized(w, dslice);
+                        if (desc.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                         try w.writeAll("\r\n");
                     }
                     try w.writeAll("\x1B[2m      $ \x1B[0m\x1B[22;1;38;5;14m");
-                    try writeSanitized(w, cmd);
+                    const cslice = if (cmd.len > overlay_field_cap) cmd[0..overlay_field_cap] else cmd;
+                    try writeSanitized(w, cslice);
                     try w.writeAll("\x1B[0m");
+                    if (cmd.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .question => {
                     const q = parsed.question();
-                    try w.writeAll("\x1B[3m"); // italic
-                    try writeSanitized(w, q);
+                    const qslice = if (q.len > overlay_field_cap) q[0..overlay_field_cap] else q;
+                    try w.writeAll("\x1B[3m");
+                    try writeSanitized(w, qslice);
                     try w.writeAll("\x1B[0m");
+                    if (q.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                     if (parsed.choices_count > 0) {
                         var i: usize = 0;
                         while (i < parsed.choices_count) : (i += 1) {
                             try w.writeAll("\r\n");
                             var num: [16]u8 = undefined;
-                            const np = std.fmt.bufPrint(&num, "\x1B[2m   {d}.\x1B[0m ", .{i + 1}) catch "";
+                            const np = std.fmt.bufPrint(&num, "\x1B[2m   {d}.\x1B[0m ", .{i + 1}) catch unreachable;
                             try w.writeAll(np);
-                            try writeSanitized(w, parsed.choice(i));
+                            const choice = parsed.choice(i);
+                            const cslice2 = if (choice.len > overlay_field_cap) choice[0..overlay_field_cap] else choice;
+                            try writeSanitized(w, cslice2);
                         }
                     }
                 },
                 .done => {
                     const r = parsed.reason();
+                    const rslice = if (r.len > overlay_field_cap) r[0..overlay_field_cap] else r;
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m ");
-                    try writeSanitized(w, r);
+                    try writeSanitized(w, rslice);
+                    if (r.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
             }
         }
 
-        /// bytes (and SGR resets).
+        /// Inline-panel single-row turn renderer — the panel's
+        /// scrollback rows are precious, so each turn gets exactly
+        /// one row. `max_visible` caps the visible cols; longer
+        /// content gets a "[…]" ellipsis. Parses the envelope when
+        /// the shape suggests one and falls back to raw content
+        /// otherwise. The caller positions the row (CUP + clear);
+        /// this function only emits content bytes (and SGR resets).
         fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize) !void {
             const c = turn.content;
             // Quick shape check: assistant turns from the dialog

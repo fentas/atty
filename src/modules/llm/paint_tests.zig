@@ -614,3 +614,51 @@ test "overlay: malformed assistant envelope falls back to raw render so nothing 
     // Raw content still surfaces — the user sees what the model emitted.
     try testing.expect(std.mem.indexOf(u8, bytes.?, "NOPE this isn't valid") != null);
 }
+
+test "overlay: assistant_exec with action=question + choices renders italic prompt + numbered list" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    const envelope =
+        "{\"action\":\"question\",\"question\":\"Which directory?\",\"choices\":[\"src\",\"tests\",\"docs\"]}";
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
+
+    rt.chat_overlay_open = true;
+    rt.chat_overlay_paint_pending = true;
+    const bytes = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(bytes != null);
+    // Italic SGR + prompt text + numbered choices.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "\x1B[3m") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "Which directory?") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "1.") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "2.") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "3.") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "src") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "tests") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "docs") != null);
+    // Raw JSON envelope must NOT leak.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "\"choices\"") == null);
+}
