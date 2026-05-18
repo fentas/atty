@@ -481,6 +481,36 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // can't erase what's already on the wire).
                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
                 trace.log(.paint, "applyReserveRows want={d} current={d}", .{ want_reserve, sb.reserve_rows });
+
+                // GROWING + the cursor would land inside the new
+                // reservation zone → scroll shell content UP so the
+                // prompt ends up above the panel. Without this, the
+                // prompt at the bottom row is OVER-PAINTED by the
+                // panel and Ctrl+Up (focus park) lands the cursor
+                // invisibly inside the panel.
+                if (want_reserve > sb.reserve_rows) {
+                    const new_bottom: u16 = if (sb.rows > want_reserve) sb.rows - want_reserve else 1;
+                    const old_bottom: u16 = if (sb.rows > sb.reserve_rows) sb.rows - sb.reserve_rows else 1;
+                    const cur_row: u16 = cursor_tracker.currentRow();
+                    if (cur_row > new_bottom and cur_row <= old_bottom) {
+                        const scroll_n: u16 = cur_row - new_bottom;
+                        // CUP to OLD bottom-of-scroll-region, emit N
+                        // newlines (each triggers scroll-up at the
+                        // bottom of the DECSTBM region — content moves
+                        // up, cursor stays). Then CUP to the prompt's
+                        // new visual row so subsequent shell output
+                        // continues from there.
+                        w_re.print("\x1B[{d};1H", .{old_bottom}) catch {};
+                        var i: u16 = 0;
+                        while (i < scroll_n) : (i += 1) {
+                            w_re.writeAll("\n") catch {};
+                        }
+                        w_re.print("\x1B[{d};1H", .{new_bottom}) catch {};
+                        // Drain the scroll-up + CUP bytes through the
+                        // cursor tracker so it learns the new row.
+                        cursor_tracker.feed(out_buf[0..w_re.end]);
+                    }
+                }
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};

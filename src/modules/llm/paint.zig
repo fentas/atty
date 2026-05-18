@@ -516,6 +516,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const top_row: u16 = total_rows - live_reserve + 1;
             const input_row: u16 = top_row + panel_rows - 1;
 
+            // Lazy snapshot: action handler set `chat_open_cursor_row
+            // = 0` so the proxy could scroll the shell content up
+            // before we recorded the prompt's row. By the time this
+            // paint fires, `ctx.cursor_row` reflects the post-scroll
+            // position. Capture once, leave alone on subsequent
+            // paints so mid-session prompt redraws don't drift it.
+            if (rt.chat_open_cursor_row == 0) {
+                if (ctx.cursor_row) |r| rt.chat_open_cursor_row = r;
+            }
+
             // Save cursor. When focus is IN the panel, hide the real
             // terminal cursor — we draw a block-cursor glyph in the
             // chat input row as the visual marker. When focus is

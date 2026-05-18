@@ -827,13 +827,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // Default: focus starts in the panel (matches
                         // the previous always-swallow behaviour).
                         rt.chat_focus_in_panel = true;
-                        // Capture the shell prompt row at open time so
-                        // every subsequent paint (including the close
-                        // paint after the next toggle) can land the
-                        // real terminal cursor back on it. Re-open
-                        // with no live cursor_row leaves this at 0,
-                        // which the helper treats as "use fallback".
-                        rt.chat_open_cursor_row = ctx.cursor_row orelse 0;
+                        // Snapshot deferred to the first paint after
+                        // this open (see `paintInlineChat`). The proxy
+                        // may scroll shell content UP between action
+                        // dispatch and the next paint to push the
+                        // prompt above the new reservation — capturing
+                        // here would record the pre-scroll row and
+                        // park the cursor inside the panel zone on
+                        // Ctrl+Up. Zero means "not captured yet".
+                        rt.chat_open_cursor_row = 0;
                     }
                     return true;
                 },
