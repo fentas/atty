@@ -14,11 +14,18 @@ use crate::protocol::{
     Verdict,
 };
 use crate::threat_map::ThreatMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
+
+/// Hard cap on a single request line. Anything longer is treated
+/// as a hostile / buggy client and the connection is dropped. 64
+/// KiB is well beyond any plausible typed command + context blob;
+/// keeps a malicious local app from OOM'ing the daemon by streaming
+/// an unbounded "line" past serde_json's recursion limit.
+const MAX_LINE_BYTES: u64 = 64 * 1024;
 
 pub fn serve(socket: &Path, verbosity: u8) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
@@ -58,12 +65,33 @@ struct State {
 }
 
 fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
-    let reader = BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
+    let mut line_buf = String::new();
 
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
+    loop {
+        line_buf.clear();
+        // Cap the read so a hostile client can't stream an
+        // unbounded "line" until OOM. take(N).read_line bounds the
+        // String capacity to N bytes; we treat overflow as
+        // "drop the connection" rather than truncating the line
+        // and feeding garbled JSON to the parser.
+        let mut limited = (&mut reader).take(MAX_LINE_BYTES);
+        let n = limited.read_line(&mut line_buf)?;
+        if n == 0 {
+            break;
+        }
+        if n as u64 == MAX_LINE_BYTES && !line_buf.ends_with('\n') {
+            write_response(
+                &mut writer,
+                0,
+                ResponseBody::Error {
+                    message: "request line exceeds 64 KiB limit".into(),
+                },
+            )?;
+            break;
+        }
+        let trimmed = line_buf.trim();
         if trimmed.is_empty() {
             continue;
         }
