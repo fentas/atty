@@ -23,9 +23,20 @@
 //
 //   bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
 
-#include <linux/bpf.h>
+// vmlinux.h MUST come first — declares the kernel types
+// (struct linux_binprm, struct task_struct, struct
+// trace_event_raw_sys_enter, …) the programs below dereference.
+// Generated via `bpftool btf dump file /sys/kernel/btf/vmlinux
+// format c > vmlinux.h`. See the Makefile target.
+#include "vmlinux.h"
+
+#include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+
+#ifndef EPERM
+#define EPERM 1
+#endif
 
 // Match the userspace ThreatLevel enum byte-for-byte.
 #define THREAT_LOW      0
@@ -59,21 +70,38 @@ struct execve_event {
 // LSM hook — fires after the kernel has resolved the new program
 // but before execve() succeeds. Returning a non-zero value rejects
 // the syscall with that errno.
+//
+// Threat-map pivot: lookup by the PARENT PID, not the current one.
+// `bpf_get_current_pid_tgid()` returns the execve'ing task (the
+// child-to-be); the threat model marks the parent (e.g. `npm`,
+// `sudo`) so every descendant's execve is gated. We walk
+// `task->real_parent->tgid` via BPF CO-RE reads.
+//
+// Comm note: at bprm_check_security time the kernel hasn't yet
+// updated the new binary's comm — `bpf_get_current_comm` returns
+// the CALLING task's comm (the parent). Userspace must NOT assume
+// `comm` = the binary about to load; we keep it as a diagnostic
+// breadcrumb only.
 SEC("lsm/bprm_check_security")
 int BPF_PROG(check_execve, struct linux_binprm *bprm)
 {
-    __u32 pid = bpf_get_current_pid_tgid() >> 32;
-    __u8 *level = bpf_map_lookup_elem(&threat_map, &pid);
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *parent = NULL;
+    bpf_core_read(&parent, sizeof(parent), &task->real_parent);
+    __u32 parent_pid = 0;
+    if (parent)
+        bpf_core_read(&parent_pid, sizeof(parent_pid), &parent->tgid);
+
+    __u32 child_pid = bpf_get_current_pid_tgid() >> 32;
+    __u8 *level = bpf_map_lookup_elem(&threat_map, &parent_pid);
 
     if (level && *level == THREAT_CRITICAL) {
         // Emit a "blocked" event before refusing so the daemon can
         // surface the reason in atty's banner.
         struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
-            e->pid = pid;
-            // ppid lookup is awkward from the LSM hook; left for
-            // userspace to resolve via /proc/<pid>/status.
-            e->ppid = 0;
+            e->pid = child_pid;
+            e->ppid = parent_pid;
             bpf_get_current_comm(e->comm, sizeof(e->comm));
             e->argv0[0] = '\0';
             bpf_ringbuf_submit(e, 0);
@@ -95,13 +123,24 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     if (!e)
         return 0;
 
+    // sys_enter_execve args:
+    //   args[0] = const char __user *filename
+    //   args[1] = const char __user *const __user *argv
+    //   args[2] = const char __user *const __user *envp
+    // The previous comment was misleading; argv is args[1].
     e->pid = bpf_get_current_pid_tgid() >> 32;
-    e->ppid = 0; // resolved userspace-side
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *parent = NULL;
+    bpf_core_read(&parent, sizeof(parent), &task->real_parent);
+    e->ppid = 0;
+    if (parent)
+        bpf_core_read(&e->ppid, sizeof(e->ppid), &parent->tgid);
+
     bpf_get_current_comm(e->comm, sizeof(e->comm));
 
-    // First argv element — best-effort copy. The actual address is
-    // in ctx->args[0]; userspace fans out to /proc/<pid>/cmdline
-    // for the full vector.
+    // First argv element — best-effort copy. Userspace fans out to
+    // /proc/<pid>/cmdline for the full vector.
     const char *const *argv = (const char *const *)ctx->args[1];
     const char *arg0 = NULL;
     bpf_probe_read_user(&arg0, sizeof(arg0), argv);

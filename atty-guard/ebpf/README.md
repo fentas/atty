@@ -93,6 +93,15 @@ enum ThreatMapBackend {
 
 `set`/`get` dispatch on the variant. No external API change.
 
+### Concurrent access on the BPF hash map (TODO)
+
+`BPF_MAP_TYPE_HASH` is RCU-protected on the kernel side: per-CPU read fast paths, writes go through a lock. From userspace the libbpf `update`/`lookup` calls are individually atomic but a read-modify-write sequence is not. The V2-B impl needs to decide:
+
+1. **Last-write-wins** (current design) — atty fires `set_threat_level` for a PID; whatever fires last is what the next LSM hook sees. Acceptable because atty's writes are per-Enter, not in tight loops.
+2. **Optimistic transactions** with the `bpf_map_lookup_and_delete_elem` family — overkill for this workload.
+
+Going with (1) for now; track this paragraph as the "we did consider it" record. Atomicity per-key is what the LSM hook actually needs.
+
 ## Safety / failure modes
 
 - **BPF verifier rejects the program**: daemon falls back to in-memory mode + logs a warning. atty's UDS contract is unaffected; only the kernel-side enforcement is missing.

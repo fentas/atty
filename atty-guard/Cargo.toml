@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive"] }
 # Pulled in only when --features ebpf is set. Implementation lands
 # with the V2-B follow-up; the feature gate exists today so the
 # `EbpfState` skeleton in `src/ebpf.rs` is visible + reviewable.
-libbpf-rs = { version = "0.24", optional = true }
+libbpf-rs = { version = "0.24.5", optional = true }
 
 [features]
 default = []

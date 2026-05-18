@@ -50,8 +50,30 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+/// Lets the daemon's startup path (which returns `io::Result`)
+/// fail through `attach()`'s error type without an explicit map.
+/// `Other` is the appropriate stdlib kind — none of our variants
+/// align with the more-specific I/O errors.
+impl From<LoadError> for std::io::Error {
+    fn from(e: LoadError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+    }
+}
+
 /// Loaded BPF state — once `attach()` returns, the LSM hook + the
 /// execve tracepoint are wired and the maps are live.
+///
+/// Concurrency note: V2-B will hold a `libbpf_rs::Object` here,
+/// which is `!Sync`. The daemon's shared-state `Arc<State>` model
+/// can't put a `!Sync` field through `Arc` without `Mutex<…>`. Two
+/// options when V2-B lands:
+///   1. Wrap the inner Object in `Mutex<>` and accept the serialise
+///      cost (cheap: only attach/detach touch it; the BPF map
+///      operations are thread-safe via libbpf's own locking).
+///   2. Park EbpfState in single-thread ownership (one dedicated
+///      ringbuf-reader thread, with set_threat/get_threat going
+///      through a mpsc channel).
+/// Documenting both here so the impl choice is explicit.
 pub struct EbpfState {
     #[cfg(feature = "ebpf")]
     _placeholder: std::marker::PhantomData<()>,
