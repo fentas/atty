@@ -276,7 +276,15 @@ const shell_doctor_snippet =
     \\    __atty_doctor_check 'declare -F __atty_osc133_preexec > /dev/null' \
     \\        '__atty_osc133_preexec function defined (emits `;C`)' \
     \\        'init eval ran with an older atty binary that lacked the DEBUG-trap-based `;C` emitter. Re-run after upgrading atty — dialog/auto mode needs `;C` to advance past `.executing` state.'
-    \\    __atty_doctor_check 'case "$(trap -p DEBUG 2>/dev/null)" in *__atty_osc133_preexec*) true ;; *) false ;; esac' \
+    \\    # Bash scopes DEBUG/RETURN traps PER-FUNCTION unless `set -T`
+    \\    # is active globally — inside `__atty_doctor_check` (which is
+    \\    # what runs `eval "$1"`), `trap -p DEBUG` returns the empty
+    \\    # function-local trap, never the user's shell-level one.
+    \\    # Capture the trap state HERE in the outer scope and pass it
+    \\    # into the check as a variable, so the case-match happens on
+    \\    # data instead of re-querying from inside a function frame.
+    \\    __atty_doctor_dbg_trap="$(trap -p DEBUG 2>/dev/null)"
+    \\    __atty_doctor_check 'case "$__atty_doctor_dbg_trap" in *__atty_osc133_preexec*) true ;; *) false ;; esac' \
     \\        'DEBUG trap wired to __atty_osc133_preexec' \
     \\        'something replaced the DEBUG trap after init (a later loaded plugin?) — dialog will stall in `.executing` until the trap is restored. Re-run `eval "$(atty init bash)"` AFTER all plugins finish setting up traps.'
     \\elif [ -n "${ZSH_VERSION:-}" ]; then
