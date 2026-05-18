@@ -250,15 +250,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // stays at N. Setting `max_rows` to `effectiveRows()` lets the
     // tracker's LF-advance clamp at the same row the terminal does,
     // keeping row consistent with what the shell sees.
-    var cursor_tracker = CursorTracker.init(blk: {
+    var cursor_tracker = blk: {
+        var rows: u16 = 24;
+        var cols: u16 = 80;
         if (args.is_tty) {
             if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                if (statusbar) |sb| break :blk sb.effectiveRows();
-                break :blk s.rows;
+                cols = s.cols;
+                rows = if (statusbar) |sb| sb.effectiveRows() else s.rows;
             } else |_| {}
         }
-        break :blk 24;
-    });
+        break :blk CursorTracker.init(rows, cols);
+    };
 
     // Alternate-screen-buffer tracker — full-screen TUIs (k9s, vim,
     // less, htop, helix, lazygit, …) swap to the alt buffer with
