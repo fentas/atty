@@ -44,6 +44,7 @@ pub const modules = struct {
     pub const guardrail = @import("modules/guardrail.zig");
     pub const history = @import("modules/history.zig");
     pub const llm = @import("modules/llm.zig");
+    pub const security_guard = @import("modules/security_guard.zig");
 };
 
 // Pull every test in the project into the runner.
