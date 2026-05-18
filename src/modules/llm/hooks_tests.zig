@@ -867,3 +867,46 @@ test "overlay chat: cursor movement + mid-line insert + Ctrl+W mirror the inline
     _ = try L.onInput(&rt, &ctx, "\x04");
     try testing.expect(!rt.chat_overlay_open);
 }
+
+test "inline chat: Enter with refused-fire clamps cursor when trailing whitespace was trimmed" {
+    // Regression guard: PR #93 round-1 review caught that trimming
+    // trailing whitespace could leave the cursor past the new EOL.
+    // If can_fire = false (request in flight), the buffer survives
+    // and a later paint or edit would index out of bounds.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    // Block submission so Enter takes the can_fire=false branch.
+    rt.in_flight = true;
+
+    _ = try L.onInput(&rt, &ctx, "hi   "); // 5 chars, cursor=5
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\r"); // Enter → trims to "hi" (len=2)
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_len);
+    // Cursor MUST have been clamped to the new length.
+    try testing.expect(rt.chat_inline_input_cursor <= rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
+}

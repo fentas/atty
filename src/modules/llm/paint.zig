@@ -183,6 +183,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const half = visible_max / 2;
                     win_start = if (cur > half) cur - half else 0;
                     win_end = if (win_start + visible_max < len) win_start + visible_max else len;
+                    // Cursor near the tail: win_end got clipped to
+                    // len, so shift win_start back to fill the full
+                    // 512-byte window. Without this, end-of-buffer
+                    // cursors only see ~256 bytes of context.
+                    if (win_end - win_start < visible_max and win_end >= visible_max) {
+                        win_start = win_end - visible_max;
+                    }
                 }
                 if (cur > win_start) {
                     writeSanitized(&w, rt.chat_input_buf[win_start..cur]) catch return false;
@@ -486,6 +493,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const half = visible_max / 2;
                     win_start = if (cur > half) cur - half else 0;
                     win_end = if (win_start + visible_max < len) win_start + visible_max else len;
+                    // Cursor near the tail: win_end got clipped to
+                    // len, so shift win_start back to fill the full
+                    // 512-byte window. Without this, end-of-buffer
+                    // cursors only see ~256 bytes of context.
+                    if (win_end - win_start < visible_max and win_end >= visible_max) {
+                        win_start = win_end - visible_max;
+                    }
                 }
                 const dim = !rt.chat_focus_in_panel;
                 if (dim) w.writeAll("\x1B[2m") catch return false;

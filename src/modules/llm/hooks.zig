@@ -267,6 +267,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 continue;
                             }
                             rt.chat_inline_input_len = trimmed_len;
+                            // Trimming may have left the cursor past
+                            // the new EOL — clamp before any path that
+                            // could survive without resetting it.
+                            if (rt.chat_inline_input_cursor > trimmed_len) {
+                                rt.chat_inline_input_cursor = trimmed_len;
+                            }
 
                             const can_fire = !rt.in_flight and
                                 (rt.dialog_state == .idle or
@@ -342,6 +348,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 continue;
                             }
                             rt.chat_input_len = trimmed_len;
+                            if (rt.chat_input_cursor > trimmed_len) {
+                                rt.chat_input_cursor = trimmed_len;
+                            }
 
                             const can_fire = !rt.in_flight and
                                 (rt.dialog_state == .idle or
