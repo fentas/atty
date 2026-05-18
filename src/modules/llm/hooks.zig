@@ -49,36 +49,24 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
         // Thin wrappers around `dialog.*` — pin the `DialogResponse`
         // factory + `buildRequestBody` so call sites stay short.
-        // llm.zig exports public copies (`parseDialogResponse`,
-        // `buildDialogRequestBody`); these private ones are what the
-        // hooks invoke directly.
-        fn parseDialogResponse(
+        // llm.zig re-exports these as `pub const parseDialogResponse
+        // = hooks.parseDialogResponse;` so tests can reach them
+        // through the configure() return without an import dance.
+        pub fn parseDialogResponse(
             allocator: std.mem.Allocator,
             raw: []const u8,
             out: *DialogResponse,
         ) !void {
             return dialog.parseResponse(DialogResponse, allocator, raw, out);
         }
-        const buildDialogRequestBody = dialog.buildRequestBody;
+        pub const buildDialogRequestBody = dialog.buildRequestBody;
 
-        // The pair of comptime-baked error/system-prompt strings —
-        // duplicated from llm.zig to keep this factory self-contained
-        // (avoids a circular import between llm.zig and hooks.zig).
-        const inert_error_msg: []const u8 = "no endpoint set — export $" ++
-            cfg.api_base_env ++ " / $" ++ cfg.api_base_fallback_env ++
-            ", or set Config.api_base in config.zig";
-
-        const effective_dialog_system_prompt: []const u8 = if (cfg.dialog_system_prompt.len > 0)
-            cfg.dialog_system_prompt
-        else
-            \\You are an interactive shell assistant running inside atty, a PTY proxy that wraps the user's shell. You receive a task and step-by-step OBSERVATIONS from previously executed commands. Reply ONLY with a JSON object on a single line. Allowed shapes:
-            \\{"action":"exec","command":"<single-line shell command>","description":"<one short sentence>"}
-            \\{"action":"done","reason":"<one short sentence>"}
-            \\{"action":"question","question":"<short question>","options":["<opt1>","<opt2>"]}
-            \\Optional advisory flag for any of the above shapes: add `"open_chat": true` when the user would benefit from following up in atty's chat surface — e.g. you finished but the reason is a long explanation the user might want to react to, or the question expects a free-form clarification rather than a one-token answer. Use sparingly; the flag is a request, not a guarantee (user policy may auto-open, notify, or ignore it).
-            \\The user can be talking to you from one of two chat surfaces (Alt+C inline panel above the statusbar, or Alt+Shift+C full overlay) — both route through the same dialog state and the same `action=exec` injection path, so a command you return WILL land at the user's shell prompt regardless of which surface they used. Treat chat input as conversational follow-up to the running dialog.
-            \\Never wrap the JSON in markdown fences. Never add prose around it. The command must be a single line, runnable as-is in the user's shell.
-        ;
+        // Shared comptime strings (inert-mode notice + dialog system
+        // prompt) live in `consts.zig` so this file and llm.zig
+        // both import them without a circular dependency.
+        const llm_consts = @import("consts.zig").Module(cfg);
+        const inert_error_msg = llm_consts.inert_error_msg;
+        const effective_dialog_system_prompt = llm_consts.effective_dialog_system_prompt;
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
             // Chat overlay — while open, keystrokes accumulate

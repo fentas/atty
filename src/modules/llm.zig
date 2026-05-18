@@ -158,33 +158,12 @@ pub fn configure(comptime cfg: Config) type {
         const resolveContextEnv = env_mod.resolveContextEnv;
         const resolveShell = env_mod.resolveShell;
 
-        /// Comptime-built notification for inert mode. Mentions the
-        /// configured env-var names (`cfg.api_base_env` /
-        /// `api_base_fallback_env`) so users who renamed them see
-        /// THEIR names rather than the upstream defaults, plus a
-        /// hint to use the static `Config.api_base` if they'd
-        /// rather skip env-var resolution entirely.
-        const inert_error_msg: []const u8 = "no endpoint set — export $" ++
-            cfg.api_base_env ++ " / $" ++ cfg.api_base_fallback_env ++
-            ", or set Config.api_base in config.zig";
-
-        /// Dialog-mode system prompt. Locks the model into a strict
-        /// JSON-envelope response so we can parse `action` /
-        /// `command` / `description` / `reason` reliably. The
-        /// instruction set is deliberately terse — every line spent
-        /// on prose costs tokens that should go to the user's
-        /// task.
-        const effective_dialog_system_prompt: []const u8 = if (cfg.dialog_system_prompt.len > 0)
-            cfg.dialog_system_prompt
-        else
-            \\You are an interactive shell assistant running inside atty, a PTY proxy that wraps the user's shell. You receive a task and step-by-step OBSERVATIONS from previously executed commands. Reply ONLY with a JSON object on a single line. Allowed shapes:
-            \\{"action":"exec","command":"<single-line shell command>","description":"<one short sentence>"}
-            \\{"action":"done","reason":"<one short sentence>"}
-            \\{"action":"question","question":"<short question>","options":["<opt1>","<opt2>"]}
-            \\Optional advisory flag for any of the above shapes: add `"open_chat": true` when the user would benefit from following up in atty's chat surface — e.g. you finished but the reason is a long explanation the user might want to react to, or the question expects a free-form clarification rather than a one-token answer. Use sparingly; the flag is a request, not a guarantee (user policy may auto-open, notify, or ignore it).
-            \\The user can be talking to you from one of two chat surfaces (Alt+C inline panel above the statusbar, or Alt+Shift+C full overlay) — both route through the same dialog state and the same `action=exec` injection path, so a command you return WILL land at the user's shell prompt regardless of which surface they used. Treat chat input as conversational follow-up to the running dialog.
-            \\Never wrap the JSON in markdown fences. Never add prose around it. The command must be a single line, runnable as-is in the user's shell.
-        ;
+        // Comptime-baked strings (inert-mode error notice + dialog
+        // system prompt) live in `llm/consts.zig` so `llm/hooks.zig`
+        // can read them without a circular import back into llm.zig.
+        const llm_consts = @import("llm/consts.zig").Module(cfg);
+        const inert_error_msg = llm_consts.inert_error_msg;
+        const effective_dialog_system_prompt = llm_consts.effective_dialog_system_prompt;
 
         // RequestKind discriminator lives in worker.zig (single vs
         // dialog request body shape).
@@ -1003,18 +982,11 @@ pub fn configure(comptime cfg: Config) type {
         pub const provideTermBytes = paint.provideTermBytes;
 
         // Dialog request body composition + parsed-response decoding
-        // live in `llm/dialog.zig`. Re-exported here for callers that
-        // expect the names on the `configure()` factory; the pub
-        // re-exports also let test code reach them via the existing
-        // surface without an import dance.
-        pub const buildDialogRequestBody = dialog.buildRequestBody;
-        pub fn parseDialogResponse(
-            allocator: std.mem.Allocator,
-            raw: []const u8,
-            out: *DialogResponse,
-        ) !void {
-            return dialog.parseResponse(DialogResponse, allocator, raw, out);
-        }
+        // — re-exported from hooks.zig (which is where the in-module
+        // call sites live). Tests reach these via L.parseDialogResponse
+        // etc. through the configure() return.
+        pub const buildDialogRequestBody = hooks.buildDialogRequestBody;
+        pub const parseDialogResponse = hooks.parseDialogResponse;
 
         // ---- worker + HTTP RPC + extract helpers -------------------------
         //
