@@ -218,7 +218,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             defer arena.deinit();
             const R = dialog.Response(cfg.max_response_bytes);
             const parsed = arena.allocator().create(R) catch {
-                try writeSanitized(w, if (c.len > 1024) c[0..1024] else c);
+                const slice = if (c.len > 1024) c[0..1024] else c;
+                try writeSanitized(w, slice);
+                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             };
             parsed.* = .{};
@@ -237,8 +239,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         const dslice = if (desc.len > overlay_field_cap) desc[0..overlay_field_cap] else desc;
                         try writeSanitized(w, dslice);
                         if (desc.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
-                        try w.writeAll("\r\n");
                     }
+                    // Always break to a new row before the command —
+                    // otherwise an empty description would land the
+                    // `$ <cmd>` on the same row as the `atty:` prefix,
+                    // breaking the two-row layout invariant.
+                    try w.writeAll("\r\n");
                     try w.writeAll("\x1B[2m      $ \x1B[0m\x1B[22;1;38;5;14m");
                     const cslice = if (cmd.len > overlay_field_cap) cmd[0..overlay_field_cap] else cmd;
                     try writeSanitized(w, cslice);
