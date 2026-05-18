@@ -444,9 +444,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const max_inline_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
             const inline_offset: usize = if (rt.chat_inline_view_offset > max_inline_offset) max_inline_offset else rt.chat_inline_view_offset;
             const visible_end: usize = rt.turns_len - inline_offset;
-            const start_turn: usize = if (visible_end > scrollback_rows) visible_end - scrollback_rows else 0;
             row = top_row + 1;
             const max_inline_visible: usize = if (cols_usize > 12) cols_usize - 6 else 40;
+            // When scrolled back, the top scrollback row becomes a
+            // dim "↑ N more turn(s) below" header so the user
+            // doesn't think new replies vanished — mirrors the
+            // overlay's scrolled-back indicator.
+            var scrollback_budget: u16 = scrollback_rows;
+            if (inline_offset > 0 and scrollback_budget > 1) {
+                var sb: [40]u8 = undefined;
+                const head = std.fmt.bufPrint(&sb, "  \x1B[2m\u{2191} {d} more turn(s) below\x1B[0m", .{inline_offset}) catch "";
+                w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
+                w.writeAll(head) catch return false;
+                row += 1;
+                scrollback_budget -= 1;
+            }
+            const start_turn: usize = if (visible_end > scrollback_budget) visible_end - scrollback_budget else 0;
             for (rt.turns[start_turn..visible_end]) |turn| {
                 if (row >= input_row) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;

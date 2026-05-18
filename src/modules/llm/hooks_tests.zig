@@ -731,3 +731,31 @@ test "chat scroll: pushTurn re-pins both view offsets to 0" {
     try testing.expectEqual(@as(usize, 0), rt.chat_view_offset);
     try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
 }
+
+test "chat scroll: freeTurns resets both view offsets" {
+    // Regression guard: cancel/reset wipes the ring; without this
+    // the offsets dangle stale until the first new pushTurn rescues
+    // them.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    try seedTurns(&rt, helpers, 6);
+    rt.chat_view_offset = 3;
+    rt.chat_inline_view_offset = 2;
+
+    helpers.freeTurns(&rt);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+    try testing.expectEqual(@as(usize, 0), rt.chat_view_offset);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
+}
