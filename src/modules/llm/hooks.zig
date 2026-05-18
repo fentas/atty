@@ -827,15 +827,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // Default: focus starts in the panel (matches
                         // the previous always-swallow behaviour).
                         rt.chat_focus_in_panel = true;
-                        // Capture the shell prompt position at open
-                        // time so every subsequent paint (including
-                        // the close paint after the next toggle)
-                        // can land the real terminal cursor on the
-                        // prompt's input region (after PS1, not col 1).
-                        // 0 sentinel = no live tracker value; the
-                        // helper treats those as "use fallback".
-                        rt.chat_open_cursor_row = ctx.cursor_row orelse 0;
-                        rt.chat_open_cursor_col = ctx.cursor_col orelse 0;
+                        // Defer the prompt-position snapshot to the
+                        // FIRST paint (sentinel 0 = not yet captured).
+                        // Why not capture here? When the proxy's
+                        // reservation-grow path scrolls the prompt UP
+                        // to make room for the panel, that scroll
+                        // happens AFTER this action handler runs but
+                        // BEFORE the panel paints. Capturing now would
+                        // record the PRE-scroll row, then the panel's
+                        // restore CUP would land in the new panel zone
+                        // — bash's next prompt redraw would chase the
+                        // cursor, scrolling the prompt UP again on
+                        // each redraw. Lazy capture picks up the
+                        // POST-scroll ctx.cursor_row that the proxy
+                        // refreshed between scroll and paint.
+                        rt.chat_open_cursor_row = 0;
+                        rt.chat_open_cursor_col = 0;
                     }
                     return true;
                 },

@@ -908,13 +908,12 @@ pub fn configure(comptime cfg: Config) type {
 
         /// Rows the inline chat panel wants reserved *above* the
         /// statusbar's base reservation. Returns 0 when the panel is
-        /// closed; otherwise `cfg.inline_chat_rows` so the proxy can
-        /// add it to `sb.baseReserveRows()` and re-apply DECSTBM. The
-        /// proxy clamps if the request would leave the shell with
-        /// fewer than 1 visible row.
+        /// closed; otherwise `cfg.inline_chat_rows + cfg.inline_chat_top_gap`
+        /// (the top gap rows stay blank — visual breathing room
+        /// between the shell prompt and the panel divider).
         pub fn extraReserveRows(rt: *Runtime) u16 {
             if (!rt.chat_inline_open) return 0;
-            return cfg.inline_chat_rows;
+            return cfg.inline_chat_rows + cfg.inline_chat_top_gap;
         }
 
         /// SIGWINCH hook — dispatcher calls this after the statusbar

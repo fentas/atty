@@ -180,11 +180,15 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[21;1H") != null);
 }
 
-test "inline chat (Alt+C): open paint CUP-restores to the cursor_row snapshot taken at toggle time" {
-    // Invariant: toggle-open snapshots `ctx.cursor_row` into the
-    // Runtime; every subsequent paint ends with CUP back to that
-    // row so the real terminal cursor sits on the shell prompt
-    // (not the panel input row) when paint returns.
+test "inline chat (Alt+C): open paint CUP-restores to the cursor_row snapshot captured at first paint" {
+    // Invariant: the first paint after toggle-open snapshots
+    // `ctx.cursor_row` into the Runtime; every subsequent paint
+    // ends with CUP back to that row so the real terminal cursor
+    // sits on the shell prompt (not the panel input row).
+    // (Snapshot is deferred from toggle to first paint so the
+    // proxy's reservation-grow scroll-up can complete and update
+    // `ctx.cursor_row` to the post-scroll prompt position before
+    // we capture.)
     const L = configure(.{
         .api_base = "http://test/v1",
         .api_base_env = "ATTY_TEST_NEVER",
@@ -218,11 +222,14 @@ test "inline chat (Alt+C): open paint CUP-restores to the cursor_row snapshot ta
 
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
     try testing.expect(rt.chat_inline_open);
-    try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
+    // Toggle defers capture — snapshot is 0 until first paint.
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_row);
 
     ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
     const opened = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(opened != null);
+    // First paint captured 8 from ctx.cursor_row.
+    try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
     // Paint must end with CUP to row 8 (the snapshot), NOT row 21
     // (the fallback shell_bottom).
     try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[8;1H") != null);
@@ -278,11 +285,11 @@ test "inline chat: cursor_row snapshot clamps to shell_bottom when it overshoots
 }
 
 test "inline chat: re-open with null ctx.cursor_row clears the previous snapshot via the open branch" {
-    // Invariant: the open branch unconditionally writes
-    // `ctx.cursor_row orelse 0` into the snapshot. A re-open with
-    // `cursor_row = null` (e.g. cursor_tracker not wired this tick)
-    // must NOT reuse the previous open's row — it falls back to
-    // shell_bottom via the helper's 0-sentinel branch.
+    // Invariant: toggle-open resets the snapshot to 0 and the
+    // first paint writes `ctx.cursor_row orelse 0` into it. A
+    // re-open with `cursor_row = null` (cursor_tracker not wired
+    // this tick) must NOT reuse the previous open's row — paint
+    // writes 0 and the helper falls back to shell_bottom.
     const L = configure(.{
         .api_base = "http://test/v1",
         .api_base_env = "ATTY_TEST_NEVER",
@@ -312,21 +319,26 @@ test "inline chat: re-open with null ctx.cursor_row clears the previous snapshot
         .cursor_row = 8,
     };
 
-    // First open captures row 8.
+    // First open + first paint captures row 8.
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_row);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    _ = try L.provideTermBytes(&rt, &ctx);
     try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
     // Close leaves the snapshot intact — the close paint still
     // needs it to know where to restore.
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
     try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
 
-    // Re-open with no cursor_row available — open branch writes 0.
+    // Re-open with no cursor_row available — toggle resets to 0,
+    // first paint writes 0 (the null fallback).
     ctx.cursor_row = null;
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
     try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_row);
     ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
     const reopened = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(reopened != null);
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_row);
     // CUP to row 21 (shell_bottom fallback), NOT row 8 (stale).
     try testing.expect(std.mem.indexOf(u8, reopened.?, "\x1B[21;1H") != null);
     try testing.expect(std.mem.indexOf(u8, reopened.?, "\x1B[8;1H") == null);
@@ -366,18 +378,22 @@ test "inline chat: re-open with a different non-null cursor_row overwrites the p
         .cursor_row = 8,
     };
 
+    // First open + first paint captures row 8.
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    _ = try L.provideTermBytes(&rt, &ctx);
     try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
 
-    // Re-open at a different row. New snapshot must replace the
-    // previous one and the paint must use it.
+    // Re-open at a different row. Toggle resets snapshot to 0,
+    // first paint captures the new value.
     ctx.cursor_row = 12;
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
-    try testing.expectEqual(@as(u16, 12), rt.chat_open_cursor_row);
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_row);
     ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
     const reopened = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(reopened != null);
+    try testing.expectEqual(@as(u16, 12), rt.chat_open_cursor_row);
     try testing.expect(std.mem.indexOf(u8, reopened.?, "\x1B[12;1H") != null);
     try testing.expect(std.mem.indexOf(u8, reopened.?, "\x1B[8;1H") == null);
 }
@@ -418,17 +434,20 @@ test "inline chat: paint ignores live ctx.cursor_row drift while panel is open" 
     };
 
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
-    try testing.expectEqual(@as(u16, 10), rt.chat_open_cursor_row);
+    // Toggle defers — snapshot still 0.
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_row);
     ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
 
     const first = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(first != null);
-    // The restore CUP is the LAST bytes the paint emits.
+    // First paint captured 10. The restore CUP is the LAST bytes
+    // the paint emits.
+    try testing.expectEqual(@as(u16, 10), rt.chat_open_cursor_row);
     try testing.expect(std.mem.endsWith(u8, first.?, "\x1B[10;1H"));
 
     // Live cursor drifts (shell printed output between ticks).
-    // Snapshot must NOT update — the closing restore CUP must
-    // still target row 10, never row 5 / row 18 / etc.
+    // Snapshot must NOT update on subsequent paints — the lazy
+    // capture only fires when the sentinel is 0.
     ctx.cursor_row = 5;
     rt.chat_inline_paint_pending = true;
     const second = try L.provideTermBytes(&rt, &ctx);
@@ -945,12 +964,16 @@ test "inline chat: open paint CUP-restores to (row, col) snapshot — not col 1"
     };
 
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
-    try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
-    try testing.expectEqual(@as(u16, 4), rt.chat_open_cursor_col);
+    // Toggle defers — snapshot still 0/0.
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_row);
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_col);
 
     ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
     const opened = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(opened != null);
+    // First paint captured row 8 + col 4.
+    try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
+    try testing.expectEqual(@as(u16, 4), rt.chat_open_cursor_col);
     // CUP must include BOTH row and col.
     try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[8;4H") != null);
     // The legacy col-1 form must NOT appear at that row.
@@ -964,10 +987,10 @@ test "inline chat: open paint CUP-restores to (row, col) snapshot — not col 1"
 }
 
 test "inline chat: col snapshot 0 → falls back to col 1" {
-    // When `ctx.cursor_col` is null at open (cursor_tracker unwired
-    // / non-TTY), the snapshot stays 0 and the restore CUP uses col
-    // 1 as a defensive default. Existing tests that don't set
-    // cursor_col rely on this fallback.
+    // When `ctx.cursor_col` is null at first paint (cursor_tracker
+    // unwired / non-TTY), the snapshot stays 0 and the restore
+    // CUP uses col 1 as a defensive default. Existing tests that
+    // don't set cursor_col rely on this fallback.
     const L = configure(.{
         .api_base = "http://test/v1",
         .api_base_env = "ATTY_TEST_NEVER",
@@ -1003,5 +1026,7 @@ test "inline chat: col snapshot 0 → falls back to col 1" {
     ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
     const opened = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(opened != null);
+    // First paint captured row 8 + col 0 (null cursor_col).
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_col);
     try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[8;1H") != null);
 }

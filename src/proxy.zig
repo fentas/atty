@@ -496,6 +496,67 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // can't erase what's already on the wire).
                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
                 trace.log(.paint, "applyReserveRows want={d} current={d}", .{ want_reserve, sb.reserve_rows });
+
+                // GROW: if the cursor currently sits in the area
+                // that's about to become panel/statusbar zone, push
+                // the existing shell content UP via scroll-up so the
+                // prompt ends up above the new reservation instead
+                // of getting over-painted by the panel chrome.
+                //
+                // We emit `\n` × N AT the BOTTOM of the current
+                // DECSTBM region — that's the only row where LF
+                // actually scrolls (LF anywhere else just advances
+                // the cursor). The cursor's CURRENT row doesn't
+                // matter for the scroll itself; we use it only to
+                // compute `scroll_n` and to know which column to
+                // restore to afterward.
+                //
+                // Bash never sees these bytes (they go to STDOUT,
+                // not pty.master). The cursor_tracker is updated
+                // post-fact via the DSR-6n that fires below.
+                var post_scroll_row: ?u16 = null;
+                var post_scroll_col: ?u16 = null;
+                if (args.is_tty and want_reserve > sb.reserve_rows) {
+                    const new_bottom: u16 = if (sb.rows > want_reserve) sb.rows - want_reserve else 1;
+                    const cur_row: u16 = cursor_tracker.currentRow();
+                    const cur_col: u16 = cursor_tracker.currentCol();
+                    if (cur_row > new_bottom) {
+                        const scroll_n: u16 = cur_row - new_bottom;
+                        const region_bottom: u16 = sb.effectiveRows();
+                        w_re.print("\x1B[{d};1H", .{region_bottom}) catch {};
+                        var nl: u16 = 0;
+                        while (nl < scroll_n) : (nl += 1) {
+                            w_re.writeAll("\n") catch {};
+                        }
+                        // Final CUP lands at (new_bottom, cur_col)
+                        // — the prompt's post-scroll home. This is
+                        // ALSO what `applyReserveRows`'s DECSC will
+                        // snapshot a few bytes later, and what its
+                        // DECRC restores once the new reservation +
+                        // erase have run. If `applyReserveRows`
+                        // ever moves its DECSC earlier in its body
+                        // (e.g. before row-wipes), this scroll-up
+                        // would no longer leave the cursor on the
+                        // prompt after DECRC and the panel paint's
+                        // capture would drift. Keep the ordering
+                        // contract in mind when touching either
+                        // side.
+                        w_re.print("\x1B[{d};{d}H", .{ new_bottom, cur_col }) catch {};
+                        trace.log(.paint, "panel-grow scroll-up: from row={d} col={d} by {d} (at region_bottom={d})", .{ cur_row, cur_col, scroll_n, region_bottom });
+                        // After the scroll the cursor lands at
+                        // (new_bottom, cur_col). Propagate to the
+                        // tracker AND `ctx` so the panel paint that
+                        // runs later in this iteration captures the
+                        // POST-scroll snapshot — without this the
+                        // panel's `inlineRestorePos` would CUP back
+                        // to the pre-scroll row, which is now in the
+                        // panel zone, and bash's next prompt redraw
+                        // would chase it (prompt visibly walks UP
+                        // each redraw).
+                        post_scroll_row = new_bottom;
+                        post_scroll_col = cur_col;
+                    }
+                }
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
                 // Refresh the tracker after the DECSTBM + erase
                 // sequence above — it may have moved the cursor in
@@ -510,14 +571,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // dispatch.
                 if (args.is_tty) DsrParser.writeQuery(&w_re) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
+                if (post_scroll_row) |r| {
+                    const c: u16 = post_scroll_col orelse 1;
+                    cursor_tracker.setPosition(r, c);
+                    ctx.cursor_row = r;
+                    ctx.cursor_col = c;
+                }
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
-                // SIGWINCH the slave so bash's readline learns
-                // the new "visible" row count. We pass the FULL
-                // size — DECSTBM constrains scroll, the slave
-                // size stays full per the startup-init comment.
-                if (args.is_tty) if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                    _ = pty.setSize(s) catch {};
-                } else |_| {};
+                // SIGWINCH is intentionally NOT sent on reservation
+                // toggles. The slave's TIOCGWINSZ size is unchanged
+                // (we pass the full terminal size; DECSTBM does the
+                // clipping atty-side), so bash would see no actual
+                // delta. But its SIGWINCH handler still triggers a
+                // readline redraw that re-emits the prompt at bash's
+                // INTERNAL cursor row — which doesn't know about our
+                // scroll-up. The redraw lands on the OLD row,
+                // visually undoing the scroll. Real terminal-size
+                // changes are handled by the SIGWINCH-handler path
+                // further down, which IS the right place to bounce
+                // the slave.
             }
             // Plumb base + live reservation + terminal geometry onto
             // Context so paint hooks (paintInlineChat) read truth
