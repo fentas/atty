@@ -496,13 +496,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // can't erase what's already on the wire).
                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
                 trace.log(.paint, "applyReserveRows want={d} current={d}", .{ want_reserve, sb.reserve_rows });
-                // Reservation transition is a sensitive moment for
-                // cursor accuracy — fire DSR-6n so the next stdin
-                // read refreshes `cursor_tracker` with the terminal's
-                // ground truth. The reply lands on stdin and gets
-                // filtered by `dsr_parser.feed` before bash sees it.
-                if (args.is_tty) DsrParser.writeQuery(&w_re) catch {};
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
+                // Refresh the tracker after the DECSTBM + erase
+                // sequence above — it may have moved the cursor in
+                // ways the byte-level model doesn't perfectly
+                // mirror (DECSC/DECRC pair, multiple CUPs for the
+                // per-row clear). DSR-6n is fire-and-forget; the
+                // reply arrives on the next stdin tick and updates
+                // `cursor_tracker`. This is a RESYNC for downstream
+                // consumers (next paint, next prompt anchor), NOT
+                // a source for THIS iteration's snapshot — the LLM
+                // module already captured (row, col) at toggle
+                // dispatch.
+                if (args.is_tty) DsrParser.writeQuery(&w_re) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
                 // SIGWINCH the slave so bash's readline learns
