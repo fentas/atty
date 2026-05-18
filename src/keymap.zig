@@ -150,6 +150,17 @@ pub const Action = union(enum) {
     /// scrolling past." For deep review use Alt+Shift+C (full
     /// overlay).
     llm_inline_chat_toggle,
+    /// While the inline chat panel is open, move keystroke focus to
+    /// the SHELL prompt without closing the panel. Default
+    /// **Ctrl+Up**. The panel stays painted; new keystrokes flow to
+    /// the shell as usual. The block-cursor glyph in the chat input
+    /// row dims to signal "panel is parked." Sibling of
+    /// `chat_focus_to_chat`. No-op when the panel isn't open.
+    chat_focus_to_shell,
+    /// Move keystroke focus back into the inline chat panel. Default
+    /// **Ctrl+Down**. Sibling of `chat_focus_to_shell`. No-op when
+    /// the panel isn't open.
+    chat_focus_to_chat,
     /// Render a one-screen cheat-sheet of every keybinding atty
     /// surfaces — pulled from `config.keymap.bindings`. Scrolls into
     /// shell history (like the LLM conclusion banner) so it stays
