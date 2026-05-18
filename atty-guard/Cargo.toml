@@ -1,0 +1,25 @@
+[package]
+name = "atty-guard"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Sidecar daemon for atty security_guard: Tier-1 regex classifier over a Unix domain socket, with stubs for Tier-2 encoder SLM and eBPF backstop"
+repository = "https://github.com/fentas/atty"
+
+[[bin]]
+name = "atty-guard"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
