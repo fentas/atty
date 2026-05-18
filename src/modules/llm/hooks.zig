@@ -1423,10 +1423,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const line = ctx.line.current();
             const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
             if (body.len == 0) {
-                latchHint(rt, if (auto)
-                    "type your task after `#: ` then press Enter"
-                else
-                    "type your task after `#: ` then press Enter");
+                // Both auto and non-auto Enter submission share the
+                // same instructional hint — the trigger key is Enter
+                // in either mode.
+                latchHint(rt, "type your task after `#: ` then press Enter");
                 return .forward;
             }
             if (body.len > cfg.max_prompt_bytes) {
