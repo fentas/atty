@@ -15,6 +15,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 clap = { version = "4", features = ["derive"] }
+# Pulled in only when --features ebpf is set. Implementation lands
+# with the V2-B follow-up; the feature gate exists today so the
+# `EbpfState` skeleton in `src/ebpf.rs` is visible + reviewable.
+libbpf-rs = { version = "0.24.5", optional = true }
+
+[features]
+default = []
+# Build the V2-B userspace eBPF loader. Requires libbpf-dev on the
+# build host and CAP_BPF at runtime. See `ebpf/README.md`.
+ebpf = ["dep:libbpf-rs"]
 
 [dev-dependencies]
 

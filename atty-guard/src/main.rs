@@ -3,28 +3,31 @@
 //! V2 entry point per `docs/security-guard-design.md`. Listens on a
 //! Unix domain socket, accepts JSON-line RPCs from atty (and any
 //! other authorised client), runs Tier-1 regex classification, falls
-//! through to a Tier-2 encoder-SLM stub.
+//! through to a Tier-2 backend (stub / heuristic / future onnx).
 //!
-//! What this V2-A PR ships:
+//! What ships today:
 //! - The daemon process + UDS server + JSON-line protocol.
 //! - Tier-1 regex classifier mirroring atty's three patterns
 //!   (curl|sh, npm install <flagged>, bash -c <long b64>).
 //! - In-memory PID → threat-level map (proxy for the eBPF map that
 //!   V2-B will introduce).
-//! - Integration tests over the live socket.
+//! - Pluggable Tier-2 backend (--tier2 stub|heuristic).
+//! - eBPF userspace-loader skeleton (--enable-ebpf flag, body
+//!   lands with V2-B impl).
 //!
-//! What V2-B will add (separate PR):
+//! What V2-B will fill in:
 //! - libbpf-rs loader pinned to `lsm/bprm_check_security` +
 //!   `tracepoint:syscalls:sys_enter_execve`.
 //! - Real ringbuf consumer feeding the classifier asynchronously.
 //! - Ownership of the BPF hash map (this in-memory map becomes a
 //!   passthrough to the kernel side).
 //!
-//! What V2-C will add (separate PR):
+//! What V2-C will add:
 //! - ONNX-runtime SLM (SecureBERT-class) integration in the
 //!   `classifier::tier2` slot.
 
 mod classifier;
+mod ebpf;
 mod protocol;
 mod server;
 mod threat_map;
@@ -53,6 +56,16 @@ struct Cli {
     /// encoder-SLM backend.
     #[arg(long, default_value = "stub", value_parser = ["stub", "heuristic"])]
     tier2: String,
+
+    /// Load the V2-B eBPF programs (lsm/bprm_check_security hook
+    /// + sys_enter_execve tracepoint) at startup. Requires the
+    /// daemon to have been built with `--features ebpf` AND to be
+    /// running with CAP_BPF. Without the feature this flag errors
+    /// out at startup; without the capability the loader errors
+    /// with a pointer to the systemd-user unit's
+    /// `AmbientCapabilities` config. See `ebpf/README.md`.
+    #[arg(long, default_value_t = false)]
+    enable_ebpf: bool,
 }
 
 fn default_socket_path() -> PathBuf {
@@ -92,6 +105,25 @@ fn main() -> std::io::Result<()> {
             socket.display(),
             cli.tier2
         );
+    }
+
+    // eBPF attach is opt-in. Either the feature isn't built (clean
+    // error, daemon continues without kernel-side enforcement),
+    // OR the feature IS built but the kernel/caps aren't there
+    // (also clean — log + continue). V2-A behaviour stays as a
+    // graceful fallback for all failure modes.
+    if cli.enable_ebpf {
+        match ebpf::EbpfState::attach() {
+            Ok(_state) => {
+                if cli.verbosity >= 1 {
+                    eprintln!("atty-guard: eBPF attached (LSM + execve tracepoint)");
+                }
+            }
+            Err(e) => {
+                eprintln!("atty-guard: eBPF unavailable — {e}");
+                eprintln!("atty-guard: continuing in V2-A mode (in-memory threat map, no kernel enforcement)");
+            }
+        }
     }
 
     server::serve(&socket, cli.verbosity, backend)
