@@ -3812,8 +3812,11 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     // Close emits cursor-show + explicit CUP to the shell-bottom
     // row (rather than DECRC, which the proxy's applyReserveRows
     // would have clobbered with its own DECSC/DECRC pair).
+    // Pin the EXACT row — terminal_rows=24, base_reserve=3 →
+    // shell_bottom = 21. Catches a regression that emits CUP to a
+    // wrong row (e.g. the old `\x1B[1;1H` home-position drift).
     try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[?25h") != null);
-    try testing.expect(std.mem.indexOf(u8, closed.?, ";1H") != null);
+    try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[21;1H") != null);
 }
 
 test "inline chat: Alt+C refuses to open when there's no statusbar" {
