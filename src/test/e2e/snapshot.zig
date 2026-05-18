@@ -240,30 +240,10 @@ pub fn writeActualFrame(io: std.Io, actual_dir_path: []const u8, frame: *const F
 
 // ─── tests ────────────────────────────────────────────────────────────────
 
-test "captureFrame round-trips a tiny grid" {
-    var g = try vt.Grid.init(std.testing.allocator, 1, 8);
-    defer g.deinit();
-    g.feed("hi");
-    var frame = try captureFrame(std.testing.allocator, &g);
-    defer frame.deinit();
-    try std.testing.expectEqualStrings("hi\n", frame.grid_text);
-}
+// ===========================================================================
+// Tests — extracted to `snapshot_tests.zig` for readability.
+// ===========================================================================
 
-test "writeEnv emits valid-looking TOML" {
-    var buf: [512]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try writeEnv(&w, .{
-        .atty_version = "0.1.0",
-        .cols = 80,
-        .rows = 24,
-        .argv = &.{ "atty", "bash" },
-        .forced_env = &.{
-            .{ .key = "TERM", .value = "xterm-256color" },
-        },
-        .extra_env = &.{},
-    });
-    const out = w.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "cols = 80") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "TERM = \"xterm-256color\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "0 = \"atty\"") != null);
+test {
+    _ = @import("snapshot_tests.zig");
 }

@@ -105,44 +105,10 @@ pub fn RingBuf(comptime cap: comptime_int) type {
     };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+// ===========================================================================
+// Tests — extracted to `overlay_ring_tests.zig` for readability.
+// ===========================================================================
 
-const testing = std.testing;
-
-test "RingBuf: push fills below cap; flush emits in order" {
-    var r: RingBuf(8) = .{};
-    r.push("abc");
-    try testing.expectEqual(@as(usize, 3), r.len);
-    try testing.expectEqual(@as(usize, 0), r.head);
-    try testing.expectEqual(@as(usize, 0), r.dropped);
-    try testing.expectEqualSlices(u8, "abc", r.buf[0..3]);
-}
-
-test "RingBuf: push at cap evicts oldest" {
-    var r: RingBuf(4) = .{};
-    r.push("abcd"); // exactly fills
-    try testing.expectEqual(@as(usize, 4), r.len);
-    try testing.expectEqual(@as(usize, 0), r.dropped);
-    r.push("e"); // evicts 'a'
-    try testing.expectEqual(@as(usize, 4), r.len);
-    try testing.expectEqual(@as(usize, 1), r.head);
-    try testing.expectEqual(@as(usize, 1), r.dropped);
-}
-
-test "RingBuf: multiple overflow tracks the count" {
-    var r: RingBuf(4) = .{};
-    r.push("abcd");
-    r.push("efgh"); // drops a,b,c,d → 4 drops, ring now ['e','f','g','h']
-    try testing.expectEqual(@as(usize, 4), r.dropped);
-    try testing.expectEqual(@as(usize, 0), r.head);
-    try testing.expectEqualSlices(u8, "efgh", r.buf[0..4]);
-}
-
-test "RingBuf: empty flush is a no-op (no write attempted)" {
-    var r: RingBuf(8) = .{};
-    // Use an obviously-invalid fd; if the impl accidentally tried
-    // to write, the syscall would fail and propagate.
-    try r.flush(-1);
+test {
+    _ = @import("overlay_ring_tests.zig");
 }

@@ -3286,9 +3286,9 @@ pub fn configure(comptime cfg: Config) type {
 }
 
 // ===========================================================================
-// Tests — extracted to `llm/tests.zig` for readability.
+// Tests — extracted to `llm_tests.zig` for readability.
 // ===========================================================================
 
 test {
-    _ = @import("llm/tests.zig");
+    _ = @import("llm_tests.zig");
 }
