@@ -184,7 +184,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// Overlay-mode structured turn rendering. The overlay has
         /// the full screen, so assistant_exec turns get spread across
         /// multiple rows: description on row 1, command on row 2
-        /// (cyan, indented `  $ `), question prompts in italic with
+        /// (cyan, indented `      $ ` to align with the prefix
+        /// width above), question prompts in italic with
         /// optional choice list, done banners with a check glyph.
         /// User + observation turns stay flat — they're free prose.
         /// Parse failures fall back to writing the raw bytes so the
