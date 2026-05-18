@@ -2524,6 +2524,18 @@ pub fn configure(comptime cfg: Config) type {
             Wrap.key("Esc") ++ " / " ++ Wrap.key("Ctrl+Shift+X") ++ " to exit";
         const thinking_hint = Wrap.icon("\u{1F9E0}") ++ " thinking\u{2026}";
 
+        // Compact discoverability hint shown when LLM is loaded but
+        // not in AI mode (no `#: ` prefix typed, no dialog active).
+        // The full AI hint (`ai_idle_hint`) only appears once the
+        // user types `#: ` — so without this, a fresh shell shows
+        // ZERO LLM-related hints and users don't discover Alt+C /
+        // Alt+S / Alt+H. Keep it short — most of the statusbar
+        // is "atty │ atuin" + this; verbose hints belong in Alt+H.
+        const ai_discovery_hint = Wrap.icon("\u{2728}") ++ " " ++
+            Wrap.key("Alt+C") ++ " chat \u{00B7} " ++
+            Wrap.key("Alt+S") ++ " dialog \u{00B7} " ++
+            Wrap.key("Alt+H") ++ " help";
+
         /// Reports whether the full chat overlay (Alt+Shift+C)
         /// currently owns atty's alt-screen on the user's outer
         /// terminal. The proxy queries this each master-read tick
@@ -2644,6 +2656,15 @@ pub fn configure(comptime cfg: Config) type {
                     return cfg.prefix_signal_status_text;
                 }
             }
+            // Discoverability fallback: when nothing else is firing
+            // (idle prompt, no AI mode, no in-flight request), surface
+            // a compact hint so users see the LLM keys exist. Without
+            // this, a fresh shell shows only "atty │ atuin" and the
+            // Alt+C / Alt+S / Alt+H bindings are invisible until the
+            // user types `#: ` (which they don't know to do until
+            // they see the hint — chicken-and-egg). Opt out via
+            // `cfg.show_idle_keys_hint = false`.
+            if (cfg.show_idle_keys_hint) return ai_discovery_hint;
             return null;
         }
 
@@ -2920,11 +2941,33 @@ pub fn configure(comptime cfg: Config) type {
         fn paintInlineChat(rt: *Runtime, ctx: *m.Context) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
             if (!rt.chat_inline_open) {
-                // Close: show the real cursor again and DECRC to
-                // the position saved on open. The proxy already
-                // redrew the reserved zone via `applyReserveRows(base)`
-                // so nothing else needs writing here.
-                w.writeAll("\x1B[?25h\x1B[u") catch return false;
+                // Close: show the real cursor and position it at the
+                // BOTTOM of the shell area (one row above the
+                // newly-restored statusbar reservation). Why not
+                // DECRC alone?
+                //
+                // The proxy's `applyReserveRows` does its own
+                // DECSC/DECRC around the row-erase. That DECSC
+                // OVERWRITES the open-time DECSC we emitted, so a
+                // bare DECRC here restores to the cursor's position
+                // when applyReserveRows ran — which is wherever the
+                // chat panel's last paint left the cursor (typically
+                // the input row at the BOTTOM of the old reservation,
+                // NOT the shell prompt at the top). Result: after
+                // close the user sees the cursor stuck at the bottom
+                // and the shell only repaints on the next keystroke.
+                //
+                // Fix: explicitly position the cursor at the last row
+                // of the shell scroll region (effectiveRows after the
+                // base reservation is restored). Bash's next readline
+                // event will re-emit its prompt at this row, which
+                // is the natural "next" row from the user's
+                // perspective. CUP `\x1B[<row>;1H` is cheap and
+                // unambiguous — no reliance on a stale DECSC slot.
+                const total_rows: u16 = ctx.terminal_rows orelse 24;
+                const base_reserve: u16 = ctx.statusbar_base_reserve orelse 3;
+                const shell_bottom: u16 = if (total_rows > base_reserve) total_rows - base_reserve else 1;
+                w.print("\x1B[?25h\x1B[{d};1H", .{shell_bottom}) catch return false;
                 rt.chat_inline_buf_len = w.end;
                 return true;
             }
@@ -3766,7 +3809,11 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     try testing.expectEqual(@as(u16, 0), L.extraReserveRows(&rt));
     const closed = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(closed != null);
-    try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[u") != null);
+    // Close emits cursor-show + explicit CUP to the shell-bottom
+    // row (rather than DECRC, which the proxy's applyReserveRows
+    // would have clobbered with its own DECSC/DECRC pair).
+    try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[?25h") != null);
+    try testing.expect(std.mem.indexOf(u8, closed.?, ";1H") != null);
 }
 
 test "inline chat: Alt+C refuses to open when there's no statusbar" {
@@ -4104,6 +4151,43 @@ test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
     try testing.expect(!rt.cursor_signal_active);
 }
 
+test "statusText: idle hint shows Alt+C/Alt+S/Alt+H when no AI mode (discoverability)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+        // Default `.show_idle_keys_hint = true` so a fresh shell
+        // surfaces the LLM bindings without the user having to
+        // type `#: ` first to discover them exist.
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Empty line, no AI mode, no dialog, no in-flight — should
+    // surface the compact discoverability hint instead of null.
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "Alt+C") != null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "Alt+S") != null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "Alt+H") != null);
+}
+
 test "statusText flips to prefix_signal_status_text while prefix matches" {
     const L = configure(.{
         .api_base = "http://test/v1",
@@ -4111,6 +4195,9 @@ test "statusText flips to prefix_signal_status_text while prefix matches" {
         .api_base_fallback_env = "ATTY_TEST_NEVER",
         .api_key_env = "ATTY_TEST_NEVER",
         .prefix_signal_status_text = "TEST_SIGNAL",
+        // Disable the discoverability hint so the idle path still
+        // returns null (the original contract this test pins).
+        .show_idle_keys_hint = false,
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});

@@ -236,6 +236,17 @@ pub const Config = struct {
     /// Status-bar text shown while the prefix is matched. Defaults
     /// to a sparkle so it pops against the bar's other segments.
     prefix_signal_status_text: []const u8 = "\u{2728} prompt",
+    /// Show a compact discoverability hint in the statusbar when
+    /// the LLM module is loaded but no AI mode is active (idle
+    /// prompt, no `#:` typed). The hint reads
+    /// `✨ Alt+C chat · Alt+S dialog · Alt+H help` — three keys
+    /// users actually need to know to bootstrap. Without it a
+    /// fresh shell shows only `atty │ atuin` and users never
+    /// discover the LLM bindings (chicken-and-egg).
+    ///
+    /// Off-by-default users: set this to `false` to hide the hint;
+    /// the more discoverable `Alt+H` cheat-sheet still works.
+    show_idle_keys_hint: bool = true,
     /// 256-colour foreground for the AI / DIALOG / AUTO icon glyphs
     /// in the status bar. Picked so the icon reads as "marked"
     /// without competing with the surrounding dim prose for
