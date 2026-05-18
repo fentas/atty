@@ -502,12 +502,10 @@ pub fn configure(comptime cfg: Config) type {
             /// last char just gets dropped; no error).
             chat_input_buf: [1024]u8 = undefined,
             chat_input_len: usize = 0,
-            /// Insertion cursor offset within `chat_input_buf`
-            /// (`<= chat_input_len`). Inserts happen AT cursor;
-            /// Backspace deletes the byte BEFORE; Ctrl+A/E jump to
-            /// 0 / len; Left/Right arrows ±1; Ctrl+U / Ctrl+K
-            /// delete to start / end; Ctrl+W kills the previous
-            /// word.
+            /// Insertion cursor — invariant `<= chat_input_len`.
+            /// Maintained by `applyChatEdit` in `llm/hooks.zig`;
+            /// paint trusts the invariant and splits rendering
+            /// around it (block-cursor glyph).
             chat_input_cursor: usize = 0,
 
             // ── Inline chat panel (Alt+C) ────────────────────────

@@ -607,6 +607,20 @@ test "inline chat: Left/Right arrow + Home/End move the cursor; Ctrl+A/E mirror 
     // Ctrl+E jumps to end.
     _ = try L.onInput(&rt, &ctx, "\x05");
     try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    // CSI Home (`ESC [ H`) → start. End (`ESC [ F`) → end.
+    _ = try L.onInput(&rt, &ctx, "\x1B[H");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1B[F");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    // VT-style xterm sequences: `ESC [ 1 ~` / `ESC [ 7 ~` Home, `ESC [ 4 ~` / `ESC [ 8 ~` End.
+    _ = try L.onInput(&rt, &ctx, "\x1B[1~");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1B[4~");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1B[7~");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1B[8~");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
     // Buffer unchanged through all that.
     try testing.expectEqualStrings("hello", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
 }
