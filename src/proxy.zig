@@ -553,13 +553,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (args.is_tty) DsrParser.writeQuery(&w_re) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
-                // SIGWINCH the slave so bash's readline learns
-                // the new "visible" row count. We pass the FULL
-                // size — DECSTBM constrains scroll, the slave
-                // size stays full per the startup-init comment.
-                if (args.is_tty) if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
-                    _ = pty.setSize(s) catch {};
-                } else |_| {};
+                // SIGWINCH is intentionally NOT sent on reservation
+                // toggles. The slave's TIOCGWINSZ size is unchanged
+                // (we pass the full terminal size; DECSTBM does the
+                // clipping atty-side), so bash would see no actual
+                // delta. But its SIGWINCH handler still triggers a
+                // readline redraw that re-emits the prompt at bash's
+                // INTERNAL cursor row — which doesn't know about our
+                // scroll-up. The redraw lands on the OLD row,
+                // visually undoing the scroll. Real terminal-size
+                // changes are handled by the SIGWINCH-handler path
+                // further down, which IS the right place to bounce
+                // the slave.
             }
             // Plumb base + live reservation + terminal geometry onto
             // Context so paint hooks (paintInlineChat) read truth
