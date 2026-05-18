@@ -69,15 +69,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const effective_dialog_system_prompt = llm_consts.effective_dialog_system_prompt;
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
-            // Chat overlay — while open, keystrokes accumulate
-            // into `chat_input_buf` rather than reaching the
-            // shell. Enter submits the buffer as a `.user` turn
-            // and fires a dialog request. Backspace pops the
-            // last byte. Ctrl+D closes the panel (mirrors Alt+C /
-            // Alt+Shift+C; preserves the draft). Other control
-            // bytes are dropped (no Ctrl+A / Ctrl+E / arrow-key
-            // editing in 2b; future follow-up — see PR series
-            // #195).
+            // Chat overlay / inline panel — while open, keystrokes
+            // accumulate into the relevant input buffer rather than
+            // reaching the shell. Enter submits the buffer as a
+            // `.user` turn and fires a dialog request. Backspace
+            // pops the last byte. Ctrl+D closes the chat surface
+            // it's typed into (panel for the inline branch below,
+            // overlay for the alt-screen branch — both mirror
+            // Alt+C / Alt+Shift+C and preserve the draft). Other
+            // control bytes are dropped (no Ctrl+A / Ctrl+E /
+            // arrow-key editing in 2b; future follow-up — see PR
+            // series #195).
             //
             // Keymap actions (Alt+Shift+C close, Esc, Ctrl+Shift+X)
             // dispatch in the proxy BEFORE this hook fires, so
