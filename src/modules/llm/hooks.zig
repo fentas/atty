@@ -96,30 +96,38 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// as a printable insert.
         fn parseChatKey(input: []const u8, i: *usize) ChatKey {
             const b = input[i.*];
-            // CSI sequence: ESC [ ?. Need at least 3 bytes for the
-            // shortest form (`ESC [ <final>`).
             if (b == 0x1B and i.* + 2 < input.len and input[i.* + 1] == '[') {
-                const final = input[i.* + 2];
+                const c = input[i.* + 2];
+                // VT-style `ESC [ <num> ~` (Delete = 3~, Home = 1~/7~,
+                // End = 4~/8~). Need a fourth byte to know which.
+                if (c >= '0' and c <= '9') {
+                    if (i.* + 3 >= input.len) return .none;
+                    const final = input[i.* + 3];
+                    if (final == '~') {
+                        i.* += 4;
+                        return switch (c) {
+                            '1', '7' => .move_home,
+                            '3' => .delete_forward,
+                            '4', '8' => .move_end,
+                            else => .none,
+                        };
+                    }
+                    while (i.* < input.len) : (i.* += 1) {
+                        const x = input[i.*];
+                        if (x >= 0x40 and x <= 0x7E) {
+                            i.* += 1;
+                            break;
+                        }
+                    }
+                    return .none;
+                }
                 i.* += 3;
-                return switch (final) {
+                return switch (c) {
                     'D' => .move_left,
                     'C' => .move_right,
                     'H' => .move_home,
                     'F' => .move_end,
-                    else => blk: {
-                        // Unknown CSI — eat through the final byte
-                        // (any byte in `0x40..0x7E`) so the rest of
-                        // the chunk doesn't see stray params leak
-                        // as printable inserts.
-                        while (i.* < input.len) : (i.* += 1) {
-                            const x = input[i.*];
-                            if (x >= 0x40 and x <= 0x7E) {
-                                i.* += 1;
-                                break;
-                            }
-                        }
-                        break :blk .none;
-                    },
+                    else => .none,
                 };
             }
             i.* += 1;
@@ -149,7 +157,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             switch (key) {
                 .insert => |c| {
                     if (len.* >= buf.len) return false;
-                    // Shift bytes [cursor..len) one slot right.
                     var j: usize = len.*;
                     while (j > cursor.*) : (j -= 1) buf[j] = buf[j - 1];
                     buf[cursor.*] = c;
@@ -226,31 +233,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         }
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
-            // Chat overlay / inline panel — while open, keystrokes
-            // accumulate into the relevant input buffer rather than
-            // reaching the shell. Enter submits the buffer as a
-            // `.user` turn and fires a dialog request. Backspace
-            // pops the last byte. Ctrl+D closes the chat surface
-            // it's typed into (panel for the inline branch below,
-            // overlay for the alt-screen branch — both mirror
-            // Alt+C / Alt+Shift+C and preserve the draft). Other
-            // control bytes are dropped (no Ctrl+A / Ctrl+E /
-            // arrow-key editing in 2b; future follow-up — see PR
-            // series #195).
-            //
             // Keymap actions (Alt+Shift+C close, Esc, Ctrl+Shift+X)
-            // dispatch in the proxy BEFORE this hook fires, so
-            // the user can still close the overlay even mid-typing.
-            // Inline chat panel — same input model as the overlay,
-            // but writes into `chat_inline_input_buf` and flips the
-            // inline paint latch. Mutually exclusive with the
-            // overlay; the action handler guarantees only one can
-            // be open at a time.
+            // dispatch in the proxy BEFORE this hook fires, so the
+            // user can still close the surface even mid-typing.
             //
-            // Only swallow keystrokes when focus is IN the panel.
-            // `Ctrl+Up` parks focus on the shell prompt above;
-            // while parked the panel stays painted but `.forward`s
-            // input so it goes to bash. `Ctrl+Down` returns focus.
+            // Inline panel: focus is IN the panel only when
+            // `chat_focus_in_panel` is set. `Ctrl+Up` parks focus on
+            // the shell prompt above; while parked the panel stays
+            // painted but `.forward`s input so it goes to bash.
             if (rt.chat_inline_open and rt.chat_focus_in_panel) {
                 var i: usize = 0;
                 while (i < input.len) {

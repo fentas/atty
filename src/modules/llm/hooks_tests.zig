@@ -733,3 +733,137 @@ test "inline chat: Ctrl+U kills to start; Ctrl+K kills to end" {
     try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
     try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
 }
+
+test "inline chat: CSI 3~ (Delete) removes the byte AFTER cursor" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "abcd");
+    _ = try L.onInput(&rt, &ctx, "\x01"); // cursor to start
+    _ = try L.onInput(&rt, &ctx, "\x1B[3~"); // Delete: removes 'a'
+    try testing.expectEqualStrings("bcd", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    // Delete at end of buffer is a no-op.
+    _ = try L.onInput(&rt, &ctx, "\x05"); // Ctrl+E
+    _ = try L.onInput(&rt, &ctx, "\x1B[3~");
+    try testing.expectEqualStrings("bcd", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: insert short-circuits when the buffer is full" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Saturate to buf.len with a long ASCII run.
+    const cap = rt.chat_inline_input_buf.len;
+    var i: usize = 0;
+    while (i < cap) : (i += 1) {
+        rt.chat_inline_input_buf[i] = 'x';
+    }
+    rt.chat_inline_input_len = cap;
+    rt.chat_inline_input_cursor = cap;
+    // Append: must drop silently (no overflow, no len growth).
+    _ = try L.onInput(&rt, &ctx, "y");
+    try testing.expectEqual(cap, rt.chat_inline_input_len);
+    try testing.expectEqual(cap, rt.chat_inline_input_cursor);
+    // Mid-cursor insert with a full buffer is also a no-op.
+    _ = try L.onInput(&rt, &ctx, "\x01"); // cursor=0
+    _ = try L.onInput(&rt, &ctx, "z");
+    try testing.expectEqual(cap, rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    try testing.expectEqual(@as(u8, 'x'), rt.chat_inline_input_buf[0]);
+}
+
+test "overlay chat: cursor movement + mid-line insert + Ctrl+W mirror the inline path" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Overlay path — open via the field directly, mirroring the
+    // existing overlay-input test pattern.
+    rt.chat_overlay_open = true;
+
+    _ = try L.onInput(&rt, &ctx, "explain foo bar");
+    try testing.expectEqual(@as(usize, 15), rt.chat_input_cursor);
+    // Ctrl+A then Right-arrow ×4: cursor at 4.
+    _ = try L.onInput(&rt, &ctx, "\x01\x1B[C\x1B[C\x1B[C\x1B[C");
+    try testing.expectEqual(@as(usize, 4), rt.chat_input_cursor);
+    // Insert '!' at cursor → "expl!ain foo bar".
+    _ = try L.onInput(&rt, &ctx, "!");
+    try testing.expectEqualStrings("expl!ain foo bar", rt.chat_input_buf[0..rt.chat_input_len]);
+    try testing.expectEqual(@as(usize, 5), rt.chat_input_cursor);
+    // Ctrl+E then Ctrl+W → kills "bar".
+    _ = try L.onInput(&rt, &ctx, "\x05\x17");
+    try testing.expectEqualStrings("expl!ain foo ", rt.chat_input_buf[0..rt.chat_input_len]);
+    // Ctrl+D closes the overlay (regression guard for PR #89).
+    _ = try L.onInput(&rt, &ctx, "\x04");
+    try testing.expect(!rt.chat_overlay_open);
+}
