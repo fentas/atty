@@ -122,27 +122,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // statusbar AI hint (consistent visual vocabulary).
             w.writeAll("\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n") catch return false;
 
+            // Clamp the offset against FIFO eviction — pushTurn
+            // can shrink `turns_len` after the user scrolled, and
+            // an unchecked `turns_len - offset` would underflow.
+            const max_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
+            const overlay_offset: usize = if (rt.chat_view_offset > max_offset) max_offset else rt.chat_view_offset;
+            const tail_end: usize = rt.turns_len - overlay_offset;
+
             const has_turns = rt.turns_len > 0;
             const has_conclusion = rt.conclusion_len > 0;
             if (!has_turns and !has_conclusion) {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
-                // Clamp the offset against FIFO eviction — pushTurn
-                // can shrink `turns_len` after the user scrolled,
-                // and an unchecked `turns_len - offset` would
-                // underflow.
-                const max_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
-                const offset: usize = if (rt.chat_view_offset > max_offset) max_offset else rt.chat_view_offset;
-                const tail_end: usize = rt.turns_len - offset;
-                if (offset > 0) {
-                    // Tiny header signals "you are scrolled back N
-                    // turns" — mirrors how less + tmux annotate the
-                    // viewport so the user knows new turns aren't
-                    // missing, just below the fold.
-                    var sb: [40]u8 = undefined;
-                    const head = std.fmt.bufPrint(&sb, "  \x1B[2m\u{2191} {d} more turn(s) below\x1B[0m\r\n", .{offset}) catch "";
-                    w.writeAll(head) catch return false;
-                }
                 for (rt.turns[0..tail_end]) |turn| {
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
@@ -199,7 +190,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             w.writeAll("\x1B[7m \x1B[0m") catch return false;
 
             w.print("\x1B[{d};1H\x1B[2K", .{rows}) catch return false;
-            w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send]\x1B[0m") catch return false;
+            // Footer is anchored OUTSIDE the DECSTBM scroll region —
+            // safe place for the scrolled-back indicator. The
+            // in-region header version scrolled off-screen with the
+            // oldest turns when the view overflowed.
+            if (overlay_offset > 0) {
+                var sb: [48]u8 = undefined;
+                const ind = std.fmt.bufPrint(&sb, "\x1B[2m[\u{2191} {d} below]\x1B[0m ", .{overlay_offset}) catch "";
+                w.writeAll(ind) catch return false;
+            }
+            w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send \u{00B7} PgUp/PgDn scroll]\x1B[0m") catch return false;
             rt.chat_overlay_buf_len = w.end;
             return true;
         }
