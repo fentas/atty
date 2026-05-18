@@ -45,41 +45,42 @@ pub const DsrParser = struct {
     digits_len: u8 = 0,
     row: u16 = 0,
     col: u16 = 0,
-    /// True while we've started parsing a `\x1B[…` sequence — the
-    /// caller should withhold these bytes from downstream until we
-    /// either complete or abort.
-    pending: bool = false,
-    /// Bytes since the last consumed reply that contributed to the
-    /// pending sequence. Indexes into the caller's slice are
-    /// recomputed each `feed` call (no persistent indices).
-    pending_byte_count: usize = 0,
+    /// Bytes accumulated while we're parsing a possible reply.
+    /// They DON'T appear in `feed`'s output until either:
+    ///   - the reply completes successfully → drop the whole buffer
+    ///   - the sequence aborts → flush the buffer to output verbatim
+    /// Withholding here is required for cross-chunk splits: a reply
+    /// like `\x1B[12;` (chunk 1) + `45R` (chunk 2) would otherwise
+    /// leak the 5 chunk-1 bytes to bash before we know it's a reply.
+    /// 32 bytes covers the largest legitimate DSR reply (`\x1B[<5
+    /// digits>;<5 digits>R` = 13) with comfort.
+    pending_buf: [32]u8 = undefined,
+    pending_len: u8 = 0,
 
     const State = enum { ground, esc, csi, row_done };
 
     /// Build the output slice by filtering the input through the
     /// parser. Bytes that BELONG to a successful DSR reply are
     /// dropped; everything else is preserved. Returns the position
-    /// parsed (if any) and a side-buffer of the filtered bytes.
+    /// parsed (if any) and the filtered byte count.
     ///
     /// `out` must be at least `input.len` bytes. Caller passes a
     /// scratch buffer they're already writing to.
+    ///
+    /// Bytes that are part of an in-flight (not yet
+    /// completed-or-aborted) sequence are NOT written to `out` —
+    /// they live in the parser's internal `pending_buf` and either
+    /// vanish (success) or get flushed (abort) on a later feed call.
     pub fn feed(self: *DsrParser, input: []const u8, out: []u8) struct { filtered_len: usize, pos: ?Position } {
         var w: usize = 0;
         var result_pos: ?Position = null;
-        // Track the start index of the current pending sequence in
-        // `out` so we can rewind the filtered write if the sequence
-        // turns out to NOT be a DSR reply (abort path).
-        var pending_w_start: usize = 0;
 
         for (input) |b| {
             switch (self.state) {
                 .ground => {
                     if (b == 0x1B) {
                         self.state = .esc;
-                        self.pending = true;
-                        pending_w_start = w;
-                        out[w] = b;
-                        w += 1;
+                        self.pushPending(b);
                     } else {
                         out[w] = b;
                         w += 1;
@@ -91,74 +92,81 @@ pub const DsrParser = struct {
                         self.digits_len = 0;
                         self.row = 0;
                         self.col = 0;
-                        out[w] = b;
-                        w += 1;
+                        self.pushPending(b);
                     } else {
-                        // Not the shape we want. Pass through.
-                        self.state = .ground;
-                        self.pending = false;
+                        // Not the shape we want — flush pending +
+                        // current byte verbatim so keymap matchers
+                        // downstream see the original sequence.
+                        w += self.flushPending(out[w..]);
                         out[w] = b;
                         w += 1;
+                        self.state = .ground;
                     }
                 },
                 .csi => {
                     if (b >= '0' and b <= '9' and self.digits_len < self.digits_buf.len) {
                         self.digits_buf[self.digits_len] = b;
                         self.digits_len += 1;
-                        out[w] = b;
-                        w += 1;
+                        self.pushPending(b);
                     } else if (b == ';') {
                         self.row = parseClamped(self.digits_buf[0..self.digits_len]);
                         self.digits_len = 0;
                         self.state = .row_done;
-                        out[w] = b;
-                        w += 1;
-                    } else if (b == 'R' or b == 'n') {
-                        // 'R' is a malformed reply (no `;`) — treat
-                        // as abort. 'n' would be DSR query itself
-                        // (we don't care). Both abort.
-                        self.state = .ground;
-                        self.pending = false;
-                        out[w] = b;
-                        w += 1;
+                        self.pushPending(b);
                     } else {
-                        // Unknown CSI body byte — abandon DSR parse,
-                        // keep bytes in the output stream so keymap
-                        // matchers / readline see them.
-                        self.state = .ground;
-                        self.pending = false;
+                        // Anything else aborts (including a stray
+                        // 'R' with no `;` — malformed reply). Flush
+                        // pending + the abort byte verbatim.
+                        w += self.flushPending(out[w..]);
                         out[w] = b;
                         w += 1;
+                        self.state = .ground;
                     }
                 },
                 .row_done => {
                     if (b >= '0' and b <= '9' and self.digits_len < self.digits_buf.len) {
                         self.digits_buf[self.digits_len] = b;
                         self.digits_len += 1;
-                        out[w] = b;
-                        w += 1;
+                        self.pushPending(b);
                     } else if (b == 'R') {
-                        // Full reply received — rewind the filtered
-                        // buffer to before the `\x1B`, dropping the
-                        // entire DSR sequence from the stream.
+                        // Full reply received — drop pending buffer
+                        // (the DSR sequence is consumed).
                         self.col = parseClamped(self.digits_buf[0..self.digits_len]);
                         result_pos = .{ .row = self.row, .col = self.col };
-                        w = pending_w_start;
+                        self.pending_len = 0;
                         self.state = .ground;
-                        self.pending = false;
                         self.digits_len = 0;
                     } else {
-                        // Malformed (no terminator) — abandon.
-                        self.state = .ground;
-                        self.pending = false;
+                        // Malformed (no terminator) — abandon, flush
+                        // pending + the abort byte.
+                        w += self.flushPending(out[w..]);
                         out[w] = b;
                         w += 1;
+                        self.state = .ground;
                     }
                 },
             }
         }
 
         return .{ .filtered_len = w, .pos = result_pos };
+    }
+
+    fn pushPending(self: *DsrParser, b: u8) void {
+        if (self.pending_len < self.pending_buf.len) {
+            self.pending_buf[self.pending_len] = b;
+            self.pending_len += 1;
+        }
+        // Overflow: silently drop bytes past the buffer. A
+        // legitimate DSR is ≤ 13 bytes; if we overflow we're
+        // looking at a hostile / malformed sequence that wasn't
+        // going to complete cleanly anyway.
+    }
+
+    fn flushPending(self: *DsrParser, out: []u8) usize {
+        const n: usize = self.pending_len;
+        if (n > 0) @memcpy(out[0..n], self.pending_buf[0..n]);
+        self.pending_len = 0;
+        return n;
     }
 
     /// Emit the DSR-6n query sequence into `w`. Caller writes the

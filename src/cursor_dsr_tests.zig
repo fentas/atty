@@ -44,23 +44,64 @@ test "DsrParser: CSI with single param ending in `R` (no `;`) doesn't match" {
     try testing.expectEqualStrings("\x1B[24R", out[0..r.filtered_len]);
 }
 
-test "DsrParser: reply split across two feeds reassembles correctly" {
+test "DsrParser: reply split across two feeds — NEITHER chunk leaks bytes" {
+    // Critical invariant: pending bytes stay in the parser's
+    // internal buffer until completion (drop) or abort (flush).
+    // A naive implementation would write `\x1B[12;` into the first
+    // chunk's filtered output and forward to bash before learning
+    // it was a reply.
     var p = DsrParser{};
     var out: [64]u8 = undefined;
     const r1 = p.feed("\x1B[12;", &out);
-    // No completion yet — bytes go to output buffer (caller hasn't
-    // decided yet whether to forward them; in the proxy they get
-    // filtered out via the rewind on completion).
     try testing.expect(r1.pos == null);
+    try testing.expectEqual(@as(usize, 0), r1.filtered_len);
 
     var out2: [64]u8 = undefined;
     const r2 = p.feed("45R", &out2);
     try testing.expect(r2.pos != null);
     try testing.expectEqual(@as(u16, 12), r2.pos.?.row);
     try testing.expectEqual(@as(u16, 45), r2.pos.?.col);
-    // Second chunk's filtered output should be empty (everything
-    // was part of the reply).
     try testing.expectEqual(@as(usize, 0), r2.filtered_len);
+}
+
+test "DsrParser: split reply with user bytes BEFORE the tail — user bytes preserved" {
+    // Pathological case: chunk 1 starts a reply, chunk 2 contains
+    // user keystrokes BEFORE the reply completes (the user typed
+    // while the terminal queued the DSR response). The user bytes
+    // would abort the reply parse and must reach bash; the
+    // pending-buffer flush emits the partial-reply bytes
+    // VERBATIM so keymap matchers still see them.
+    var p = DsrParser{};
+    var out: [64]u8 = undefined;
+    const r1 = p.feed("\x1B[12;", &out);
+    try testing.expectEqual(@as(usize, 0), r1.filtered_len);
+
+    // Chunk 2 has user input that aborts the pending reply.
+    var out2: [64]u8 = undefined;
+    const r2 = p.feed("xls\r", &out2);
+    try testing.expect(r2.pos == null);
+    // Aborted: the pending `\x1B[12;` flushes verbatim followed by
+    // `xls\r`.
+    try testing.expectEqualStrings("\x1B[12;xls\r", out2[0..r2.filtered_len]);
+}
+
+test "DsrParser: in-flight pending across an idle feed call — bytes still withheld" {
+    var p = DsrParser{};
+    var out: [64]u8 = undefined;
+    const r1 = p.feed("\x1B[", &out);
+    try testing.expectEqual(@as(usize, 0), r1.filtered_len);
+
+    // Empty feed (nothing arrives this tick).
+    const r2 = p.feed("", &out);
+    try testing.expectEqual(@as(usize, 0), r2.filtered_len);
+    try testing.expect(r2.pos == null);
+
+    // Reply finishes later.
+    const r3 = p.feed("1;2R", &out);
+    try testing.expect(r3.pos != null);
+    try testing.expectEqual(@as(u16, 1), r3.pos.?.row);
+    try testing.expectEqual(@as(u16, 2), r3.pos.?.col);
+    try testing.expectEqual(@as(usize, 0), r3.filtered_len);
 }
 
 test "DsrParser: zero-param fields parse as 0 (caller's job to clamp)" {
