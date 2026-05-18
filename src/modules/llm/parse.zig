@@ -62,18 +62,74 @@ pub fn decodeContent(body: []const u8, out: []u8) usize {
                 // user review.
                 'r' => i += 1,
                 'u' => {
-                    // `\uXXXX` — skip up to 4 hex digits after the
-                    // `u`, but bail early at a closing quote or
-                    // backslash so malformed JSON (fewer than 4 hex
-                    // digits) cannot cause us to skip past the
-                    // content boundary into the next field.
-                    i += 1;
-                    var k: usize = 0;
-                    while (k < 4 and i + 1 < body.len) : (k += 1) {
-                        const h = body[i + 1];
-                        if (h == '"' or h == '\\') break;
+                    // `\uXXXX` — decode the 4 hex digits to a
+                    // codepoint and re-encode as UTF-8 into `out`.
+                    // Previously this branch dropped the escape
+                    // entirely, which silently mangled commands
+                    // that the model JSON-encoded with shell
+                    // metacharacters (`2>/dev/null` →
+                    // `2/dev/null`; `&&` → empty). The
+                    // bail-out on `"` / `\\` before consuming the
+                    // 4 digits stays in place — malformed JSON
+                    // must not run us past the content boundary
+                    // into the next field.
+                    if (i + 5 >= body.len) {
                         i += 1;
+                        continue;
                     }
+                    // Reject if any of the 4 chars after `u` is a
+                    // string terminator or escape — malformed.
+                    var malformed = false;
+                    var cp: u21 = 0;
+                    var k: usize = 0;
+                    while (k < 4) : (k += 1) {
+                        const h = body[i + 2 + k];
+                        if (h == '"' or h == '\\') {
+                            malformed = true;
+                            break;
+                        }
+                        const d: u4 = switch (h) {
+                            '0'...'9' => @intCast(h - '0'),
+                            'a'...'f' => @intCast(h - 'a' + 10),
+                            'A'...'F' => @intCast(h - 'A' + 10),
+                            else => {
+                                malformed = true;
+                                break;
+                            },
+                        };
+                        cp = (cp << 4) | @as(u21, d);
+                    }
+                    if (malformed) {
+                        // Advance only past the consumed prefix
+                        // (the `u` + however many digits we got)
+                        // so the outer scanner can continue.
+                        i += 1 + k;
+                        continue;
+                    }
+                    // `\r` carriage return drops for the same
+                    // reason the literal `\r` escape does above —
+                    // it would auto-execute on the PTY.
+                    if (cp == '\r') {
+                        i += 5;
+                        continue;
+                    }
+                    // Encode as UTF-8. Surrogate halves (D800-DFFF)
+                    // are technically allowed by JSON in pairs but
+                    // valid bash commands don't contain them; we
+                    // emit the replacement character for any
+                    // surrogate so the input isn't silently lost.
+                    var utf8: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(cp, &utf8) catch blk: {
+                        utf8[0] = 0xEF;
+                        utf8[1] = 0xBF;
+                        utf8[2] = 0xBD;
+                        break :blk @as(u3, 3);
+                    };
+                    if (n + len <= out.len) {
+                        @memcpy(out[n .. n + len], utf8[0..len]);
+                        n += len;
+                    }
+                    i += 5;
                 },
                 else => i += 1,
             }
