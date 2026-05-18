@@ -16,6 +16,7 @@ test {
     _ = @import("osc133.zig");
     _ = @import("altscreen.zig");
     _ = @import("cursor_tracker.zig");
+    _ = @import("cursor_dsr.zig");
     _ = @import("subprocess.zig");
     _ = @import("osc7.zig");
     _ = @import("pty.zig");

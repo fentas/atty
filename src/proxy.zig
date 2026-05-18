@@ -48,6 +48,7 @@ const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
 const CursorTracker = @import("cursor_tracker.zig").CursorTracker;
+const DsrParser = @import("cursor_dsr.zig").DsrParser;
 const Osc7 = @import("osc7.zig").Osc7;
 const subprocess_mod = @import("subprocess.zig");
 const overlay_ring = @import("overlay_ring.zig");
@@ -261,6 +262,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         }
         break :blk CursorTracker.init(rows, cols);
     };
+    // DSR-6n reply interceptor. atty issues `\x1B[6n` at key moments
+    // (inline panel open, SIGWINCH, post-command `;D`) to ground-
+    // truth the cursor position; the terminal replies on stdin with
+    // `\x1B[<r>;<c>R`. The parser strips that reply from the stream
+    // before keymap matching / dispatch / pty.master forward so the
+    // shell never sees it as user input.
+    var dsr_parser = DsrParser{};
+    // Scratch buffer the parser writes filtered stdin bytes into.
+    // Sized to match `read_buf` since the filtered output is at most
+    // as long as the input.
+    var stdin_filtered_buf: [4096]u8 = undefined;
 
     // Alternate-screen-buffer tracker — full-screen TUIs (k9s, vim,
     // less, htop, helix, lazygit, …) swap to the alt buffer with
@@ -584,7 +596,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         if (pfds[0].revents & POLLIN != 0) {
             const read_n = posix.read(posix.STDIN_FILENO, &read_buf) catch 0;
             if (read_n > 0) {
-                var input: []const u8 = read_buf[0..read_n];
+                // DSR-6n reply intercept — `\x1B[<r>;<c>R` is the
+                // terminal's response to our cursor-position query;
+                // strip it before bash sees it as keyboard input.
+                const dsr_result = dsr_parser.feed(read_buf[0..read_n], &stdin_filtered_buf);
+                if (dsr_result.pos) |pos| {
+                    cursor_tracker.setPosition(pos.row, pos.col);
+                    trace.log(.cursor, "DSR-6n reply: row={d} col={d}", .{ pos.row, pos.col });
+                }
+                var input: []const u8 = stdin_filtered_buf[0..dsr_result.filtered_len];
+                if (input.len == 0) continue; // entire chunk was DSR reply
                 trace.logBytes(.input, "stdin_read", input);
                 trace.log(.altscreen, "alt_screen.active={} module_overlay_active={}", .{ alt_screen.active, ctx.module_overlay_active });
 
