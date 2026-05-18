@@ -116,7 +116,7 @@ pub fn log(comptime cat: Category, comptime fmt: []const u8, args: anytype) void
 /// hex, truncated with `…` when longer. Single allocation-free call.
 pub fn logBytes(comptime cat: Category, comptime label: []const u8, bytes: []const u8) void {
     if (!isEnabled(cat)) return;
-    const max: usize = 32;
+    const max: usize = 128;
     var hex_buf: [max * 3 + 4]u8 = undefined;
     var w: std.Io.Writer = .fixed(&hex_buf);
     const n = if (bytes.len < max) bytes.len else max;
