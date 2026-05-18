@@ -496,6 +496,48 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // can't erase what's already on the wire).
                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
                 trace.log(.paint, "applyReserveRows want={d} current={d}", .{ want_reserve, sb.reserve_rows });
+
+                // GROW: if the cursor currently sits in the area
+                // that's about to become panel/statusbar zone, push
+                // the existing shell content UP via scroll-up so the
+                // prompt ends up above the new reservation instead
+                // of getting over-painted by the panel chrome.
+                //
+                // We emit `\n` × N AT the cursor's current row to
+                // trigger scroll-up at the bottom of the CURRENT
+                // DECSTBM region (still full-shell-area at this
+                // point — applyReserveRows below is what shrinks
+                // it). Each `\n` at the bottom-of-region scrolls
+                // by one. Then CUP the cursor to the new prompt
+                // row, using the column the cursor_tracker recorded
+                // (post-PS1 — without this the cursor lands at col 1
+                // on top of the prompt chrome).
+                //
+                // Bash never sees these bytes (they go to STDOUT,
+                // not pty.master). The cursor_tracker is updated
+                // post-fact via the DSR-6n that fires below.
+                if (args.is_tty and want_reserve > sb.reserve_rows) {
+                    const new_bottom: u16 = if (sb.rows > want_reserve) sb.rows - want_reserve else 1;
+                    const cur_row: u16 = cursor_tracker.currentRow();
+                    const cur_col: u16 = cursor_tracker.currentCol();
+                    if (cur_row > new_bottom) {
+                        const scroll_n: u16 = cur_row - new_bottom;
+                        // Position at the OLD bottom-of-scroll-region
+                        // first so the `\n` series scrolls within the
+                        // existing region. (cursor_tracker.max_rows is
+                        // already `sb.effectiveRows()`, i.e. old_bottom.)
+                        w_re.print("\x1B[{d};1H", .{cur_row}) catch {};
+                        var nl: u16 = 0;
+                        while (nl < scroll_n) : (nl += 1) {
+                            w_re.writeAll("\n") catch {};
+                        }
+                        // CUP to (new prompt row, original col) so
+                        // bash's next echo lands where the user
+                        // expects.
+                        w_re.print("\x1B[{d};{d}H", .{ new_bottom, cur_col }) catch {};
+                        trace.log(.paint, "panel-grow scroll-up: from row={d} col={d} by {d}", .{ cur_row, cur_col, scroll_n });
+                    }
+                }
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
                 // Refresh the tracker after the DECSTBM + erase
                 // sequence above — it may have moved the cursor in
