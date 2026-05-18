@@ -92,7 +92,7 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 - **Comments: WHY only.** Never explain what the code does (well-named idents do that); never reference the current task, fix, or callers. Multi-line docstrings are rare.
 - **No backwards-compat shims** unless a user has explicitly asked. This is pre-1.0, refactor aggressively.
 - **Suckless ethos.** Edit `src/config.zig`, recompile, done. No runtime config files, no plugin loaders. `make link` for live dev binary; `get.atty.sh` does the same symlink trick for source-build users.
-- **Test pattern.** Unit tests inline in each file (`test "…" { … }`); pulled into `src/unit_tests.zig` for `zig build test`. PTY tests in `src/test/integration.zig`. Scripted scenarios in `tests/e2e/*/scenario.e2e` + goldens.
+- **Test pattern.** Unit tests live in **sibling files**: `src/foo.zig` is tested by `src/foo_tests.zig` next to it (same directory). The source file has a single `test { _ = @import("foo_tests.zig"); }` discovery stub; `src/unit_tests.zig` imports source files only, and test discovery cascades through the stub. The siblings use a fixed header: `const std`, `const testing`, `const mod = @import("foo.zig");`, then re-bind any pub decls (`const Style = mod.Style;`) so test bodies stay short. Exception: `src/modules/llm/dialog.zig` keeps tests inline because production code (the `Module(cfg, Runtime)` factory) is interleaved between two test stripes — extraction would split it across files. PTY tests in `src/test/integration.zig`. Scripted scenarios in `tests/e2e/*/scenario.e2e` + goldens.
 
 ## Things to be careful about
 

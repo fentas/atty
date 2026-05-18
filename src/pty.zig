@@ -233,20 +233,10 @@ fn childSetup(master_fd: posix.fd_t, slave_path: [:0]const u8) !void {
     _ = std.c.close(master_fd);
 }
 
-test "Pty.open allocates a master and slave path" {
-    var pty = try Pty.open(std.testing.allocator);
-    defer pty.deinit();
+// ===========================================================================
+// Tests — extracted to `pty_tests.zig` for readability.
+// ===========================================================================
 
-    try std.testing.expect(pty.master >= 0);
-    try std.testing.expect(std.mem.startsWith(u8, pty.slave_path, "/dev/pts/"));
-}
-
-test "Pty.setSize round-trips through ioctl" {
-    var pty = try Pty.open(std.testing.allocator);
-    defer pty.deinit();
-
-    try pty.setSize(.{ .rows = 24, .cols = 80 });
-    const got = try Pty.querySize(pty.master);
-    try std.testing.expectEqual(@as(u16, 24), got.rows);
-    try std.testing.expectEqual(@as(u16, 80), got.cols);
+test {
+    _ = @import("pty_tests.zig");
 }

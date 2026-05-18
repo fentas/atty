@@ -1,20 +1,18 @@
-//! Tests for `src/modules/llm.zig`. Lifted out so the implementation
+//! Tests for `modules/llm.zig`. Lifted out so the implementation
 //! file stays readable — the inline-tests pattern was costing ~1700
 //! lines and made the configure() body hard to scan.
 //!
-//! Test discovery: `unit_tests.zig` imports `modules/llm.zig`, which
-//! has a single `test { _ = @import("llm/tests.zig"); }` block that
-//! brings every test below into scope. No new entries needed in
-//! `unit_tests.zig` for new tests — just add them here.
+//! Naming follows the project-wide convention: source-file siblings
+//! live as `<name>_tests.zig` in the SAME directory.
 
 const std = @import("std");
 const testing = std.testing;
 
-const llm = @import("../llm.zig");
+const llm = @import("llm.zig");
 const configure = llm.configure;
-const m = @import("../../module.zig");
+const m = @import("../module.zig");
 const dialog = llm.dialog_ns;
-const parse = @import("parse.zig");
+const parse = @import("llm/parse.zig");
 
 const test_io: std.Io = std.Io.failing;
 
@@ -335,7 +333,7 @@ test "chat overlay (Alt+Shift+C): refuses to open when no conversation exists" {
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -369,7 +367,7 @@ test "chat overlay (Alt+Shift+C): toggle emits alt-screen enter then exit" {
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -446,7 +444,7 @@ test "chat overlay: onInput swallows all keystrokes while open" {
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -500,7 +498,7 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -591,7 +589,7 @@ test "inline chat (Alt+C): open paint CUP-restores to the cursor_row snapshot ta
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -644,7 +642,7 @@ test "inline chat: cursor_row snapshot clamps to shell_bottom when it overshoots
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -689,7 +687,7 @@ test "inline chat: re-open with null ctx.cursor_row clears the previous snapshot
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -743,7 +741,7 @@ test "inline chat: re-open with a different non-null cursor_row overwrites the p
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -794,7 +792,7 @@ test "inline chat: paint ignores live ctx.cursor_row drift while panel is open" 
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -844,7 +842,7 @@ test "inline chat: Alt+C refuses to open when there's no statusbar" {
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -878,7 +876,7 @@ test "inline chat: Ctrl+Up parks focus; Ctrl+Down brings it back; passthrough wh
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -936,7 +934,7 @@ test "inline chat: closing panel via Alt+C resets focus to in-panel for next ope
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1011,7 +1009,7 @@ test "inline chat: Alt+Shift+C closes inline panel first if it was open (mutuall
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1050,7 +1048,7 @@ test "inline chat: Alt+C closes overlay first if it was open (mutually exclusive
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1090,7 +1088,7 @@ test "inline chat: onInput swallows keystrokes into chat_inline_input_buf when o
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1130,7 +1128,7 @@ test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1182,7 +1180,7 @@ test "statusText: idle hint shows Alt+C/Alt+S/Alt+H when no AI mode (discoverabi
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1221,7 +1219,7 @@ test "statusText flips to prefix_signal_status_text while prefix matches" {
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1263,7 +1261,7 @@ test "statusText: AI hint embeds SGR escapes for icon + shortcuts (default color
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1306,7 +1304,7 @@ test "statusText: null icon/shortcut colors produce no SGR escapes (legacy look)
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
     var ctx: m.Context = .{
@@ -1495,7 +1493,7 @@ test "LLM worker round-trips a mock ollama response into the latch + hint surfac
 
     // Prime line_state with `#: hello` followed by Enter — onInput
     // expects lastCommitted to hold the prefixed line.
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     _ = line.applyInput("#: hello\r");
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
@@ -1557,7 +1555,7 @@ test "inert mode (no endpoint env) surfaces a 'no endpoint' hint" {
     try testing.expectEqual(@as(usize, 0), rt.api_base.len);
     try testing.expect(rt.thread == null);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     _ = line.applyInput("#: hello\r");
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);
@@ -1658,7 +1656,7 @@ test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
 
-    var line: @import("../../line_state.zig").LineState = .{};
+    var line: @import("../line_state.zig").LineState = .{};
     _ = line.applyInput("#: hello\r");
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(testing.allocator);

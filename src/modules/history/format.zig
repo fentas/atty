@@ -35,34 +35,9 @@ pub fn formatHistoryLine(buf: []u8, line: []const u8, fmt: history.Format, ts: i
 }
 
 // ===========================================================================
-// Tests
+// Tests — extracted to `format_tests.zig` for readability.
 // ===========================================================================
 
-const testing = std.testing;
-
-test "parseHistoryLine strips zsh extended prefix" {
-    try testing.expectEqualStrings("ls -la", parseHistoryLine(": 1700000000:0;ls -la"));
-    try testing.expectEqualStrings("echo hi", parseHistoryLine("echo hi"));
-    try testing.expectEqualStrings("", parseHistoryLine(""));
-    // Lines without the colon prefix are returned as-is.
-    try testing.expectEqualStrings(":not-extended", parseHistoryLine(":not-extended"));
-}
-
-test "formatHistoryLine emits zsh extended prefix" {
-    var buf: [128]u8 = undefined;
-    const out = formatHistoryLine(&buf, "ls -la", .zsh_extended, 1_700_000_000).?;
-    try testing.expectEqualStrings(": 1700000000:0;ls -la\n", out);
-}
-
-test "formatHistoryLine bash + plain emit bare lines" {
-    var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("git status\n", formatHistoryLine(&buf, "git status", .bash, 0).?);
-    try testing.expectEqualStrings("ls\n", formatHistoryLine(&buf, "ls", .plain, 0).?);
-}
-
-test "formatHistoryLine round-trips through parseHistoryLine" {
-    var buf: [128]u8 = undefined;
-    const formatted = formatHistoryLine(&buf, "echo hi", .zsh_extended, 42).?;
-    const without_nl = std.mem.trimEnd(u8, formatted, "\n");
-    try testing.expectEqualStrings("echo hi", parseHistoryLine(without_nl));
+test {
+    _ = @import("format_tests.zig");
 }

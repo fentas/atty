@@ -202,89 +202,9 @@ pub const Context = struct {
 };
 
 // ===========================================================================
-// Tests
+// Tests — extracted to `module_tests.zig` for readability.
 // ===========================================================================
 
-const testing = std.testing;
-
-test "subprocessCwd: null tracker → fallback" {
-    var line = LineState{};
-    var scratch: std.ArrayList(u8) = .empty;
-    var ctx = Context{
-        .allocator = testing.allocator,
-        .io = undefined,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-    };
-    var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("/home/me", ctx.subprocessCwd(&buf, "/home/me"));
-}
-
-test "subprocessCwd: empty tracker → fallback" {
-    var tr = subprocess_mod.Tracker.init();
-    var line = LineState{};
-    var scratch: std.ArrayList(u8) = .empty;
-    var ctx = Context{
-        .allocator = testing.allocator,
-        .io = undefined,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-        .subprocess = &tr,
-    };
-    var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("/home/me", ctx.subprocessCwd(&buf, "/home/me"));
-}
-
-test "subprocessCwd: ssh frame → ssh:// URI" {
-    var tr = subprocess_mod.Tracker.init();
-    tr.onCommandStart("ssh foo@bar", testing.allocator, null);
-    var line = LineState{};
-    var scratch: std.ArrayList(u8) = .empty;
-    var ctx = Context{
-        .allocator = testing.allocator,
-        .io = undefined,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-        .subprocess = &tr,
-    };
-    var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("ssh://foo@bar/?", ctx.subprocessCwd(&buf, "/home/me"));
-}
-
-test "subprocessCwd: ssh frame with OSC 7 cwd → ssh://host/path (no double slash)" {
-    var tr = subprocess_mod.Tracker.init();
-    tr.onCommandStart("ssh foo@bar", testing.allocator, null);
-    tr.onRemoteCwd("file://bar/srv/app");
-    var line = LineState{};
-    var scratch: std.ArrayList(u8) = .empty;
-    var ctx = Context{
-        .allocator = testing.allocator,
-        .io = undefined,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-        .subprocess = &tr,
-    };
-    var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("ssh://foo@bar/srv/app", ctx.subprocessCwd(&buf, "/home/me"));
-}
-
-test "subprocessCwd: kind=.none frame falls back" {
-    var tr = subprocess_mod.Tracker.init();
-    tr.onCommandStart("ls -la", testing.allocator, null);
-    var line = LineState{};
-    var scratch: std.ArrayList(u8) = .empty;
-    var ctx = Context{
-        .allocator = testing.allocator,
-        .io = undefined,
-        .line = &line,
-        .scratch = &scratch,
-        .is_tty = false,
-        .subprocess = &tr,
-    };
-    var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("/home/me", ctx.subprocessCwd(&buf, "/home/me"));
+test {
+    _ = @import("module_tests.zig");
 }

@@ -3290,5 +3290,5 @@ pub fn configure(comptime cfg: Config) type {
 // ===========================================================================
 
 test {
-    _ = @import("llm/tests.zig");
+    _ = @import("llm_tests.zig");
 }
