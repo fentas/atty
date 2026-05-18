@@ -542,6 +542,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (comptime @hasField(Runtime, "chat_overlay_open")) {
                 if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
             }
+            // Pin both surfaces back to the live tail. Otherwise a
+            // new assistant reply lands invisibly off-screen for any
+            // user who had scrolled up.
+            if (comptime @hasField(Runtime, "chat_view_offset")) {
+                rt.chat_view_offset = 0;
+            }
+            if (comptime @hasField(Runtime, "chat_inline_view_offset")) {
+                rt.chat_inline_view_offset = 0;
+            }
         }
 
         /// Free every turn's content + reset the count. Called on

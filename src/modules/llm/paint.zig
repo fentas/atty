@@ -127,7 +127,24 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (!has_turns and !has_conclusion) {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
-                for (rt.turns[0..rt.turns_len]) |turn| {
+                // Visible window slides with `chat_view_offset`. The
+                // offset can't exceed `turns_len - 1` — the
+                // scroll-action handler clamps; the assertion is the
+                // load-bearing one (a stale offset post-FIFO eviction
+                // would underflow `tail_end` below). Coerce defensively.
+                const max_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
+                const offset: usize = if (rt.chat_view_offset > max_offset) max_offset else rt.chat_view_offset;
+                const tail_end: usize = rt.turns_len - offset;
+                if (offset > 0) {
+                    // Tiny header signals "you are scrolled back N
+                    // turns" — mirrors how less + tmux annotate the
+                    // viewport so the user knows new turns aren't
+                    // missing, just below the fold.
+                    var sb: [40]u8 = undefined;
+                    const head = std.fmt.bufPrint(&sb, "  \x1B[2m\u{2191} {d} more turn(s) below\x1B[0m\r\n", .{offset}) catch "";
+                    w.writeAll(head) catch return false;
+                }
+                for (rt.turns[0..tail_end]) |turn| {
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
                         .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
@@ -421,13 +438,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 w.print("\x1B[{d};1H\x1B[2K", .{r}) catch return false;
             }
 
-            // Build a list of rendered "lines" (one line per turn
-            // for now — wrapping is a future follow-up). Render the
-            // last N where N = scrollback_rows.
-            const start_turn: usize = if (rt.turns_len > scrollback_rows) rt.turns_len - scrollback_rows else 0;
+            // `chat_inline_view_offset` shifts the window of the
+            // last `scrollback_rows` turns toward the head. Clamp
+            // here too — turns_len shrinks after FIFO eviction.
+            const max_inline_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
+            const inline_offset: usize = if (rt.chat_inline_view_offset > max_inline_offset) max_inline_offset else rt.chat_inline_view_offset;
+            const visible_end: usize = rt.turns_len - inline_offset;
+            const start_turn: usize = if (visible_end > scrollback_rows) visible_end - scrollback_rows else 0;
             row = top_row + 1;
             const max_inline_visible: usize = if (cols_usize > 12) cols_usize - 6 else 40;
-            for (rt.turns[start_turn..rt.turns_len]) |turn| {
+            for (rt.turns[start_turn..visible_end]) |turn| {
                 if (row >= input_row) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
                 const prefix: []const u8 = switch (turn.kind) {

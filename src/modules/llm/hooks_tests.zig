@@ -556,3 +556,178 @@ test "inline chat: onInput swallows keystrokes into chat_inline_input_buf when o
     // The overlay buffer must not be touched (mutually exclusive).
     try testing.expectEqual(@as(usize, 0), rt.chat_input_len);
 }
+
+// ───────────────────────────────────────────────────────────────
+// Chat scroll / viewport — overlay + inline.
+// ───────────────────────────────────────────────────────────────
+
+fn seedTurns(rt: anytype, helpers: anytype, count: usize) !void {
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const kind: dialog.TurnKind = if (i % 2 == 0) .user else .assistant_exec;
+        const body = try std.fmt.allocPrint(testing.allocator, "turn-{d}", .{i});
+        try helpers.pushTurn(rt, kind, body);
+    }
+}
+
+test "chat scroll: no chat surface open → action declines and PageUp passes through" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const consumed = try L.onAction(&rt, &ctx, .chat_scroll_page_up);
+    try testing.expect(!consumed);
+    try testing.expectEqual(@as(usize, 0), rt.chat_view_offset);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
+}
+
+test "chat scroll: overlay PageUp / PageDown adjusts chat_view_offset and clamps at edges" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    // `history_turns_max` defaults to 8 — pushTurn FIFO-evicts past
+    // that. Seed exactly the ring size so max_offset = 7.
+    try seedTurns(&rt, helpers, 8);
+    try testing.expectEqual(@as(usize, 8), rt.turns_len);
+
+    rt.chat_overlay_open = true;
+
+    // PageUp pages by 8, clamped at max_offset = 7.
+    try testing.expect(try L.onAction(&rt, &ctx, .chat_scroll_page_up));
+    try testing.expectEqual(@as(usize, 7), rt.chat_view_offset);
+    try testing.expect(rt.chat_overlay_paint_pending);
+
+    // Already at the head — extra PageUp is a no-op (offset unchanged,
+    // but `consumed=true` still claims the key so it doesn't leak to
+    // the shell).
+    rt.chat_overlay_paint_pending = false;
+    try testing.expect(try L.onAction(&rt, &ctx, .chat_scroll_page_up));
+    try testing.expectEqual(@as(usize, 7), rt.chat_view_offset);
+
+    // PageDown by 8 floors at 0.
+    try testing.expect(try L.onAction(&rt, &ctx, .chat_scroll_page_down));
+    try testing.expectEqual(@as(usize, 0), rt.chat_view_offset);
+
+    // scroll_up nudges +1; scroll_down -1.
+    _ = try L.onAction(&rt, &ctx, .chat_scroll_up);
+    try testing.expectEqual(@as(usize, 1), rt.chat_view_offset);
+    _ = try L.onAction(&rt, &ctx, .chat_scroll_down);
+    try testing.expectEqual(@as(usize, 0), rt.chat_view_offset);
+    // scroll_down at 0 is also a no-op-but-consumed.
+    _ = try L.onAction(&rt, &ctx, .chat_scroll_down);
+    try testing.expectEqual(@as(usize, 0), rt.chat_view_offset);
+}
+
+test "chat scroll: inline panel scrolls only when focus is in the panel" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    try seedTurns(&rt, helpers, 8); // ring size; max_offset = 7
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false; // parked on the shell
+
+    // Parked → action declines, shell sees PageUp.
+    try testing.expect(!try L.onAction(&rt, &ctx, .chat_scroll_page_up));
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
+
+    rt.chat_focus_in_panel = true;
+    try testing.expect(try L.onAction(&rt, &ctx, .chat_scroll_page_up));
+    try testing.expect(rt.chat_inline_view_offset > 0);
+    try testing.expect(rt.chat_inline_paint_pending);
+}
+
+test "chat scroll: pushTurn re-pins both view offsets to 0" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    try seedTurns(&rt, helpers, 6);
+
+    // User scrolled both views away from the tail.
+    rt.chat_view_offset = 3;
+    rt.chat_inline_view_offset = 2;
+
+    const body = try testing.allocator.dupe(u8, "new assistant reply");
+    try helpers.pushTurn(&rt, .assistant_exec, body);
+
+    try testing.expectEqual(@as(usize, 0), rt.chat_view_offset);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
+}

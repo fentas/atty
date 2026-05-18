@@ -136,6 +136,14 @@ pub fn configure(comptime cfg: Config) type {
             // target. No CSI-u sibling needed.
             .{ .bytes = keymap.key("Ctrl+Up"), .action = .chat_focus_to_shell, .label = "Ctrl+Up", .description = "while inline chat is open: focus shell prompt (panel stays)" },
             .{ .bytes = keymap.key("Ctrl+Down"), .action = .chat_focus_to_chat, .label = "Ctrl+Down", .description = "while inline chat is open: focus chat input" },
+            // Scrollback within a chat surface. PageUp/PageDown
+            // aren't bound anywhere else in atty, so claiming them
+            // unconditionally is safe — the action handler no-ops
+            // when no chat surface is open AND the dispatcher hands
+            // the keystroke back as `.forward`, so the shell still
+            // sees PageUp normally.
+            .{ .bytes = keymap.key("PageUp"), .action = .chat_scroll_page_up, .label = "PageUp", .description = "chat: scroll back one page (when chat surface is open)" },
+            .{ .bytes = keymap.key("PageDown"), .action = .chat_scroll_page_down, .label = "PageDown", .description = "chat: scroll forward one page (when chat surface is open)" },
         };
 
         // HTTP worker thread + request/response plumbing extracted
@@ -557,6 +565,16 @@ pub fn configure(comptime cfg: Config) type {
             /// the two clobbering each other on toggle.
             chat_inline_input_buf: [1024]u8 = undefined,
             chat_inline_input_len: usize = 0,
+
+            /// Turns scrolled back from the live tail in the overlay /
+            /// inline panel respectively. 0 = pinned to latest; every
+            /// `pushTurn` resets both so a new assistant reply always
+            /// re-pins the view. PageUp/PageDown adjust the offset and
+            /// the paint sites compute their visible window as
+            /// `turns[..turns_len - offset]`. Clamped so the offset
+            /// never exceeds `turns_len - 1` (one turn stays visible).
+            chat_view_offset: usize = 0,
+            chat_inline_view_offset: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
