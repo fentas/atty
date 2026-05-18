@@ -8,7 +8,7 @@
 //! at the expected scale (one atty session ≈ one or two open
 //! connections at most).
 
-use crate::classifier::Classifier;
+use crate::classifier::{BackendKind, Classifier};
 use crate::protocol::{
     Category, ClassifyContext, ClassifyResult, Envelope, Request, ResponseBody, ThreatLevel,
     Verdict,
@@ -27,7 +27,7 @@ use std::thread;
 /// an unbounded "line" past serde_json's recursion limit.
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 
-pub fn serve(socket: &Path, verbosity: u8) -> std::io::Result<()> {
+pub fn serve(socket: &Path, verbosity: u8, backend: BackendKind) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // Restrictive perms so a co-tenant user can't connect. UDS files
     // honour file permissions on Linux; mode 0600 == owner-only.
@@ -35,7 +35,7 @@ pub fn serve(socket: &Path, verbosity: u8) -> std::io::Result<()> {
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
 
     let state = Arc::new(State {
-        classifier: Classifier::new(),
+        classifier: Classifier::new_with_backend(backend),
         threat: ThreatMap::new(),
         verbosity,
     });
@@ -209,7 +209,7 @@ mod tests {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
         let handle = thread::spawn(move || {
-            let _ = serve(&socket_for_thread, 0);
+            let _ = serve(&socket_for_thread, 0, BackendKind::Stub);
         });
         // Wait for the bind to land.
         for _ in 0..50 {
