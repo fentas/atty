@@ -161,6 +161,30 @@ pub const Action = union(enum) {
     /// **Ctrl+Down**. Sibling of `chat_focus_to_shell`. No-op when
     /// the panel isn't open.
     chat_focus_to_chat,
+    /// Scroll the chat history view back / forward by one turn.
+    /// Targets whichever chat surface is open: overlay first, then
+    /// the inline panel (only when focus is in the panel — Ctrl+Up
+    /// parks focus on the shell, and shell-scope PageUp belongs to
+    /// the shell, not the chat). Bumps `chat_view_offset` (overlay)
+    /// or `chat_inline_view_offset` (inline) by 1, clamped so the
+    /// view never moves past the oldest turn. Sibling
+    /// `chat_scroll_page_*` scrolls by one viewport's worth.
+    ///
+    /// **Not bound by default** (single-step keys live in the
+    /// future per-surface ring-buffer story; for now only page
+    /// scroll is shipped). Listed here so user configs can map
+    /// e.g. Shift+Up / Shift+Down.
+    chat_scroll_up,
+    chat_scroll_down,
+    /// Scroll the chat history view back / forward by one page —
+    /// "page" = the number of scrollback rows the surface is
+    /// currently showing (8 in the overlay's small layout, panel
+    /// rows minus 2 in the inline panel). Default
+    /// **PageUp / PageDown** while focus is in a chat surface;
+    /// otherwise unbound and PageUp/PageDown pass through to the
+    /// shell unchanged.
+    chat_scroll_page_up,
+    chat_scroll_page_down,
     /// Render a one-screen cheat-sheet of every keybinding atty
     /// surfaces — pulled from `config.keymap.bindings`. Scrolls into
     /// shell history (like the LLM conclusion banner) so it stays

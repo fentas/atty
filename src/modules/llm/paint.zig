@@ -121,12 +121,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // statusbar AI hint (consistent visual vocabulary).
             w.writeAll("\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n") catch return false;
 
+            // Clamp the offset against FIFO eviction — pushTurn
+            // can shrink `turns_len` after the user scrolled, and
+            // an unchecked `turns_len - offset` would underflow.
+            const max_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
+            const overlay_offset: usize = if (rt.chat_view_offset > max_offset) max_offset else rt.chat_view_offset;
+            const tail_end: usize = rt.turns_len - overlay_offset;
+
             const has_turns = rt.turns_len > 0;
             const has_conclusion = rt.conclusion_len > 0;
             if (!has_turns and !has_conclusion) {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
-                for (rt.turns[0..rt.turns_len]) |turn| {
+                for (rt.turns[0..tail_end]) |turn| {
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
                         .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
@@ -206,7 +213,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
 
             w.print("\x1B[{d};1H\x1B[2K", .{rows}) catch return false;
-            w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send]\x1B[0m") catch return false;
+            // The footer sits OUTSIDE the DECSTBM scroll region, so
+            // anchoring the "↑ N below" indicator here keeps it
+            // visible regardless of how far the scrollback walks.
+            if (overlay_offset > 0) {
+                var sb: [48]u8 = undefined;
+                const ind = std.fmt.bufPrint(&sb, "\x1B[2m[\u{2191} {d} below]\x1B[0m ", .{overlay_offset}) catch "";
+                w.writeAll(ind) catch return false;
+            }
+            w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send \u{00B7} PgUp/PgDn scroll]\x1B[0m") catch return false;
             rt.chat_overlay_buf_len = w.end;
             return true;
         }
@@ -444,13 +459,29 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 w.print("\x1B[{d};1H\x1B[2K", .{r}) catch return false;
             }
 
-            // Build a list of rendered "lines" (one line per turn
-            // for now — wrapping is a future follow-up). Render the
-            // last N where N = scrollback_rows.
-            const start_turn: usize = if (rt.turns_len > scrollback_rows) rt.turns_len - scrollback_rows else 0;
+            // `chat_inline_view_offset` shifts the window of the
+            // last `scrollback_rows` turns toward the head. Clamp
+            // here too — turns_len shrinks after FIFO eviction.
+            const max_inline_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
+            const inline_offset: usize = if (rt.chat_inline_view_offset > max_inline_offset) max_inline_offset else rt.chat_inline_view_offset;
+            const visible_end: usize = rt.turns_len - inline_offset;
             row = top_row + 1;
             const max_inline_visible: usize = if (cols_usize > 12) cols_usize - 6 else 40;
-            for (rt.turns[start_turn..rt.turns_len]) |turn| {
+            // When scrolled back, the top scrollback row becomes a
+            // dim "↑ N more turn(s) below" header so the user
+            // doesn't think new replies vanished — mirrors the
+            // overlay's scrolled-back indicator.
+            var scrollback_budget: u16 = scrollback_rows;
+            if (inline_offset > 0 and scrollback_budget > 1) {
+                var sb: [40]u8 = undefined;
+                const head = std.fmt.bufPrint(&sb, "  \x1B[2m\u{2191} {d} more turn(s) below\x1B[0m", .{inline_offset}) catch "";
+                w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
+                w.writeAll(head) catch return false;
+                row += 1;
+                scrollback_budget -= 1;
+            }
+            const start_turn: usize = if (visible_end > scrollback_budget) visible_end - scrollback_budget else 0;
+            for (rt.turns[start_turn..visible_end]) |turn| {
                 if (row >= input_row) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
                 const prefix: []const u8 = switch (turn.kind) {

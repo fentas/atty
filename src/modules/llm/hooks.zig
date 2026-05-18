@@ -861,6 +861,40 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                     return true;
                 },
+                .chat_scroll_up, .chat_scroll_down, .chat_scroll_page_up, .chat_scroll_page_down => {
+                    // Pick the target surface — overlay wins when both
+                    // are conceptually open (mutual exclusion makes that
+                    // unreachable today, but defensive). Refuse with
+                    // `false` when neither is active so PageUp/PageDown
+                    // pass through to the shell.
+                    const target_overlay = rt.chat_overlay_open;
+                    const target_inline = !target_overlay and rt.chat_inline_open and rt.chat_focus_in_panel;
+                    if (!target_overlay and !target_inline) return false;
+                    if (rt.turns_len == 0) return true;
+
+                    const max_offset: usize = rt.turns_len - 1;
+                    const offset_ptr: *usize = if (target_overlay) &rt.chat_view_offset else &rt.chat_inline_view_offset;
+                    // Page size — large enough that PageUp meaningfully
+                    // walks history. Overlay shows ~all turns up to 24
+                    // rows so use 8; inline panel's scrollback is
+                    // `inline_chat_rows - 2`, mirror it.
+                    const page: usize = if (target_overlay) 8 else if (cfg.inline_chat_rows >= 2) cfg.inline_chat_rows - 2 else 1;
+
+                    switch (action) {
+                        .chat_scroll_up => offset_ptr.* = @min(offset_ptr.* + 1, max_offset),
+                        .chat_scroll_down => offset_ptr.* = if (offset_ptr.* > 0) offset_ptr.* - 1 else 0,
+                        .chat_scroll_page_up => offset_ptr.* = @min(offset_ptr.* + page, max_offset),
+                        .chat_scroll_page_down => offset_ptr.* = if (offset_ptr.* > page) offset_ptr.* - page else 0,
+                        else => unreachable,
+                    }
+
+                    if (target_overlay) {
+                        rt.chat_overlay_paint_pending = true;
+                    } else {
+                        rt.chat_inline_paint_pending = true;
+                    }
+                    return true;
+                },
                 .llm_exec_cancel => {
                     // Only claim consumed when there's actual
                     // state to clear — otherwise the user's
