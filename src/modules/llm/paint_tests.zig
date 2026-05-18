@@ -489,10 +489,9 @@ test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
 }
 
 test "overlay: assistant_exec turn renders structured (description + `$ command`) instead of raw JSON" {
-    // Regression guard: the overlay used to dump assistant JSON
-    // envelopes verbatim, so users saw `{"action":"exec",...}`.
-    // PR D parses the envelope and renders description on one row
-    // + indented cyan command on the next.
+    // Regression guard: the structured renderer must split the
+    // envelope into description + indented cyan command and never
+    // leak the raw `{"action":"exec",...}` JSON to the user.
     const L = configure(.{
         .api_base = "http://test/v1",
         .api_base_env = "ATTY_TEST_NEVER",

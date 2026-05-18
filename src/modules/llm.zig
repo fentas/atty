@@ -486,11 +486,15 @@ pub fn configure(comptime cfg: Config) type {
             /// paint bytes have been returned.
             chat_overlay_paint_pending: bool = false,
             /// Rendered overlay bytes ready for `provideTermBytes`
-            /// to return. Sized for chrome + ~24 rows of conversation
-            /// text + SGR styling overhead. Longer conversations
-            /// truncate at the top (FIFO eviction already capped by
-            /// `cfg.history_turns_max`).
-            chat_overlay_buf: [4096]u8 = undefined,
+            /// to return. Sized for the FIFO-capped turn ring under
+            /// structured rendering: each turn can take up to ~1.2 KB
+            /// (480-col description + 480-col command + SGR framing,
+            /// or a question with up to 9 choices × 480 cols), so 16
+            /// KB covers `history_turns_max = 8` turns with margin.
+            /// Overflow `paintChatOverlay` returns false and the
+            /// paint is skipped rather than emitting a truncated
+            /// alt-screen sequence.
+            chat_overlay_buf: [16384]u8 = undefined,
             chat_overlay_buf_len: usize = 0,
             /// Chat input buffer — keystrokes accumulated while
             /// the overlay is open. Enter submits as a new

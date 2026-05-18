@@ -128,11 +128,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
                 for (rt.turns[0..rt.turns_len]) |turn| {
-                    // Assistant turns previously rendered their raw
-                    // JSON envelope verbatim — the overlay now uses
-                    // the structured renderer so users see "atty:
-                    // <description>\n      $ <command>" instead of
-                    // a wall of `{"action":"exec",...}`.
+                    // Structured render: the alt-screen has rows to
+                    // spare, so split the envelope into readable
+                    // lines instead of dumping raw JSON.
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
                         .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
@@ -280,6 +278,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             const choice = parsed.choice(i);
                             const cslice2 = if (choice.len > overlay_field_cap) choice[0..overlay_field_cap] else choice;
                             try writeSanitized(w, cslice2);
+                            if (choice.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                         }
                     }
                 },
