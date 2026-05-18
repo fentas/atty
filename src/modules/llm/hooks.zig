@@ -77,7 +77,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Ctrl+A / Ctrl+E / arrow-key editing in 2b; that
             // is a future follow-up — see PR series #195).
             //
-            // Keymap actions (Alt+C close, Esc, Ctrl+Shift+X)
+            // Keymap actions (Alt+Shift+C close, Esc, Ctrl+Shift+X)
             // dispatch in the proxy BEFORE this hook fires, so
             // the user can still close the overlay even mid-typing.
             // Inline chat panel — same input model as the overlay,
@@ -1242,7 +1242,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // text suitable for inline emission via
                     // `provideTermBytes` — scrolls into the
                     // shell's normal history above the next prompt,
-                    // re-emittable via Alt+C
+                    // re-emittable via Alt+Shift+C
                     // (`llm_chat_overlay_toggle`). See `captureConclusion`.
                     captureConclusion(rt, reason, exec_count, observation_count, user_count);
                     // Order matters: dialogReset clears the pending
@@ -1266,7 +1266,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     //     pick up the just-captured conclusion as
                     //     content via the conclusion-fallback path)
                     //   .notify → latch a hint so the user can
-                    //     decide whether to press Alt+C
+                    //     decide whether to press Alt+Shift+C
                     //   .never → ignore the flag
                     // The conclusion banner still scrolls into
                     // shell history (conclusion_pending stays
