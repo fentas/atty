@@ -92,6 +92,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // input so it goes to bash. `Ctrl+Down` returns focus.
             if (rt.chat_inline_open and rt.chat_focus_in_panel) {
                 for (input) |byte| switch (byte) {
+                    0x04 => {
+                        // Ctrl+D — close the panel like Alt+C. The
+                        // input buffer's contents stay around so the
+                        // next open re-shows the draft.
+                        rt.chat_inline_open = false;
+                        rt.chat_inline_paint_pending = true;
+                    },
                     0x0D, 0x0A => {
                         var trimmed_len = rt.chat_inline_input_len;
                         while (trimmed_len > 0 and (rt.chat_inline_input_buf[trimmed_len - 1] == ' ' or rt.chat_inline_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
@@ -150,6 +157,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
             if (rt.chat_overlay_open) {
                 for (input) |byte| switch (byte) {
+                    0x04 => {
+                        // Ctrl+D — close the overlay like
+                        // Alt+Shift+C. Mirrors the inline panel
+                        // behaviour above.
+                        rt.chat_overlay_open = false;
+                        rt.chat_overlay_paint_pending = true;
+                    },
                     0x0D, 0x0A => {
                         // Enter — submit the buffer as a user
                         // turn (if non-empty) and fire a dialog
