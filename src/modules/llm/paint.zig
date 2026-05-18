@@ -481,8 +481,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 "\x1B[2;38;5;14m";
             w.writeAll(prompt_style) catch return false;
             w.writeAll("\u{276F}\x1B[0m ") catch return false;
-            // Same cursor-centered 512-byte window as the overlay
-            // input — see proxy.zig:overlayInput notes.
+            // Same cursor-centered 512-byte window the overlay input
+            // uses (~10 lines above): keeps the byte under the cursor
+            // on-screen when the buffer is longer than the visible
+            // row.
             {
                 const cur = rt.chat_inline_input_cursor;
                 const len = rt.chat_inline_input_len;

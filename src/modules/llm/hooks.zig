@@ -94,6 +94,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// Advances `i` past the consumed bytes. Drops unknown CSI
         /// finals to .none rather than treating their final letter
         /// as a printable insert.
+        ///
+        /// Cross-`read` boundary limitation: an incomplete CSI tail
+        /// (e.g. `ESC [ 3` waiting for `~`) is drained to chunk end,
+        /// so if the kernel splits the sequence across two reads the
+        /// continuation bytes (the lone `~`) land as a printable
+        /// insert on the next call. Stateful CSI carryover would fix
+        /// it cleanly but adds an interactive-state field on the
+        /// runtime; deferred. Terminals emit cursor-keys atomically
+        /// in one write, so a split is unusual outside signal-
+        /// interrupt cases.
         fn parseChatKey(input: []const u8, i: *usize) ChatKey {
             const b = input[i.*];
             // Incomplete CSI tail (chunk ends with `ESC` or `ESC [`).
