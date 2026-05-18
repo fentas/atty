@@ -140,16 +140,33 @@ test "extractCommand skips uncommon escapes (\\b, \\f) without leaking the escap
     try testing.expectEqualStrings("ab", out[0..L.extractCommand(sample_f, &out)]);
 }
 
-test "extractCommand skips \\uXXXX unicode escapes cleanly" {
+test "extractCommand decodes \\uXXXX unicode escapes (regression: previously skipped)" {
     const L = configure(.{});
     var out: [128]u8 = undefined;
-    // Valid \u0020: skipped entirely (not decoded to a space), "ls-la" not "lsu0020-la".
-    const sample_valid = "{\"choices\":[{\"message\":{\"content\":\"ls\\u0020-la\"}}]}";
-    try testing.expectEqualStrings("ls-la", out[0..L.extractCommand(sample_valid, &out)]);
-    // Malformed \u with only 2 hex digits before the closing quote: must not
-    // skip past the closing " and extract garbage from the surrounding JSON.
+    // Valid   decodes to a space → "ls -la".
+    const sample_space = "{\"choices\":[{\"message\":{\"content\":\"ls\\u0020-la\"}}]}";
+    try testing.expectEqualStrings("ls -la", out[0..L.extractCommand(sample_space, &out)]);
+    // The real-world regression: > is `>`. Without decoding,
+    // `2>/dev/null` arrives as `2/dev/null` and the user wonders
+    // where the redirect went.
+    const sample_redirect = "{\"choices\":[{\"message\":{\"content\":\"echo a 2\\u003e/dev/null\"}}]}";
+    try testing.expectEqualStrings("echo a 2>/dev/null", out[0..L.extractCommand(sample_redirect, &out)]);
+    // Same for & = `&`.
+    const sample_amp = "{\"choices\":[{\"message\":{\"content\":\"echo a \\u0026\\u0026 echo b\"}}]}";
+    try testing.expectEqualStrings("echo a && echo b", out[0..L.extractCommand(sample_amp, &out)]);
+    // Multi-byte UTF-8: → is `→` (RIGHTWARDS ARROW, 3-byte
+    // UTF-8 sequence). Should encode correctly.
+    const sample_arrow = "{\"choices\":[{\"message\":{\"content\":\"echo \\u2192\"}}]}";
+    try testing.expectEqualStrings("echo \u{2192}", out[0..L.extractCommand(sample_arrow, &out)]);
+    // Malformed \u with only 2 hex digits before the closing quote
+    // must not run past the boundary. The decoder bails on the `"`
+    // and the loop terminates at it.
     const sample_malformed = "{\"choices\":[{\"message\":{\"content\":\"ls\\u01\"}}]}";
     try testing.expectEqualStrings("ls", out[0..L.extractCommand(sample_malformed, &out)]);
+    // \r (carriage return) MUST drop — writing CR to the PTY
+    // would act as Enter and auto-execute the partial command.
+    const sample_cr = "{\"choices\":[{\"message\":{\"content\":\"echo a\\u000Decho b\"}}]}";
+    try testing.expectEqualStrings("echo aecho b", out[0..L.extractCommand(sample_cr, &out)]);
 }
 
 test "extractCommand only takes the first non-empty line (multi-line replies)" {
