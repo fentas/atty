@@ -383,6 +383,89 @@ test "statusText: DIALOG mode hint covers state-engaged-but-mode-already-reset w
     try testing.expect(std.mem.indexOf(u8, got.?, "DIALOG") != null);
 }
 
+test "statusText: single-shot in_flight returns thinking_hint, not DIALOG" {
+    // Alt+A single-shot path: no persistent mode, dialog_state
+    // stays .idle, just `in_flight = true` while the worker runs.
+    // Must show the transient brain glyph — claiming "DIALOG mode"
+    // when the user didn't enter a dialog would be misleading.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.dialog_persistent_mode = .off;
+    rt.dialog_state = .idle;
+    rt.in_flight = true; // single-shot Alt+A worker mid-flight
+
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    // Brain glyph U+1F9E0 — encoded as the UTF-8 sequence \xF0\x9F\xA7\xA0.
+    try testing.expect(std.mem.indexOf(u8, got.?, "\u{1F9E0}") != null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "thinking") != null);
+    // Must NOT show DIALOG or AUTO labels.
+    try testing.expect(std.mem.indexOf(u8, got.?, "DIALOG") == null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "AUTO") == null);
+}
+
+test "statusText: mode=.dialog keeps DIALOG label even if auto_mode_active leaks" {
+    // Defense-in-depth: if the auto_mode_active flag is set while
+    // dialog_persistent_mode is still .dialog (a known leak path
+    // through cfg.enter_action=.auto + .llm_exec_dialog), the
+    // statusbar should still render DIALOG — the persistent mode
+    // is the source of truth.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.dialog_persistent_mode = .dialog;
+    rt.auto_mode_active = true; // leaky combo
+    rt.in_flight = false;
+
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "DIALOG") != null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "AUTO") == null);
+}
+
 test "statusText: AUTO mode hint covers state-engaged-with-auto-flag window" {
     // Same as the dialog regression, but for auto-exec mode where
     // `auto_mode_active` is the engaged flag.
@@ -410,13 +493,18 @@ test "statusText: AUTO mode hint covers state-engaged-with-auto-flag window" {
         .is_tty = false,
     };
 
+    // mode=.off + state engaged + auto flag — the state machine
+    // is mid-flow with auto-exec active even though the persistent
+    // mode reset (LLM action=done). Auto label is correct.
     rt.dialog_persistent_mode = .off;
+    rt.dialog_state = .observation_ready;
     rt.auto_mode_active = true;
     rt.in_flight = false;
 
     const got = try L.statusText(&rt, &ctx);
     try testing.expect(got != null);
     try testing.expect(std.mem.indexOf(u8, got.?, "AUTO") != null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "DIALOG") == null);
 }
 
 test "statusText flips to prefix_signal_status_text while prefix matches" {
