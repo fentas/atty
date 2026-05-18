@@ -486,15 +486,18 @@ pub fn configure(comptime cfg: Config) type {
             /// paint bytes have been returned.
             chat_overlay_paint_pending: bool = false,
             /// Rendered overlay bytes ready for `provideTermBytes`
-            /// to return. Sized for the FIFO-capped turn ring under
-            /// structured rendering: each turn can take up to ~1.2 KB
-            /// (480-col description + 480-col command + SGR framing,
-            /// or a question with up to 9 choices × 480 cols), so 16
-            /// KB covers `history_turns_max = 8` turns with margin.
-            /// Overflow `paintChatOverlay` returns false and the
-            /// paint is skipped rather than emitting a truncated
-            /// alt-screen sequence.
-            chat_overlay_buf: [16384]u8 = undefined,
+            /// to return. Worst-case sizing under the structured
+            /// renderer + FIFO-capped turn ring:
+            ///   - exec turn:     ~800 B (256 desc + 480 cmd + SGR)
+            ///   - done turn:     ~310 B (256 reason + SGR)
+            ///   - question turn: ~3.0 KB (480 prompt + 9 × 256 choice + SGR)
+            ///   - user/obs:      ~1.1 KB (1024 cap)
+            /// 8 all-question turns would be ~24 KB — the most
+            /// pathological realistic mix. 32 KB leaves margin for
+            /// the alt-screen chrome (title bar, footer, input row,
+            /// SGR resets) so `paintChatOverlay` overflow + skip-the-
+            /// paint never triggers under normal use.
+            chat_overlay_buf: [32768]u8 = undefined,
             chat_overlay_buf_len: usize = 0,
             /// Chat input buffer — keystrokes accumulated while
             /// the overlay is open. Enter submits as a new

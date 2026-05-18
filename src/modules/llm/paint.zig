@@ -181,27 +181,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return true;
         }
 
-        /// Paint the inline chat panel into the rows the statusbar
-        /// has just reserved above the hint row. The proxy is
-        /// responsible for emitting `setReserveRows + activate`
-        /// before this paint runs — `activate` blanks the reserved
-        /// zone and re-anchors DECSTBM so the shell stops scrolling
-        /// into the panel.
-        ///
-        /// Layout, top→bottom (panel rows = `cfg.inline_chat_rows`,
-        /// e.g. 10):
-        ///
-        ///   • divider row — dim icon + "atty chat" label + Alt+C hint
-        ///   • scrollback rows — recent turns (assistant + user),
-        ///     wrap auto-handled by terminal inside the bounds set
-        ///     by per-row CUP + EL
-        ///   • input row — `❯ <typed text>█` with reverse-video block cursor
-        ///
-        /// Close: emits an empty paint plus a DECSC/DECRC pair so
-        /// the cursor returns to the shell's previous position
-        /// after the proxy's `setReserveRows(base) + activate` has
-        /// shrunk the reservation back. (The proxy clears the freed
-        /// rows itself via `activate`; the paint doesn't need to.)
         /// Overlay-mode structured turn rendering. The overlay has
         /// the full screen, so assistant_exec turns get spread across
         /// multiple rows: description on row 1, command on row 2
@@ -390,6 +369,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return rt.chat_open_cursor_row;
         }
 
+        /// Paint the inline chat panel into the rows the statusbar
+        /// has just reserved above the hint row. The proxy is
+        /// responsible for emitting `setReserveRows + activate`
+        /// before this paint runs — `activate` blanks the reserved
+        /// zone and re-anchors DECSTBM so the shell stops scrolling
+        /// into the panel.
+        ///
+        /// Layout, top→bottom (panel rows = `cfg.inline_chat_rows`,
+        /// e.g. 10):
+        ///
+        ///   • divider row — dim icon + "atty chat" label + Alt+C hint
+        ///   • scrollback rows — recent turns (assistant + user),
+        ///     wrap auto-handled by terminal inside the bounds set
+        ///     by per-row CUP + EL
+        ///   • input row — `❯ <typed text>█` with reverse-video block cursor
+        ///
+        /// Close: emits an empty paint plus a DECSC/DECRC pair so
+        /// the cursor returns to the shell's previous position
+        /// after the proxy's `setReserveRows(base) + activate` has
+        /// shrunk the reservation back. (The proxy clears the freed
+        /// rows itself via `activate`; the paint doesn't need to.)
         fn paintInlineChat(rt: *Runtime, ctx: *m.Context) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
 
