@@ -341,6 +341,84 @@ test "statusText: idle hint shows Alt+C/Alt+S/Alt+H when no AI mode (discoverabi
     try testing.expect(std.mem.indexOf(u8, got.?, "Alt+H") != null);
 }
 
+test "statusText: DIALOG mode hint covers state-engaged-but-mode-already-reset window" {
+    // Regression guard: when `dialog_persistent_mode` resets to .off
+    // (LLM said action=done) but the dialog state machine is still
+    // cycling (observation_ready, etc.), the statusbar previously
+    // fell through to the discovery hint — making the user think
+    // they were idle when they were actually waiting for the next
+    // turn. Surface DIALOG mode for any non-.idle state too.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Mode reset (LLM done), but state machine still mid-cycle.
+    rt.dialog_persistent_mode = .off;
+    rt.dialog_state = .observation_ready;
+    rt.in_flight = false;
+
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    // Should see "DIALOG", NOT the discovery "Alt+C chat" segment.
+    try testing.expect(std.mem.indexOf(u8, got.?, "DIALOG") != null);
+}
+
+test "statusText: AUTO mode hint covers state-engaged-with-auto-flag window" {
+    // Same as the dialog regression, but for auto-exec mode where
+    // `auto_mode_active` is the engaged flag.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.dialog_persistent_mode = .off;
+    rt.auto_mode_active = true;
+    rt.in_flight = false;
+
+    const got = try L.statusText(&rt, &ctx);
+    try testing.expect(got != null);
+    try testing.expect(std.mem.indexOf(u8, got.?, "AUTO") != null);
+}
+
 test "statusText flips to prefix_signal_status_text while prefix matches" {
     const L = configure(.{
         .api_base = "http://test/v1",

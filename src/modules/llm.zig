@@ -895,13 +895,27 @@ pub fn configure(comptime cfg: Config) type {
             // per-request "thinking" feedback. We still show the
             // thinking glyph as a suffix on the mode segment when
             // a request is in flight.
-            switch (rt.dialog_persistent_mode) {
-                .off => {},
-                .dialog => return if (rt.in_flight) dialog_inflight_hint else dialog_idle_hint,
-                .auto => return if (rt.in_flight) auto_inflight_hint else auto_idle_hint,
+            //
+            // Surface the mode hint when ANY of the following is
+            // true — closes the visibility gap the user reported
+            // between LLM "action=done" (mode resets to .off) and
+            // the next observation-driven turn firing (state stays
+            // non-idle, in_flight will flip true on the next tick):
+            //   • dialog_persistent_mode set explicitly
+            //   • state machine engaged (state != .idle)
+            //   • request in flight
+            //   • auto_mode_active flag set (auto-exec armed)
+            const state_engaged = rt.dialog_state != .idle;
+            const mode_engaged = rt.dialog_persistent_mode != .off or
+                rt.auto_mode_active or state_engaged or rt.in_flight;
+            if (mode_engaged) {
+                const is_auto = rt.auto_mode_active or
+                    rt.dialog_persistent_mode == .auto;
+                if (is_auto) {
+                    return if (rt.in_flight) auto_inflight_hint else auto_idle_hint;
+                }
+                return if (rt.in_flight) dialog_inflight_hint else dialog_idle_hint;
             }
-
-            if (rt.in_flight) return thinking_hint;
 
             // AI mode hint: when the line starts with the prefix,
             // surface the action keys so users discover the new
