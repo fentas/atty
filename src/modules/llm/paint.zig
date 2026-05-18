@@ -128,23 +128,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
                 for (rt.turns[0..rt.turns_len]) |turn| {
+                    // Assistant turns previously rendered their raw
+                    // JSON envelope verbatim — the overlay now uses
+                    // the structured renderer so users see "atty:
+                    // <description>\n      $ <command>" instead of
+                    // a wall of `{"action":"exec",...}`.
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
                         .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
                         .observation => "\x1B[2mOutput:\x1B[0m ",
                     };
                     w.writeAll(prefix) catch return false;
-                    // Sanitize: strip embedded ESC / control bytes
-                    // so a model that sneaks `\x1B[…` into its
-                    // reason field can't hijack our overlay paint.
-                    // Cap to ~512 chars rendered so a huge JSON
-                    // envelope doesn't fill the screen with one
-                    // turn; truncation marker dimmed.
-                    const slice = if (turn.content.len > 512) turn.content[0..512] else turn.content;
-                    writeSanitized(&w, slice) catch return false;
-                    if (turn.content.len > 512) {
-                        w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m") catch return false;
-                    }
+                    renderOverlayTurnContent(&w, turn) catch return false;
                     w.writeAll("\r\n\r\n") catch return false;
                 }
                 if (has_conclusion and !has_turns) {
@@ -220,6 +215,73 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// `max_visible` caps the visible cols on a single row;
         /// longer content gets a "[…]" ellipsis. The actual row
         /// CUP + clear is done by the caller; we only emit content
+        /// Overlay-mode structured turn rendering. The overlay has
+        /// the full screen, so assistant_exec turns get spread across
+        /// multiple rows: description on row 1, command on row 2
+        /// (cyan, indented `  $ `), question prompts in italic with
+        /// optional choice list, done banners with a check glyph.
+        /// User + observation turns stay flat — they're free prose.
+        /// Parse failures fall back to writing the raw bytes so the
+        /// user sees what the model actually emitted instead of an
+        /// empty turn.
+        fn renderOverlayTurnContent(w: *std.Io.Writer, turn: dialog.Turn) !void {
+            const c = turn.content;
+            const looks_like_envelope = turn.kind == .assistant_exec and
+                c.len > 2 and
+                c[0] == '{' and
+                std.mem.indexOf(u8, c, "\"action\"") != null;
+            if (!looks_like_envelope) {
+                const slice = if (c.len > 1024) c[0..1024] else c;
+                try writeSanitized(w, slice);
+                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                return;
+            }
+            const R = dialog.Response(cfg.max_response_bytes);
+            var parsed: R = .{};
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
+                const slice = if (c.len > 1024) c[0..1024] else c;
+                try writeSanitized(w, slice);
+                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                return;
+            };
+            switch (parsed.action) {
+                .exec => {
+                    const desc = parsed.description();
+                    const cmd = parsed.command();
+                    if (desc.len > 0) {
+                        try writeSanitized(w, desc);
+                        try w.writeAll("\r\n");
+                    }
+                    try w.writeAll("\x1B[2m      $ \x1B[0m\x1B[22;1;38;5;14m");
+                    try writeSanitized(w, cmd);
+                    try w.writeAll("\x1B[0m");
+                },
+                .question => {
+                    const q = parsed.question();
+                    try w.writeAll("\x1B[3m"); // italic
+                    try writeSanitized(w, q);
+                    try w.writeAll("\x1B[0m");
+                    if (parsed.choices_count > 0) {
+                        var i: usize = 0;
+                        while (i < parsed.choices_count) : (i += 1) {
+                            try w.writeAll("\r\n");
+                            var num: [16]u8 = undefined;
+                            const np = std.fmt.bufPrint(&num, "\x1B[2m   {d}.\x1B[0m ", .{i + 1}) catch "";
+                            try w.writeAll(np);
+                            try writeSanitized(w, parsed.choice(i));
+                        }
+                    }
+                },
+                .done => {
+                    const r = parsed.reason();
+                    try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m ");
+                    try writeSanitized(w, r);
+                },
+            }
+        }
+
         /// bytes (and SGR resets).
         fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize) !void {
             const c = turn.content;
