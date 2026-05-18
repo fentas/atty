@@ -121,9 +121,35 @@ JSON-line over the UDS — one request per `\n`-terminated line, one response pe
 | `bash_c_base64`      | `bash`/`sh`/`zsh -c <quoted-arg>` where `<quoted-arg>` is ≥40 chars AND ≥90% base64 alphabet — the classic encoded-payload tell. |
 | `pid_high_threat`    | Source PID is in the threat map at `high`/`critical`. Returned EVEN when Tier-1 says safe, so atty escalates.                  |
 
-## Tier-2 stub
+## Tier-2 backend
 
-The encoder-SLM classifier is currently a stub that always returns `Safe` with 0.0 confidence. V2-C will replace it with an ONNX runtime + a quantized SecureBERT-class model. The protocol surface is stable — adding Tier-2 doesn't change request/response shapes, only the verdict distribution.
+Tier-2 is pluggable behind the `Tier2Backend` trait. Two impls ship today; an `OnnxBackend` lands with V2-C. Pick with `--tier2 <name>`:
+
+```sh
+atty-guard --tier2 stub        # default — always Safe, no extra rules
+atty-guard --tier2 heuristic   # additional regex rules beyond Tier-1
+```
+
+### `stub`
+
+Returns `Safe` with 0.0 confidence — Tier-1 hits are the only signal that reaches atty. Default for clean opt-in.
+
+### `heuristic`
+
+Adds rules that don't fit Tier-1's "obvious shapes" surface:
+
+| Match                                                            | Confidence | Reason                                                    |
+|------------------------------------------------------------------|-----------:|-----------------------------------------------------------|
+| `bash <(curl …)`, `sh <(wget …)`                                  | 0.85       | process-substitution wrapping of fetcher → shell          |
+| `curl --insecure …` / `-k` / `wget --no-check-certificate …`     | 0.70       | fetcher disables TLS cert validation                      |
+| `curl http://192.168.0.1/x.sh`                                    | 0.60       | fetcher targets a bare IP address (no domain)             |
+| `chmod +x foo; ./foo`, `chmod +x foo && foo`                      | 0.75       | `chmod +x` followed by execution of the same file         |
+
+All produce `Verdict::Warn` — atty's user still has the `[y]/[t]/cancel` choice, so a false positive only costs one keystroke. Pure CPU, ~µs latency, zero deps beyond `regex`.
+
+### `onnx` (V2-C, not in this PR)
+
+Encoder SLM (SecureBERT-class quantized INT8) via the `ort` crate. Latency target ≤ 15 ms/inference. Will be feature-gated behind a Cargo feature so the default build stays small.
 
 ## Tests
 

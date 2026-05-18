@@ -45,6 +45,14 @@ struct Cli {
     /// Log verbosity: 0=quiet, 1=info, 2=debug.
     #[arg(short = 'v', long, default_value_t = 1)]
     verbosity: u8,
+
+    /// Tier-2 backend. `stub` (default) returns Safe; `heuristic`
+    /// adds regex rules beyond Tier-1's surface (proc-substitution
+    /// fetcher→shell, `--insecure` TLS, bare IP fetcher targets,
+    /// chmod+x followed by execute). V2-C will add `onnx` for the
+    /// encoder-SLM backend.
+    #[arg(long, default_value = "stub", value_parser = ["stub", "heuristic"])]
+    tier2: String,
 }
 
 fn default_socket_path() -> PathBuf {
@@ -69,6 +77,7 @@ fn libc_uid() -> u32 {
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
     let socket = cli.socket.unwrap_or_else(default_socket_path);
+    let backend = classifier::BackendKind::parse(&cli.tier2).unwrap_or(classifier::BackendKind::Stub);
 
     // SO_REUSEADDR equivalent for UDS: unlink stale socket file first.
     // On restart after a crash the previous socket file may linger and
@@ -78,8 +87,12 @@ fn main() -> std::io::Result<()> {
     let _ = std::fs::remove_file(&socket);
 
     if cli.verbosity >= 1 {
-        eprintln!("atty-guard: listening on {}", socket.display());
+        eprintln!(
+            "atty-guard: listening on {} (tier2={})",
+            socket.display(),
+            cli.tier2
+        );
     }
 
-    server::serve(&socket, cli.verbosity)
+    server::serve(&socket, cli.verbosity, backend)
 }
