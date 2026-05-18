@@ -487,3 +487,66 @@ test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
     try testing.expect(std.mem.indexOf(u8, out2.?, "\x1B]112\x07") != null);
     try testing.expect(!rt.cursor_signal_active);
 }
+
+test "overlay scroll: nonzero view offset hides tail turns AND emits indicator" {
+    // Invariant: when `chat_view_offset > 0` the paint must (a)
+    // suppress the most-recent N turns, and (b) emit the
+    // dim `[↑ N below]` indicator in the footer row.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    // Three turns with distinct content so we can assert which
+    // ones the paint suppresses.
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "TURN-OLDEST"));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "TURN-MIDDLE"));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "TURN-NEWEST"));
+
+    rt.chat_overlay_open = true;
+    rt.chat_overlay_paint_pending = true;
+    // Scroll back by 2 — only TURN-OLDEST should be visible.
+    rt.chat_view_offset = 2;
+
+    const bytes = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(bytes != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "TURN-OLDEST") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "TURN-MIDDLE") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "TURN-NEWEST") == null);
+    // Footer indicator visible with the count.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{2191} 2 below") != null);
+    // Standard footer hint still present (scroll indicator
+    // prepends, doesn't replace).
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "Alt+Shift+C close") != null);
+
+    // Re-pin: offset = 0 → all 3 turns visible, no indicator.
+    rt.chat_view_offset = 0;
+    rt.chat_overlay_paint_pending = true;
+    const bytes2 = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(bytes2 != null);
+    try testing.expect(std.mem.indexOf(u8, bytes2.?, "TURN-OLDEST") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes2.?, "TURN-MIDDLE") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes2.?, "TURN-NEWEST") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes2.?, "below") == null);
+}
