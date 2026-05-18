@@ -9,26 +9,30 @@ const mod = @import("chat_persist.zig");
 // these module-level names by bare identifier).
 const dialog = @import("dialog.zig");
 
+// libc externs duplicated from the source rather than re-bound
+// via `mod.*` — keeps the source's surface minimal (these are
+// implementation details, not module API).
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
+extern "c" fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) c_int;
+extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
+
+// O_* flags — Linux values.
+const O_RDONLY: c_int = 0;
+const O_WRONLY: c_int = 1;
+const O_CREAT: c_int = 0o100;
+const O_APPEND: c_int = 0o2000;
+
 // Re-binds of pub decls so test bodies stay short.
-const O_APPEND = mod.O_APPEND;
-const O_CREAT = mod.O_CREAT;
-const O_RDONLY = mod.O_RDONLY;
-const O_WRONLY = mod.O_WRONLY;
 const appendTurn = mod.appendTurn;
-const close = mod.close;
-const fstat = mod.fstat;
-const getenv = mod.getenv;
 const LoadedTurn = mod.LoadedTurn;
 const loadLastTurns = mod.loadLastTurns;
-const lseek = mod.lseek;
-const mkdir = mod.mkdir;
-const open = mod.open;
 const parseLine = mod.parseLine;
-const read = mod.read;
-const rename = mod.rename;
 const resolvePath = mod.resolvePath;
 const rotateIfExceeded = mod.rotateIfExceeded;
-const write = mod.write;
 
 test "parseLine: user turn round-trips through JSON" {
     const line = "{\"kind\":\"user\",\"content\":\"list files\"}";

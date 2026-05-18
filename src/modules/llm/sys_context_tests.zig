@@ -5,18 +5,16 @@ const std = @import("std");
 const testing = std.testing;
 const mod = @import("sys_context.zig");
 
+// libc externs duplicated here instead of re-bound via `mod.*`,
+// so the source file's surface stays minimal (these are
+// implementation details, not module API).
+extern "c" fn system(command: [*:0]const u8) c_int;
+
 // Re-binds of pub decls so test bodies stay short.
-const access = mod.access;
-const close = mod.close;
 const compose = mod.compose;
 const gatherDynamic = mod.gatherDynamic;
 const gatherStatic = mod.gatherStatic;
-const getcwd = mod.getcwd;
-const getenv = mod.getenv;
-const open = mod.open;
-const read = mod.read;
 const readGitHead = mod.readGitHead;
-const system = mod.system;
 
 test "compose: joins non-empty pieces with `; `" {
     const out = try compose(testing.allocator, "OS=Arch", "PWD=/tmp", "USER=fentas");

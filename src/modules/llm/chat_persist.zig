@@ -26,20 +26,20 @@ const std = @import("std");
 
 const dialog = @import("dialog.zig");
 
-pub extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
-pub extern "c" fn close(fd: c_int) c_int;
-pub extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
-pub extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
-pub extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
-pub extern "c" fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) c_int;
-pub extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
-pub extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
-pub extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
+extern "c" fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) c_int;
+extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
-pub const O_RDONLY: c_int = 0;
-pub const O_WRONLY: c_int = 1;
-pub const O_CREAT: c_int = 0o100;
-pub const O_APPEND: c_int = 0o2000;
+const O_RDONLY: c_int = 0;
+const O_WRONLY: c_int = 1;
+const O_CREAT: c_int = 0o100;
+const O_APPEND: c_int = 0o2000;
 const FILE_MODE: c_int = 0o600;
 const DIR_MODE: c_uint = 0o700;
 

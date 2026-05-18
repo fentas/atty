@@ -27,13 +27,13 @@
 
 const std = @import("std");
 
-pub extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
-pub extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
-pub extern "c" fn close(fd: c_int) c_int;
-pub extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
-pub extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
-pub extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*]u8;
-pub extern "c" fn system(command: [*:0]const u8) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*]u8;
+extern "c" fn system(command: [*:0]const u8) c_int;
 
 const O_RDONLY: c_int = 0;
 const F_OK: c_int = 0;

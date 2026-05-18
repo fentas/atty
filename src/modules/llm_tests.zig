@@ -8,10 +8,10 @@
 const std = @import("std");
 const testing = std.testing;
 
-const llm = @import("llm.zig");
-const configure = llm.configure;
+const mod = @import("llm.zig");
+const configure = mod.configure;
 const m = @import("../module.zig");
-const dialog = llm.dialog_ns;
+const dialog = mod.dialog_ns;
 const parse = @import("llm/parse.zig");
 
 const test_io: std.Io = std.Io.failing;
