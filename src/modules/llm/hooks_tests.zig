@@ -1029,3 +1029,104 @@ test "inline chat: modified CSI (`ESC [ 1 ; 5 D`) doesn't leak its tail as print
     _ = try L.onInput(&rt, &ctx, "\x1B[D"); // Left
     try testing.expectEqual(@as(usize, 4), rt.chat_inline_input_cursor);
 }
+
+test "inline chat: SS3 cursor keys (`ESC O D/C/H/F`) move the cursor and don't leak" {
+    // Invariant: terminals in application-cursor mode emit
+    // `ESC O <letter>` for arrows / Home / End. parseChatKey must
+    // map the same handful as the CSI form so legacy and
+    // application modes both work, and the trailing letter must
+    // not leak into the buffer as a printable when the variant
+    // is unrecognised.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "abc");
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1BOD"); // SS3 Left
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1BOC"); // SS3 Right
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1BOH"); // SS3 Home
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1BOF"); // SS3 End
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
+    // Unrecognised SS3 (e.g. F1 = `ESC O P`) must be silently
+    // dropped — no `P` should land in the buffer.
+    _ = try L.onInput(&rt, &ctx, "\x1BOP");
+    try testing.expectEqualStrings("abc", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "inline chat: CSI with intermediate params (`ESC [ ? 2 5 l`, `ESC [ ; 5 D`) doesn't leak tail" {
+    // Invariant: the CSI scanner must consume to the final byte
+    // (0x40..0x7E) regardless of which parameter / intermediate
+    // bytes appear in between. Without this, an unrecognised
+    // private-mode sequence like `ESC [ ? 2 5 l` (DECTCEM hide
+    // cursor) would have only `ESC [ ?` consumed and `25l` would
+    // reparse as printables.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Private-mode CSI: DECTCEM hide cursor.
+    _ = try L.onInput(&rt, &ctx, "\x1B[?25l");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // CSI starting with `;` separator (no leading digit).
+    _ = try L.onInput(&rt, &ctx, "\x1B[;5D");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // `>` introducer (kitty / device-attributes style).
+    _ = try L.onInput(&rt, &ctx, "\x1B[>0c");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // Normal typing after still works.
+    _ = try L.onInput(&rt, &ctx, "ok");
+    try testing.expectEqualStrings("ok", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}

@@ -106,19 +106,54 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// interrupt cases.
         fn parseChatKey(input: []const u8, i: *usize) ChatKey {
             const b = input[i.*];
-            // Incomplete CSI tail (chunk ends with `ESC` or `ESC [`).
-            // Drain to chunk end so the partial bytes don't get
-            // misread — a lone `[` would otherwise be inserted as a
-            // printable, and `ESC` alone would loop on its
-            // single-byte fallthrough on the next pass.
-            if (b == 0x1B and (i.* + 1 >= input.len or
-                (input[i.* + 1] == '[' and i.* + 2 >= input.len)))
-            {
+            // Incomplete escape tail (chunk ends with `ESC`, `ESC [`,
+            // or `ESC O`). Drain to chunk end so the partial bytes
+            // don't get reparsed as printables on the next pass.
+            if (b == 0x1B and i.* + 1 >= input.len) {
                 i.* = input.len;
                 return .none;
             }
+            if (b == 0x1B and (input[i.* + 1] == '[' or input[i.* + 1] == 'O') and i.* + 2 >= input.len) {
+                i.* = input.len;
+                return .none;
+            }
+            // SS3 (application-cursor mode) — `ESC O <letter>` is
+            // what many terminals emit for arrow / Home / End when
+            // the cursor-key mode is application instead of normal.
+            // Map the same handful we accept on CSI; drop the rest
+            // as a 3-byte sequence so the trailing letter doesn't
+            // leak as a printable.
+            if (b == 0x1B and i.* + 2 < input.len and input[i.* + 1] == 'O') {
+                const c = input[i.* + 2];
+                i.* += 3;
+                return switch (c) {
+                    'D' => .move_left,
+                    'C' => .move_right,
+                    'H' => .move_home,
+                    'F' => .move_end,
+                    else => .none,
+                };
+            }
             if (b == 0x1B and i.* + 2 < input.len and input[i.* + 1] == '[') {
                 const c = input[i.* + 2];
+                // CSI structure: `ESC [` then optional parameter
+                // bytes (0x30-0x3F) and intermediate bytes
+                // (0x20-0x2F), then a single final byte (0x40-0x7E).
+                // If `c` is already a final, consume the 3-byte
+                // sequence; otherwise scan forward for the final.
+                if (c >= 0x40 and c <= 0x7E) {
+                    // VT-style CSI never reaches here because none
+                    // of {1,3,4,7,8} are in 0x40..0x7E — they're
+                    // handled by the digit branch below.
+                    i.* += 3;
+                    return switch (c) {
+                        'D' => .move_left,
+                        'C' => .move_right,
+                        'H' => .move_home,
+                        'F' => .move_end,
+                        else => .none,
+                    };
+                }
                 // VT-style `ESC [ <num> ~` (Delete = 3~, Home = 1~/7~,
                 // End = 4~/8~). Need a fourth byte to know which.
                 if (c >= '0' and c <= '9') {
@@ -141,32 +176,25 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             else => .none,
                         };
                     }
-                    // Modified CSI (e.g. `ESC [ 1 ; 5 D` for
-                    // Ctrl+Left). Skip past `ESC [` + the leading
-                    // digit run + optional params, ending at the
-                    // first byte in `0x40..0x7E` (the CSI final).
-                    // Starting the scan at i.* (still pointing at
-                    // ESC) would treat `[` as the final and leave
-                    // the rest of the sequence to be re-parsed as
-                    // printables.
-                    i.* += 3;
-                    while (i.* < input.len) : (i.* += 1) {
-                        const x = input[i.*];
-                        if (x >= 0x40 and x <= 0x7E) {
-                            i.* += 1;
-                            break;
-                        }
-                    }
-                    return .none;
+                    // fall through to the param-scan recovery below
                 }
+                // Param/intermediate byte (0x20-0x3F) — including
+                // `?`/`>` private markers, `;` separator, and
+                // numeric params. Walk forward to the first byte
+                // in 0x40..0x7E (the CSI final) so everything past
+                // the sequence is left for the next loop iteration.
+                // Without this, sequences like `ESC [ ? 2 5 l` or
+                // `ESC [ ; 5 D` would only have `ESC [ <byte>`
+                // consumed and the rest leak as printables.
                 i.* += 3;
-                return switch (c) {
-                    'D' => .move_left,
-                    'C' => .move_right,
-                    'H' => .move_home,
-                    'F' => .move_end,
-                    else => .none,
-                };
+                while (i.* < input.len) : (i.* += 1) {
+                    const x = input[i.*];
+                    if (x >= 0x40 and x <= 0x7E) {
+                        i.* += 1;
+                        break;
+                    }
+                }
+                return .none;
             }
             i.* += 1;
             return switch (b) {
