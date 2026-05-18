@@ -103,6 +103,176 @@ test "chat overlay: onInput swallows all keystrokes while open" {
     try testing.expectEqual(@as(usize, 1), rt.turns_len);
 }
 
+test "chat overlay: Ctrl+D closes the overlay (mirrors Alt+Shift+C)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_overlay_open = true;
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x04"));
+    try testing.expect(!rt.chat_overlay_open);
+    try testing.expect(rt.chat_overlay_paint_pending);
+}
+
+test "inline chat: Ctrl+D closes the panel (mirrors Alt+C)" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x04"));
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(rt.chat_inline_paint_pending);
+}
+
+test "Ctrl+D falls through to .forward when no chat panel is open (bash gets EOF)" {
+    // Regression guard: the chat panel intercepts Ctrl+D ONLY when
+    // it owns focus. With both panel + overlay closed, Ctrl+D must
+    // reach bash so the user's normal shell-exit semantics work.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try testing.expectEqual(m.Action{ .forward = {} }, try L.onInput(&rt, &ctx, "\x04"));
+}
+
+test "inline chat: Ctrl+D inside a multi-byte chunk closes the panel and drops the rest" {
+    // Regression guard: when a chunk contains Ctrl+D PLUS trailing
+    // bytes (paste, buffered burst), the panel must close AT the
+    // 0x04 and the trailing bytes must NOT be appended to the
+    // (now-closed) input buffer.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    // Seed the buffer empty; rely on the chunk to fill it.
+    rt.chat_inline_input_len = 0;
+
+    // Chunk: "ab\x04cd" — 'a','b' accumulate, Ctrl+D closes + returns,
+    // 'c','d' must NOT reach the buffer.
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "ab\x04cd"));
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expectEqualStrings("ab", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "inline chat: Ctrl+D falls through to .forward when focus is parked on the shell" {
+    // Same regression guard for the parked-focus state: Ctrl+Up
+    // moves focus to bash while the panel stays painted. In that
+    // state, Ctrl+D should reach bash, not close the panel.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false; // parked on shell
+
+    try testing.expectEqual(m.Action{ .forward = {} }, try L.onInput(&rt, &ctx, "\x04"));
+    try testing.expect(rt.chat_inline_open); // panel still open
+}
+
 test "inline chat: Alt+C refuses to open when there's no statusbar" {
     const L = configure(.{
         .api_base = "http://test/v1",

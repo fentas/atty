@@ -69,13 +69,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const effective_dialog_system_prompt = llm_consts.effective_dialog_system_prompt;
 
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
-            // Chat overlay — while open, keystrokes accumulate
-            // into `chat_input_buf` rather than reaching the
-            // shell. Enter submits the buffer as a `.user` turn
-            // and fires a dialog request. Backspace pops the
-            // last byte. Other control bytes are dropped (no
-            // Ctrl+A / Ctrl+E / arrow-key editing in 2b; that
-            // is a future follow-up — see PR series #195).
+            // Chat overlay / inline panel — while open, keystrokes
+            // accumulate into the relevant input buffer rather than
+            // reaching the shell. Enter submits the buffer as a
+            // `.user` turn and fires a dialog request. Backspace
+            // pops the last byte. Ctrl+D closes the chat surface
+            // it's typed into (panel for the inline branch below,
+            // overlay for the alt-screen branch — both mirror
+            // Alt+C / Alt+Shift+C and preserve the draft). Other
+            // control bytes are dropped (no Ctrl+A / Ctrl+E /
+            // arrow-key editing in 2b; future follow-up — see PR
+            // series #195).
             //
             // Keymap actions (Alt+Shift+C close, Esc, Ctrl+Shift+X)
             // dispatch in the proxy BEFORE this hook fires, so
@@ -92,6 +96,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // input so it goes to bash. `Ctrl+Down` returns focus.
             if (rt.chat_inline_open and rt.chat_focus_in_panel) {
                 for (input) |byte| switch (byte) {
+                    0x04 => {
+                        // Ctrl+D — close the panel like Alt+C. The
+                        // input buffer's contents stay around so the
+                        // next open re-shows the draft.
+                        //
+                        // Stop processing the rest of THIS chunk:
+                        // any bytes after the Ctrl+D would otherwise
+                        // still hit the now-closed panel's input
+                        // buffer (the `chat_inline_open` check above
+                        // is sampled once per chunk, not per byte).
+                        rt.chat_inline_open = false;
+                        rt.chat_inline_paint_pending = true;
+                        return .swallow;
+                    },
                     0x0D, 0x0A => {
                         var trimmed_len = rt.chat_inline_input_len;
                         while (trimmed_len > 0 and (rt.chat_inline_input_buf[trimmed_len - 1] == ' ' or rt.chat_inline_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
@@ -150,6 +168,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
             if (rt.chat_overlay_open) {
                 for (input) |byte| switch (byte) {
+                    0x04 => {
+                        // Ctrl+D — close the overlay like
+                        // Alt+Shift+C. Mirrors the inline panel
+                        // behaviour above. Same early-return
+                        // rationale: bytes after Ctrl+D in this
+                        // chunk would otherwise still hit the now-
+                        // closed overlay's input buffer.
+                        rt.chat_overlay_open = false;
+                        rt.chat_overlay_paint_pending = true;
+                        return .swallow;
+                    },
                     0x0D, 0x0A => {
                         // Enter — submit the buffer as a user
                         // turn (if non-empty) and fire a dialog
