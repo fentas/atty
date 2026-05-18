@@ -45,7 +45,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     historical ones do; cheap insurance.
         ///   - UTF-8 encoding of C1 (0xC2 followed by 0x80-0x9F):
         ///     drop the pair so the same codepoint can't sneak
-        ///     through the multi-byte form.
+        ///     through the multi-byte form. A 0xC2 that's NOT
+        ///     followed by a valid continuation byte (0x80-0xBF) is
+        ///     also dropped — emitting it alone would land
+        ///     malformed UTF-8 on the user's terminal.
         ///   - Tab (0x09) and printable ASCII pass through.
         fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) !void {
             var i: usize = 0;
@@ -55,9 +58,24 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (b == 0x0A or b == 0x0D) try w.writeAll(" ") else continue;
                 } else if (b >= 0x80 and b <= 0x9F) {
                     continue;
-                } else if (b == 0xC2 and i + 1 < bytes.len and bytes[i + 1] >= 0x80 and bytes[i + 1] <= 0x9F) {
-                    i += 1; // skip the continuation byte too
-                    continue;
+                } else if (b == 0xC2) {
+                    if (i + 1 >= bytes.len) continue; // lone 0xC2 → drop
+                    const next = bytes[i + 1];
+                    if (next >= 0x80 and next <= 0x9F) {
+                        // UTF-8 encoding of C1 control → drop pair.
+                        i += 1;
+                        continue;
+                    }
+                    if (next < 0x80 or next > 0xBF) {
+                        // Not a valid UTF-8 continuation — drop the
+                        // 0xC2; let `next` be re-examined on the
+                        // next iteration so its own gates apply.
+                        continue;
+                    }
+                    // 0xC2 + valid non-C1 continuation (e.g. NBSP).
+                    try w.writeByte(b);
+                    try w.writeByte(next);
+                    i += 1;
                 } else {
                     try w.writeByte(b);
                 }
