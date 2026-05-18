@@ -1020,7 +1020,8 @@ pub fn configure(comptime cfg: Config) type {
 }
 
 // ===========================================================================
-// Tests — extracted to `llm_tests.zig` for readability.
+// Tests — `llm_tests.zig` holds llm-core tests and cascades into
+// `llm/paint_tests.zig` + `llm/hooks_tests.zig` for the sub-modules.
 // ===========================================================================
 
 test {
