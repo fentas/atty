@@ -83,7 +83,16 @@ pub const Client = struct {
     socket_path: []const u8,
     fd: i32 = -1,
     next_id: u64 = 1,
-    read_buf: [4096]u8 = undefined,
+    /// 16 KiB caps a single daemon response. The hot signal is
+    /// `matched` (the substring that tripped the daemon); long
+    /// URLs inside `curl|sh` matches are real, so 4 KiB was tight
+    /// in practice. Beyond 16 KiB the daemon is either misbehaving
+    /// or attacking us; `readLine` returns LineTooLong, the caller
+    /// closes the fd, and the in-proc patterns kick in as fallback.
+    read_buf: [16384]u8 = undefined,
+    /// 4 KiB is plenty for the request side — atty's committed
+    /// line is bounded by readline's edit buffer (typically 4096)
+    /// and the context blob is small.
     write_buf: [4096]u8 = undefined,
     /// Read timeout per request. Caps the worst-case keystroke
     /// stall when the daemon is slow / wedged. Caller should
@@ -310,7 +319,11 @@ fn writeEscaped(w: *std.Io.Writer, s: []const u8) !void {
 // a general parser. Falls back to `error.DaemonError` on anything
 // it doesn't recognise.
 
-fn parseClassifyResponse(buf: []const u8) Error!ClassifyResult {
+/// Pulled out (and `pub`'d) so tests can round-trip without
+/// standing up a daemon. Returns the parsed result OR a typed
+/// error; the callers up the chain map the errors back into
+/// fallback / arming decisions.
+pub fn parseClassifyResponse(buf: []const u8) Error!ClassifyResult {
     // Look for "type":"classify" first to reject other envelope shapes.
     if (std.mem.indexOf(u8, buf, "\"type\":\"classify\"") == null) {
         if (std.mem.indexOf(u8, buf, "\"type\":\"error\"") != null) {
