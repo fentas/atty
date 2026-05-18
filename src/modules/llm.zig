@@ -540,6 +540,20 @@ pub fn configure(comptime cfg: Config) type {
             // The full overlay (Alt+Shift+C) is still available and
             // mutually-exclusive — opening one closes the other.
             chat_inline_open: bool = false,
+            /// Snapshot of `ctx.cursor_row` taken at the moment the
+            /// panel OPENED (Alt+C). Every subsequent paint ends with
+            /// an explicit CUP to this row so the real terminal
+            /// cursor returns to the shell's prompt area between
+            /// paints. Without this, the open-paint leaves the
+            /// cursor parked at the chat input row → bash's echo of
+            /// any byte (typed char, prompt redraw, exec injection)
+            /// lands AT the input row, looking like a duplicate
+            /// command / shell-output-in-the-chat-panel.
+            ///
+            /// 0 = unknown (non-TTY, cursor_tracker not wired). The
+            /// paint falls back to `shell_bottom` (last row of the
+            /// scroll region) in that case.
+            chat_open_cursor_row: u16 = 0,
             /// True when the user's keystroke focus is inside the
             /// inline chat panel (default whenever the panel opens).
             /// `Ctrl+Up` flips it to false → focus moves to the shell
@@ -1243,6 +1257,12 @@ pub fn configure(comptime cfg: Config) type {
                         // Default: focus starts in the panel (matches
                         // the previous always-swallow behaviour).
                         rt.chat_focus_in_panel = true;
+                        // Snapshot the shell cursor row so every paint
+                        // can CUP-restore the real terminal cursor
+                        // back to the shell area. 0 = unknown (non-TTY
+                        // tests or cursor_tracker not wired) — paint
+                        // falls back to shell_bottom.
+                        rt.chat_open_cursor_row = ctx.cursor_row orelse 0;
                     }
                     return true;
                 },
@@ -2938,36 +2958,45 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
+        /// Compute the row the real terminal cursor should sit at
+        /// after every paintInlineChat call. Pulls from the snapshot
+        /// taken at open time (`rt.chat_open_cursor_row`), falling
+        /// back to the bottom of the shell scroll region when the
+        /// snapshot is unknown OR was clamped past the shell area
+        /// (defensive against cursor_tracker drift / SIGWINCH races).
+        fn inlineRestoreRow(rt: *Runtime, total_rows: u16, base_reserve: u16) u16 {
+            const shell_bottom: u16 = if (total_rows > base_reserve) total_rows - base_reserve else 1;
+            if (rt.chat_open_cursor_row == 0) return shell_bottom;
+            if (rt.chat_open_cursor_row > shell_bottom) return shell_bottom;
+            return rt.chat_open_cursor_row;
+        }
+
         fn paintInlineChat(rt: *Runtime, ctx: *m.Context) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
+
             if (!rt.chat_inline_open) {
-                // Close: show the real cursor and position it at the
-                // BOTTOM of the shell area (one row above the
-                // newly-restored statusbar reservation). Why not
-                // DECRC alone?
+                // Close: route through the shared restore-row helper.
+                // Close-time `terminal_rows` / `statusbar_base_reserve`
+                // are already on Context (proxy refreshes per tick).
+                const ct_rows: u16 = ctx.terminal_rows orelse 24;
+                const ct_base: u16 = ctx.statusbar_base_reserve orelse 3;
+                const restore_row = inlineRestoreRow(rt, ct_rows, ct_base);
+                // Close: show the real cursor and explicit CUP back
+                // to the snapshot row. Why not bare DECRC?
                 //
                 // The proxy's `applyReserveRows` does its own
                 // DECSC/DECRC around the row-erase. That DECSC
-                // OVERWRITES the open-time DECSC we emitted, so a
-                // bare DECRC here restores to the cursor's position
-                // when applyReserveRows ran — which is wherever the
-                // chat panel's last paint left the cursor (typically
-                // the input row at the BOTTOM of the old reservation,
-                // NOT the shell prompt at the top). Result: after
-                // close the user sees the cursor stuck at the bottom
-                // and the shell only repaints on the next keystroke.
+                // OVERWRITES our open-time slot, so bare DECRC here
+                // would restore to the cursor's position WHEN
+                // applyReserveRows ran — which is wherever the chat
+                // panel's last paint left it (the input row at the
+                // bottom of the old reservation). Result before
+                // this fix: cursor stuck at the bottom of the screen
+                // until the shell repaints on the next keystroke.
                 //
-                // Fix: explicitly position the cursor at the last row
-                // of the shell scroll region (effectiveRows after the
-                // base reservation is restored). Bash's next readline
-                // event will re-emit its prompt at this row, which
-                // is the natural "next" row from the user's
-                // perspective. CUP `\x1B[<row>;1H` is cheap and
-                // unambiguous — no reliance on a stale DECSC slot.
-                const total_rows: u16 = ctx.terminal_rows orelse 24;
-                const base_reserve: u16 = ctx.statusbar_base_reserve orelse 3;
-                const shell_bottom: u16 = if (total_rows > base_reserve) total_rows - base_reserve else 1;
-                w.print("\x1B[?25h\x1B[{d};1H", .{shell_bottom}) catch return false;
+                // Explicit CUP is unambiguous and survives the proxy's
+                // DECSC overwrites.
+                w.print("\x1B[?25h\x1B[{d};1H", .{restore_row}) catch return false;
                 rt.chat_inline_buf_len = w.end;
                 return true;
             }
@@ -3127,6 +3156,18 @@ pub fn configure(comptime cfg: Config) type {
             } else {
                 w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
             }
+            // CRITICAL: end every open-paint with an explicit CUP
+            // back to the shell-prompt row. The block-cursor glyph
+            // above is a STATIC visual marker — the real terminal
+            // cursor must NOT linger at the chat input row, or bash's
+            // echo of any keystroke / prompt redraw / exec injection
+            // lands in the chat panel area (the user-reported
+            // "command shows up in the chat input AND the shell
+            // prompt" bug). CUP is unambiguous and survives the
+            // proxy's DECSC overwrites from `applyReserveRows` and
+            // `renderStatus`.
+            const restore_row_open = inlineRestoreRow(rt, total_rows, base_reserve);
+            w.print("\x1B[{d};1H", .{restore_row_open}) catch return false;
 
             rt.chat_inline_buf_len = w.end;
             return true;
@@ -3801,6 +3842,14 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     try testing.expect(std.mem.indexOf(u8, opened.?, "Enter") != null);
     // Save-cursor on open so close can restore.
     try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[s") != null);
+    // Open paint MUST end with an explicit CUP back to the shell
+    // area — otherwise the real terminal cursor stays parked at the
+    // chat input row and bash's echo of any subsequent byte lands
+    // in the chat panel (the "command shows up in chat AND prompt"
+    // bug). Snapshot is 0 in this is_tty=false test, so the helper
+    // falls back to shell_bottom = terminal_rows - base_reserve =
+    // 24 - 3 = 21. Pin the exact row.
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[21;1H") != null);
 
     // Toggle closed — reserve request returns to zero, paint emits
     // the saved-cursor restore + leaves clearing to the proxy.
@@ -3817,6 +3866,106 @@ test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     // wrong row (e.g. the old `\x1B[1;1H` home-position drift).
     try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[?25h") != null);
     try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[21;1H") != null);
+}
+
+test "inline chat (Alt+C): open paint CUP-restores to the cursor_row snapshot taken at toggle time" {
+    // The fix for the "alt+c -> alt+c moves the prompt down" bug:
+    // toggle-open snapshots `ctx.cursor_row` into the Runtime, and
+    // every subsequent paint emits CUP back to that row. Without
+    // this, the open-paint left the real terminal cursor at the
+    // chat input row, so bash's echo of any byte (typed char, prompt
+    // redraw, exec injection) landed AT the input row.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+        // Shell prompt is currently at row 8 (e.g. plenty of output
+        // above). The open-paint must CUP back here, NOT shell_bottom.
+        .cursor_row = 8,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(rt.chat_inline_open);
+    try testing.expectEqual(@as(u16, 8), rt.chat_open_cursor_row);
+
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const opened = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(opened != null);
+    // Paint must end with CUP to row 8 (the snapshot), NOT row 21
+    // (the fallback shell_bottom).
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[8;1H") != null);
+
+    // Close also routes through the same helper — CUP to row 8.
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    const closed = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(closed != null);
+    try testing.expect(std.mem.indexOf(u8, closed.?, "\x1B[8;1H") != null);
+}
+
+test "inline chat: cursor_row snapshot clamps to shell_bottom when it overshoots the shell area" {
+    // Defensive clamp: if cursor_tracker reports a row inside the
+    // reserved statusbar/panel zone (e.g. SIGWINCH races), the helper
+    // must NOT CUP into the reservation — that would paint AT the
+    // panel input row again, defeating the fix.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+        // Bogus row (in the reservation): helper must clamp to 21.
+        .cursor_row = 23,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const opened = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(opened != null);
+    // CUP to row 21 (shell_bottom), NOT row 23 (the bogus snapshot).
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[21;1H") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[23;1H") == null);
 }
 
 test "inline chat: Alt+C refuses to open when there's no statusbar" {
