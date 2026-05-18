@@ -895,12 +895,48 @@ pub fn configure(comptime cfg: Config) type {
             // per-request "thinking" feedback. We still show the
             // thinking glyph as a suffix on the mode segment when
             // a request is in flight.
-            switch (rt.dialog_persistent_mode) {
-                .off => {},
-                .dialog => return if (rt.in_flight) dialog_inflight_hint else dialog_idle_hint,
-                .auto => return if (rt.in_flight) auto_inflight_hint else auto_idle_hint,
+            //
+            // Surface the mode hint when the dialog state machine
+            // is engaged via either a persistent mode flag OR a
+            // non-idle state. The state-engaged half closes the
+            // visibility gap reported by the user: after LLM
+            // `action=done` resets `dialog_persistent_mode` to .off,
+            // the state machine can still be cycling toward the
+            // next observation turn — without this gate the
+            // statusbar fell back to the discovery hint and the
+            // user thought the dialog was over.
+            //
+            // The single-shot (Alt+A) path keeps the `thinking_hint`
+            // brain glyph: that flow only sets `in_flight = true`
+            // without engaging the dialog state machine, so it
+            // falls through the mode-engaged gate below into the
+            // explicit `if (rt.in_flight)` branch.
+            //
+            // AUTO vs DIALOG selection prefers the persistent mode
+            // flag — `mode == .dialog` always renders DIALOG even
+            // if `auto_mode_active` is true (defends against the
+            // single-mode-with-enter_action=.auto path that leaks
+            // the flag without flipping persistent mode).
+            const is_dialog_engaged = rt.dialog_persistent_mode != .off or
+                rt.dialog_state != .idle;
+            if (is_dialog_engaged) {
+                const is_auto = switch (rt.dialog_persistent_mode) {
+                    .auto => true,
+                    .dialog => false,
+                    .off => rt.auto_mode_active,
+                };
+                if (is_auto) {
+                    return if (rt.in_flight) auto_inflight_hint else auto_idle_hint;
+                }
+                return if (rt.in_flight) dialog_inflight_hint else dialog_idle_hint;
             }
 
+            // Single-shot Alt+A path: no persistent mode set and
+            // `dialog_state` stays `.idle` (the single worker
+            // request doesn't engage the multi-turn state machine).
+            // Show the transient brain glyph so the user gets some
+            // signal that work is in flight without claiming the
+            // session is in DIALOG mode.
             if (rt.in_flight) return thinking_hint;
 
             // AI mode hint: when the line starts with the prefix,
