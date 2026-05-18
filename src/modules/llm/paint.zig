@@ -527,7 +527,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // panel_rows = live - base derives the true (possibly
             // clamped) panel height.
             const live_reserve: u16 = ctx.statusbar_reserve orelse
-                (base_reserve + cfg.inline_chat_rows);
+                (base_reserve + cfg.inline_chat_rows + cfg.inline_chat_top_gap);
             if (live_reserve <= base_reserve or total_rows <= live_reserve) {
                 // Terminal too small to fit any panel rows on top of
                 // the base reservation, or the proxy clamped us into
@@ -538,8 +538,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.chat_inline_buf_len = w.end;
                 return false;
             }
-            const panel_rows: u16 = live_reserve - base_reserve;
-            const top_row: u16 = total_rows - live_reserve + 1;
+            // Top gap stays blank — visual breathing room between
+            // the shell prompt and the panel divider. Clamped so a
+            // misconfigured gap never starves the panel of all
+            // its rows.
+            const top_gap: u16 = if (cfg.inline_chat_top_gap < (live_reserve - base_reserve))
+                cfg.inline_chat_top_gap
+            else
+                0;
+            const panel_rows: u16 = live_reserve - base_reserve - top_gap;
+            const top_row: u16 = total_rows - live_reserve + 1 + top_gap;
             const input_row: u16 = top_row + panel_rows - 1;
 
             // Save cursor. When focus is IN the panel, hide the real

@@ -431,4 +431,12 @@ pub const Config = struct {
     /// tiny terminals or up for a wider history view. Minimum 3 —
     /// less than that and there's no scrollback at all.
     inline_chat_rows: u16 = 10,
+    /// Blank rows between the shell prompt and the inline panel's
+    /// top divider. Default 1 keeps the prompt visually separated
+    /// from the chat chrome instead of glued directly to the
+    /// divider edge. The proxy reserves these rows on top of
+    /// `inline_chat_rows`; the panel paint skips them so they stay
+    /// empty. Set to 0 to abut the divider directly against the
+    /// prompt; raise for more breathing room.
+    inline_chat_top_gap: u16 = 1,
 };
