@@ -528,7 +528,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // clamped) panel height.
             const live_reserve: u16 = ctx.statusbar_reserve orelse
                 (base_reserve + cfg.inline_chat_rows + cfg.inline_chat_top_gap);
-            if (live_reserve <= base_reserve or total_rows <= live_reserve) {
+            // Panel needs at least 3 rows after the top gap is taken
+            // out: divider + ≥1 scrollback + input. Below that, the
+            // `scrollback_rows = panel_rows - 2` calc later in this
+            // function underflows u16 and the per-row blank loop
+            // writes ~65k CUPs into a tiny buffer (paint-buf
+            // overflow, panel rolls back, user sees "terminal too
+            // small"). Guarded here on the LIVE values (post proxy
+            // clamp + post top_gap) rather than the static cfg so a
+            // proxy-clamped reservation still bails out cleanly.
+            if (live_reserve <= base_reserve or total_rows <= live_reserve or
+                live_reserve - base_reserve < cfg.inline_chat_top_gap + 3)
+            {
                 // Terminal too small to fit any panel rows on top of
                 // the base reservation, or the proxy clamped us into
                 // a no-op. Roll the open flag back so the user isn't
@@ -539,13 +550,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 return false;
             }
             // Top gap stays blank — visual breathing room between
-            // the shell prompt and the panel divider. Clamped so a
-            // misconfigured gap never starves the panel of all
-            // its rows.
-            const top_gap: u16 = if (cfg.inline_chat_top_gap < (live_reserve - base_reserve))
-                cfg.inline_chat_top_gap
-            else
-                0;
+            // the shell prompt and the panel divider. The early-out
+            // above guarantees `live_reserve - base_reserve >=
+            // inline_chat_top_gap + 3`, so subtraction is safe.
+            const top_gap: u16 = cfg.inline_chat_top_gap;
             const panel_rows: u16 = live_reserve - base_reserve - top_gap;
             const top_row: u16 = total_rows - live_reserve + 1 + top_gap;
             const input_row: u16 = top_row + panel_rows - 1;

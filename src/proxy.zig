@@ -528,6 +528,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         while (nl < scroll_n) : (nl += 1) {
                             w_re.writeAll("\n") catch {};
                         }
+                        // Final CUP lands at (new_bottom, cur_col)
+                        // — the prompt's post-scroll home. This is
+                        // ALSO what `applyReserveRows`'s DECSC will
+                        // snapshot a few bytes later, and what its
+                        // DECRC restores once the new reservation +
+                        // erase have run. If `applyReserveRows`
+                        // ever moves its DECSC earlier in its body
+                        // (e.g. before row-wipes), this scroll-up
+                        // would no longer leave the cursor on the
+                        // prompt after DECRC and the panel paint's
+                        // capture would drift. Keep the ordering
+                        // contract in mind when touching either
+                        // side.
                         w_re.print("\x1B[{d};{d}H", .{ new_bottom, cur_col }) catch {};
                         trace.log(.paint, "panel-grow scroll-up: from row={d} col={d} by {d} (at region_bottom={d})", .{ cur_row, cur_col, scroll_n, region_bottom });
                         // After the scroll the cursor lands at
