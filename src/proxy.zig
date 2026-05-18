@@ -708,31 +708,50 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         },
                         .ghost_accept_word => {
                             // Partial accept (fish's section-by-
-                            // section walk). Take the FIRST word
-                            // of the trailing ghost suggestion +
-                            // the trailing whitespace after it.
+                            // section walk). Take the next "section"
+                            // of the trailing ghost suggestion, where
+                            // a section ends at EITHER a space-run
+                            // OR a `/` (path-segment boundary).
                             // Successive presses peel off the next
-                            // word from the (now shorter) ghost.
+                            // section from the (now shorter) ghost.
                             //
-                            // Word boundary: skip leading spaces,
-                            // skip non-space chars (the word
-                            // itself), then include trailing space
-                            // run so the next press starts cleanly.
+                            // The `/` boundary makes long paths walk
+                            // naturally: `cd /home/fentas/github/atty`
+                            // peels as `/home/` → `fentas/` →
+                            // `github/` → `atty` instead of one
+                            // mega-chunk. Same logic mirrors what
+                            // bash readline + most editors call
+                            // "subword" forward-motion.
+                            //
+                            // Algorithm:
+                            //   1. Skip leading whitespace (rare —
+                            //      ghost usually opens with a word).
+                            //   2. If the ghost opens with `/` (a
+                            //      path-rooted suggestion), include
+                            //      that opening slash with the
+                            //      segment so the press accepts
+                            //      `/home/` not `/` + `home/`.
+                            //   3. Consume the segment body (chars
+                            //      that aren't space and aren't `/`).
+                            //   4. Include the trailing boundary:
+                            //      a `/` is consumed as a single
+                            //      byte (so the next press lands on
+                            //      the char after); a space-run is
+                            //      consumed wholesale.
+                            //
                             // No-op when no ghost / uncertain line.
                             if (!line_state.uncertain) {
                                 if (D.gatherGhostText(&runtimes, &ctx) catch null) |trailing| {
                                     if (trailing.len > 0) {
                                         var end: usize = 0;
-                                        // Skip leading whitespace (rare —
-                                        // usually the ghost starts with
-                                        // a word char).
                                         while (end < trailing.len and trailing[end] == ' ') end += 1;
-                                        // Consume the word.
-                                        while (end < trailing.len and trailing[end] != ' ') end += 1;
-                                        // Consume the trailing whitespace
-                                        // run so the boundary lands at
-                                        // the next word's first char.
-                                        while (end < trailing.len and trailing[end] == ' ') end += 1;
+                                        if (end < trailing.len and trailing[end] == '/') end += 1;
+                                        while (end < trailing.len and trailing[end] != ' ' and trailing[end] != '/') end += 1;
+                                        if (end < trailing.len and trailing[end] == '/') {
+                                            end += 1;
+                                        } else {
+                                            while (end < trailing.len and trailing[end] == ' ') end += 1;
+                                        }
                                         if (end > 0 and end <= accept_buf.len) {
                                             @memcpy(accept_buf[0..end], trailing[0..end]);
                                             input = accept_buf[0..end];
