@@ -127,11 +127,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (!has_turns and !has_conclusion) {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
-                // Visible window slides with `chat_view_offset`. The
-                // offset can't exceed `turns_len - 1` — the
-                // scroll-action handler clamps; the assertion is the
-                // load-bearing one (a stale offset post-FIFO eviction
-                // would underflow `tail_end` below). Coerce defensively.
+                // Clamp the offset against FIFO eviction — pushTurn
+                // can shrink `turns_len` after the user scrolled,
+                // and an unchecked `turns_len - offset` would
+                // underflow.
                 const max_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
                 const offset: usize = if (rt.chat_view_offset > max_offset) max_offset else rt.chat_view_offset;
                 const tail_end: usize = rt.turns_len - offset;
