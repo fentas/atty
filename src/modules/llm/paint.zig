@@ -137,7 +137,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         .observation => "\x1B[2mOutput:\x1B[0m ",
                     };
                     w.writeAll(prefix) catch return false;
-                    renderOverlayTurnContent(&w, turn) catch return false;
+                    renderOverlayTurnContent(&w, rt.allocator, turn) catch return false;
                     w.writeAll("\r\n\r\n") catch return false;
                 }
                 if (has_conclusion and !has_turns) {
@@ -190,7 +190,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// Parse failures fall back to writing the raw bytes so the
         /// user sees what the model actually emitted instead of an
         /// empty turn.
-        fn renderOverlayTurnContent(w: *std.Io.Writer, turn: dialog.Turn) !void {
+        fn renderOverlayTurnContent(w: *std.Io.Writer, allocator: std.mem.Allocator, turn: dialog.Turn) !void {
             // Bound the per-field render so a 4096-byte command
             // doesn't wrap into 50+ rows and push the input row off
             // the alt-screen. Capped at 480 visible cols (~6 wraps
@@ -209,15 +209,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             }
-            // FixedBufferAllocator keeps the parse off the heap and
-            // off the kernel. `cfg.max_response_bytes` + slack covers
-            // the worst-case envelope (one full-size command field +
-            // the small string fields + JSON-parser per-token nodes).
-            var fba_buf: [cfg.max_response_bytes + 4096]u8 = undefined;
-            var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
+            // Heap-arena off the runtime allocator so the stack
+            // frame stays small regardless of `cfg.max_response_bytes`
+            // (the `Response` struct alone is `2 * max_response_bytes`
+            // + change). One arena per call, deinit on return.
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
             const R = dialog.Response(cfg.max_response_bytes);
-            var parsed: R = .{};
-            dialog.parseResponse(R, fba.allocator(), c, &parsed) catch {
+            const parsed = arena.allocator().create(R) catch {
+                try writeSanitized(w, if (c.len > 1024) c[0..1024] else c);
+                return;
+            };
+            parsed.* = .{};
+            dialog.parseResponse(R, arena.allocator(), c, parsed) catch {
                 const slice = if (c.len > 1024) c[0..1024] else c;
                 try writeSanitized(w, slice);
                 if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
