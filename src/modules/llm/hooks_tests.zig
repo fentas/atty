@@ -550,9 +550,583 @@ test "inline chat: onInput swallows keystrokes into chat_inline_input_buf when o
     rt.chat_inline_open = true;
     try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "ping"));
     try testing.expectEqualStrings("ping", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 4), rt.chat_inline_input_cursor);
     // Backspace pops.
     try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x08"));
     try testing.expectEqualStrings("pin", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
     // The overlay buffer must not be touched (mutually exclusive).
     try testing.expectEqual(@as(usize, 0), rt.chat_input_len);
+}
+
+test "inline chat: Left/Right arrow + Home/End move the cursor; Ctrl+A/E mirror them" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "hello");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    // Left arrow (CSI D).
+    _ = try L.onInput(&rt, &ctx, "\x1B[D");
+    try testing.expectEqual(@as(usize, 4), rt.chat_inline_input_cursor);
+    // Right arrow back.
+    _ = try L.onInput(&rt, &ctx, "\x1B[C");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    // Right at end → no-op, doesn't overshoot.
+    _ = try L.onInput(&rt, &ctx, "\x1B[C");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    // Ctrl+A jumps to start.
+    _ = try L.onInput(&rt, &ctx, "\x01");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    // Left at start → no-op.
+    _ = try L.onInput(&rt, &ctx, "\x1B[D");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    // Ctrl+E jumps to end.
+    _ = try L.onInput(&rt, &ctx, "\x05");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    // CSI Home (`ESC [ H`) → start. End (`ESC [ F`) → end.
+    _ = try L.onInput(&rt, &ctx, "\x1B[H");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1B[F");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    // VT-style xterm sequences: `ESC [ 1 ~` / `ESC [ 7 ~` Home, `ESC [ 4 ~` / `ESC [ 8 ~` End.
+    _ = try L.onInput(&rt, &ctx, "\x1B[1~");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1B[4~");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1B[7~");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1B[8~");
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    // Buffer unchanged through all that.
+    try testing.expectEqualStrings("hello", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "inline chat: insert at mid-cursor shifts trailing bytes right" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "hllo");
+    // Move cursor between 'h' and 'l'. Three left arrows.
+    _ = try L.onInput(&rt, &ctx, "\x1B[D\x1B[D\x1B[D");
+    try testing.expectEqual(@as(usize, 1), rt.chat_inline_input_cursor);
+    // Insert 'e' AT cursor — buffer becomes "hello", cursor=2.
+    _ = try L.onInput(&rt, &ctx, "e");
+    try testing.expectEqualStrings("hello", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
+    // Backspace deletes BEFORE cursor (the just-inserted 'e').
+    _ = try L.onInput(&rt, &ctx, "\x08");
+    try testing.expectEqualStrings("hllo", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 1), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: Ctrl+W kills the previous word" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "explain foo bar");
+    // Ctrl+W kills the last word "bar".
+    _ = try L.onInput(&rt, &ctx, "\x17");
+    try testing.expectEqualStrings("explain foo ", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 12), rt.chat_inline_input_cursor);
+    // Ctrl+W again kills "foo " (trailing-whitespace-then-word).
+    _ = try L.onInput(&rt, &ctx, "\x17");
+    try testing.expectEqualStrings("explain ", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 8), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: Ctrl+U kills to start; Ctrl+K kills to end" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "hello world");
+    // Move cursor to AFTER "hello " (idx 6).
+    _ = try L.onInput(&rt, &ctx, "\x01\x06\x06\x06\x06\x06\x06");
+    try testing.expectEqual(@as(usize, 6), rt.chat_inline_input_cursor);
+    // Ctrl+K wipes from cursor to end → "hello ".
+    _ = try L.onInput(&rt, &ctx, "\x0B");
+    try testing.expectEqualStrings("hello ", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 6), rt.chat_inline_input_cursor);
+    // Ctrl+U wipes from start to cursor → buffer empty.
+    _ = try L.onInput(&rt, &ctx, "\x15");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: CSI 3~ (Delete) removes the byte AFTER cursor" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "abcd");
+    _ = try L.onInput(&rt, &ctx, "\x01"); // cursor to start
+    _ = try L.onInput(&rt, &ctx, "\x1B[3~"); // Delete: removes 'a'
+    try testing.expectEqualStrings("bcd", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    // Delete at end of buffer is a no-op.
+    _ = try L.onInput(&rt, &ctx, "\x05"); // Ctrl+E
+    _ = try L.onInput(&rt, &ctx, "\x1B[3~");
+    try testing.expectEqualStrings("bcd", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: insert short-circuits when the buffer is full" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Saturate to buf.len with a long ASCII run.
+    const cap = rt.chat_inline_input_buf.len;
+    var i: usize = 0;
+    while (i < cap) : (i += 1) {
+        rt.chat_inline_input_buf[i] = 'x';
+    }
+    rt.chat_inline_input_len = cap;
+    rt.chat_inline_input_cursor = cap;
+    // Append: must drop silently (no overflow, no len growth).
+    _ = try L.onInput(&rt, &ctx, "y");
+    try testing.expectEqual(cap, rt.chat_inline_input_len);
+    try testing.expectEqual(cap, rt.chat_inline_input_cursor);
+    // Mid-cursor insert with a full buffer is also a no-op.
+    _ = try L.onInput(&rt, &ctx, "\x01"); // cursor=0
+    _ = try L.onInput(&rt, &ctx, "z");
+    try testing.expectEqual(cap, rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    try testing.expectEqual(@as(u8, 'x'), rt.chat_inline_input_buf[0]);
+}
+
+test "overlay chat: cursor movement + mid-line insert + Ctrl+W mirror the inline path" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Overlay path — open via the field directly, mirroring the
+    // existing overlay-input test pattern.
+    rt.chat_overlay_open = true;
+
+    _ = try L.onInput(&rt, &ctx, "explain foo bar");
+    try testing.expectEqual(@as(usize, 15), rt.chat_input_cursor);
+    // Ctrl+A then Right-arrow ×4: cursor at 4.
+    _ = try L.onInput(&rt, &ctx, "\x01\x1B[C\x1B[C\x1B[C\x1B[C");
+    try testing.expectEqual(@as(usize, 4), rt.chat_input_cursor);
+    // Insert '!' at cursor → "expl!ain foo bar".
+    _ = try L.onInput(&rt, &ctx, "!");
+    try testing.expectEqualStrings("expl!ain foo bar", rt.chat_input_buf[0..rt.chat_input_len]);
+    try testing.expectEqual(@as(usize, 5), rt.chat_input_cursor);
+    // Ctrl+E then Ctrl+W → kills "bar".
+    _ = try L.onInput(&rt, &ctx, "\x05\x17");
+    try testing.expectEqualStrings("expl!ain foo ", rt.chat_input_buf[0..rt.chat_input_len]);
+    // Ctrl+D closes the overlay — `.close` must return `.swallow`
+    // immediately so trailing bytes don't land in the now-closed
+    // buffer.
+    _ = try L.onInput(&rt, &ctx, "\x04");
+    try testing.expect(!rt.chat_overlay_open);
+}
+
+test "inline chat: Enter with refused-fire clamps cursor when trailing whitespace was trimmed" {
+    // Invariant: trimming trailing whitespace must leave the cursor
+    // within `[0, chat_inline_input_len]`. When submission is
+    // refused (request in flight) the buffer survives, and a stale
+    // out-of-range cursor would index past EOL on the next paint or
+    // edit.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    // Block submission so Enter takes the can_fire=false branch.
+    rt.in_flight = true;
+
+    _ = try L.onInput(&rt, &ctx, "hi   "); // 5 chars, cursor=5
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\r"); // Enter → trims to "hi" (len=2)
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_len);
+    // Cursor MUST have been clamped to the new length.
+    try testing.expect(rt.chat_inline_input_cursor <= rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: chunk ending mid-CSI doesn't spin AND doesn't insert literal `[`" {
+    // Regression guard: a chunk ending with `ESC [ 3` (partial
+    // Delete sequence) used to make parseChatKey return .none
+    // without advancing `i`, sending the caller's
+    // `while (i < input.len)` loop into an infinite spin.
+    // Sibling: a chunk ending with `ESC [` would fall through to
+    // the single-byte path and insert a literal `[` next.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Partial Delete: must terminate (no spin) and not insert anything.
+    _ = try L.onInput(&rt, &ctx, "\x1B[3");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // Partial 3-byte CSI: must NOT insert `[` as printable.
+    _ = try L.onInput(&rt, &ctx, "\x1B[");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // Bare ESC at chunk end: also drained cleanly.
+    _ = try L.onInput(&rt, &ctx, "\x1B");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // A complete CSI in a single chunk still works.
+    _ = try L.onInput(&rt, &ctx, "abc");
+    _ = try L.onInput(&rt, &ctx, "\x1B[3~"); // Delete at end of buffer — no-op
+    try testing.expectEqualStrings("abc", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "inline chat: modified CSI (`ESC [ 1 ; 5 D`) doesn't leak its tail as printables" {
+    // Invariant: parseChatKey must consume the WHOLE CSI sequence
+    // for unrecognised modified keys (Ctrl+Left etc.), not just
+    // `ESC [`. A premature return mid-sequence would leave the
+    // remaining bytes (digits + params) to be reparsed as
+    // printables on the next loop iteration.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Ctrl+Left arrow: `ESC [ 1 ; 5 D`. Unrecognised (we only
+    // handle plain Left/Right/Home/End and VT-style ~ sequences).
+    // The whole 6-byte sequence must be consumed silently.
+    _ = try L.onInput(&rt, &ctx, "\x1B[1;5D");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // Same shape but with a recognised final wrapped in params —
+    // still consumed as a single sequence, not insert-leaked.
+    _ = try L.onInput(&rt, &ctx, "\x1B[1;2C"); // Shift+Right
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // A plain CSI right afterwards still works.
+    _ = try L.onInput(&rt, &ctx, "hello");
+    _ = try L.onInput(&rt, &ctx, "\x1B[D"); // Left
+    try testing.expectEqual(@as(usize, 4), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: SS3 cursor keys (`ESC O D/C/H/F`) move the cursor and don't leak" {
+    // Invariant: terminals in application-cursor mode emit
+    // `ESC O <letter>` for arrows / Home / End. parseChatKey must
+    // map the same handful as the CSI form so legacy and
+    // application modes both work, and the trailing letter must
+    // not leak into the buffer as a printable when the variant
+    // is unrecognised.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "abc");
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1BOD"); // SS3 Left
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1BOC"); // SS3 Right
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1BOH"); // SS3 Home
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    _ = try L.onInput(&rt, &ctx, "\x1BOF"); // SS3 End
+    try testing.expectEqual(@as(usize, 3), rt.chat_inline_input_cursor);
+    // Unrecognised SS3 (e.g. F1 = `ESC O P`) must be silently
+    // dropped — no `P` should land in the buffer.
+    _ = try L.onInput(&rt, &ctx, "\x1BOP");
+    try testing.expectEqualStrings("abc", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "inline chat: CSI with intermediate params (`ESC [ ? 2 5 l`, `ESC [ ; 5 D`) doesn't leak tail" {
+    // Invariant: the CSI scanner must consume to the final byte
+    // (0x40..0x7E) regardless of which parameter / intermediate
+    // bytes appear in between. Without this, an unrecognised
+    // private-mode sequence like `ESC [ ? 2 5 l` (DECTCEM hide
+    // cursor) would have only `ESC [ ?` consumed and `25l` would
+    // reparse as printables.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Private-mode CSI: DECTCEM hide cursor.
+    _ = try L.onInput(&rt, &ctx, "\x1B[?25l");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // CSI starting with `;` separator (no leading digit).
+    _ = try L.onInput(&rt, &ctx, "\x1B[;5D");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // `>` introducer (kitty / device-attributes style).
+    _ = try L.onInput(&rt, &ctx, "\x1B[>0c");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+
+    // Normal typing after still works.
+    _ = try L.onInput(&rt, &ctx, "ok");
+    try testing.expectEqualStrings("ok", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
 }

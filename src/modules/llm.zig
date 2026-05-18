@@ -502,6 +502,11 @@ pub fn configure(comptime cfg: Config) type {
             /// last char just gets dropped; no error).
             chat_input_buf: [1024]u8 = undefined,
             chat_input_len: usize = 0,
+            /// Insertion cursor — invariant `<= chat_input_len`.
+            /// Maintained by `applyChatEdit` in `llm/hooks.zig`;
+            /// paint trusts the invariant and splits rendering
+            /// around it (block-cursor glyph).
+            chat_input_cursor: usize = 0,
 
             // ── Inline chat panel (Alt+C) ────────────────────────
             //
@@ -557,6 +562,9 @@ pub fn configure(comptime cfg: Config) type {
             /// the two clobbering each other on toggle.
             chat_inline_input_buf: [1024]u8 = undefined,
             chat_inline_input_len: usize = 0,
+            /// Insertion cursor offset within `chat_inline_input_buf` —
+            /// same invariants as `chat_input_cursor` above.
+            chat_inline_input_cursor: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {

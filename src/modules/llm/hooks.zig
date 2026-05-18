@@ -68,204 +68,399 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const inert_error_msg = llm_consts.inert_error_msg;
         const effective_dialog_system_prompt = llm_consts.effective_dialog_system_prompt;
 
-        pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
-            // Chat overlay / inline panel — while open, keystrokes
-            // accumulate into the relevant input buffer rather than
-            // reaching the shell. Enter submits the buffer as a
-            // `.user` turn and fires a dialog request. Backspace
-            // pops the last byte. Ctrl+D closes the chat surface
-            // it's typed into (panel for the inline branch below,
-            // overlay for the alt-screen branch — both mirror
-            // Alt+C / Alt+Shift+C and preserve the draft). Other
-            // control bytes are dropped (no Ctrl+A / Ctrl+E /
-            // arrow-key editing in 2b; future follow-up — see PR
-            // series #195).
-            //
-            // Keymap actions (Alt+Shift+C close, Esc, Ctrl+Shift+X)
-            // dispatch in the proxy BEFORE this hook fires, so
-            // the user can still close the overlay even mid-typing.
-            // Inline chat panel — same input model as the overlay,
-            // but writes into `chat_inline_input_buf` and flips the
-            // inline paint latch. Mutually exclusive with the
-            // overlay; the action handler guarantees only one can
-            // be open at a time.
-            //
-            // Only swallow keystrokes when focus is IN the panel.
-            // `Ctrl+Up` parks focus on the shell prompt above;
-            // while parked the panel stays painted but `.forward`s
-            // input so it goes to bash. `Ctrl+Down` returns focus.
-            if (rt.chat_inline_open and rt.chat_focus_in_panel) {
-                for (input) |byte| switch (byte) {
-                    0x04 => {
-                        // Ctrl+D — close the panel like Alt+C. The
-                        // input buffer's contents stay around so the
-                        // next open re-shows the draft.
-                        //
-                        // Stop processing the rest of THIS chunk:
-                        // any bytes after the Ctrl+D would otherwise
-                        // still hit the now-closed panel's input
-                        // buffer (the `chat_inline_open` check above
-                        // is sampled once per chunk, not per byte).
-                        rt.chat_inline_open = false;
-                        rt.chat_inline_paint_pending = true;
-                        return .swallow;
-                    },
-                    0x0D, 0x0A => {
-                        var trimmed_len = rt.chat_inline_input_len;
-                        while (trimmed_len > 0 and (rt.chat_inline_input_buf[trimmed_len - 1] == ' ' or rt.chat_inline_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
-                        if (trimmed_len == 0) {
-                            rt.chat_inline_input_len = 0;
-                            rt.chat_inline_paint_pending = true;
-                            continue;
-                        }
-                        rt.chat_inline_input_len = trimmed_len;
+        /// Parsed chat-input keystroke. Folds single-byte control
+        /// codes (Ctrl+A/E/B/F/U/K/W, Backspace, DEL, Enter, Ctrl+D)
+        /// and multi-byte CSI sequences (Left/Right/Home/End from
+        /// terminals that don't push the kitty kbd flag) into a
+        /// single discriminated union so both panel + overlay
+        /// paths share one editor.
+        const ChatKey = union(enum) {
+            none,
+            close, // Ctrl+D
+            enter,
+            insert: u8,
+            backspace,
+            delete_forward,
+            move_left,
+            move_right,
+            move_home,
+            move_end,
+            kill_to_start,
+            kill_to_end,
+            kill_word_back,
+        };
 
-                        const can_fire = !rt.in_flight and
-                            (rt.dialog_state == .idle or
-                                rt.dialog_state == .awaiting_question_answer);
-                        if (!can_fire) {
-                            latchHint(rt, "request in flight — wait for the response, or Ctrl+Shift+X to cancel");
-                            rt.chat_inline_paint_pending = true;
-                            continue;
-                        }
-
-                        const copy = rt.allocator.dupe(u8, rt.chat_inline_input_buf[0..rt.chat_inline_input_len]) catch {
-                            latchErr(rt, "out of memory submitting chat turn");
-                            rt.chat_inline_input_len = 0;
-                            rt.chat_inline_paint_pending = true;
-                            continue;
-                        };
-                        pushTurn(rt, .user, copy) catch {
-                            rt.allocator.free(copy);
-                            latchErr(rt, "out of memory submitting chat turn");
-                            rt.chat_inline_input_len = 0;
-                            rt.chat_inline_paint_pending = true;
-                            continue;
-                        };
-                        rt.chat_inline_input_len = 0;
-                        fireDialogRequest(rt, ctx) catch {
-                            latchErr(rt, "couldn't send chat turn — see status");
-                        };
-                        rt.chat_inline_paint_pending = true;
-                    },
-                    0x08, 0x7F => {
-                        if (rt.chat_inline_input_len > 0) {
-                            rt.chat_inline_input_len -= 1;
-                            rt.chat_inline_paint_pending = true;
-                        }
-                    },
-                    0x20...0x7E => {
-                        if (rt.chat_inline_input_len < rt.chat_inline_input_buf.len) {
-                            rt.chat_inline_input_buf[rt.chat_inline_input_len] = byte;
-                            rt.chat_inline_input_len += 1;
-                            rt.chat_inline_paint_pending = true;
-                        }
-                    },
-                    else => {},
+        /// Pull the next chat-input keystroke from `input[i..]`.
+        /// Advances `i` past the consumed bytes. Drops unknown CSI
+        /// finals to .none rather than treating their final letter
+        /// as a printable insert.
+        ///
+        /// Cross-`read` boundary limitation: an incomplete CSI tail
+        /// (e.g. `ESC [ 3` waiting for `~`) is drained to chunk end,
+        /// so if the kernel splits the sequence across two reads the
+        /// continuation bytes (the lone `~`) land as a printable
+        /// insert on the next call. Stateful CSI carryover would fix
+        /// it cleanly but adds an interactive-state field on the
+        /// runtime; deferred. Terminals emit cursor-keys atomically
+        /// in one write, so a split is unusual outside signal-
+        /// interrupt cases.
+        fn parseChatKey(input: []const u8, i: *usize) ChatKey {
+            const b = input[i.*];
+            // Incomplete escape tail (chunk ends with `ESC`, `ESC [`,
+            // or `ESC O`). Drain to chunk end so the partial bytes
+            // don't get reparsed as printables on the next pass.
+            if (b == 0x1B and i.* + 1 >= input.len) {
+                i.* = input.len;
+                return .none;
+            }
+            if (b == 0x1B and (input[i.* + 1] == '[' or input[i.* + 1] == 'O') and i.* + 2 >= input.len) {
+                i.* = input.len;
+                return .none;
+            }
+            // SS3 (application-cursor mode) — `ESC O <letter>` is
+            // what many terminals emit for arrow / Home / End when
+            // the cursor-key mode is application instead of normal.
+            // Map the same handful we accept on CSI; drop the rest
+            // as a 3-byte sequence so the trailing letter doesn't
+            // leak as a printable.
+            if (b == 0x1B and i.* + 2 < input.len and input[i.* + 1] == 'O') {
+                const c = input[i.* + 2];
+                i.* += 3;
+                return switch (c) {
+                    'D' => .move_left,
+                    'C' => .move_right,
+                    'H' => .move_home,
+                    'F' => .move_end,
+                    else => .none,
                 };
+            }
+            if (b == 0x1B and i.* + 2 < input.len and input[i.* + 1] == '[') {
+                const c = input[i.* + 2];
+                // CSI structure: `ESC [` then optional parameter
+                // bytes (0x30-0x3F) and intermediate bytes
+                // (0x20-0x2F), then a single final byte (0x40-0x7E).
+                // If `c` is already a final, consume the 3-byte
+                // sequence; otherwise scan forward for the final.
+                if (c >= 0x40 and c <= 0x7E) {
+                    // VT-style CSI never reaches here because none
+                    // of {1,3,4,7,8} are in 0x40..0x7E — they're
+                    // handled by the digit branch below.
+                    i.* += 3;
+                    return switch (c) {
+                        'D' => .move_left,
+                        'C' => .move_right,
+                        'H' => .move_home,
+                        'F' => .move_end,
+                        else => .none,
+                    };
+                }
+                // VT-style `ESC [ <num> ~` (Delete = 3~, Home = 1~/7~,
+                // End = 4~/8~). Need a fourth byte to know which.
+                if (c >= '0' and c <= '9') {
+                    // Incomplete VT-style CSI (chunk ended mid-
+                    // sequence, e.g. `ESC [ 3` waiting for `~`).
+                    // Drain to chunk end so the caller's
+                    // `while (i < input.len)` loop terminates —
+                    // returning .none without advancing would spin.
+                    if (i.* + 3 >= input.len) {
+                        i.* = input.len;
+                        return .none;
+                    }
+                    const final = input[i.* + 3];
+                    if (final == '~') {
+                        i.* += 4;
+                        return switch (c) {
+                            '1', '7' => .move_home,
+                            '3' => .delete_forward,
+                            '4', '8' => .move_end,
+                            else => .none,
+                        };
+                    }
+                    // fall through to the param-scan recovery below
+                }
+                // Param/intermediate byte (0x20-0x3F) — including
+                // `?`/`>` private markers, `;` separator, and
+                // numeric params. Walk forward to the first byte
+                // in 0x40..0x7E (the CSI final) so everything past
+                // the sequence is left for the next loop iteration.
+                // Without this, sequences like `ESC [ ? 2 5 l` or
+                // `ESC [ ; 5 D` would only have `ESC [ <byte>`
+                // consumed and the rest leak as printables.
+                i.* += 3;
+                while (i.* < input.len) : (i.* += 1) {
+                    const x = input[i.*];
+                    if (x >= 0x40 and x <= 0x7E) {
+                        i.* += 1;
+                        break;
+                    }
+                }
+                return .none;
+            }
+            i.* += 1;
+            return switch (b) {
+                0x01 => .move_home, // Ctrl+A
+                0x05 => .move_end, // Ctrl+E
+                0x02 => .move_left, // Ctrl+B
+                0x06 => .move_right, // Ctrl+F
+                0x08, 0x7F => .backspace, // Ctrl+H / DEL
+                0x04 => .close, // Ctrl+D
+                0x0B => .kill_to_end, // Ctrl+K
+                0x15 => .kill_to_start, // Ctrl+U
+                0x17 => .kill_word_back, // Ctrl+W
+                0x0D, 0x0A => .enter,
+                0x20...0x7E => .{ .insert = b },
+                else => .none,
+            };
+        }
+
+        /// Apply a parsed key to (buf, len, cursor). Returns true
+        /// when the edit changed any state (caller arms the paint
+        /// latch in that case). The .close / .enter variants are
+        /// caller-handled (this function returns false for them so
+        /// the caller still treats the byte specially) — every
+        /// other key mutates the buffer here.
+        fn applyChatEdit(buf: []u8, len: *usize, cursor: *usize, key: ChatKey) bool {
+            switch (key) {
+                .insert => |c| {
+                    if (len.* >= buf.len) return false;
+                    var j: usize = len.*;
+                    while (j > cursor.*) : (j -= 1) buf[j] = buf[j - 1];
+                    buf[cursor.*] = c;
+                    len.* += 1;
+                    cursor.* += 1;
+                    return true;
+                },
+                .backspace => {
+                    if (cursor.* == 0) return false;
+                    var j: usize = cursor.* - 1;
+                    while (j + 1 < len.*) : (j += 1) buf[j] = buf[j + 1];
+                    len.* -= 1;
+                    cursor.* -= 1;
+                    return true;
+                },
+                .delete_forward => {
+                    if (cursor.* >= len.*) return false;
+                    var j: usize = cursor.*;
+                    while (j + 1 < len.*) : (j += 1) buf[j] = buf[j + 1];
+                    len.* -= 1;
+                    return true;
+                },
+                .move_left => {
+                    if (cursor.* == 0) return false;
+                    cursor.* -= 1;
+                    return true;
+                },
+                .move_right => {
+                    if (cursor.* >= len.*) return false;
+                    cursor.* += 1;
+                    return true;
+                },
+                .move_home => {
+                    if (cursor.* == 0) return false;
+                    cursor.* = 0;
+                    return true;
+                },
+                .move_end => {
+                    if (cursor.* == len.*) return false;
+                    cursor.* = len.*;
+                    return true;
+                },
+                .kill_to_start => {
+                    if (cursor.* == 0) return false;
+                    var j: usize = 0;
+                    while (cursor.* + j < len.*) : (j += 1) buf[j] = buf[cursor.* + j];
+                    len.* -= cursor.*;
+                    cursor.* = 0;
+                    return true;
+                },
+                .kill_to_end => {
+                    if (cursor.* == len.*) return false;
+                    len.* = cursor.*;
+                    return true;
+                },
+                .kill_word_back => {
+                    if (cursor.* == 0) return false;
+                    var k: usize = cursor.*;
+                    // Skip trailing whitespace, then a run of
+                    // non-whitespace. Matches readline's M-Backspace
+                    // / Ctrl+W shape closely enough that the muscle
+                    // memory carries over.
+                    while (k > 0 and (buf[k - 1] == ' ' or buf[k - 1] == '\t')) : (k -= 1) {}
+                    while (k > 0 and buf[k - 1] != ' ' and buf[k - 1] != '\t') : (k -= 1) {}
+                    if (k == cursor.*) return false;
+                    var j: usize = k;
+                    while (cursor.* + (j - k) < len.*) : (j += 1) buf[j] = buf[cursor.* + (j - k)];
+                    len.* -= cursor.* - k;
+                    cursor.* = k;
+                    return true;
+                },
+                else => return false,
+            }
+        }
+
+        pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
+            // Keymap actions (Alt+Shift+C close, Esc, Ctrl+Shift+X)
+            // dispatch in the proxy BEFORE this hook fires, so the
+            // user can still close the surface even mid-typing.
+            //
+            // Inline panel: focus is IN the panel only when
+            // `chat_focus_in_panel` is set. `Ctrl+Up` parks focus on
+            // the shell prompt above; while parked the panel stays
+            // painted but `.forward`s input so it goes to bash.
+            if (rt.chat_inline_open and rt.chat_focus_in_panel) {
+                var i: usize = 0;
+                while (i < input.len) {
+                    const key = parseChatKey(input, &i);
+                    switch (key) {
+                        .close => {
+                            // Ctrl+D — close the panel. Stop
+                            // processing the rest of THIS chunk so
+                            // post-Ctrl+D bytes don't land in the
+                            // now-closed panel's buffer.
+                            rt.chat_inline_open = false;
+                            rt.chat_inline_paint_pending = true;
+                            return .swallow;
+                        },
+                        .enter => {
+                            // Trim trailing whitespace before checking
+                            // empty — matches onLineCommit's semantics.
+                            var trimmed_len = rt.chat_inline_input_len;
+                            while (trimmed_len > 0 and (rt.chat_inline_input_buf[trimmed_len - 1] == ' ' or rt.chat_inline_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
+                            if (trimmed_len == 0) {
+                                rt.chat_inline_input_len = 0;
+                                rt.chat_inline_input_cursor = 0;
+                                rt.chat_inline_paint_pending = true;
+                                continue;
+                            }
+                            rt.chat_inline_input_len = trimmed_len;
+                            // Trimming may have left the cursor past
+                            // the new EOL — clamp before any path that
+                            // could survive without resetting it.
+                            if (rt.chat_inline_input_cursor > trimmed_len) {
+                                rt.chat_inline_input_cursor = trimmed_len;
+                            }
+
+                            const can_fire = !rt.in_flight and
+                                (rt.dialog_state == .idle or
+                                    rt.dialog_state == .awaiting_question_answer);
+                            if (!can_fire) {
+                                latchHint(rt, "request in flight — wait for the response, or Ctrl+Shift+X to cancel");
+                                rt.chat_inline_paint_pending = true;
+                                continue;
+                            }
+
+                            const copy = rt.allocator.dupe(u8, rt.chat_inline_input_buf[0..rt.chat_inline_input_len]) catch {
+                                latchErr(rt, "out of memory submitting chat turn");
+                                rt.chat_inline_input_len = 0;
+                                rt.chat_inline_input_cursor = 0;
+                                rt.chat_inline_paint_pending = true;
+                                continue;
+                            };
+                            pushTurn(rt, .user, copy) catch {
+                                rt.allocator.free(copy);
+                                latchErr(rt, "out of memory submitting chat turn");
+                                rt.chat_inline_input_len = 0;
+                                rt.chat_inline_input_cursor = 0;
+                                rt.chat_inline_paint_pending = true;
+                                continue;
+                            };
+                            rt.chat_inline_input_len = 0;
+                            rt.chat_inline_input_cursor = 0;
+                            fireDialogRequest(rt, ctx) catch {
+                                latchErr(rt, "couldn't send chat turn — see status");
+                            };
+                            rt.chat_inline_paint_pending = true;
+                        },
+                        else => {
+                            if (applyChatEdit(
+                                &rt.chat_inline_input_buf,
+                                &rt.chat_inline_input_len,
+                                &rt.chat_inline_input_cursor,
+                                key,
+                            )) {
+                                rt.chat_inline_paint_pending = true;
+                            }
+                        },
+                    }
+                }
                 return .swallow;
             }
 
             if (rt.chat_overlay_open) {
-                for (input) |byte| switch (byte) {
-                    0x04 => {
-                        // Ctrl+D — close the overlay like
-                        // Alt+Shift+C. Mirrors the inline panel
-                        // behaviour above. Same early-return
-                        // rationale: bytes after Ctrl+D in this
-                        // chunk would otherwise still hit the now-
-                        // closed overlay's input buffer.
-                        rt.chat_overlay_open = false;
-                        rt.chat_overlay_paint_pending = true;
-                        return .swallow;
-                    },
-                    0x0D, 0x0A => {
-                        // Enter — submit the buffer as a user
-                        // turn (if non-empty) and fire a dialog
-                        // request. The response will land via
-                        // handleDialogResponse on the next worker
-                        // tick; paintChatOverlay re-renders when
-                        // the paint latch fires.
-                        // Trim trailing whitespace before checking
-                        // empty — matches `onLineCommit`'s semantics
-                        // (whitespace-only line = no submission).
-                        var trimmed_len = rt.chat_input_len;
-                        while (trimmed_len > 0 and (rt.chat_input_buf[trimmed_len - 1] == ' ' or rt.chat_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
-                        if (trimmed_len == 0) {
-                            // All-whitespace input — clear and
-                            // repaint without firing.
-                            rt.chat_input_len = 0;
+                var i: usize = 0;
+                while (i < input.len) {
+                    const key = parseChatKey(input, &i);
+                    switch (key) {
+                        .close => {
+                            // Ctrl+D closes the overlay. Stop the
+                            // chunk so post-Ctrl+D bytes don't land
+                            // in the now-closed overlay's buffer.
+                            rt.chat_overlay_open = false;
                             rt.chat_overlay_paint_pending = true;
-                            continue;
-                        }
-                        rt.chat_input_len = trimmed_len;
+                            return .swallow;
+                        },
+                        .enter => {
+                            // Trim trailing whitespace, refuse when
+                            // mid-cycle, dupe-push-fire. Same logic
+                            // as the inline branch above; the only
+                            // delta is which buffer + paint latch
+                            // is touched.
+                            var trimmed_len = rt.chat_input_len;
+                            while (trimmed_len > 0 and (rt.chat_input_buf[trimmed_len - 1] == ' ' or rt.chat_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
+                            if (trimmed_len == 0) {
+                                rt.chat_input_len = 0;
+                                rt.chat_input_cursor = 0;
+                                rt.chat_overlay_paint_pending = true;
+                                continue;
+                            }
+                            rt.chat_input_len = trimmed_len;
+                            if (rt.chat_input_cursor > trimmed_len) {
+                                rt.chat_input_cursor = trimmed_len;
+                            }
 
-                        // Refuse to submit when atty is mid-cycle:
-                        //   - `rt.in_flight`: a worker request is
-                        //     in HTTP flight (single-mode Alt+A
-                        //     leaves dialog_state untouched, so the
-                        //     state check below would let us
-                        //     clobber `shared.body_buf` + req_gen
-                        //     and silently discard the response).
-                        //   - `.observation_ready`: onTick is about
-                        //     to drain `captured_output` into a
-                        //     turn and fire; preempting here would
-                        //     send the user's chat without the
-                        //     observation, breaking the dialog
-                        //     loop's premise.
-                        //   - other non-terminal states (.generating,
-                        //     .suggesting, .executing, .capturing_output)
-                        //     — a request is pending or in flight.
-                        //
-                        // `.idle` and `.awaiting_question_answer`
-                        // are safe to fire from (the latter is
-                        // exactly where the user's free-form answer
-                        // should go).
-                        const can_fire = !rt.in_flight and
-                            (rt.dialog_state == .idle or
-                                rt.dialog_state == .awaiting_question_answer);
-                        if (!can_fire) {
-                            latchHint(rt, "request in flight — wait for the response, or Ctrl+Shift+X to cancel");
-                            rt.chat_overlay_paint_pending = true;
-                            continue;
-                        }
+                            const can_fire = !rt.in_flight and
+                                (rt.dialog_state == .idle or
+                                    rt.dialog_state == .awaiting_question_answer);
+                            if (!can_fire) {
+                                latchHint(rt, "request in flight — wait for the response, or Ctrl+Shift+X to cancel");
+                                rt.chat_overlay_paint_pending = true;
+                                continue;
+                            }
 
-                        const copy = rt.allocator.dupe(u8, rt.chat_input_buf[0..rt.chat_input_len]) catch {
-                            latchErr(rt, "out of memory submitting chat turn");
+                            const copy = rt.allocator.dupe(u8, rt.chat_input_buf[0..rt.chat_input_len]) catch {
+                                latchErr(rt, "out of memory submitting chat turn");
+                                rt.chat_input_len = 0;
+                                rt.chat_input_cursor = 0;
+                                rt.chat_overlay_paint_pending = true;
+                                continue;
+                            };
+                            pushTurn(rt, .user, copy) catch {
+                                rt.allocator.free(copy);
+                                latchErr(rt, "out of memory submitting chat turn");
+                                rt.chat_input_len = 0;
+                                rt.chat_input_cursor = 0;
+                                rt.chat_overlay_paint_pending = true;
+                                continue;
+                            };
                             rt.chat_input_len = 0;
+                            rt.chat_input_cursor = 0;
+                            fireDialogRequest(rt, ctx) catch {
+                                latchErr(rt, "couldn't send chat turn — see status");
+                            };
                             rt.chat_overlay_paint_pending = true;
-                            continue;
-                        };
-                        pushTurn(rt, .user, copy) catch {
-                            rt.allocator.free(copy);
-                            latchErr(rt, "out of memory submitting chat turn");
-                            rt.chat_input_len = 0;
-                            rt.chat_overlay_paint_pending = true;
-                            continue;
-                        };
-                        rt.chat_input_len = 0;
-                        fireDialogRequest(rt, ctx) catch {
-                            latchErr(rt, "couldn't send chat turn — see status");
-                        };
-                        rt.chat_overlay_paint_pending = true;
-                    },
-                    0x08, 0x7F => {
-                        // Backspace / Delete — pop one byte.
-                        if (rt.chat_input_len > 0) {
-                            rt.chat_input_len -= 1;
-                            rt.chat_overlay_paint_pending = true;
-                        }
-                    },
-                    0x20...0x7E => {
-                        // Printable ASCII — append.
-                        if (rt.chat_input_len < rt.chat_input_buf.len) {
-                            rt.chat_input_buf[rt.chat_input_len] = byte;
-                            rt.chat_input_len += 1;
-                            rt.chat_overlay_paint_pending = true;
-                        }
-                    },
-                    else => {}, // drop other control bytes silently
-                };
+                        },
+                        else => {
+                            if (applyChatEdit(
+                                &rt.chat_input_buf,
+                                &rt.chat_input_len,
+                                &rt.chat_input_cursor,
+                                key,
+                            )) {
+                                rt.chat_overlay_paint_pending = true;
+                            }
+                        },
+                    }
+                }
                 return .swallow;
             }
 

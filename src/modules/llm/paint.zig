@@ -170,17 +170,41 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // bleed through.
             w.print("\x1B[{d};1H\x1B[2K", .{rows - 1}) catch return false;
             w.writeAll("\x1B[22;1;38;5;14m\u{276F}\x1B[0m ") catch return false;
-            if (rt.chat_input_len > 0) {
-                const visible = if (rt.chat_input_len > 512)
-                    rt.chat_input_buf[rt.chat_input_len - 512 .. rt.chat_input_len]
-                else
-                    rt.chat_input_buf[0..rt.chat_input_len];
-                writeSanitized(&w, visible) catch return false;
+            // Center the cursor in a 512-byte window so long
+            // prompts still show what's under the cursor instead
+            // of dragging the tail off-screen.
+            {
+                const cur = rt.chat_input_cursor;
+                const len = rt.chat_input_len;
+                const visible_max: usize = 512;
+                var win_start: usize = 0;
+                var win_end: usize = len;
+                if (len > visible_max) {
+                    const half = visible_max / 2;
+                    win_start = if (cur > half) cur - half else 0;
+                    win_end = if (win_start + visible_max < len) win_start + visible_max else len;
+                    // Cursor near the tail: win_end got clipped to
+                    // len, so shift win_start back to fill the full
+                    // 512-byte window. Without this, end-of-buffer
+                    // cursors only see ~256 bytes of context.
+                    if (win_end - win_start < visible_max and win_end >= visible_max) {
+                        win_start = win_end - visible_max;
+                    }
+                }
+                if (cur > win_start) {
+                    writeSanitized(&w, rt.chat_input_buf[win_start..cur]) catch return false;
+                }
+                if (cur < len) {
+                    w.writeAll("\x1B[7m") catch return false;
+                    writeSanitized(&w, rt.chat_input_buf[cur .. cur + 1]) catch return false;
+                    w.writeAll("\x1B[0m") catch return false;
+                    if (cur + 1 < win_end) {
+                        writeSanitized(&w, rt.chat_input_buf[cur + 1 .. win_end]) catch return false;
+                    }
+                } else {
+                    w.writeAll("\x1B[7m \x1B[0m") catch return false;
+                }
             }
-            // Block-cursor indicator (reverse-video space) so the
-            // typing position reads as a "real" cursor even though
-            // we never move the actual terminal cursor here.
-            w.writeAll("\x1B[7m \x1B[0m") catch return false;
 
             w.print("\x1B[{d};1H\x1B[2K", .{rows}) catch return false;
             w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send]\x1B[0m") catch return false;
@@ -457,33 +481,70 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 "\x1B[2;38;5;14m";
             w.writeAll(prompt_style) catch return false;
             w.writeAll("\u{276F}\x1B[0m ") catch return false;
-            if (rt.chat_inline_input_len > 0) {
-                const visible = if (rt.chat_inline_input_len > 512)
-                    rt.chat_inline_input_buf[rt.chat_inline_input_len - 512 .. rt.chat_inline_input_len]
-                else
-                    rt.chat_inline_input_buf[0..rt.chat_inline_input_len];
+            // Center the cursor in a 512-byte window so long
+            // prompts still show what's under the cursor instead
+            // of dragging the tail off-screen. Same windowing the
+            // overlay input uses.
+            {
+                const cur = rt.chat_inline_input_cursor;
+                const len = rt.chat_inline_input_len;
+                const visible_max: usize = 512;
+                var win_start: usize = 0;
+                var win_end: usize = len;
+                if (len > visible_max) {
+                    const half = visible_max / 2;
+                    win_start = if (cur > half) cur - half else 0;
+                    win_end = if (win_start + visible_max < len) win_start + visible_max else len;
+                    // Cursor near the tail: win_end got clipped to
+                    // len, so shift win_start back to fill the full
+                    // 512-byte window. Without this, end-of-buffer
+                    // cursors only see ~256 bytes of context.
+                    if (win_end - win_start < visible_max and win_end >= visible_max) {
+                        win_start = win_end - visible_max;
+                    }
+                }
+                const dim = !rt.chat_focus_in_panel;
+                if (dim) w.writeAll("\x1B[2m") catch return false;
+                if (cur > win_start) {
+                    writeSanitized(&w, rt.chat_inline_input_buf[win_start..cur]) catch return false;
+                }
+                if (dim) w.writeAll("\x1B[0m") catch return false;
+
+                // Cursor glyph at the insertion point. Focused →
+                // reverse-video block over the byte under the cursor
+                // (or a blank reverse-video space at EOL). Parked →
+                // dim the byte under the cursor in place so the
+                // tail render below doesn't duplicate it.
                 if (rt.chat_focus_in_panel) {
-                    writeSanitized(&w, visible) catch return false;
+                    if (cur < len) {
+                        w.writeAll("\x1B[7m") catch return false;
+                        writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
+                        w.writeAll("\x1B[0m") catch return false;
+                    } else {
+                        w.writeAll("\x1B[7m \x1B[0m") catch return false;
+                    }
                 } else {
-                    // Dim the in-flight chat-input text when parked so
-                    // it reads as "draft" rather than competing with
-                    // the shell's cursor.
-                    w.writeAll("\x1B[2m") catch return false;
-                    writeSanitized(&w, visible) catch return false;
-                    w.writeAll("\x1B[0m") catch return false;
+                    if (cur < len) {
+                        w.writeAll("\x1B[2m") catch return false;
+                        writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
+                        w.writeAll("\x1B[0m") catch return false;
+                    } else {
+                        w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
+                    }
+                }
+
+                // Tail: everything PAST the cursor byte (always
+                // `cur + 1`, never `cur`). Dim when parked so the
+                // unconsumed draft reads as inactive.
+                if (cur + 1 < win_end) {
+                    if (!rt.chat_focus_in_panel) w.writeAll("\x1B[2m") catch return false;
+                    writeSanitized(&w, rt.chat_inline_input_buf[cur + 1 .. win_end]) catch return false;
+                    if (!rt.chat_focus_in_panel) w.writeAll("\x1B[0m") catch return false;
                 }
             }
-            // Block-cursor glyph: bright reverse-video when focused,
-            // dim outline when parked (so the user sees where chat
-            // input would resume but the shell prompt is "live").
-            if (rt.chat_focus_in_panel) {
-                w.writeAll("\x1B[7m \x1B[0m") catch return false;
-            } else {
-                w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
-            }
-            // The block-cursor glyph above is a static visual marker;
-            // park the real terminal cursor back on the shell row so
-            // echoed bytes land at the prompt. See inlineRestoreRow.
+            // Park the real terminal cursor on the shell row — the
+            // block-cursor glyph above is purely visual. See
+            // inlineRestoreRow for the row math.
             const restore_row_open = inlineRestoreRow(rt, total_rows, base_reserve);
             w.print("\x1B[{d};1H", .{restore_row_open}) catch return false;
 

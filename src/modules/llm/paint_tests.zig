@@ -487,3 +487,117 @@ test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
     try testing.expect(std.mem.indexOf(u8, out2.?, "\x1B]112\x07") != null);
     try testing.expect(!rt.cursor_signal_active);
 }
+
+test "overlay input: cursor-split rendering puts reverse-video on the cursor byte" {
+    // Invariant: when the cursor is mid-buffer the byte UNDER the
+    // cursor renders inside `\x1B[7m...\x1B[0m` (reverse video),
+    // not duplicated in the tail. At end-of-buffer the cursor
+    // collapses to a reverse-video space.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_overlay_open = true;
+    rt.chat_overlay_paint_pending = true;
+    // Seed input buffer directly.
+    const buf = "abXcd";
+    @memcpy(rt.chat_input_buf[0..buf.len], buf);
+    rt.chat_input_len = buf.len;
+    rt.chat_input_cursor = 2; // on 'X'
+
+    const bytes = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(bytes != null);
+    // The cursor byte 'X' must appear inside the reverse-video
+    // SGR pair. Asserting the literal `\x1B[7mX\x1B[0m` substring
+    // pins both the highlight AND the no-duplication invariant.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "\x1B[7mX\x1B[0m") != null);
+    // The buffer text appears once: walk the rendered output and
+    // confirm 'X' shows up exactly once.
+    var count: usize = 0;
+    for (bytes.?) |c| if (c == 'X') {
+        count += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), count);
+
+    // End-of-buffer cursor → reverse-video SPACE (not a buffer byte).
+    rt.chat_input_cursor = rt.chat_input_len;
+    rt.chat_overlay_paint_pending = true;
+    const bytes2 = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(bytes2 != null);
+    try testing.expect(std.mem.indexOf(u8, bytes2.?, "\x1B[7m \x1B[0m") != null);
+}
+
+test "inline input: parked render renders cursor byte once (no duplication)" {
+    // Invariant: when focus is parked, the byte under the cursor
+    // renders in `\x1B[2m...\x1B[0m` (dim) — NOT as a stand-in
+    // glyph AND the literal byte. Regression guard for the
+    // "draft shifted one column right when parked" bug.
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(rt.chat_inline_open);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // Seed inline input + park focus.
+    const buf = "abYcd";
+    @memcpy(rt.chat_inline_input_buf[0..buf.len], buf);
+    rt.chat_inline_input_len = buf.len;
+    rt.chat_inline_input_cursor = 2;
+    rt.chat_focus_in_panel = false; // parked
+    rt.chat_inline_paint_pending = true;
+
+    const bytes = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(bytes != null);
+    // 'Y' must appear exactly once across the entire paint.
+    var count: usize = 0;
+    for (bytes.?) |c| if (c == 'Y') {
+        count += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), count);
+}
