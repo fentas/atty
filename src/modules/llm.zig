@@ -502,6 +502,13 @@ pub fn configure(comptime cfg: Config) type {
             /// last char just gets dropped; no error).
             chat_input_buf: [1024]u8 = undefined,
             chat_input_len: usize = 0,
+            /// Insertion cursor offset within `chat_input_buf`
+            /// (`<= chat_input_len`). Inserts happen AT cursor;
+            /// Backspace deletes the byte BEFORE; Ctrl+A/E jump to
+            /// 0 / len; Left/Right arrows ±1; Ctrl+U / Ctrl+K
+            /// delete to start / end; Ctrl+W kills the previous
+            /// word.
+            chat_input_cursor: usize = 0,
 
             // ── Inline chat panel (Alt+C) ────────────────────────
             //
@@ -557,6 +564,9 @@ pub fn configure(comptime cfg: Config) type {
             /// the two clobbering each other on toggle.
             chat_inline_input_buf: [1024]u8 = undefined,
             chat_inline_input_len: usize = 0,
+            /// Insertion cursor offset within `chat_inline_input_buf` —
+            /// same invariants as `chat_input_cursor` above.
+            chat_inline_input_cursor: usize = 0,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {

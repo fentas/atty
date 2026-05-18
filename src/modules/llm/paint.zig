@@ -170,17 +170,43 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // bleed through.
             w.print("\x1B[{d};1H\x1B[2K", .{rows - 1}) catch return false;
             w.writeAll("\x1B[22;1;38;5;14m\u{276F}\x1B[0m ") catch return false;
-            if (rt.chat_input_len > 0) {
-                const visible = if (rt.chat_input_len > 512)
-                    rt.chat_input_buf[rt.chat_input_len - 512 .. rt.chat_input_len]
-                else
-                    rt.chat_input_buf[0..rt.chat_input_len];
-                writeSanitized(&w, visible) catch return false;
+            // Render the input buffer split at the cursor so the
+            // reverse-video block cursor lands AT the insertion
+            // point. The 512-byte tail clamp from the no-cursor
+            // version is kept but skewed around the cursor when
+            // the buffer is long.
+            {
+                const cur = rt.chat_input_cursor;
+                const len = rt.chat_input_len;
+                // Clamp the visible window: aim to keep the cursor
+                // visible. Show up to 512 bytes total, centered
+                // around the cursor when the buffer overflows.
+                const visible_max: usize = 512;
+                var win_start: usize = 0;
+                var win_end: usize = len;
+                if (len > visible_max) {
+                    // Center the cursor; clip to the buffer ends.
+                    const half = visible_max / 2;
+                    win_start = if (cur > half) cur - half else 0;
+                    win_end = if (win_start + visible_max < len) win_start + visible_max else len;
+                }
+                if (cur > win_start) {
+                    writeSanitized(&w, rt.chat_input_buf[win_start..cur]) catch return false;
+                }
+                // Block-cursor — render the byte AT cursor under
+                // reverse video when there's one, otherwise a
+                // reverse-video space for end-of-line.
+                if (cur < len) {
+                    w.writeAll("\x1B[7m") catch return false;
+                    writeSanitized(&w, rt.chat_input_buf[cur .. cur + 1]) catch return false;
+                    w.writeAll("\x1B[0m") catch return false;
+                    if (cur + 1 < win_end) {
+                        writeSanitized(&w, rt.chat_input_buf[cur + 1 .. win_end]) catch return false;
+                    }
+                } else {
+                    w.writeAll("\x1B[7m \x1B[0m") catch return false;
+                }
             }
-            // Block-cursor indicator (reverse-video space) so the
-            // typing position reads as a "real" cursor even though
-            // we never move the actual terminal cursor here.
-            w.writeAll("\x1B[7m \x1B[0m") catch return false;
 
             w.print("\x1B[{d};1H\x1B[2K", .{rows}) catch return false;
             w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send]\x1B[0m") catch return false;
@@ -457,29 +483,51 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 "\x1B[2;38;5;14m";
             w.writeAll(prompt_style) catch return false;
             w.writeAll("\u{276F}\x1B[0m ") catch return false;
-            if (rt.chat_inline_input_len > 0) {
-                const visible = if (rt.chat_inline_input_len > 512)
-                    rt.chat_inline_input_buf[rt.chat_inline_input_len - 512 .. rt.chat_inline_input_len]
-                else
-                    rt.chat_inline_input_buf[0..rt.chat_inline_input_len];
-                if (rt.chat_focus_in_panel) {
-                    writeSanitized(&w, visible) catch return false;
+            // Render the input buffer split at the cursor so the
+            // block-cursor glyph lands AT the insertion point. The
+            // 512-byte window from the cursor-less version is kept,
+            // centered around the cursor when the buffer overflows.
+            {
+                const cur = rt.chat_inline_input_cursor;
+                const len = rt.chat_inline_input_len;
+                const visible_max: usize = 512;
+                var win_start: usize = 0;
+                var win_end: usize = len;
+                if (len > visible_max) {
+                    const half = visible_max / 2;
+                    win_start = if (cur > half) cur - half else 0;
+                    win_end = if (win_start + visible_max < len) win_start + visible_max else len;
+                }
+                const dim = !rt.chat_focus_in_panel;
+                if (dim) w.writeAll("\x1B[2m") catch return false;
+                if (cur > win_start) {
+                    writeSanitized(&w, rt.chat_inline_input_buf[win_start..cur]) catch return false;
+                }
+                if (dim) w.writeAll("\x1B[0m") catch return false;
+
+                // Block-cursor glyph: bright reverse-video when
+                // focused, dim outline when parked. If cursor is
+                // BEFORE end, render the byte under the cursor in
+                // reverse video instead of a bare space so the
+                // user sees what's about to be edited.
+                if (cur < len and rt.chat_focus_in_panel) {
+                    w.writeAll("\x1B[7m") catch return false;
+                    writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
+                    w.writeAll("\x1B[0m") catch return false;
+                } else if (rt.chat_focus_in_panel) {
+                    w.writeAll("\x1B[7m \x1B[0m") catch return false;
                 } else {
-                    // Dim the in-flight chat-input text when parked so
-                    // it reads as "draft" rather than competing with
-                    // the shell's cursor.
+                    w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
+                }
+
+                if (cur + 1 < win_end and rt.chat_focus_in_panel) {
+                    writeSanitized(&w, rt.chat_inline_input_buf[cur + 1 .. win_end]) catch return false;
+                } else if (cur < win_end and !rt.chat_focus_in_panel) {
+                    // Parked: render the unconsumed tail dimmed too.
                     w.writeAll("\x1B[2m") catch return false;
-                    writeSanitized(&w, visible) catch return false;
+                    writeSanitized(&w, rt.chat_inline_input_buf[cur..win_end]) catch return false;
                     w.writeAll("\x1B[0m") catch return false;
                 }
-            }
-            // Block-cursor glyph: bright reverse-video when focused,
-            // dim outline when parked (so the user sees where chat
-            // input would resume but the shell prompt is "live").
-            if (rt.chat_focus_in_panel) {
-                w.writeAll("\x1B[7m \x1B[0m") catch return false;
-            } else {
-                w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
             }
             // The block-cursor glyph above is a static visual marker;
             // park the real terminal cursor back on the shell row so
