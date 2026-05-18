@@ -1655,17 +1655,29 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // (they bypass pty.master), so this edge wouldn't
             // otherwise fire the existing reactivate path.
             if (statusbar) |*sb| {
-                var w2: std.Io.Writer = .fixed(&out_buf);
-                // Skip the write when reactivate overflowed
-                // `out_buf` (a partial DECSC/DECSTBM/DECRC sequence
-                // would leave the cursor saved with no matching
-                // restore). The next periodic-paint tick will
-                // re-run reactivate cleanly.
+                // Dedicated 16 KB buffer for reactivate so its
+                // DECSC + per-row clear + DECRC sequence can't
+                // overflow `out_buf` (4 KB) on pathological
+                // configurations. Per-row clears are ~12 bytes,
+                // so 16 KB covers ~1300 reserved rows — far more
+                // than any realistic statusbar reservation. If
+                // reactivate still fails (shouldn't), skip both
+                // the reactivate write AND the ring flush so the
+                // buffered shell bytes don't land into a wiped
+                // scroll region; the next periodic paint will
+                // recover.
+                var reactivate_buf: [16384]u8 = undefined;
+                var w2: std.Io.Writer = .fixed(&reactivate_buf);
                 if (sb.reactivate(&w2)) {
-                    if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
-                } else |_| {}
+                    if (w2.end > 0) writeAll(posix.STDOUT_FILENO, reactivate_buf[0..w2.end]) catch {};
+                    overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
+                } else |_| {
+                    // Defer flush — the ring stays held until the
+                    // next close edge or graceful child-exit drain.
+                }
+            } else {
+                overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
             }
-            overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
         }
         prev_overlay_active = overlay_active_end;
     }
