@@ -64,6 +64,12 @@ const Cache = struct {
     enabled_mask: u8 = 0,
 };
 
+// Main-thread only. The current `trace.*` call sites all live in
+// `proxy.zig`'s poll loop (single-threaded). Worker threads (LLM,
+// atuin) MUST NOT call into this module — the unsynchronised
+// `cache` write in `refreshMask` would race the read in
+// `isEnabled`. If a worker ever needs tracing, switch this to
+// `@atomicStore`/`@atomicLoad` or take a mutex.
 var cache: Cache = .{};
 
 fn maskFor(cat: Category) u8 {

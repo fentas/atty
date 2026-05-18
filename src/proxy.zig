@@ -474,6 +474,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // suppression branch below stops new paints but
                 // can't erase what's already on the wire).
                 if (ghost.visible) clearGhost(&ghost, &out_buf) catch {};
+                trace.log(.paint, "applyReserveRows want={d} current={d}", .{ want_reserve, sb.reserve_rows });
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
                 if (w_re.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_re.end]) catch {};
@@ -678,6 +679,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // First-match-wins via the linear scan in `keymap.match`.
                 const matched_action = keymap.match(config.keymap.bindings, input) orelse
                     keymap.match(D.allDefaultBindings(), input);
+                if (matched_action) |act| {
+                    trace.log(.keymap, "matched action={s}", .{@tagName(act)});
+                } else {
+                    trace.log(.keymap, "no match", .{});
+                }
                 // `var` so the llm-action arm can clear it when a
                 // match didn't consume — that lets the CSI-u
                 // cleanup at the bottom still translate / drop the
@@ -1748,6 +1754,7 @@ fn renderStatus(
     // — atty's terminal is in alt-screen, and writing the bar's
     // bytes there clobbers the overlay's painted content.
     if (ctx.module_overlay_active) return;
+    trace.log(.paint, "renderStatus reserve={d} cursor_row={?}", .{ sb.reserve_rows, ctx.cursor_row });
 
     // First gather the module contributions into a scratch buffer.
     //
