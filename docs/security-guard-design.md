@@ -24,7 +24,7 @@ Per external review (2026-05-18): the system is **three** cooperating pieces wit
               │            │ PID → threat level             │            │
               │            ▼                                │            │
               │   ┌─────────────────────────────────────────┴────────┐   │
-              │   │           bpf_lsm_security_bprm_check             │   │
+              │   │           lsm/bprm_check_security             │   │
               │   │             tracepoint sys_enter_execve           │   │
               │   ╞══════════════════════════════════════════════════╡   │
               ├───┤             KERNEL SPACE (eBPF)                  ├───┤
@@ -41,7 +41,7 @@ Per external review (2026-05-18): the system is **three** cooperating pieces wit
 **Why three components instead of one daemon:**
 
 1. **atty (PTY proxy, Zig)** — sees the user's intent at the typed-line level (pipes, redirections, full command structure) before the kernel gets it. Decides the *threat level* per-command from a deterministic state machine. Pushes that decision into an eBPF hash map keyed by PID.
-2. **eBPF LSM (kernel, no custom module)** — backstops the PTY blind spot. When `npm install` forks a `postinstall` script that spawns a reverse shell, that shell never goes through atty's PTY — but its execve goes through `security_bprm_check`. The eBPF program checks the parent PID against atty's high-threat map and routes accordingly: log async OR hold sync.
+2. **eBPF LSM (kernel, no custom module)** — backstops the PTY blind spot. When `npm install` forks a `postinstall` script that spawns a reverse shell, that shell never goes through atty's PTY — but its execve goes through the kernel's `bprm_check_security` LSM hook. The eBPF program attaches via `SEC("lsm/bprm_check_security")`, checks the parent PID against atty's high-threat map, and routes accordingly: log async OR hold sync.
 3. **atty-guard (user-space daemon, Rust/Go)** — runs the ONNX-compiled SLM. eBPF can't run an SLM (verifier rejects floating-point + >512B stack + bounded instruction count). Daemon reads the ringbuf, runs Tier 1 regex first, falls through to Tier 2 SLM. Replies sync (for sync-mode commands) or async-flags via D-Bus / notify-send.
 
 **Why this hybrid is the right shape:** the PTY proxy's threat-level state machine selects the inspection mode dynamically. A `git status` runs through the async path with zero added latency. An `npm install` flips that PID's tree to synchronous-block mode, so every child process is gated through the SLM. Best of both worlds — fast normal path, hard wall when context goes risky.
@@ -290,7 +290,7 @@ Separate repo / binary, NOT bundled with atty. **Two new pieces ship together** 
   - `classify(payload: str) → { label, confidence }`
   - `set_threat_level(pid: u32, level: enum) → ok`
   - `subscribe_ringbuf() → stream of execve events`
-- **eBPF object** — shipped with `atty-guard`. Loads at daemon start via libbpf. Pins to `bpf_lsm_security_bprm_check` + `tracepoint:syscalls:sys_enter_execve`. Maps:
+- **eBPF object** — shipped with `atty-guard`. Loads at daemon start via libbpf. Pins to `lsm/bprm_check_security` + `tracepoint:syscalls:sys_enter_execve`. Maps:
   - `BPF_MAP_TYPE_HASH` keyed by PID → threat level (written by atty via UDS, read by eBPF on every execve).
   - `BPF_MAP_TYPE_RINGBUF` → execve events to user space.
 - **atty's role unchanged from V1** — Tier 1 pattern matchers stay in atty proper. atty queries `atty-guard` over UDS for Tier 2 (the existing query path) AND for setting PID threat level when high-risk commands fire.
@@ -344,7 +344,7 @@ Tier 2 (SLM sidecar) becomes a separate project / repo — `atty-guard` — with
 ## External input archive
 
 - 2026-05-16: Gemini reframed Tier 2 from "generative LLM" to "encoder SLM classifier" (SecureBERT 2.0 / CodeBERT family) — 10–100× latency drop changes the architecture (inline becomes viable). Also recommended: synthetic translation of CVEs → CLI payloads, GTFOBins/LOLBAS scraping, shell-metacharacter-preserving tokenization, INT8 quantization + ONNX runtime for sub-15ms inference. Endpoint-deployment (not centralized) as the right shape for atty.
-- 2026-05-18: Three-component split crystallised. **No custom kernel module** — eBPF LSM hooks (`bpf_lsm_security_bprm_check`, `tracepoint:sys_enter_execve`) cover the kernel-side interception cleanly. Reviewer's split:
+- 2026-05-18: Three-component split crystallised. **No custom kernel module** — eBPF LSM hooks (`lsm/bprm_check_security`, `tracepoint:sys_enter_execve`) cover the kernel-side interception cleanly. Reviewer's split:
   - `atty` (PTY proxy) sees command intent at typed-line time, decides threat level via deterministic state machine.
   - `atty-guard` (Rust/Go daemon) owns the eBPF map + ringbuf + ONNX SLM. eBPF can't host the SLM (verifier rejects FP / >512B stack / unbounded loops).
   - Hybrid async/sync mode selection driven by the PTY proxy's threat-level decision — low-risk commands stay async (zero perceptible latency); high-risk commands stall the execve syscall until the SLM verdicts.
