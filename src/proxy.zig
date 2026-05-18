@@ -1642,6 +1642,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         const overlay_active_end = D.anyOverlayActive(&runtimes);
         if (prev_overlay_active and !overlay_active_end) {
             overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
+            // Re-arm the statusbar's DECSTBM reservation. The
+            // module's overlay close emits `\x1B[r` to reset its
+            // own scroll region; on terminals with GLOBAL DECSTBM
+            // scope (rare; some configurations of Ghostty) that
+            // propagates to the primary screen and wipes the
+            // statusbar's reservation until SIGWINCH or another
+            // paint triggers `activate`. Firing reactivate on the
+            // close edge restores it within the same tick.
+            // `alt_screen.feed` doesn't see the module's bytes
+            // (they bypass pty.master), so this edge wouldn't
+            // otherwise fire the existing reactivate path.
+            if (statusbar) |*sb| {
+                var w2: std.Io.Writer = .fixed(&out_buf);
+                sb.reactivate(&w2) catch {};
+                if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+            }
         }
         prev_overlay_active = overlay_active_end;
     }

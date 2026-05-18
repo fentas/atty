@@ -67,13 +67,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///   - chat input at row rows-1 + footer at row rows
         ///     (outside the scroll region so they stay anchored)
         ///
-        /// **Known limitation:** on terminals with GLOBAL DECSTBM
-        /// scope (rare; most modern terminals isolate DECSTBM
-        /// per-buffer), the close path's `\x1B[r` may wipe the
-        /// statusbar's reserved scroll region until SIGWINCH or
-        /// another paint triggers `sb.activate`. Phase 2c
-        /// (proxy-level overlay surface) will route close through
-        /// the proxy so `sb.reactivate` fires automatically.
+        /// On terminals with GLOBAL DECSTBM scope (rare; some
+        /// configurations of Ghostty) the close's `\x1B[r` would
+        /// wipe the statusbar reservation — the proxy now detects
+        /// the module-overlay close edge and fires `sb.reactivate`
+        /// within the same tick (`proxy.zig`'s `prev_overlay_active`
+        /// edge handler).
         fn paintChatOverlay(rt: *Runtime) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
             if (!rt.chat_overlay_open) {
