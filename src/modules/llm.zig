@@ -125,6 +125,14 @@ pub fn configure(comptime cfg: Config) type {
             .{ .bytes = keymap.key("Alt+C"), .action = .llm_chat_overlay_toggle, .label = "Alt+Shift+C", .description = "toggle full-screen chat overlay" },
             .{ .bytes = "\x1b[99;4u", .action = .llm_chat_overlay_toggle },
             .{ .bytes = keymap.key("Ctrl+Shift+X"), .action = .llm_exec_cancel, .label = "Ctrl+Shift+X", .description = "cancel any active LLM exec / dialog / auto" },
+            // Inline-panel focus jump — works only while the panel is
+            // open. Ctrl+Up parks the panel + moves focus to the
+            // shell prompt above; Ctrl+Down brings focus back. Both
+            // ship dual-encoded (legacy CSI + kitty kbd CSI-u).
+            .{ .bytes = keymap.key("Ctrl+Up"), .action = .chat_focus_to_shell, .label = "Ctrl+Up", .description = "while inline chat is open: focus shell prompt (panel stays)" },
+            .{ .bytes = "\x1b[1;5A", .action = .chat_focus_to_shell }, // explicit legacy form some terminals emit
+            .{ .bytes = keymap.key("Ctrl+Down"), .action = .chat_focus_to_chat, .label = "Ctrl+Down", .description = "while inline chat is open: focus chat input" },
+            .{ .bytes = "\x1b[1;5B", .action = .chat_focus_to_chat },
         };
 
         // HTTP worker thread + request/response plumbing extracted
@@ -529,6 +537,13 @@ pub fn configure(comptime cfg: Config) type {
             // The full overlay (Alt+Shift+C) is still available and
             // mutually-exclusive — opening one closes the other.
             chat_inline_open: bool = false,
+            /// True when the user's keystroke focus is inside the
+            /// inline chat panel (default whenever the panel opens).
+            /// `Ctrl+Up` flips it to false → focus moves to the shell
+            /// prompt above, panel stays painted but doesn't swallow
+            /// keystrokes. `Ctrl+Down` flips it back.
+            /// Meaningless when `chat_inline_open = false`.
+            chat_focus_in_panel: bool = true,
             /// Flag the proxy reads via `extraReserveRows` — the
             /// proxy compares it to the live reserve baseline and
             /// emits `setReserveRows + activate` on the open/close
@@ -707,7 +722,12 @@ pub fn configure(comptime cfg: Config) type {
             // inline paint latch. Mutually exclusive with the
             // overlay; the action handler guarantees only one can
             // be open at a time.
-            if (rt.chat_inline_open) {
+            //
+            // Only swallow keystrokes when focus is IN the panel.
+            // `Ctrl+Up` parks focus on the shell prompt above;
+            // while parked the panel stays painted but `.forward`s
+            // input so it goes to bash. `Ctrl+Down` returns focus.
+            if (rt.chat_inline_open and rt.chat_focus_in_panel) {
                 for (input) |byte| switch (byte) {
                     0x0D, 0x0A => {
                         var trimmed_len = rt.chat_inline_input_len;
@@ -1217,6 +1237,33 @@ pub fn configure(comptime cfg: Config) type {
                         // active — the user is already chatting, the
                         // separate banner would clutter the panel.
                         rt.conclusion_pending = false;
+                        // Default: focus starts in the panel (matches
+                        // the previous always-swallow behaviour).
+                        rt.chat_focus_in_panel = true;
+                    }
+                    return true;
+                },
+                .chat_focus_to_shell => {
+                    // Only meaningful when the inline panel is open.
+                    // Park the panel: keystrokes flow through to the
+                    // shell, panel chrome stays painted but doesn't
+                    // swallow input. Repaint dims the input row to
+                    // reflect "parked." No-op + don't consume the
+                    // keystroke if the panel isn't open — let the
+                    // shell handle Ctrl+Up natively (e.g. tmux pane
+                    // navigation).
+                    if (!rt.chat_inline_open) return false;
+                    if (rt.chat_focus_in_panel) {
+                        rt.chat_focus_in_panel = false;
+                        rt.chat_inline_paint_pending = true;
+                    }
+                    return true;
+                },
+                .chat_focus_to_chat => {
+                    if (!rt.chat_inline_open) return false;
+                    if (!rt.chat_focus_in_panel) {
+                        rt.chat_focus_in_panel = true;
+                        rt.chat_inline_paint_pending = true;
                     }
                     return true;
                 },
@@ -2911,14 +2958,20 @@ pub fn configure(comptime cfg: Config) type {
             const top_row: u16 = total_rows - live_reserve + 1;
             const input_row: u16 = top_row + panel_rows - 1;
 
-            // Save cursor + hide the real one. The real cursor needs
-            // to remain in the shell area (so bash's echo of an
-            // injected exec command lands at the SHELL PROMPT, not
-            // the chat input row). We draw a block-cursor glyph in
-            // the input row as the visible marker; the real cursor
-            // sits invisibly back at the shell's prompt position via
-            // DECRC at the END of this paint.
-            w.writeAll("\x1B[?25l\x1B[s") catch return false;
+            // Save cursor. When focus is IN the panel, hide the real
+            // terminal cursor — we draw a block-cursor glyph in the
+            // chat input row as the visual marker. When focus is
+            // PARKED on the shell prompt above (Ctrl+Up), keep the
+            // real cursor VISIBLE because that's where the user is
+            // typing; the input-row block glyph dims out to reflect
+            // "panel parked." DECRC at the end of the paint puts
+            // the real cursor back wherever it was when paint
+            // started (typically the shell's prompt position).
+            if (rt.chat_focus_in_panel) {
+                w.writeAll("\x1B[?25l\x1B[s") catch return false;
+            } else {
+                w.writeAll("\x1B[?25h\x1B[s") catch return false;
+            }
 
             // Top divider row — dim chrome + mauve icon + cyan
             // shortcut, matching the overlay's visual vocabulary.
@@ -2996,15 +3049,38 @@ pub fn configure(comptime cfg: Config) type {
             // cursor (positioned by the final CUP at the end of
             // this paint) sits adjacent to it.
             w.print("\x1B[{d};1H\x1B[2K", .{input_row}) catch return false;
-            w.writeAll("\x1B[22;1;38;5;14m\u{276F}\x1B[0m ") catch return false;
+            // Chrome glyph dims when focus is parked on the shell —
+            // signals the panel is non-interactive at the moment.
+            const prompt_style: []const u8 = if (rt.chat_focus_in_panel)
+                "\x1B[22;1;38;5;14m"
+            else
+                "\x1B[2;38;5;14m";
+            w.writeAll(prompt_style) catch return false;
+            w.writeAll("\u{276F}\x1B[0m ") catch return false;
             if (rt.chat_inline_input_len > 0) {
                 const visible = if (rt.chat_inline_input_len > 512)
                     rt.chat_inline_input_buf[rt.chat_inline_input_len - 512 .. rt.chat_inline_input_len]
                 else
                     rt.chat_inline_input_buf[0..rt.chat_inline_input_len];
-                writeSanitized(&w, visible) catch return false;
+                if (rt.chat_focus_in_panel) {
+                    writeSanitized(&w, visible) catch return false;
+                } else {
+                    // Dim the in-flight chat-input text when parked so
+                    // it reads as "draft" rather than competing with
+                    // the shell's cursor.
+                    w.writeAll("\x1B[2m") catch return false;
+                    writeSanitized(&w, visible) catch return false;
+                    w.writeAll("\x1B[0m") catch return false;
+                }
             }
-            w.writeAll("\x1B[7m \x1B[0m") catch return false;
+            // Block-cursor glyph: bright reverse-video when focused,
+            // dim outline when parked (so the user sees where chat
+            // input would resume but the shell prompt is "live").
+            if (rt.chat_focus_in_panel) {
+                w.writeAll("\x1B[7m \x1B[0m") catch return false;
+            } else {
+                w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
+            }
 
             rt.chat_inline_buf_len = w.end;
             return true;
@@ -3722,6 +3798,104 @@ test "inline chat: Alt+C refuses to open when there's no statusbar" {
     try testing.expect(!rt.chat_inline_open); // but refused to open
     try testing.expect(rt.hint_pending); // hint surfaces explaining why
     rt.hint_pending = false;
+}
+
+test "inline chat: Ctrl+Up parks focus; Ctrl+Down brings it back; passthrough while parked" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Without inline chat open, both focus actions are no-ops AND
+    // not-consumed (so the keystroke bytes flow through to the shell
+    // — e.g. tmux pane navigation on Ctrl+Up still works).
+    try testing.expect(!try L.onAction(&rt, &ctx, .chat_focus_to_shell));
+    try testing.expect(!try L.onAction(&rt, &ctx, .chat_focus_to_chat));
+
+    // Open inline chat — focus defaults to in-panel.
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Keystroke while focused: swallowed into chat buffer.
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "h"));
+    try testing.expectEqualStrings("h", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+
+    // Ctrl+Up → parks focus on the shell.
+    try testing.expect(try L.onAction(&rt, &ctx, .chat_focus_to_shell));
+    try testing.expect(!rt.chat_focus_in_panel);
+    try testing.expect(rt.chat_inline_open); // panel STILL open
+    try testing.expect(rt.chat_inline_paint_pending); // repaint armed to dim chrome
+
+    // Keystroke while parked: forwarded, NOT swallowed; chat buffer
+    // unchanged.
+    const len_before = rt.chat_inline_input_len;
+    try testing.expectEqual(m.Action{ .forward = {} }, try L.onInput(&rt, &ctx, "x"));
+    try testing.expectEqual(len_before, rt.chat_inline_input_len);
+
+    // Ctrl+Down → focus back in panel.
+    rt.chat_inline_paint_pending = false;
+    try testing.expect(try L.onAction(&rt, &ctx, .chat_focus_to_chat));
+    try testing.expect(rt.chat_focus_in_panel);
+    try testing.expect(rt.chat_inline_paint_pending);
+}
+
+test "inline chat: closing panel via Alt+C resets focus to in-panel for next open" {
+    const L = configure(.{
+        .api_base = "http://test/v1",
+        .api_base_env = "ATTY_TEST_NEVER",
+        .api_base_fallback_env = "ATTY_TEST_NEVER",
+        .api_key_env = "ATTY_TEST_NEVER",
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    // Open, park focus on shell, close, reopen — focus must restart
+    // in the panel (don't carry stale parked state into next session).
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle); // open
+    rt.chat_focus_in_panel = false; // parked
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle); // close
+    try testing.expect(!rt.chat_inline_open);
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle); // reopen
+    try testing.expect(rt.chat_inline_open);
+    try testing.expect(rt.chat_focus_in_panel);
 }
 
 test "inline chat: pushTurn arms paint latch when inline open (response auto-repaints)" {
