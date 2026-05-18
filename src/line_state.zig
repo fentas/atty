@@ -273,7 +273,20 @@ pub const LineState = struct {
                 // whole next typing session).
                 if (j < input.len and self.len > 0) {
                     switch (input[j]) {
-                        'D', 'C', 'H', 'F', '~' => self.cursor_moved = true,
+                        'D', 'H' => self.cursor_moved = true, // Left / Home
+                        'C' => self.cursor_moved = true, // Right — only ±1, no EOL guarantee
+                        'F' => self.cursor_moved = false, // End lands provably at EOL
+                        '~' => {
+                            // VT-style — peek at the param substring to
+                            // distinguish End (4~, 8~) from Home / Delete
+                            // / PageUp / PageDown.
+                            const param = input[i + 2 .. j];
+                            if (std.mem.eql(u8, param, "4") or std.mem.eql(u8, param, "8")) {
+                                self.cursor_moved = false;
+                            } else {
+                                self.cursor_moved = true;
+                            }
+                        },
                         else => {},
                     }
                 }

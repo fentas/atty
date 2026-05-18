@@ -709,11 +709,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // accept it regardless of whether it's
                             // been painted yet.
                             //
+                            // Suppress when the cursor isn't at EOL
+                            // (`cursor_moved` is sticky after a
+                            // Left/Home/etc. CSI). Right-arrow is
+                            // bound to ghost_accept by default —
+                            // without this gate, navigating back
+                            // toward EOL would paste history-matched
+                            // bytes mid-line instead of moving the
+                            // cursor. The render path already
+                            // suppresses ghost paint on cursor_moved
+                            // (see `renderGhost`); accept must
+                            // mirror it.
+                            //
                             // gatherGhostText returns the *trailing*
                             // portion (what would be painted after
                             // the cursor) — i.e. the bytes we want
                             // to inject. Use it directly.
-                            if (!line_state.uncertain) {
+                            if (!line_state.uncertain and !line_state.cursor_moved) {
                                 if (D.gatherGhostText(&runtimes, &ctx) catch null) |trailing| {
                                     if (trailing.len > 0 and trailing.len <= accept_buf.len) {
                                         @memcpy(accept_buf[0..trailing.len], trailing);
@@ -736,7 +748,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // — fully unit-tested over the rooted
                             // path / non-slash word / empty / double-
                             // slash / trailing-slash cases.
-                            if (!line_state.uncertain) {
+                            //
+                            // Same cursor_moved gate as `ghost_accept`:
+                            // a mid-line cursor must not pick history
+                            // bytes (Ctrl+Right would otherwise mash
+                            // them in at the cursor position).
+                            if (!line_state.uncertain and !line_state.cursor_moved) {
                                 if (D.gatherGhostText(&runtimes, &ctx) catch null) |trailing| {
                                     const end = ghost_mod.nextSectionEnd(trailing);
                                     if (end > 0 and end <= accept_buf.len) {

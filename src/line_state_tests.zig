@@ -55,13 +55,12 @@ test "CSI escape marks uncertain" {
     try std.testing.expect(l.uncertain);
 }
 
-test "Left/Right/Home/End arrows set cursor_moved (ghost render gate)" {
-    // The Left arrow moves the cursor mid-line WITHOUT changing the
-    // buffer. OSC 133 syncFromCapture would otherwise clear
-    // `uncertain` (content matches), and ghost text would then paint
-    // at the new cursor position — overwriting the character to its
-    // right (looks like deletion). The `cursor_moved` flag stays
-    // sticky for renderGhost to gate on.
+test "Left/Right/Home set cursor_moved; End clears it (lands provably at EOL)" {
+    // Left/Right/Home leave the cursor potentially mid-buffer, so
+    // ghost rendering at the new position would overwrite the
+    // character to its right (looks like deletion). End lands the
+    // cursor at EOL by definition — clearing the flag lets the user
+    // re-engage ghost after navigating back to EOL via End.
     var l = LineState{};
     _ = l.applyInput("hello");
     try std.testing.expect(!l.cursor_moved);
@@ -70,15 +69,40 @@ test "Left/Right/Home/End arrows set cursor_moved (ghost render gate)" {
     try std.testing.expect(l.cursor_moved);
 
     l.cursor_moved = false; // simulate a fresh prompt for the next case
-    _ = l.applyInput("\x1B[C"); // Right
+    _ = l.applyInput("\x1B[C"); // Right — only ±1, no EOL guarantee
     try std.testing.expect(l.cursor_moved);
 
     l.cursor_moved = false;
     _ = l.applyInput("\x1B[H"); // Home
     try std.testing.expect(l.cursor_moved);
 
-    l.cursor_moved = false;
-    _ = l.applyInput("\x1B[F"); // End
+    // End (xterm cursor-style) — provably at EOL, clears the flag.
+    _ = l.applyInput("\x1B[F");
+    try std.testing.expect(!l.cursor_moved);
+
+    // Sticky flag + End should clear too.
+    l.cursor_moved = true;
+    _ = l.applyInput("\x1B[F");
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "End VT-form (`\\x1b[4~` / `\\x1b[8~`) clears cursor_moved" {
+    // VT-form End is what xterm + libvte-based terminals send by
+    // default. Both `4~` (xterm End) and `8~` (vt220 End) must clear
+    // the flag — same EOL guarantee as the cursor-style `F`.
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput("\x1B[4~"); // End
+    try std.testing.expect(!l.cursor_moved);
+
+    l.cursor_moved = true;
+    _ = l.applyInput("\x1B[8~"); // vt220 End
+    try std.testing.expect(!l.cursor_moved);
+
+    // Home VT-form still SETS the flag.
+    _ = l.applyInput("\x1B[1~");
     try std.testing.expect(l.cursor_moved);
 }
 
