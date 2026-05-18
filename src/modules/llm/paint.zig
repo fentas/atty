@@ -190,10 +190,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             w.writeAll("\x1B[7m \x1B[0m") catch return false;
 
             w.print("\x1B[{d};1H\x1B[2K", .{rows}) catch return false;
-            // Footer is anchored OUTSIDE the DECSTBM scroll region —
-            // safe place for the scrolled-back indicator. The
-            // in-region header version scrolled off-screen with the
-            // oldest turns when the view overflowed.
+            // The footer sits OUTSIDE the DECSTBM scroll region, so
+            // anchoring the "↑ N below" indicator here keeps it
+            // visible regardless of how far the scrollback walks.
             if (overlay_offset > 0) {
                 var sb: [48]u8 = undefined;
                 const ind = std.fmt.bufPrint(&sb, "\x1B[2m[\u{2191} {d} below]\x1B[0m ", .{overlay_offset}) catch "";
