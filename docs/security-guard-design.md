@@ -1,8 +1,38 @@
-# security guard — rough outline
+# security guard — design + status
 
-Status: **brainstorm**, not committed scope. To be revised together.
+Status: **V1 shipped, V2 in progress.** V2-A (sidecar daemon + UDS + Tier-1 mirror + threat map) merged 2026-05-18. V2-D (atty UDS client) merged 2026-05-19. V2-B (eBPF LSM) and V2-C (encoder SLM) still ahead.
 
-## TL;DR — three-component architecture (current direction)
+## Implementation status
+
+| Slice  | What lands                                                                              | PR     | Status         |
+|--------|-----------------------------------------------------------------------------------------|--------|----------------|
+| V1     | `src/modules/security_guard.zig` — Tier-1 in-proc patterns + trust cache + confirm UX. | #104   | ✅ merged       |
+| V2-A   | `atty-guard/` Rust sidecar — UDS server, JSON-line protocol, Tier-1 mirror, threat map. | #105   | ✅ merged       |
+| V2-D   | `src/modules/security_guard/uds_client.zig` — atty queries the sidecar before in-proc.  | #106   | ✅ merged       |
+| V2-B   | `aya-rs` (or libbpf-rs) LSM hook + ringbuf consumer + real BPF threat map.              | TBD    | ⏳ not started |
+| V2-C   | ONNX runtime + encoder-SLM (SecureBERT 2.0 / CodeBERT) in `classifier::tier2`.          | TBD    | ⏳ not started |
+| V2-E   | `atty init`-driven sidecar auto-launch + systemd-user unit packaging.                   | TBD    | ⏳ not started |
+
+The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-A + V2-D bring the protocol surface up; V2-B and V2-C will be backends behind that already-stable surface — no further wire-protocol churn expected.
+
+### What V2-B brings (next)
+
+- `BPF_MAP_TYPE_HASH` keyed by PID — replaces the in-memory `ThreatMap` in `atty-guard/src/threat_map.rs`.
+- `lsm/bprm_check_security` hook program — gates execve sync-block when the parent PID is in the map at `Critical`.
+- `tracepoint:syscalls:sys_enter_execve` — async ringbuf events for the log-only / Warn cases.
+- Userspace loader: `atty-guard --enable-ebpf` (requires `CAP_BPF` + `CAP_SYS_RESOURCE`).
+
+### What V2-C brings (after V2-B)
+
+- ONNX runtime (Rust crate `ort` or `tract`) loaded by atty-guard.
+- Quantized SecureBERT-2.0 / CodeBERT INT8 model — ~50 MB on disk, ~80 MB RSS.
+- `Tier2Backend` trait + `Stub` (current) / `Onnx` impls; chosen at startup.
+- Inputs: tokenized command (shell-metachar-preserving) + the matched section from any Tier-1 hit. Output: softmax over {safe, suspicious, harmful}.
+- Latency target: ≤15 ms/inference; ringbuf consumer dispatches async classify on every execve event when the sidecar is in `--enable-ebpf` mode.
+
+## TL;DR — three-component architecture
+
+Per external review (2026-05-18): the system is **three** cooperating pieces with a hard kernel/user-space split. No custom kernel module — eBPF LSM hooks handle the kernel side.
 
 Per external review (2026-05-18): the system is **three** cooperating pieces with a hard kernel/user-space split. No custom kernel module — eBPF LSM hooks handle the kernel side.
 
@@ -337,9 +367,11 @@ Why NOT bundled:
 
 ## Next step
 
-Talk through MVP scope. If we agree on Tier 1 only + three patterns + trust cache, that's a focused PR in the 200-400 LOC range.
+**Next in queue (V2-B):** `aya-rs` LSM hook + ringbuf consumer. Reasoning: the atty UDS surface is now stable (#104→#105→#106 merged). Adding BPF on top doesn't churn the protocol; it just swaps the threat-map backing from `Mutex<HashMap>` to a real BPF map and adds an async ringbuf consumer to the daemon. Build path needs `CAP_BPF` + a recent kernel (5.15+ for the `lsm/bprm_check_security` hook) — only the user-installed sidecar gains those caps; atty itself stays unprivileged.
 
-Tier 2 (SLM sidecar) becomes a separate project / repo — `atty-guard` — with its own cadence and dependencies. Tracking issue or design doc once Tier 1 is in.
+**Then V2-C:** `Tier2Backend` trait in `classifier.rs` with an `Onnx` impl gated behind a Cargo feature flag. Model bundle distribution is the open question — likely shipped alongside atty-guard's GitHub releases as a separate `model-bundle-vX.Y.tar.zst`.
+
+**Then V2-E:** auto-launch from atty proper (or a `systemd --user` unit shipped under `atty-guard/contrib/`).
 
 ## External input archive
 

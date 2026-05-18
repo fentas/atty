@@ -1,6 +1,6 @@
 # atty-guard
 
-Sidecar daemon for atty's `security_guard` module. V2-A scope: UDS RPC server + Tier-1 regex classifier + in-memory PID threat map. V2-B (separate PR) adds the eBPF LSM hook backstop; V2-C wires the encoder-SLM Tier-2 classifier.
+Sidecar daemon for atty's `security_guard` module. **Shipping today (V2-A + V2-D):** UDS RPC server, JSON-line protocol, Tier-1 regex classifier mirroring atty's in-proc patterns, in-memory PID → threat-level map. **Coming next:** V2-B adds the eBPF LSM hook backstop (replaces the in-memory map with a `BPF_MAP_TYPE_HASH`), V2-C wires the encoder-SLM Tier-2 classifier (SecureBERT-class, ONNX-INT8, ≤15 ms/inference).
 
 See [docs/security-guard-design.md](../docs/security-guard-design.md) in the atty repo for the three-component architecture.
 
@@ -142,9 +142,10 @@ Runs the regex matcher unit tests plus 6 integration tests that spin up a server
 
 ## Roadmap
 
-| Stage | Lands                                              | Status         |
-|-------|----------------------------------------------------|----------------|
-| V2-A  | This crate — UDS + Tier-1 + in-mem threat map.     | This PR.       |
-| V2-B  | libbpf-rs LSM hook + ringbuf consumer + real map.  | Follow-up.     |
-| V2-C  | ONNX SLM in `classifier::tier2`.                   | Follow-up.     |
-| V2-D  | Auto-launch from `atty init` snippet; health-ping. | Follow-up.     |
+| Stage | Lands                                                   | Status         |
+|-------|---------------------------------------------------------|----------------|
+| V2-A  | This crate — UDS + Tier-1 + in-mem threat map.          | ✅ shipped (#105) |
+| V2-D  | atty-side UDS client — atty queries this daemon.        | ✅ shipped (#106) |
+| V2-B  | `aya-rs` LSM hook + ringbuf consumer + BPF threat map.  | ⏳ next        |
+| V2-C  | ONNX SLM in `classifier::tier2` (SecureBERT-class).     | ⏳ after V2-B  |
+| V2-E  | Auto-launch from atty + systemd-user unit packaging.    | ⏳             |
