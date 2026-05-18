@@ -5,9 +5,10 @@
 //! code is verbatim — only the wrapping `Module(cfg, Runtime)`
 //! factory is new.
 //!
-//! Callers reach this surface through the `configure()` factory's
-//! re-exports in llm.zig (`provideTermBytes`, plus the internal
-//! helpers other paint sites in llm.zig still use directly).
+//! Only `provideTermBytes` is public — it's re-exported from
+//! `llm.zig` as the module hook the dispatcher invokes. Every
+//! other symbol (paint helpers, sanitiser, OSC escape constants)
+//! is module-private; nothing in `llm.zig` calls them directly.
 
 const std = @import("std");
 const m = @import("../../module.zig");
@@ -26,16 +27,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const latchErr = dialog_helpers.latchErr;
 
         // Pre-built OSC escape strings; comptime-baked from the
-        // configured colour so we don't allocate per tick.
+        // configured colour so we don't allocate per tick. Emitted
+        // by `provideTermBytes` on edge transitions (one-shot per
+        // edge) when the user types a prefix-matched prompt — the
+        // terminal doesn't see redundant OSC traffic on every tick.
         const cursor_set_seq = "\x1B]12;" ++ cfg.prefix_signal_cursor_color ++ "\x07";
         const cursor_reset_seq = "\x1B]112\x07";
 
-        /// Bytes to write to the user's outer terminal (NOT the
-        /// pty.master, which goes to the shell). Used here for OSC
-        /// 12 / 112 cursor-colour transitions while the user is
-        /// typing a prefix-matched prompt. One-shot per transition
-        /// — we only emit on edges so the terminal doesn't see
-        /// redundant OSC traffic on every tick.
         /// Write `bytes` to `w` filtering out control bytes that
         /// would otherwise hijack the terminal — embedded `\x1B`
         /// in an LLM response would smuggle escape sequences into
