@@ -1656,8 +1656,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // otherwise fire the existing reactivate path.
             if (statusbar) |*sb| {
                 var w2: std.Io.Writer = .fixed(&out_buf);
-                sb.reactivate(&w2) catch {};
-                if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+                // Skip the write when reactivate overflowed
+                // `out_buf` (a partial DECSC/DECSTBM/DECRC sequence
+                // would leave the cursor saved with no matching
+                // restore). The next periodic-paint tick will
+                // re-run reactivate cleanly.
+                if (sb.reactivate(&w2)) {
+                    if (w2.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w2.end]) catch {};
+                } else |_| {}
             }
             overlay_ring_state.flush(posix.STDOUT_FILENO) catch {};
         }
