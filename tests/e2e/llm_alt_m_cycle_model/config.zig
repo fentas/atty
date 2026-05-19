@@ -12,7 +12,11 @@ pub const modules = .{
         // Inert (no HTTP) — the cycle and hint are pure runtime
         // state, no worker round-trip needed.
         .api_base = "",
-        .models = &.{ "model-alpha", "model-beta", "model-gamma" },
+        .models = &.{
+            .{ .name = "model-alpha" },
+            .{ .name = "model-beta" },
+            .{ .name = "model-gamma" },
+        },
     }),
 };
 

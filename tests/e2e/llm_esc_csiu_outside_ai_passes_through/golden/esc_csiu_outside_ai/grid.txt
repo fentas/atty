@@ -3,4 +3,4 @@ $
 
 
 
-atty
+atty │ ✨ Alt+C chat · Alt+S dialog · Alt+H help
