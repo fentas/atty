@@ -159,6 +159,46 @@ pub fn isCsiU(input: []const u8) bool {
     return true;
 }
 
+/// True if `input` is a modifier-augmented VT-style CSI sequence:
+/// `ESC [ <keycode> ; <modifier> ~`, where the modifier param is
+/// strictly greater than 1 (1 = no modifier; legacy unmodified
+/// `\x1b[<n>~` shapes still pass through to the shell).
+///
+/// This is the `~`-terminated sibling of CSI-u under kitty kbd
+/// flag 1 (disambiguate). Examples bash readline can't handle:
+///   `\x1b[2;5~` — Ctrl+Insert (Windsurf's Super+V paste).
+///   `\x1b[3;5~` — Ctrl+Delete.
+///   `\x1b[5;5~` — Ctrl+PageUp.
+/// Without dropping these, bash beeps + echoes the trailing
+/// `<modifier>~` tail (`5~`) as if it were typed input — the
+/// user-visible "5~ leak" on the prompt.
+pub fn isModifiedVtCsi(input: []const u8) bool {
+    if (input.len < 6) return false; // min: `ESC [ <kc> ; <m> ~`
+    if (input[0] != 0x1B or input[1] != '[') return false;
+    if (input[input.len - 1] != '~') return false;
+    // Body must contain exactly one `;` (separating keycode and
+    // modifier). Body chars are digits / `;` / `:` only.
+    var semis: usize = 0;
+    for (input[2 .. input.len - 1]) |b| {
+        switch (b) {
+            '0'...'9', ':' => {},
+            ';' => semis += 1,
+            else => return false,
+        }
+    }
+    if (semis != 1) return false;
+    // Modifier param must be >= 2 (i.e. some modifier is held);
+    // an explicit `<n>;1~` shape is rare but, if it ever appears,
+    // is semantically identical to the unmodified `<n>~` form.
+    // Don't drop those — let them pass through.
+    const body = input[2 .. input.len - 1];
+    const semi = std.mem.indexOfScalar(u8, body, ';').?;
+    const after = body[semi + 1 ..];
+    const mod_end = std.mem.indexOfScalar(u8, after, ':') orelse after.len;
+    const mod = std.fmt.parseInt(u32, after[0..mod_end], 10) catch return false;
+    return mod >= 2;
+}
+
 /// If `bytes` begins with a well-formed CSI-u sequence, return its
 /// length (including the `u` terminator). Returns null otherwise.
 ///

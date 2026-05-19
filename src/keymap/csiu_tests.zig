@@ -91,6 +91,41 @@ test "csiUToLegacy: malformed CSI-u (non-numeric) returns null safely" {
     try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[99;xyu", &out));
 }
 
+test "isModifiedVtCsi: kitty kbd modifier-augmented VT-style sequences" {
+    const isModifiedVtCsi = mod.isModifiedVtCsi;
+    // Ctrl+Insert / Ctrl+Delete / Ctrl+PageUp etc. — what Windsurf
+    // emits for Super+V paste and similar bindings.
+    try std.testing.expect(isModifiedVtCsi("\x1b[2;5~")); // Ctrl+Insert
+    try std.testing.expect(isModifiedVtCsi("\x1b[3;5~")); // Ctrl+Delete
+    try std.testing.expect(isModifiedVtCsi("\x1b[5;5~")); // Ctrl+PageUp
+    try std.testing.expect(isModifiedVtCsi("\x1b[5;6~")); // Ctrl+Shift+PageUp
+    try std.testing.expect(isModifiedVtCsi("\x1b[15;3~")); // Alt+F5
+}
+
+test "isModifiedVtCsi: unmodified VT-style sequences pass through" {
+    const isModifiedVtCsi = mod.isModifiedVtCsi;
+    // Plain Insert/Delete/PageUp without a modifier param — those
+    // are legacy bash-readable shapes; don't drop them.
+    try std.testing.expect(!isModifiedVtCsi("\x1b[2~"));
+    try std.testing.expect(!isModifiedVtCsi("\x1b[3~"));
+    try std.testing.expect(!isModifiedVtCsi("\x1b[5~"));
+    try std.testing.expect(!isModifiedVtCsi("\x1b[6~"));
+    // Explicit `<n>;1~` (modifier "1" = none) is semantically the
+    // unmodified form too — let it pass.
+    try std.testing.expect(!isModifiedVtCsi("\x1b[2;1~"));
+}
+
+test "isModifiedVtCsi: rejects malformed + non-VT shapes" {
+    const isModifiedVtCsi = mod.isModifiedVtCsi;
+    try std.testing.expect(!isModifiedVtCsi(""));
+    try std.testing.expect(!isModifiedVtCsi("~"));
+    try std.testing.expect(!isModifiedVtCsi("\x1b[~"));
+    try std.testing.expect(!isModifiedVtCsi("\x1b[2;5u")); // CSI-u, not VT
+    try std.testing.expect(!isModifiedVtCsi("\x1b[2;5;3~")); // 2 semicolons
+    try std.testing.expect(!isModifiedVtCsi("\x1b[A")); // CSI-letter, no `~`
+    try std.testing.expect(!isModifiedVtCsi("hello"));
+}
+
 test "isCsiU recognises kitty-protocol CSI-u shapes" {
     try std.testing.expect(isCsiU("\x1B[105;6u"));
     try std.testing.expect(isCsiU("\x1B[57;5u"));
