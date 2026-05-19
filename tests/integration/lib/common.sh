@@ -149,7 +149,11 @@ classify() {
     local json_cmd
     json_cmd=$(printf '%s' "$cmd" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')
     local req="{\"id\":1,\"method\":\"classify\",\"command\":${json_cmd}}"
-    _LAST_RESPONSE=$(printf '%s\n' "$req" | socat -t 2 - "UNIX-CONNECT:$_GUARD_SOCKET" 2>/dev/null || true)
+    # Generous timeout — covers ONNX SLM cold-start (~5-10 s on the
+    # first request after daemon start) and V2-F OSV.dev round-trips
+    # (up to ~5 s on cool DNS). Override with `$ATTY_CLASSIFY_TIMEOUT`.
+    local t="${ATTY_CLASSIFY_TIMEOUT:-10}"
+    _LAST_RESPONSE=$(printf '%s\n' "$req" | socat -t "$t" - "UNIX-CONNECT:$_GUARD_SOCKET" 2>/dev/null || true)
     if [ -z "$_LAST_RESPONSE" ]; then
         fail "no response from atty-guard for: $cmd"
         return 1

@@ -6,6 +6,8 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
+ATOMS_LOG=$(mktemp -t atty-atoms.XXXXXX.log)
+
 require_cmd curl
 
 # Pre-flight: can we even reach github? Skip if no network.
@@ -25,8 +27,8 @@ OUT_FILE="$XDG_DATA_HOME/atty-guard/flagged_atoms.txt"
 # `--update-atoms-now` is a one-shot subcommand — fetches, writes,
 # exits. Doesn't start the UDS server. Source filter restricts to
 # GTFOBins only.
-if ! "$GUARD_BIN" --update-atoms-now --atoms-sources gtfobins 2>&1 | tee /tmp/atoms-update.log >&2; then
-    fail "--update-atoms-now gtfobins failed (see /tmp/atoms-update.log)"
+if ! "$GUARD_BIN" --update-atoms-now --atoms-sources gtfobins 2>&1 | tee $ATOMS_LOG >&2; then
+    fail "--update-atoms-now gtfobins failed (see $ATOMS_LOG)"
 fi
 
 if [ ! -f "$OUT_FILE" ]; then

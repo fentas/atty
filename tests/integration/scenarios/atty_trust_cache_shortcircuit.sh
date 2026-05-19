@@ -11,6 +11,8 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
+BUILD_LOG=$(mktemp -t atty-build.XXXXXX.log)
+
 start_guard --tier2 stub
 build_atty
 
@@ -36,8 +38,8 @@ pub const statusbar: atty.StatusBar = .{
 };
 ZIG
 
-(cd "$REPO_ROOT" && zig build -Doptimize=ReleaseSafe -Dconfig="$ATTY_CONFIG" >/tmp/atty-trust-build.log 2>&1) || {
-    cat /tmp/atty-trust-build.log >&2
+(cd "$REPO_ROOT" && zig build -Doptimize=ReleaseSafe -Dconfig="$ATTY_CONFIG" >"$BUILD_LOG" 2>&1) || {
+    cat "$BUILD_LOG" >&2
     fail "atty build failed"
 }
 

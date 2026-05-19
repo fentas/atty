@@ -73,7 +73,7 @@ Each scenario is a self-contained bash script under `scenarios/`.
 | V2-J accumulator + SLM hit | `v2j_accumulator_slm_plus_atom` | none |
 | V2-J-2 auto-Block escalation | `v2j2_autoblock_threshold` | none |
 | V2-J-2 single-hit guard | `v2j2_single_hit_stays_warn` | none |
-| V2-J-2 range guard | `v2j2_range_guard_rejects_out_of_range` | none |
+| V2-J-2 range guard | `v2j2_range_guard` | none |
 | atty side honors `Block` | `atty_block_refuses_outright` | atty + atty-guard run together |
 | atty side honors `Warn` | `atty_warn_arms_banner` | atty + atty-guard run together |
 | atom-fetcher GTFOBins source | `atom_fetcher_gtfobins` | outbound HTTPS |

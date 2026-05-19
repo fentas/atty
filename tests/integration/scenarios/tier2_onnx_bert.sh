@@ -16,7 +16,9 @@ fi
 
 # Write a TOML config that points the daemon at the model files.
 CONFIG_FILE=$(mktemp -t atty-guard-onnx.XXXXXX.toml)
-trap 'rm -f "$CONFIG_FILE"' EXIT
+# Preserve common.sh's stop_guard trap — a bare `trap '...' EXIT`
+# would silently replace it and leak the daemon.
+trap 'rm -f "$CONFIG_FILE"; stop_guard' EXIT INT TERM
 
 cat > "$CONFIG_FILE" <<TOML
 [tier2.onnx]

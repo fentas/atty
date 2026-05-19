@@ -10,6 +10,8 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
+BUILD_LOG=$(mktemp -t atty-build.XXXXXX.log)
+
 OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 OLLAMA_MODEL="${ATTY_OLLAMA_MODEL:-qwen2.5-coder:1.5b}"
 
@@ -60,7 +62,7 @@ ZIG
 
 # Rebuild atty with this config. config path must be repo-relative.
 (cd "$REPO_ROOT" && zig build -Doptimize=ReleaseSafe -Dconfig="$CONFIG_FILE" >/tmp/atty-ollama-build.log 2>&1) || {
-    cat /tmp/atty-ollama-build.log >&2
+    cat "$BUILD_LOG" >&2
     fail "atty build with Ollama config failed"
 }
 

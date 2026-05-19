@@ -7,7 +7,9 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 CONFIG_FILE=$(mktemp -t atty-guard-autoblock.XXXXXX.toml)
-trap 'rm -f "$CONFIG_FILE"' EXIT
+# Preserve common.sh's stop_guard trap — a bare `trap '...' EXIT`
+# would silently replace it and leak the daemon.
+trap 'rm -f "$CONFIG_FILE"; stop_guard' EXIT INT TERM
 
 cat > "$CONFIG_FILE" <<TOML
 [accumulator]

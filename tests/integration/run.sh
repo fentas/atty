@@ -83,19 +83,6 @@ run_one() {
     return 0
 }
 
-run_set() {
-    local -n set_ref=$1
-    local pass=0 fail=0 skip=0
-    for stem in "${set_ref[@]}"; do
-        run_one "$stem"
-        case $? in
-            0) status=$(grep -E "^(PASS|SKIP):" <(echo) > /dev/null; true) ;;
-        esac
-    done
-    # The per-line counts are produced by the previous loop's stdout;
-    # the caller pipes us through `tee -a /tmp/run.log` and counts there.
-}
-
 case "${1:-help}" in
     quick)
         echo "== running ${#QUICK_SCENARIOS[@]} quick scenarios =="

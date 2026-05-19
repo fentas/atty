@@ -33,10 +33,23 @@ probe() {
         return
     fi
 
-    # 2. Inject break.
+    # 2. Inject break with revert-on-failure protection. Without
+    # this, a bad sed/python pattern leaves `.probe-bak` AND a
+    # half-modified source file in tree — the next probe's `cp` then
+    # overwrites the backup with the corrupted file and the source
+    # is unrecoverable without `git checkout`. Trap-driven revert
+    # makes a failed injection a clean rollback.
     echo "  inject: $injection_apply"
     cp "$injection_file" "$injection_file.probe-bak"
-    eval "$injection_apply"
+    local revert='mv "$injection_file.probe-bak" "$injection_file"'
+    trap "$revert" ERR
+    if ! eval "$injection_apply"; then
+        trap - ERR
+        eval "$revert"
+        RESULTS+=("BAD-PROBE: $label — injection step failed")
+        return
+    fi
+    trap - ERR
 
     # 3. Rebuild affected component. `touch` so cargo doesn't no-op
     # when the file's contents revert to a known-cached state (binary
@@ -56,8 +69,9 @@ probe() {
         RESULTS+=("OK: $label")
     fi
 
-    # 5. Revert + rebuild.
+    # 5. Revert + rebuild (always — even if step 4 errored).
     mv "$injection_file.probe-bak" "$injection_file"
+    touch "$injection_file"
     if [[ "$injection_file" == *"atty-guard"* ]]; then
         (cd "$REPO_ROOT/atty-guard" && cargo build --release --features tier2-onnx,osv-live,atoms-fetch --quiet) || true
     else
