@@ -504,6 +504,9 @@ A second module in the guardrail family. Where `guardrail` matches a comptime li
 | V2-E   | `atty-guard/contrib/install.sh` + hardened `atty-guard.service` user unit.           |
 | V2-C   | Pluggable Tier-2: `--tier2 stub|heuristic` (4 extra regex rules); `onnx` follows.   |
 | V2-B   | eBPF LSM hook + execve tracepoint backstop (skeleton landed; impl ahead).            |
+| V2-G/H/I | AtomMatcher (Aho-Corasick) + sliding window + atom fetcher (GTFOBins/Sigma/LOLBAS).|
+| V2-J   | Threat-level accumulator: independent-probability combine across Tier-1 + Tier-2.    |
+| V2-J-2 | Opt-in auto-Block escalation. Daemon-`Block` verdict triggers a red `REFUSED` line + clears readline atty-side (no prompt). |
 
 Default: disabled. Opt in via:
 
@@ -523,6 +526,8 @@ Optional sidecar (after `atty-guard/contrib/install.sh`):
     .daemon_socket_path = "/run/user/1000/atty-guard.sock",
 }),
 ```
+
+**Block-refuse path (V2-J-2).** When the daemon returns `Verdict::Block` — either via the auto-Block escalation knob (`[accumulator] block_threshold = 0.95` in TOML) or because the PID-tree threat map says this PID is already Critical — atty does NOT prompt. It writes a one-shot `REFUSED — <reason>` line styled by `Config.refused_style` (bold red 8-color default), marks the shell PID Critical, and clears readline (Ctrl+U). Trust-cache hits short-circuit BOTH the Warn-prompt path and the Block-refuse path so prior `[t]rust` choices survive.
 
 Full architecture: `docs/security-guard-design.md`. Daemon: `atty-guard/`.
 

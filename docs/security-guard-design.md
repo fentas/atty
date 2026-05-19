@@ -24,7 +24,7 @@ Status: **V1 + V2 baseline shipped (atty side + sidecar + ONNX SLM + eBPF + OSV)
 | V2-I      | Baked-in atom fetcher — periodic refresh of `flagged_atoms.txt`; one-shot CLI + cron-style interval mode. GTFOBins shipped first.                  | #121  | ✅ merged       |
 | V2-I-2    | Sigma + LOLBAS sources — extend the V2-I fetcher with the SigmaHQ Linux rule corpus and LOLBAS Windows-binary corpus.                              | #125  | ✅ merged       |
 | V2-J      | Threat-level accumulator — multi-hit Tier-1 + Tier-2 SLM combined via independent-probability math; multi-atom commands surface a higher combined confidence. | #126  | ✅ merged       |
-| **V2-J-2**| **Auto-Block escalation** — opt-in TOML knob `[accumulator] block_threshold` lets the accumulator escalate Warn → Block when combined confidence reaches the configured value AND ≥ 2 distinct signals fired. | TBD   | 🟡 this PR     |
+| V2-J-2    | Auto-Block escalation — opt-in TOML knob `[accumulator] block_threshold` lets the accumulator escalate Warn → Block when combined confidence reaches the configured value AND ≥ 2 distinct signals fired; atty side renders a red `REFUSED` line + clears readline instead of prompting. | #127  | ✅ merged       |
 
 The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-G+H+I are the pattern-matching scale + intelligence-freshness improvements that close the gap between curated bundles and live disclosures.
 
@@ -82,9 +82,11 @@ After V2-G/H/I land, the threat-level accumulator across the AC + precise + SLM 
   - `0.95`: ≥ 5 atoms OR atom + high-conf SLM. Low false-positive risk.
   - `0.99`: practically requires 8+ atoms OR multiple high-conf rules. Very low false-positive risk.
 
-## TL;DR — three-component architecture
+- Input validation: `Classifier::with_block_threshold` only accepts `(WARN_THRESHOLD, 1.0]` and finite values. Out-of-range or NaN inputs degrade to `None` with a stderr warning at daemon start. A threshold at-or-below the Warn floor would auto-Block every multi-hit indiscriminately (defeats the [y]/[t]/cancel intent), so the strict lower bound rejects e.g. `block_threshold = 0.5`.
 
-Per external review (2026-05-18): the system is **three** cooperating pieces with a hard kernel/user-space split. No custom kernel module — eBPF LSM hooks handle the kernel side.
+- **atty side — actually refuses on Block.** `src/modules/security_guard.zig::queryDaemon` branches on verdict before arming: Safe → forward, Warn → arm the `[y]/[t]/cancel` banner (unchanged), **Block → write a red `REFUSED — <reason>` line, mark the shell PID Critical via `setThreatLevel`, and signal the caller to clear readline (`Ctrl+U` via `.replace = "\x15"`).** No follow-up keystroke; the user types something fresh. Trust-cache hits short-circuit BOTH paths so previously-trusted exact matches still bypass even with auto-Block enabled — operators who want auto-Block to override prior trust must clear the trust file. Render style is `Config.refused_style` (bold red 8-color by default; distinct from `warning_style`'s dim italic).
+
+## TL;DR — three-component architecture
 
 Per external review (2026-05-18): the system is **three** cooperating pieces with a hard kernel/user-space split. No custom kernel module — eBPF LSM hooks handle the kernel side.
 
