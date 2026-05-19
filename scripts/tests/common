@@ -1,0 +1,83 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# Shared helpers for the per-PR test sections: TTY output,
+# pass/fail aggregation, build bootstrap. Imported by every
+# `scripts/tests/<name>` file via `import ^tests/common`.
+
+# Colours — TTY only; piping to less etc. falls back to plain.
+if [[ -t 1 ]]; then
+  C_RESET=$'\e[0m'; C_DIM=$'\e[2m'; C_BOLD=$'\e[1m'
+  C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_RED=$'\e[31m'; C_BLUE=$'\e[34m'
+else
+  C_RESET= C_DIM= C_BOLD= C_GREEN= C_YELLOW= C_RED= C_BLUE=
+fi
+
+section() { printf "\n%s━━━ %s ━━━%s\n" "${C_BOLD}${C_BLUE}" "$1" "${C_RESET}"; }
+step()    { printf "%s» %s%s\n"          "${C_BOLD}"            "$1" "${C_RESET}"; }
+note()    { printf "%s  %s%s\n"          "${C_DIM}"             "$1" "${C_RESET}"; }
+expect()  { printf "%s  expect:%s %s\n"  "${C_GREEN}"           "${C_RESET}" "$1"; }
+warn_x()  { printf "%s  ⚠ %s%s\n"        "${C_YELLOW}"          "$1" "${C_RESET}"; }
+fail_x()  { printf "%s  ✗ %s%s\n"        "${C_RED}"             "$1" "${C_RESET}"; }
+pass_x()  { printf "%s  ✓ %s%s\n"        "${C_GREEN}"           "$1" "${C_RESET}"; }
+
+declare -gA RESULTS
+confirm() {
+  local label="$1"
+  printf "\n%sDid it work as expected for %s? [y/N]%s " "${C_BOLD}" "${label}" "${C_RESET}"
+  local ans
+  read -r ans
+  case "${ans,,}" in
+    y|yes) RESULTS["${label}"]="pass"; pass_x "${label}";;
+    *)     RESULTS["${label}"]="fail"; fail_x "${label}";;
+  esac
+}
+
+pause() { printf "\n%spress Enter to continue ...%s " "${C_DIM}" "${C_RESET}"; read -r _; }
+
+# Make sure the binary is built. Skip if `atty` is already on PATH.
+ensure_atty() {
+  if command -v atty >/dev/null 2>&1; then
+    note "atty on PATH: $(command -v atty)"
+    return 0
+  fi
+  if [[ ! -x "${PATH_BASE}/zig-out/bin/atty" ]]; then
+    step "building atty (zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe)"
+    (cd "${PATH_BASE}" && zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe)
+  fi
+  export PATH="${PATH_BASE}/zig-out/bin:${PATH}"
+  note "using ${PATH_BASE}/zig-out/bin/atty"
+}
+
+ensure_atty_guard() {
+  if command -v atty-guard >/dev/null 2>&1; then
+    note "atty-guard on PATH: $(command -v atty-guard)"
+    return 0
+  fi
+  if [[ ! -x "${PATH_BASE}/atty-guard/target/release/atty-guard" ]]; then
+    step "building atty-guard (cargo build --release --features atoms-fetch)"
+    (cd "${PATH_BASE}/atty-guard" && cargo build --release --features atoms-fetch)
+  fi
+  export PATH="${PATH_BASE}/atty-guard/target/release:${PATH}"
+  note "using ${PATH_BASE}/atty-guard/target/release/atty-guard"
+}
+
+# Final aggregate across every section that ran.
+print_summary() {
+  section "Summary"
+  if (( ${#RESULTS[@]} == 0 )); then
+    note "no sections completed"
+    return 0
+  fi
+  local pass_count=0 fail_count=0 key
+  for key in "${!RESULTS[@]}"; do
+    if [[ "${RESULTS[$key]}" == "pass" ]]; then
+      pass_x "${key}"
+      ((pass_count++))
+    else
+      fail_x "${key}"
+      ((fail_count++))
+    fi
+  done
+  printf "\n%s%d passed, %d failed%s\n" "${C_BOLD}" "${pass_count}" "${fail_count}" "${C_RESET}"
+  (( fail_count == 0 ))
+}

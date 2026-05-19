@@ -1,0 +1,46 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# PR #122 — Ghost overlay tests.
+#
+# Walks the three ghost-suppression sequences from the bug report:
+#   1. Up + Ctrl-A + type: ghost SUPPRESSED (cursor mid-line).
+#   2. Up + Ctrl-A + End + type: ghost matches FULL recalled line.
+#   3. Up + Ctrl-A + Right ×N to EOL + backspace + type: ghost
+#      re-engages once cursor returns to EOL.
+
+import ^tests/common
+
+main::ghost() {
+  local -a args=("${args[@]:-}")
+  :args "Ghost overlay tests (PR #122)" "${@}"
+  section "PR #122 — Ghost overlay"
+
+  ensure_atty
+  step "open an atty session in another terminal:  atty bash"
+  step "make sure your shell has OSC 133 wired:    eval \"\$(atty init bash)\""
+  note "(skip if your .bashrc already does this)"
+  pause
+
+  step "1. type a known history command, press Enter"
+  step "2. press Arrow-Up to recall it"
+  step "3. press Ctrl-A (cursor jumps to BOL)"
+  step "4. start typing a new char"
+  expect "NO ghost text (cursor is mid-line)"
+  expect "recalled line tail stays visible to the right of the cursor"
+  confirm "Ctrl-A suppression"
+
+  step "1. Arrow-Up again to recall"
+  step "2. Ctrl-A then press End (or Ctrl-E)"
+  step "3. type a char"
+  expect "ghost text matches the FULL recalled line + the typed char"
+  expect "match is NOT just the last char"
+  confirm "Ctrl-A + End preserves recalled buffer"
+
+  step "1. Arrow-Up to recall"
+  step "2. Ctrl-A then Right-arrow N times until cursor reaches EOL"
+  step "3. press Backspace"
+  step "4. type a char"
+  expect "ghost text re-engages after backspace at EOL"
+  expect "match is full shortened line + char (not just the char)"
+  confirm "Right-stepping to EOL + backspace re-engages ghost"
+}

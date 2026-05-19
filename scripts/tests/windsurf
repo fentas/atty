@@ -1,0 +1,39 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# PR #124 — Windsurf integrated-terminal compatibility.
+#
+# Two regressions xterm.js's kitty-kbd over-reporting caused:
+#   - Space (kc=32 as `\x1b[32u`) silently dropped by atty's
+#     unmapped-CSI-u path. Now translated to `0x20`.
+#   - Super+V paste sends `\x1b[2;5~` (Ctrl+Insert); bash beeped
+#     and echoed `5~`. Now dropped by `isModifiedVtCsi`.
+
+import ^tests/common
+
+main::windsurf() {
+  local -a args=("${args[@]:-}")
+  :args "Windsurf compat tests (PR #124)" "${@}"
+  section "PR #124 — Windsurf integrated-terminal compatibility"
+
+  ensure_atty
+  warn_x "Windsurf-only — works as a sanity check in other terminals too"
+  step "open Windsurf's integrated terminal"
+  step "start an atty session:  atty bash"
+  pause
+
+  step "1. press Space at the prompt several times"
+  expect "spaces appear on the prompt (not silently swallowed)"
+  expect "typed line grows by one char each press"
+  confirm "Space-key handling"
+
+  step "1. select some text from the Windsurf editor pane"
+  step "2. press Super+V (or whatever Windsurf binds to paste)"
+  expect "selected text pastes into the atty prompt cleanly"
+  expect "no trailing \`5~\` chars left over on the prompt"
+  expect "no BEL beep from bash"
+  confirm "Super+V paste"
+
+  step "press Tab on a partial command; press Enter on an empty prompt"
+  expect "Tab + Enter still work — neither regressed by the CSI-u changes"
+  confirm "Tab + Enter regression check"
+}

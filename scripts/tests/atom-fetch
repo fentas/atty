@@ -1,0 +1,57 @@
+#!/usr/bin/env argsh
+# shellcheck shell=bash disable=SC2034
+# PR #121 + #125 — V2-I baked-in atom fetcher with all three
+# sources (GTFOBins + Sigma + LOLBAS).
+#
+# Validates the live one-shot fetch produces a non-trivial atom
+# corpus (~1000+ atoms) and that source subsetting works.
+
+import ^tests/common
+
+main::atom-fetch() {
+  local clean
+  local -a args=(
+    'clean|c:+'  'Drop the existing flagged_atoms.txt before fetching'
+    "${args[@]:-}"
+  )
+  :args "Atom-fetcher tests (PR #121 + #125)" "${@}"
+  section "PR #121 + #125 — V2-I baked-in atom fetcher"
+
+  ensure_atty_guard
+  note "this hits the live upstream — needs network"
+
+  local out_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/atty-guard"
+  local out_file="${out_dir}/flagged_atoms.txt"
+  if (( clean )) && [[ -f "${out_file}" ]]; then
+    step "removing existing ${out_file}"
+    rm -f "${out_file}"
+  fi
+
+  step "fetch all three sources (one-shot, no daemon):"
+  step "  atty-guard --update-atoms-now"
+  pause
+
+  if atty-guard --update-atoms-now 2>&1 | tee /tmp/atty-prs-fetch.log; then
+    pass_x "fetcher exited 0"
+  else
+    fail_x "fetcher exited non-zero"
+  fi
+  expect "stderr mentions 'atom refresh ok — N atoms across 3 sources'"
+  expect "N is at least ~1000 (Sigma + GTFOBins alone)"
+  expect "per-source breakdown shows non-zero for gtfobins, sigma, lolbas"
+
+  if [[ -f "${out_file}" ]]; then
+    local total
+    total=$(grep -cv '^#\|^$' "${out_file}" || echo 0)
+    note "atoms in ${out_file}: ${total}"
+    note "grep -c 'nc -e' ${out_file}:  $(grep -c 'nc -e' "${out_file}" || echo 0)"
+  else
+    fail_x "${out_file} does not exist"
+  fi
+  confirm "atom refresh"
+
+  step "smoke-test source subsetting:"
+  step "  atty-guard --update-atoms-now --atoms-sources gtfobins,sigma"
+  expect "report shows ONLY gtfobins + sigma in the per-source list"
+  confirm "source subsetting"
+}
