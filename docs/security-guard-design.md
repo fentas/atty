@@ -22,7 +22,8 @@ Status: **V1 + V2 baseline shipped (atty side + sidecar + ONNX SLM + eBPF + OSV)
 | V2-G      | AtomMatcher — Aho-Corasick over `flagged_atoms.txt` for thousand-scale patterns.       | #119  | ✅ merged       |
 | V2-H      | Sliding-context-window for SLM — `OnnxBackend` gets ±N bytes around the AC hit.        | #120  | ✅ merged       |
 | V2-I      | Baked-in atom fetcher — periodic refresh of `flagged_atoms.txt`; one-shot CLI + cron-style interval mode. GTFOBins shipped first.                  | #121  | ✅ merged       |
-| **V2-I-2**| **Sigma + LOLBAS sources** — extend the V2-I fetcher with the SigmaHQ Linux rule corpus and LOLBAS Windows-binary corpus. Scales the corpus from ~150 to thousands of atoms. | TBD   | 🟡 this PR     |
+| V2-I-2    | Sigma + LOLBAS sources — extend the V2-I fetcher with the SigmaHQ Linux rule corpus and LOLBAS Windows-binary corpus.                              | #125  | ✅ merged       |
+| **V2-J**  | **Threat-level accumulator** — multi-hit Tier-1 + Tier-2 SLM combined via independent-probability math; multi-atom commands surface a higher combined confidence. | TBD   | 🟡 this PR     |
 
 The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-G+H+I are the pattern-matching scale + intelligence-freshness improvements that close the gap between curated bundles and live disclosures.
 
@@ -53,6 +54,15 @@ The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable t
 - Feature-gated `atoms-fetch` so a build without the network deps still ships.
 
 After V2-G/H/I land, the threat-level accumulator across the AC + precise + SLM tiers becomes the natural follow-up (V2-J).
+
+### What V2-J brings (this PR)
+
+- `AtomMatcher::find_all` — walks every non-overlapping atom hit in a command, not just the first. With the Sigma + LOLBAS corpus (#125) a single command realistically carries 2-5 atoms.
+- `Tier1::classify_all` — collects EVERY signal that fired (regex layers + flagged-URL substrings + npm + bash-c-base64 + all atom hits) instead of returning the first match.
+- Independent-probability accumulator: `p_combined = 1 - prod(1 - p_i)`. Three atoms at 0.6 each combine to 0.936; a single regex hit at 1.0 stays 1.0. Saturates toward 1.0 monotonically as more signals fire.
+- SLM second-stage gating moved to `combined_conf < 0.9` — when Tier-1 already has enough signal we skip the ~50 ms SLM call.
+- Verdict policy: **no auto-`Block` escalation in this phase**. The accumulator boosts the confidence NUMBER (used by the banner UI + future trust-cache ranking) while the verdict still comes from the primary (highest-confidence) hit. Per-policy auto-block is deferred to a future PR with a user-configurable threshold.
+- Banner reason for multi-hit: `"N signals fired: <reason1>; <reason2>; ..."` — each layer's attribution preserved.
 
 ## TL;DR — three-component architecture
 
