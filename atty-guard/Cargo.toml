@@ -15,16 +15,27 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 clap = { version = "4", features = ["derive"] }
-# Pulled in only when --features ebpf is set. Implementation lands
-# with the V2-B follow-up; the feature gate exists today so the
-# `EbpfState` skeleton in `src/ebpf.rs` is visible + reviewable.
+# V2-B eBPF loader. See `ebpf/README.md`.
 libbpf-rs = { version = "0.24.5", optional = true }
+# V2-C Tier-2 ONNX SLM backend. `tract-onnx` is pure-Rust —
+# no `libonnxruntime.so` dep, no bindgen compile flakiness, fewer
+# moving parts. Slightly slower than ort against the C++ runtime
+# but well inside our ≤15 ms inference budget for SecureBERT 2.0
+# and Qwen2.5-Coder. tokenizers stays pure-Rust for HF-style
+# tokeniser JSON.
+tract-onnx = { version = "0.21", optional = true, default-features = false }
+tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
+toml = { version = "0.8", optional = true }
 
 [features]
 default = []
 # Build the V2-B userspace eBPF loader. Requires libbpf-dev on the
 # build host and CAP_BPF at runtime. See `ebpf/README.md`.
 ebpf = ["dep:libbpf-rs"]
+# Build the V2-C ONNX Tier-2 backend (SecureBERT 2.0 / Qwen2.5-Coder
+# / any HF-tokeniser ONNX classifier). Needs onnxruntime installed
+# on the runtime host. See `docs/security-guard-slm.md`.
+tier2-onnx = ["dep:tract-onnx", "dep:tokenizers", "dep:toml"]
 
 [dev-dependencies]
 
