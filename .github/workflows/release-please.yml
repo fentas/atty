@@ -57,6 +57,14 @@ jobs:
         run: |
           set -euo pipefail
           ver=$(jq -r '.["."]' .release-please-manifest.json)
+          # Sanity-check the manifest before doing anything stateful.
+          # A corrupt or empty manifest would emit `null`, and the
+          # downstream tag-push would silently create `vnull` — bad.
+          if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].+)?$ ]]; then
+            echo "error: invalid manifest version '$ver'" >&2
+            echo "       .release-please-manifest.json may be corrupt or empty" >&2
+            exit 1
+          fi
           tag="v${ver}"
 
           if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null 2>&1; then
