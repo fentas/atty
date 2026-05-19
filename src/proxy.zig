@@ -827,16 +827,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // been painted yet.
                             //
                             // Suppress when the cursor isn't at EOL
-                            // (`cursor_moved` is sticky after a
-                            // Left/Home/etc. CSI). Right-arrow is
-                            // bound to ghost_accept by default —
-                            // without this gate, navigating back
-                            // toward EOL would paste history-matched
-                            // bytes mid-line instead of moving the
-                            // cursor. The render path already
+                            // (`cursor_moved == cursor_pos != len`,
+                            // set by Left/Home/Ctrl-A and cleared when
+                            // cursor returns to len via End/Right/etc.).
+                            // Right-arrow is bound to ghost_accept by
+                            // default — without this gate, navigating
+                            // back toward EOL would paste history-
+                            // matched bytes mid-line instead of moving
+                            // the cursor. The render path already
                             // suppresses ghost paint on cursor_moved
-                            // (see `renderGhost`); accept must
-                            // mirror it.
+                            // (see `renderGhost`); accept must mirror it.
                             //
                             // gatherGhostText returns the *trailing*
                             // portion (what would be painted after
