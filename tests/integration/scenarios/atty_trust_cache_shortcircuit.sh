@@ -19,7 +19,7 @@ build_atty
 TRUST_FILE="/tmp/atty-trust-${RANDOM}.txt"
 mkdir -p "$REPO_ROOT/tests/integration/fixtures/build-tmp"
 ATTY_CONFIG="tests/integration/fixtures/build-tmp/atty-trust.zig"
-trap 'rm -f "$REPO_ROOT/$ATTY_CONFIG" "$TRUST_FILE"; stop_guard' EXIT
+trap 'rm -f "$BUILD_LOG" "$REPO_ROOT/$ATTY_CONFIG" "$TRUST_FILE"; stop_guard' EXIT
 
 cat > "$REPO_ROOT/$ATTY_CONFIG" <<ZIG
 const atty = @import("atty");
@@ -44,7 +44,7 @@ ZIG
 }
 
 TMP_OUT=$(mktemp)
-trap 'rm -f "$REPO_ROOT/$ATTY_CONFIG" "$TRUST_FILE" "$TMP_OUT"; stop_guard' EXIT
+trap 'rm -f "$BUILD_LOG" "$REPO_ROOT/$ATTY_CONFIG" "$TRUST_FILE" "$TMP_OUT"; stop_guard' EXIT
 
 # Phase 1: type flagged command, press `t` to trust permanently.
 {
@@ -69,7 +69,7 @@ fi
 # Phase 2: type the SAME command again — should NOT arm the banner
 # (trust short-circuit). Capture output, verify no banner text.
 TMP_OUT2=$(mktemp)
-trap 'rm -f "$REPO_ROOT/$ATTY_CONFIG" "$TRUST_FILE" "$TMP_OUT" "$TMP_OUT2"; stop_guard' EXIT
+trap 'rm -f "$BUILD_LOG" "$REPO_ROOT/$ATTY_CONFIG" "$TRUST_FILE" "$TMP_OUT" "$TMP_OUT2"; stop_guard' EXIT
 
 {
     sleep 0.5

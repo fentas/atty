@@ -152,6 +152,13 @@ classify() {
     # Generous timeout — covers ONNX SLM cold-start (~5-10 s on the
     # first request after daemon start) and V2-F OSV.dev round-trips
     # (up to ~5 s on cool DNS). Override with `$ATTY_CLASSIFY_TIMEOUT`.
+    #
+    # `socat -t N` is the half-close stay-alive timeout: how long
+    # socat keeps one direction open after the OTHER side EOFs. Since
+    # `printf '%s\n' | socat …` EOFs stdin immediately after writing
+    # the one-line request, `-t` effectively bounds how long socat
+    # waits for the daemon's reply before closing. Works for this
+    # one-shot RPC shape; would be wrong for a long-lived session.
     local t="${ATTY_CLASSIFY_TIMEOUT:-10}"
     _LAST_RESPONSE=$(printf '%s\n' "$req" | socat -t "$t" - "UNIX-CONNECT:$_GUARD_SOCKET" 2>/dev/null || true)
     if [ -z "$_LAST_RESPONSE" ]; then

@@ -33,23 +33,20 @@ probe() {
         return
     fi
 
-    # 2. Inject break with revert-on-failure protection. Without
-    # this, a bad sed/python pattern leaves `.probe-bak` AND a
-    # half-modified source file in tree — the next probe's `cp` then
-    # overwrites the backup with the corrupted file and the source
-    # is unrecoverable without `git checkout`. Trap-driven revert
-    # makes a failed injection a clean rollback.
+    # 2. Inject break with explicit revert-on-failure. Without this,
+    # a bad sed/python pattern would leave `.probe-bak` AND a
+    # half-modified source in tree — the next probe's `cp` then
+    # overwrites the backup with the corrupted file. We don't use an
+    # `ERR` trap here: `if ! eval ...` disables Bash's `set -e`
+    # behaviour for the wrapped command, so we check the exit status
+    # explicitly and revert on the early-exit branch.
     echo "  inject: $injection_apply"
     cp "$injection_file" "$injection_file.probe-bak"
-    local revert='mv "$injection_file.probe-bak" "$injection_file"'
-    trap "$revert" ERR
     if ! eval "$injection_apply"; then
-        trap - ERR
-        eval "$revert"
+        mv "$injection_file.probe-bak" "$injection_file"
         RESULTS+=("BAD-PROBE: $label — injection step failed")
         return
     fi
-    trap - ERR
 
     # 3. Rebuild affected component. `touch` so cargo doesn't no-op
     # when the file's contents revert to a known-cached state (binary

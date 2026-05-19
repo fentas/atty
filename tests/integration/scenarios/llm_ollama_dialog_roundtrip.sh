@@ -42,7 +42,7 @@ build_atty
 # so we write into the integration fixtures dir (gitignored).
 mkdir -p "$REPO_ROOT/tests/integration/fixtures/build-tmp"
 CONFIG_FILE="tests/integration/fixtures/build-tmp/ollama-dialog.zig"
-trap 'rm -f "$REPO_ROOT/$CONFIG_FILE"' EXIT
+trap 'rm -f "$BUILD_LOG" "$REPO_ROOT/$CONFIG_FILE"' EXIT
 
 cat > "$REPO_ROOT/$CONFIG_FILE" <<ZIG
 const atty = @import("atty");
@@ -61,7 +61,7 @@ pub const statusbar: atty.StatusBar = .{
 ZIG
 
 # Rebuild atty with this config. config path must be repo-relative.
-(cd "$REPO_ROOT" && zig build -Doptimize=ReleaseSafe -Dconfig="$CONFIG_FILE" >/tmp/atty-ollama-build.log 2>&1) || {
+(cd "$REPO_ROOT" && zig build -Doptimize=ReleaseSafe -Dconfig="$CONFIG_FILE" >"$BUILD_LOG" 2>&1) || {
     cat "$BUILD_LOG" >&2
     fail "atty build with Ollama config failed"
 }

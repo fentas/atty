@@ -14,7 +14,7 @@ build_atty
 # Write atty config that points at the test daemon's socket.
 mkdir -p "$REPO_ROOT/tests/integration/fixtures/build-tmp"
 CONFIG_FILE="tests/integration/fixtures/build-tmp/atty-warn.zig"
-trap 'rm -f "$REPO_ROOT/$CONFIG_FILE"; stop_guard' EXIT
+trap 'rm -f "$BUILD_LOG" "$REPO_ROOT/$CONFIG_FILE"; stop_guard' EXIT
 
 cat > "$REPO_ROOT/$CONFIG_FILE" <<ZIG
 const atty = @import("atty");
@@ -39,7 +39,7 @@ ZIG
 }
 
 TMP_OUT=$(mktemp)
-trap 'rm -f "$REPO_ROOT/$CONFIG_FILE" "$TMP_OUT"; stop_guard' EXIT
+trap 'rm -f "$BUILD_LOG" "$REPO_ROOT/$CONFIG_FILE" "$TMP_OUT"; stop_guard' EXIT
 
 {
     sleep 0.5

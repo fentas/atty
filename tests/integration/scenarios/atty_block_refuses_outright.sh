@@ -19,7 +19,7 @@ build_atty
 
 mkdir -p "$REPO_ROOT/tests/integration/fixtures/build-tmp"
 ATTY_CONFIG="tests/integration/fixtures/build-tmp/atty-block.zig"
-trap 'rm -f "$REPO_ROOT/$ATTY_CONFIG" "$GUARD_CONFIG"; stop_guard' EXIT
+trap 'rm -f "$BUILD_LOG" "$REPO_ROOT/$ATTY_CONFIG" "$GUARD_CONFIG"; stop_guard' EXIT
 
 cat > "$REPO_ROOT/$ATTY_CONFIG" <<ZIG
 const atty = @import("atty");
@@ -44,7 +44,7 @@ ZIG
 }
 
 TMP_OUT=$(mktemp)
-trap 'rm -f "$REPO_ROOT/$ATTY_CONFIG" "$GUARD_CONFIG" "$TMP_OUT"; stop_guard' EXIT
+trap 'rm -f "$BUILD_LOG" "$REPO_ROOT/$ATTY_CONFIG" "$GUARD_CONFIG" "$TMP_OUT"; stop_guard' EXIT
 
 {
     sleep 0.5
