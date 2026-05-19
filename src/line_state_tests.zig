@@ -210,6 +210,86 @@ test "mid-line append/backspace/killWord markUncertain instead of corrupting buf
     try std.testing.expectEqualSlices(u8, "hello world", l.current());
 }
 
+test "uncertain + DIFFERENT content + Tab + sync still clamps cursor_pos (Tab-with-completion path)" {
+    // Counterpart to the no-match guard below: Tab WITH a completion
+    // that grew the buffer falls through to the rewrite branch and
+    // clamps cursor_pos = new_len. Correct for the typical bash
+    // completion shape (insert at cursor, cursor ends up at the end
+    // of the inserted text — = new_len when the user didn't move
+    // past EOL after Arrow-Up). Without this test a future "preserve
+    // cursor_pos always" regression would silently break the common
+    // Tab-completion path.
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A");
+    l.syncFromCapture("git st");
+    _ = l.applyInput("\x09"); // Tab → markUncertain
+    try std.testing.expect(l.uncertain);
+
+    l.syncFromCapture("git status");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqual(@as(usize, 10), l.cursor_pos);
+    try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqualSlices(u8, "git status", l.current());
+}
+
+test "uncertain + same content + lone ESC + sync preserves cursor_pos (ESC-no-content guard)" {
+    // Lone ESC (0x1B with no `[` follower) also calls markUncertain;
+    // same shape as Tab-no-match. If the next syncFromCapture has
+    // unchanged content, the cursor must stay mid-line.
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A");
+    l.syncFromCapture("which pvcontrol");
+
+    _ = l.applyInput("\x1B[D"); // Left
+    _ = l.applyInput("\x1B[D"); // Left → cursor_pos = 13
+    try std.testing.expectEqual(@as(usize, 13), l.cursor_pos);
+
+    _ = l.applyInput("\x1B"); // lone ESC → markUncertain
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqual(@as(usize, 13), l.cursor_pos);
+
+    l.syncFromCapture("which pvcontrol");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 13), l.cursor_pos);
+}
+
+test "uncertain + same content + Tab + sync preserves cursor_pos (Tab-no-match guard)" {
+    // User-reported: Arrow-Up → Arrow-Left × N → Tab (no completion
+    // match) → ghost text appeared mid-line, overlaying the text
+    // to the right of the cursor. Root cause: Tab → markUncertain;
+    // the proxy then called syncFromCapture with the unchanged OSC
+    // 133 input region, which used to unconditionally clamp
+    // cursor_pos = n (= EOL) even when the buffer hadn't changed.
+    // The "buffer-already-matches" early-return now clears
+    // `uncertain` but preserves `cursor_pos` so the cursor_moved
+    // gate keeps ghost suppressed until the user actually walks
+    // back to EOL.
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A"); // Arrow Up
+    l.syncFromCapture("which pvcontrol"); // OSC 133 recall sync
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expect(!l.cursor_moved);
+
+    _ = l.applyInput("\x1B[D"); // Left
+    _ = l.applyInput("\x1B[D"); // Left
+    _ = l.applyInput("\x1B[D"); // Left → cursor_pos = 12
+    try std.testing.expectEqual(@as(usize, 12), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+
+    _ = l.applyInput("\x09"); // Tab → markUncertain
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqual(@as(usize, 12), l.cursor_pos); // cursor untouched
+
+    // Shell didn't insert anything (no completion match). OSC 133
+    // input region still holds the recalled line. Sync fires
+    // because `uncertain` triggered branch (a) of the gate.
+    l.syncFromCapture("which pvcontrol");
+    try std.testing.expect(!l.uncertain); // sync cleared it
+    try std.testing.expect(l.cursor_moved); // cursor STILL mid-line
+    try std.testing.expectEqual(@as(usize, 12), l.cursor_pos);
+}
+
 test "uncertain + same content + Left + sync preserves cursor_pos (mid-typing redraw guard)" {
     // The proxy-side gate (`osc_input.len >= line.len` OR
     // `uncertain`) lets bash's mid-typing PS1 redraws sync back —
@@ -600,15 +680,18 @@ test "syncFromCapture is a no-op when buffer is already in sync" {
     try std.testing.expectEqual(gen_before, l.generation);
 }
 
-test "syncFromCapture still bumps generation when uncertain was true" {
+test "syncFromCapture clears uncertain without bumping generation when buffer matches" {
     var l = LineState{};
     _ = l.applyInput("ls\x1B[A");
     // Buffer is "ls" + uncertain=true. Sync with the same bytes —
-    // content matches but uncertainty doesn't, so we must repaint
-    // and recompute.
+    // content matches; clear uncertain but DON'T bump generation
+    // (no buffer change → no provider recompute needed) and DON'T
+    // clamp cursor_pos (the OSC stream carries no cursor info, so
+    // forcing EOL would falsely re-engage ghost when the user
+    // was mid-line — see the Tab-no-match regression test).
     const gen_before = l.generation;
     l.syncFromCapture("ls");
-    try std.testing.expect(l.generation != gen_before);
+    try std.testing.expectEqual(gen_before, l.generation);
     try std.testing.expect(!l.uncertain);
 }
 
