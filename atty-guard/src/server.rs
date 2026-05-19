@@ -124,7 +124,13 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
         let envelope: serde_json::Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(e) => {
-                write_response(&mut writer, 0, ResponseBody::Error { message: format!("invalid JSON: {e}") })?;
+                write_response(
+                    &mut writer,
+                    0,
+                    ResponseBody::Error {
+                        message: format!("invalid JSON: {e}"),
+                    },
+                )?;
                 continue;
             }
         };
@@ -133,7 +139,13 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
         let request: Request = match serde_json::from_value(envelope.clone()) {
             Ok(r) => r,
             Err(e) => {
-                write_response(&mut writer, id, ResponseBody::Error { message: format!("invalid request: {e}") })?;
+                write_response(
+                    &mut writer,
+                    id,
+                    ResponseBody::Error {
+                        message: format!("invalid request: {e}"),
+                    },
+                )?;
                 continue;
             }
         };
@@ -198,7 +210,9 @@ fn dispatch(state: &State, req: Request) -> ResponseBody {
                         },
                         category: Category::PidHighThreat,
                         confidence: 1.0,
-                        reason: "this PID's process tree was marked high-risk by an earlier command".into(),
+                        reason:
+                            "this PID's process tree was marked high-risk by an earlier command"
+                                .into(),
                         matched: command.clone(),
                     };
                 }
@@ -236,7 +250,9 @@ fn extract_npm_install_pkg(line: &str) -> Option<&str> {
         ("yarn ", "add"),
     ];
     for (cmd, verb) in verbs {
-        let Some(cmd_at) = line.find(cmd) else { continue };
+        let Some(cmd_at) = line.find(cmd) else {
+            continue;
+        };
         if cmd_at != 0 {
             let prev = line.as_bytes()[cmd_at - 1];
             if !matches!(prev, b' ' | b';' | b'&' | b'|') {
@@ -427,7 +443,10 @@ mod tests {
 
     #[test]
     fn extract_npm_install_pkg_bare() {
-        assert_eq!(extract_npm_install_pkg("npm install lodash"), Some("lodash"));
+        assert_eq!(
+            extract_npm_install_pkg("npm install lodash"),
+            Some("lodash")
+        );
     }
 
     #[test]

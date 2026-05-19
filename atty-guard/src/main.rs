@@ -150,13 +150,19 @@ fn parse_interval(s: &str) -> Result<Option<std::time::Duration>, String> {
         'm' => 60,
         'h' => 3600,
         'd' => 86400,
-        other => return Err(format!("atoms-update-interval suffix `{other}` — expected s/m/h/d")),
+        other => {
+            return Err(format!(
+                "atoms-update-interval suffix `{other}` — expected s/m/h/d"
+            ))
+        }
     };
     let secs = n
         .checked_mul(mult)
         .ok_or_else(|| format!("atoms-update-interval `{s}` overflows — pick a smaller value"))?;
     if secs < 60 {
-        return Err(format!("atoms-update-interval `{s}` below 60s — be polite to upstream"));
+        return Err(format!(
+            "atoms-update-interval `{s}` below 60s — be polite to upstream"
+        ));
     }
     Ok(Some(std::time::Duration::from_secs(secs)))
 }
@@ -231,13 +237,17 @@ fn main() -> std::io::Result<()> {
             }
             Err(e) => {
                 eprintln!("atty-guard: atom refresh failed — {e}");
-                Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
             }
         };
     }
 
     let socket = cli.socket.unwrap_or_else(default_socket_path);
-    let backend = classifier::BackendKind::parse(&cli.tier2).unwrap_or(classifier::BackendKind::Stub);
+    let backend =
+        classifier::BackendKind::parse(&cli.tier2).unwrap_or(classifier::BackendKind::Stub);
 
     // Optional TOML config — only used by the ONNX backend today,
     // but the loader is generic so future Tier-2 backends + V2-F
@@ -246,7 +256,10 @@ fn main() -> std::io::Result<()> {
         Some(p) => match config::load(p) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("atty-guard: --config {} ({e}) — using defaults", p.display());
+                eprintln!(
+                    "atty-guard: --config {} ({e}) — using defaults",
+                    p.display()
+                );
                 config::Config::default()
             }
         },

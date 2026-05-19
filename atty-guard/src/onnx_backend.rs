@@ -127,7 +127,11 @@ mod with_tract {
             })
         }
 
-        fn infer_with_hint(&self, command: &str, hint_offset: Option<usize>) -> Result<[f32; 3], String> {
+        fn infer_with_hint(
+            &self,
+            command: &str,
+            hint_offset: Option<usize>,
+        ) -> Result<[f32; 3], String> {
             // V2-H sliding-context-window. When an upstream Tier-1
             // matcher (AtomMatcher / regex / flagged-URL) reported
             // a localised hit, we slice [-64, +256] BYTES around the

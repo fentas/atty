@@ -108,16 +108,10 @@ pub struct ClassifyResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseBody {
     Ok,
-    Health {
-        version: String,
-    },
+    Health { version: String },
     Classify(ClassifyResult),
-    ThreatLevel {
-        level: ThreatLevel,
-    },
-    Error {
-        message: String,
-    },
+    ThreatLevel { level: ThreatLevel },
+    Error { message: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

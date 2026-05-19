@@ -111,11 +111,9 @@ impl AtomMatcher {
         self.ac
             .find_iter(input)
             .map(|m| {
-                let atom = self
-                    .atoms
-                    .get(m.pattern().as_usize())
-                    .copied()
-                    .expect("aho-corasick pattern id out of bounds of self.atoms — invariant broken");
+                let atom = self.atoms.get(m.pattern().as_usize()).copied().expect(
+                    "aho-corasick pattern id out of bounds of self.atoms — invariant broken",
+                );
                 AtomHit {
                     atom,
                     byte_offset: m.start(),

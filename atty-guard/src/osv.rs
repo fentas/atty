@@ -80,7 +80,10 @@ pub enum LookupError {
 impl std::fmt::Display for LookupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LookupError::FeatureNotBuilt => write!(f, "OSV feature not built — rebuild with --features osv-live"),
+            LookupError::FeatureNotBuilt => write!(
+                f,
+                "OSV feature not built — rebuild with --features osv-live"
+            ),
             LookupError::NetworkError(s) => write!(f, "OSV network error: {s}"),
             LookupError::ParseError(s) => write!(f, "OSV parse error: {s}"),
         }
@@ -308,7 +311,10 @@ mod tests {
                 "summary": "Supply-chain attack via compromised maintainer"
             }]
         });
-        assert!(matches!(parse_osv_response(&json), OsvVerdict::Malicious(_)));
+        assert!(matches!(
+            parse_osv_response(&json),
+            OsvVerdict::Malicious(_)
+        ));
     }
 
     #[test]

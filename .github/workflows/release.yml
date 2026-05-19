@@ -102,11 +102,119 @@ jobs:
             dist/atty-${{ matrix.asset_arch }}.sha256
 
   # ---------------------------------------------------------------------------
+  # atty-guard sidecar binaries. Same musl cross-targets as `binaries`,
+  # built with cargo-zigbuild so the existing zig toolchain doubles as
+  # the Rust linker — no QEMU, no system musl, no host toolchain juggle.
+  #
+  # Features baked in: tier2-onnx (pure-Rust tract) + osv-live (ureq)
+  # + atoms-fetch (ureq+flate2+tar+serde_yaml). eBPF is excluded —
+  # `libbpf-rs` needs libbpf headers at build time and CAP_BPF at
+  # runtime, both of which warrant a separate opt-in flavour rather
+  # than the default release artifact. Users who want eBPF can
+  # `cd atty-guard && cargo build --release --features ebpf` locally.
+  # ---------------------------------------------------------------------------
+  guard-binaries:
+    name: build atty-guard (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset_arch: linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            asset_arch: linux-aarch64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: atty-guard
+          key: ${{ matrix.target }}
+
+      # Pin cargo-zigbuild to a known-good major. Without a version
+      # constraint a breaking release at any point silently changes
+      # the linker behaviour of a tagged atty release — bad for
+      # reproducibility. `taiki-e/install-action` is the canonical
+      # CI shortcut and respects the version pin.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.22
+
+      - name: cargo zigbuild atty-guard
+        working-directory: atty-guard
+        run: |
+          cargo zigbuild --release --target ${{ matrix.target }} \
+              --features tier2-onnx,osv-live,atoms-fetch
+
+      - name: package
+        id: pkg
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stem="atty-guard-${version}-${{ matrix.asset_arch }}"
+          unver="atty-guard-${{ matrix.asset_arch }}"
+          bin_src="atty-guard/target/${{ matrix.target }}/release/atty-guard"
+
+          mkdir -p dist
+          install -m 0755 "$bin_src" "dist/atty-guard"
+
+          tar -C dist -czf "dist/${stem}.tar.gz" atty-guard
+          ( cd dist && sha256sum "${stem}.tar.gz" > "${stem}.tar.gz.sha256" )
+
+          install -m 0755 "$bin_src" "dist/${stem}"
+          ( cd dist && sha256sum "${stem}" > "${stem}.sha256" )
+
+          install -m 0755 "$bin_src" "dist/${unver}"
+          ( cd dist && sha256sum "${unver}" > "${unver}.sha256" )
+
+          rm dist/atty-guard
+
+          {
+            echo "stem=${stem}"
+            echo "unver=${unver}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Native-only smoke test. The aarch64 binary is cross-built but
+      # the runner is amd64 — we'd need QEMU to exec it, which the
+      # existing atty pattern also avoids. Aarch64 ships un-smoke-
+      # tested; if it links wrong, the link step would have errored.
+      - name: smoke test (${{ matrix.target }})
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          # Exec the EXACT stem path — globbing matched both the
+          # versioned binary and the unversioned alias, and bash
+          # passed the second match as argv[1] making clap exit
+          # non-zero on the "unexpected argument".
+          chmod +x dist/${{ steps.pkg.outputs.stem }}
+          ./dist/${{ steps.pkg.outputs.stem }} --version | grep -E '^atty-guard '
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: atty-guard-${{ matrix.asset_arch }}
+          path: |
+            dist/atty-guard-*.tar.gz
+            dist/atty-guard-*.tar.gz.sha256
+            dist/atty-guard-*-${{ matrix.asset_arch }}
+            dist/atty-guard-*-${{ matrix.asset_arch }}.sha256
+            dist/atty-guard-${{ matrix.asset_arch }}
+            dist/atty-guard-${{ matrix.asset_arch }}.sha256
+
+  # ---------------------------------------------------------------------------
   # Publish artifacts to the GitHub Release once every binary is built.
   # ---------------------------------------------------------------------------
   publish:
     name: attach release assets
-    needs: binaries
+    needs: [binaries, guard-binaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
@@ -119,11 +227,17 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
+          # `atty-*` globs naturally catch BOTH `atty-*` and
+          # `atty-guard-*` versioned filenames. Only the bare
+          # unversioned aliases need their own line — those use
+          # the literal prefix `atty-linux-` / `atty-guard-linux-`
+          # which doesn't share a glob.
           files: |
             dist/atty-*.tar.gz
             dist/atty-*.tar.gz.sha256
             dist/atty-*-linux-*
             dist/atty-linux-*
+            dist/atty-guard-linux-*
           generate_release_notes: false
           fail_on_unmatched_files: true
 

