@@ -403,24 +403,27 @@ mod imp {
     /// We extract every `code` scalar, take its first line, trim.
     /// Atom rules (≥3 chars, no leading `#`) apply at write time.
     fn extract_gtfobins_atoms(content: &str, atoms: &mut BTreeSet<String>) {
-        // Front-matter must be `---\n…---\n` Jekyll-style. Tighter
-        // parsing than "split on the first `---`" — without the
-        // close fence (or with garbage trailing the YAML) the whole
-        // markdown body would be handed to serde_yaml. Bail clean
-        // on missing fence: the upstream file is malformed and we
-        // shouldn't pretend to parse atoms from prose.
+        // Front-matter starts with `---\n`. Upstream GTFOBins files
+        // (verified 2026-05-19 on GTFOBins/GTFOBins.github.io@master)
+        // are PURE YAML wrapped in a leading `---\n` — there's no
+        // closing fence, and the rest of the file is the structured
+        // YAML body Jekyll renders. The earlier "require closing
+        // fence" check produced 0 atoms across the entire corpus
+        // because the close marker never existed. Now: strip the
+        // leading fence, treat the rest as YAML. If a closing
+        // `\n---\n` IS present (e.g. a future file with trailing
+        // prose), truncate at it.
         let stripped = content
             .strip_prefix("---\n")
             .or_else(|| content.strip_prefix("---\r\n"));
         let Some(rest) = stripped else { return };
-        let close_marker = if let Some(at) = rest.find("\n---\n") {
-            (at, 5)
+        let yaml = if let Some(at) = rest.find("\n---\n") {
+            &rest[..at]
         } else if let Some(at) = rest.find("\n---\r\n") {
-            (at, 6)
+            &rest[..at]
         } else {
-            return;
+            rest
         };
-        let yaml = &rest[..close_marker.0];
         let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml) {
             Ok(v) => v,
             Err(_) => return,

@@ -38,7 +38,7 @@ ifdef CONFIG
 ZIG_CONFIG_ARG := -Dconfig=$(CONFIG)
 endif
 
-.PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update run \
+.PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
         clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard
 
@@ -59,7 +59,9 @@ help:
 	@printf "  test-guard      Run only atty-guard unit tests (default + feature-on).\n"
 	@printf "  itest           Run atty integration tests (real PTY).\n"
 	@printf "  e2e             Run end-to-end scenarios under tests/e2e/.\n"
-	@printf "  e2e-update      Refresh e2e goldens from current output.\n\n"
+	@printf "  e2e-update      Refresh e2e goldens from current output.\n"
+	@printf "  integration-test       Run atty ↔ guard ↔ SLM integration tests (no external deps).\n"
+	@printf "  integration-test-full  Same + Ollama / ONNX / atom-fetcher scenarios (skip when deps absent).\n\n"
 	@printf "Install (default = both subprojects)\n"
 	@printf "  install         Copy atty binary to \$$PREFIX/bin AND run atty-guard installer.\n"
 	@printf "  install-atty    Only copy zig-out/bin/atty to \$$PREFIX/bin (default: ~/.local/bin).\n"
@@ -116,6 +118,16 @@ e2e:
 # Refresh goldens to match current output. Review the diff before committing.
 e2e-update:
 	$(ZIG) build e2e -Dtarget=$(TARGET) -- --update
+
+# Integration suite: end-to-end scenarios that boot a real atty-guard
+# daemon (+ optionally talk to Ollama and pull atom corpora over the
+# network). Lives in `tests/integration/`. See its README for the
+# scenario matrix.
+integration-test:
+	tests/integration/run.sh quick
+
+integration-test-full:
+	tests/integration/run.sh full
 
 run: build-atty
 	./zig-out/bin/atty
