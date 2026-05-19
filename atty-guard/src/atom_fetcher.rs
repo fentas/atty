@@ -363,10 +363,13 @@ mod imp {
         path_str.contains("/rules/linux/") && path_str.ends_with(".yml")
     }
 
-    /// Layout: `LOLBAS-master/yml/{OSBinaries,OSScripts,OSLibraries}/<name>.yml`.
-    /// All three subdirs are interesting — binaries are the canonical
-    /// LOLBAS, scripts are powershell/cscript dispatchers, libraries
-    /// are loadable DLLs commonly side-loaded via legitimate hosts.
+    /// Layout: `LOLBAS-master/yml/{OSBinaries,OSScripts,OSLibraries,
+    /// OtherMSBinaries}/<name>.yml`. All four subdirs are
+    /// interesting — binaries are the canonical LOLBAS, scripts are
+    /// powershell/cscript dispatchers, libraries are loadable DLLs
+    /// commonly side-loaded via legitimate hosts, OtherMSBinaries
+    /// are Microsoft-shipped utilities that fall outside the OS
+    /// proper (Office runtimes, dev tools, etc.).
     fn is_lolbas_binary_yml(path: &std::path::Path, etype: tar::EntryType) -> bool {
         if !etype.is_file() {
             return false;
@@ -378,6 +381,7 @@ mod imp {
         path_str.contains("/yml/OSBinaries/")
             || path_str.contains("/yml/OSScripts/")
             || path_str.contains("/yml/OSLibraries/")
+            || path_str.contains("/yml/OtherMSBinaries/")
     }
 
     /// Parse one GTFOBins markdown file's YAML front-matter and
@@ -743,14 +747,31 @@ Commands:
         }
 
         #[test]
-        fn is_lolbas_binary_yml_covers_all_three_subdirs() {
+        fn is_lolbas_binary_yml_covers_all_four_subdirs() {
             use std::path::Path;
             let f = tar::EntryType::Regular;
             assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSBinaries/certutil.yml"), f));
             assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSScripts/cscript.yml"), f));
             assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OSLibraries/comsvcs.yml"), f));
+            assert!(is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/OtherMSBinaries/devtoolslauncher.yml"), f));
             assert!(!is_lolbas_binary_yml(Path::new("LOLBAS-master/README.md"), f));
             assert!(!is_lolbas_binary_yml(Path::new("LOLBAS-master/yml/index.json"), f));
+        }
+
+        #[test]
+        fn extractors_handle_malformed_yaml_cleanly() {
+            // Both Sigma and LOLBAS parsers must NOT panic on
+            // malformed YAML — return zero atoms via the early
+            // Err arm in `serde_yaml::from_str`.
+            let mut atoms = BTreeSet::new();
+            extract_sigma_atoms("not: [valid: yaml", &mut atoms);
+            assert!(atoms.is_empty());
+            extract_lolbas_atoms("Commands: [not-a-list-yaml: blah:", &mut atoms);
+            assert!(atoms.is_empty());
+            // Also: empty input.
+            extract_sigma_atoms("", &mut atoms);
+            extract_lolbas_atoms("", &mut atoms);
+            assert!(atoms.is_empty());
         }
 
         #[test]
