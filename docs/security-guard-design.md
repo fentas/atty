@@ -1,34 +1,57 @@
 # security guard — design + status
 
-Status: **V1 shipped, V2 in progress.** V2-A (sidecar daemon + UDS + Tier-1 mirror + threat map) merged 2026-05-18. V2-D (atty UDS client) merged 2026-05-19. V2-B (eBPF LSM) and V2-C (encoder SLM) still ahead.
+Status: **V1 + V2 baseline shipped (atty side + sidecar + ONNX SLM + eBPF + OSV).** Next push: a `aho-corasick`-driven AtomMatcher Tier-1 layer (V2-G), context-window slicing for the SLM (V2-H), and a baked-in atom fetcher that periodically pulls IOCs from Sigma / GTFOBins / LOLBAS / OSV into `flagged_atoms.txt` (V2-I).
 
 ## Implementation status
 
-| Slice  | What lands                                                                              | PR     | Status         |
-|--------|-----------------------------------------------------------------------------------------|--------|----------------|
-| V1     | `src/modules/security_guard.zig` — Tier-1 in-proc patterns + trust cache + confirm UX. | #104   | ✅ merged       |
-| V2-A   | `atty-guard/` Rust sidecar — UDS server, JSON-line protocol, Tier-1 mirror, threat map. | #105   | ✅ merged       |
-| V2-D   | `src/modules/security_guard/uds_client.zig` — atty queries the sidecar before in-proc.  | #106   | ✅ merged       |
-| V2-B   | `aya-rs` (or libbpf-rs) LSM hook + ringbuf consumer + real BPF threat map.              | TBD    | ⏳ not started |
-| V2-C   | ONNX runtime + encoder-SLM (SecureBERT 2.0 / CodeBERT) in `classifier::tier2`.          | TBD    | ⏳ not started |
-| V2-E   | `atty init`-driven sidecar auto-launch + systemd-user unit packaging.                   | TBD    | ⏳ not started |
+| Slice  | What lands                                                                              | PR    | Status         |
+|--------|-----------------------------------------------------------------------------------------|-------|----------------|
+| V1     | `src/modules/security_guard.zig` — Tier-1 in-proc patterns + trust cache + confirm UX. | #104  | ✅ merged       |
+| V2-A   | `atty-guard/` Rust sidecar — UDS server, JSON-line protocol, Tier-1 mirror, threat map. | #105  | ✅ merged       |
+| V2-D   | `src/modules/security_guard/uds_client.zig` — atty queries the sidecar before in-proc.  | #106  | ✅ merged       |
+| V2-E   | Hardened systemd-user unit + idempotent installer.                                       | #108  | ✅ merged       |
+| V2-C-trait | `Tier2Backend` trait + `StubBackend` + `HeuristicBackend` (+ `--tier2` flag).        | #109  | ✅ merged       |
+| V2-B-skel | eBPF LSM + execve tracepoint kernel C + Rust loader skeleton.                         | #110  | ✅ merged       |
+| atty-side | PID-tree threat marking + 🛡 statusbar indicator (`Context.shell_pid`).               | #112  | ✅ merged       |
+| V2-B-impl | libbpf-rs LSM attach + BPF map write-through.                                         | #113  | ✅ merged       |
+| Data file | Shared `flagged_npm.txt` + scoped-pkg `@` fix + Shai-Hulud seeds.                     | #114  | ✅ merged       |
+| Updates   | `flagged_urls.txt` matcher + bundle/sign update-channel design.                       | #115  | ✅ merged       |
+| V2-C-onnx | Configurable ONNX SLM via tract — SecureBERT 2.0 / Qwen2.5-Coder.                     | #116  | ✅ merged       |
+| AF_ALG    | eBPF `sys_enter_socket` tracepoint — copy.fail-class kernel-LPE detector.             | #117  | ✅ merged       |
+| V2-F      | Live OSV.dev lookup for `npm install <pkg>` Tier-1 misses.                            | #118  | ✅ merged       |
+| **V2-G**  | **AtomMatcher** — Aho-Corasick over `flagged_atoms.txt` for thousand-scale patterns.   | TBD   | 🟡 this PR     |
+| **V2-H**  | **Sliding-context-window for SLM** — `OnnxBackend` gets ±N chars around the AC hit.    | TBD   | ⏳ next        |
+| **V2-I**  | **Baked-in atom fetcher** — periodic refresh of `flagged_atoms.txt` from Sigma + GTFOBins + LOLBAS + OSV; one-shot CLI + cron-style interval mode. | TBD   | ⏳ after V2-H  |
 
-The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-A + V2-D bring the protocol surface up; V2-B and V2-C will be backends behind that already-stable surface — no further wire-protocol churn expected.
+The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-G+H+I are the pattern-matching scale + intelligence-freshness improvements that close the gap between curated bundles and live disclosures.
 
-### What V2-B brings (next)
+### What V2-G brings (this PR)
 
-- `BPF_MAP_TYPE_HASH` keyed by PID — replaces the in-memory `ThreatMap` in `atty-guard/src/threat_map.rs`.
-- `lsm/bprm_check_security` hook program — gates execve sync-block when the parent PID is in the map at `Critical`.
-- `tracepoint:syscalls:sys_enter_execve` — async ringbuf events for the log-only / Warn cases.
-- Userspace loader: `atty-guard --enable-ebpf` (requires `CAP_BPF` + `CAP_SYS_RESOURCE`).
+- `aho-corasick` crate compiled at startup from a new `flagged_atoms.txt` data file (one atom per line, comment + blank-line stripping).
+- Single DFA scans the typed command in O(n) regardless of atom count — scales to thousand-pattern corpora.
+- Atom hits reuse `Category::CurlPipeSh` as the verdict bucket today; the verdict reason carries the actual atom string so the banner is still informative. A dedicated `Category::AtomMatch` is queued for the protocol bump that adds the V2-J accumulator's combined score.
+- Runs AFTER the precise regex Tier-1 as a broad-signal fallback: high-confidence verdicts (curl|sh = 1.0, flagged-URLs = 0.9, npm = 1.0, bash -c base64 = 1.0) win; the AtomMatcher's medium-confidence 0.6 Warn only fires when nothing more specific matched. Inverting this would silently demote the strongest signals we have.
+- Same data-file pattern as `flagged_npm.txt` / `flagged_urls.txt` on the Rust side (`include_str!`). The Zig in-proc security_guard reads its own pattern set today; a Zig-side AtomMatcher reading the same `flagged_atoms.txt` via `@embedFile` is queued for V2-J when the in-proc corpus grows past linear-scan range.
 
-### What V2-C brings (after V2-B)
+### What V2-H brings (next)
 
-- ONNX runtime (Rust crate `ort` or `tract`) loaded by atty-guard.
-- Quantized SecureBERT-2.0 / CodeBERT INT8 model — ~50 MB on disk, ~80 MB RSS.
-- `Tier2Backend` trait + `Stub` (current) / `Onnx` impls; chosen at startup.
-- Inputs: tokenized command (shell-metachar-preserving) + the matched section from any Tier-1 hit. Output: softmax over {safe, suspicious, harmful}.
-- Latency target: ≤15 ms/inference; ringbuf consumer dispatches async classify on every execve event when the sidecar is in `--enable-ebpf` mode.
+- `OnnxBackend::classify` accepts an optional hint offset (the AC match position from V2-G).
+- When set, extracts `[-64, +256]` chars around the hit, tokenises ONLY that window, dropping the prompt-chrome prefix.
+- ~3-5× token reduction on long pipeline-stuffed commands; brings Qwen2.5-Coder-1.5B inference comfortably under the 50 ms UDS-client timeout.
+- No-hint fallback path keeps the existing whole-command tokenisation for clean commands.
+
+### What V2-I brings (after V2-H)
+
+- Daemon-internal fetcher: `atty-guard atoms update` (one-shot) + `atty-guard --atoms-update-interval 6h` (cron-style background thread).
+- Sources, opt-in via TOML config (`[atoms.sources]`):
+  - **Sigma rules** (`detection.selection.CommandLine|contains` blocks from the SigmaHQ Linux corpus).
+  - **GTFOBins** (`functions.shell` from per-binary YAML manifests).
+  - **LOLBAS** (less relevant for Linux but same shape — Windows IOCs land here for ssh-pivot detection).
+  - **OSV** (re-uses the existing live-lookup path; per-batch dump rather than per-classify query).
+- Atomic tmp+rename install into `~/.local/share/atty-guard/atoms.txt`; daemon SIGHUP-reloads.
+- Feature-gated `atoms-fetch` so a build without the network deps still ships.
+
+After V2-G/H/I land, the threat-level accumulator across the AC + precise + SLM tiers becomes the natural follow-up (V2-J).
 
 ## TL;DR — three-component architecture
 

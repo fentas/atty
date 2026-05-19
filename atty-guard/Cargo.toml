@@ -14,6 +14,10 @@ path = "src/main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
+# V2-G Tier-1 AtomMatcher. Aho-Corasick compiles N atoms into one
+# DFA, scans the typed line in O(line_len) regardless of N.
+# Mature crate (powers ripgrep). ~50 KB additional binary weight.
+aho-corasick = "1.1"
 clap = { version = "4", features = ["derive"] }
 # V2-B eBPF loader. See `ebpf/README.md`.
 libbpf-rs = { version = "0.24.5", optional = true }

@@ -1,0 +1,123 @@
+# Atomic threat fragments — V2-G AtomMatcher data file.
+#
+# Today: atty-guard (Rust) reads this via `include_str!` →
+# `aho-corasick`. atty's in-proc security_guard (Zig) does NOT
+# load this file yet — it ships its own narrower atom set inline.
+# V2-J queues a Zig-side `@embedFile` reader sharing this corpus
+# once the in-proc set grows past linear-scan range. The file
+# lives under `src/modules/security_guard/data/` because Zig's
+# `@embedFile` only reaches files inside its package root and we
+# want the eventual shared layout in place from day one.
+#
+# One atom per line; `#` comments and blank lines stripped at
+# parse time.
+#
+# Atom design rules (read before adding entries):
+#   - Min length 3 characters — anything shorter is high-FP noise.
+#   - Prefer COMMAND FRAGMENTS over WORDS — `nc -e` beats `nc`.
+#   - Prefer SYMBOL-DENSE strings — `/bin/sh -i` beats `bin/sh`.
+#   - The matcher is case-sensitive substring; don't try to encode
+#     case-insensitivity here, write both forms instead.
+#   - One incident per section. Cite source in the comment.
+#
+# Verdict mapping (today, until the threat-level accumulator
+# lands as V2-J):
+#   - Any single atom hit → Verdict::Warn at confidence 0.6.
+#   - The OnnxBackend's sliding-context-window (V2-H) will use
+#     the atom match position to slice the SLM input — turning
+#     a low-confidence broad signal into a high-confidence
+#     verdict via deeper context.
+#
+# Adding a new atom: PR with the entry + a regression test in
+# `atom_matcher.rs` tests asserting the new atom hits.
+# Removing: same — drop the entry + remove its test.
+
+# ---------------------------------------------------------------
+# Reverse-shell shapes. These appear verbatim in MITRE T1219, in
+# Sigma rules, in GTFOBins shell-spawn snippets, and in every
+# public exploit PoC that ships its own backdoor. Catching them
+# at the shell layer is the easy half of the V2-B/H pipeline.
+
+nc -e
+ncat -e
+/bin/sh -i
+/bin/bash -i
+sh -i >&
+bash -i >&
+/dev/tcp/
+mkfifo /tmp/
+busybox nc -e
+
+# ---------------------------------------------------------------
+# Encoded-payload signatures. Anything that smells like
+# "execute this opaque blob in a shell". The bash_c_base64 regex
+# already catches the long-quoted-arg shape; these atoms catch
+# the shorter forms + ANY shell that decode-and-exec's.
+
+base64 -d
+base64 --decode
+xxd -r
+printf %s | base64
+| sh -s --
+| bash -s --
+
+# ---------------------------------------------------------------
+# Setuid / privilege-escalation shapes that pure regex misses
+# without becoming over-broad. `chmod +s` alone is rare in
+# legitimate use; the combination of these atoms accumulates
+# toward Critical.
+
+chmod +s
+chmod u+s
+setuid 0
+setgid 0
+/usr/bin/passwd
+
+# ---------------------------------------------------------------
+# Network-fetch-then-execute beyond the curl|sh pipe. Many
+# attackers wrap the pipe in process substitution to evade the
+# precise regex; the atoms catch the FETCHER + the IMMEDIATE
+# EXECUTOR independently — accumulation handles the combo.
+
+wget -qO-
+curl -fsSL
+curl -kL
+wget --no-check-certificate
+bash <(curl
+sh <(wget
+fetch -o -
+
+# ---------------------------------------------------------------
+# In-place persistence. Drop the payload into a shell-rc.
+
+>> ~/.bashrc
+>> ~/.zshrc
+>> ~/.profile
+>> /etc/cron.d/
+>> /etc/crontab
+crontab -e <<
+@reboot /tmp/
+@reboot /var/tmp/
+
+# ---------------------------------------------------------------
+# CVE-2026-31431 / copy.fail. AF_ALG socket creation isn't
+# observable from the shell layer (kernel-side eBPF tracepoint
+# does that — #117). But the typed line that BUILDS the PoC is
+# observable.
+
+socket.AF_ALG
+af_alg_set
+algif_aead
+splice(
+
+# ---------------------------------------------------------------
+# Common npm postinstall persistence + Shai-Hulud worm artefacts.
+# The `flagged_npm.txt` package-name list catches "I asked for
+# the bad package"; THESE catch "the bad package is doing its
+# thing" inside install-script output the user is about to run
+# in a fresh shell.
+
+postinstall.js
+NPM_TOKEN
+shai-hulud
+bundle.js?shai
