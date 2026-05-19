@@ -140,8 +140,14 @@ jobs:
           workspaces: atty-guard
           key: ${{ matrix.target }}
 
-      - name: install cargo-zigbuild
-        run: cargo install --locked cargo-zigbuild
+      # Pin cargo-zigbuild to a known-good major. Without a version
+      # constraint a breaking release at any point silently changes
+      # the linker behaviour of a tagged atty release — bad for
+      # reproducibility. `taiki-e/install-action` is the canonical
+      # CI shortcut and respects the version pin.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.20
 
       - name: cargo zigbuild atty-guard
         working-directory: atty-guard
@@ -172,15 +178,21 @@ jobs:
 
           rm dist/atty-guard
 
+          {
+            echo "stem=${stem}"
+            echo "unver=${unver}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: smoke test (${{ matrix.target }})
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           set -euo pipefail
-          chmod +x dist/atty-guard-*-${{ matrix.asset_arch }}
-          # `--version` is a no-arg clap-derived command — exercises
-          # argv parsing, version-string interpolation, and the musl
-          # link without depending on a UDS bind.
-          ./dist/atty-guard-*-${{ matrix.asset_arch }} --version | grep -E '^atty-guard '
+          # Exec the EXACT stem path — globbing matched both the
+          # versioned binary and the unversioned alias, and bash
+          # passed the second match as argv[1] making clap exit
+          # non-zero on the "unexpected argument".
+          chmod +x dist/${{ steps.pkg.outputs.stem }}
+          ./dist/${{ steps.pkg.outputs.stem }} --version | grep -E '^atty-guard '
 
       - uses: actions/upload-artifact@v7
         with:

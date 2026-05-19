@@ -124,7 +124,14 @@ run: build-atty
 # Run on a fresh clone to land a complete setup. Per-subproject
 # variants (`install-atty` / `install-guard`) stay available when you
 # only want one side.
-install: install-atty install-guard
+#
+# Recursive `$(MAKE)` calls instead of prerequisite-list serialise the
+# two steps even under `make -j`: install-guard's contrib/install.sh
+# does multi-step systemd-user setup (daemon-reload + enable + start)
+# that races badly with concurrent installs.
+install:
+	$(MAKE) install-atty
+	$(MAKE) install-guard
 
 install-atty: build-atty
 	install -d $(PREFIX)/bin
@@ -169,7 +176,7 @@ clean-atty:
 	rm -rf zig-out .zig-cache dist
 
 clean-guard:
-	rm -rf atty-guard/target
+	cd atty-guard && $(CARGO) clean --quiet
 
 docker:
 	docker build -t atty:latest .
@@ -206,6 +213,7 @@ fmt-guard:
 # enable+start the service. Delegates to the canonical installer so
 # the systemd policy stays in one place (atty-guard.service).
 install-guard: build-guard
+	@printf "→ %s will install + enable atty-guard.service (systemd-user)\n" "$@"
 	atty-guard/contrib/install.sh
 
 # Symlink the daemon binary the same way `make link` does for atty:
@@ -239,9 +247,9 @@ reload-guard:
 	    printf "⚠ systemctl not on \$$PATH — start atty-guard yourself with the new binary\n"; \
 	    exit 1; \
 	fi
-	@if ! systemctl --user is-active --quiet atty-guard.service 2>/dev/null && \
-	    ! systemctl --user is-enabled --quiet atty-guard.service 2>/dev/null; then \
-	    printf "⚠ atty-guard.service not installed — run \`make install-guard\` first\n"; \
+	@unit_path="$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user/atty-guard.service"; \
+	if [ ! -f "$$unit_path" ]; then \
+	    printf "⚠ atty-guard.service not installed (%s) — run \`make install-guard\` first\n" "$$unit_path"; \
 	    exit 1; \
 	fi
 	systemctl --user restart atty-guard.service

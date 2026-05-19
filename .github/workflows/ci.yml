@@ -70,10 +70,6 @@ jobs:
         with:
           workspaces: atty-guard
 
-      - name: cargo build (default features)
-        working-directory: atty-guard
-        run: cargo build --quiet
-
       - name: cargo test (default features)
         working-directory: atty-guard
         run: cargo test --quiet
@@ -81,6 +77,17 @@ jobs:
       - name: cargo test (tier2-onnx + osv-live + atoms-fetch)
         working-directory: atty-guard
         run: cargo test --features tier2-onnx,osv-live,atoms-fetch --quiet
+
+      # eBPF code can't be tested in CI (needs CAP_BPF + kernel
+      # LSM support), but `cargo check` exercises the libbpf-rs
+      # build path so a refactor that breaks the kernel-loader
+      # call sites surfaces here instead of at release time.
+      - name: install libbpf-dev (for ebpf compile-check)
+        run: sudo apt-get install -y --no-install-recommends libbpf-dev
+
+      - name: cargo check --features ebpf
+        working-directory: atty-guard
+        run: cargo check --features ebpf --quiet
 
   docker:
     name: docker build
