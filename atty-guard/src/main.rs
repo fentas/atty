@@ -27,8 +27,11 @@
 //!   `classifier::tier2` slot.
 
 mod classifier;
+mod config;
 mod ebpf;
+mod onnx_backend;
 mod protocol;
+mod sanitize;
 mod server;
 mod threat_map;
 
@@ -49,13 +52,28 @@ struct Cli {
     #[arg(short = 'v', long, default_value_t = 1)]
     verbosity: u8,
 
-    /// Tier-2 backend. `stub` (default) returns Safe; `heuristic`
-    /// adds regex rules beyond Tier-1's surface (proc-substitution
-    /// fetcher→shell, `--insecure` TLS, bare IP fetcher targets,
-    /// chmod+x followed by execute). V2-C will add `onnx` for the
-    /// encoder-SLM backend.
-    #[arg(long, default_value = "stub", value_parser = ["stub", "heuristic"])]
+    /// Tier-2 backend.
+    ///   stub      (default) returns Safe; Tier-1 hits are the
+    ///              only signal that reaches atty.
+    ///   heuristic regex rules beyond Tier-1 (proc-substitution
+    ///              fetcher→shell, `--insecure` TLS, bare IP
+    ///              fetcher targets, chmod+x followed by execute).
+    ///   onnx      encoder-SLM via the `tier2-onnx` Cargo feature.
+    ///              Supports SecureBERT 2.0 (default) AND
+    ///              Qwen2.5-Coder; the model is picked via the
+    ///              `[tier2.onnx] model` config key. Requires
+    ///              `--config <path>` pointing at a TOML file
+    ///              with `model_path` + `tokenizer_path` set, and
+    ///              `libonnxruntime.so` on the loader path.
+    #[arg(long, default_value = "stub", value_parser = ["stub", "heuristic", "onnx"])]
     tier2: String,
+
+    /// Optional TOML config — currently populates the Tier-2 ONNX
+    /// backend's model/tokenizer paths + thresholds. All fields
+    /// are optional; missing ones fall through to compiled-in
+    /// defaults. CLI flags override file values.
+    #[arg(long)]
+    config: Option<PathBuf>,
 
     /// Load the V2-B eBPF programs (lsm/bprm_check_security hook
     /// + sys_enter_execve tracepoint) at startup. Requires the
@@ -91,6 +109,20 @@ fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
     let socket = cli.socket.unwrap_or_else(default_socket_path);
     let backend = classifier::BackendKind::parse(&cli.tier2).unwrap_or(classifier::BackendKind::Stub);
+
+    // Optional TOML config — only used by the ONNX backend today,
+    // but the loader is generic so future Tier-2 backends + V2-F
+    // OSV-lookup tunables can hang here without reshuffling.
+    let file_cfg = match cli.config.as_ref() {
+        Some(p) => match config::load(p) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("atty-guard: --config {} ({e}) — using defaults", p.display());
+                config::Config::default()
+            }
+        },
+        None => config::Config::default(),
+    };
 
     // SO_REUSEADDR equivalent for UDS: unlink stale socket file first.
     // On restart after a crash the previous socket file may linger and
@@ -130,5 +162,5 @@ fn main() -> std::io::Result<()> {
         None
     };
 
-    server::serve(&socket, cli.verbosity, backend, ebpf_state)
+    server::serve(&socket, cli.verbosity, backend, &file_cfg.tier2.onnx, ebpf_state)
 }

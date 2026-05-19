@@ -25,11 +25,14 @@ pub trait Tier2Backend: Send + Sync {
     fn classify(&self, command: &str) -> Option<ClassifyResult>;
 }
 
-/// Backend selector — drives `Classifier::new_with_backend`.
+/// Backend selector. `Onnx` is feature-gated; constructing it with
+/// `--features tier2-onnx` off OR with a misconfigured model path
+/// falls back to `Stub` with a startup log line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     Stub,
     Heuristic,
+    Onnx,
 }
 
 impl BackendKind {
@@ -37,6 +40,7 @@ impl BackendKind {
         match s {
             "stub" => Some(BackendKind::Stub),
             "heuristic" => Some(BackendKind::Heuristic),
+            "onnx" => Some(BackendKind::Onnx),
             _ => None,
         }
     }
@@ -51,13 +55,23 @@ impl Classifier {
     /// Default Tier-2 backend = `Stub`. Kept for tests + callers
     /// that don't care.
     pub fn new() -> Self {
-        Self::new_with_backend(BackendKind::Stub)
+        Self::new_with_backend(BackendKind::Stub, &crate::config::OnnxConfig::default())
     }
 
-    pub fn new_with_backend(kind: BackendKind) -> Self {
+    pub fn new_with_backend(kind: BackendKind, onnx_cfg: &crate::config::OnnxConfig) -> Self {
         let tier2: Box<dyn Tier2Backend> = match kind {
             BackendKind::Stub => Box::new(StubBackend),
             BackendKind::Heuristic => Box::new(HeuristicBackend::new()),
+            BackendKind::Onnx => match crate::onnx_backend::OnnxBackend::open(onnx_cfg) {
+                #[cfg(feature = "tier2-onnx")]
+                Ok(b) => Box::new(b),
+                #[cfg(not(feature = "tier2-onnx"))]
+                Ok(_) => unreachable!("OnnxBackend::open is Err in non-feature builds"),
+                Err(e) => {
+                    eprintln!("atty-guard: ONNX backend unavailable ({e}) — falling back to Stub");
+                    Box::new(StubBackend)
+                }
+            },
         };
         Self {
             tier1: Tier1::new(),
@@ -565,7 +579,7 @@ mod tests {
     fn backend_kind_parse() {
         assert_eq!(BackendKind::parse("stub"), Some(BackendKind::Stub));
         assert_eq!(BackendKind::parse("heuristic"), Some(BackendKind::Heuristic));
-        assert_eq!(BackendKind::parse("onnx"), None);
+        assert_eq!(BackendKind::parse("onnx"), Some(BackendKind::Onnx));
         assert_eq!(BackendKind::parse(""), None);
     }
 
@@ -644,7 +658,7 @@ mod tests {
 
     #[test]
     fn classifier_with_heuristic_backend_routes_through() {
-        let c = Classifier::new_with_backend(BackendKind::Heuristic);
+        let c = Classifier::new_with_backend(BackendKind::Heuristic, &crate::config::OnnxConfig::default());
         let r = c.classify("bash <(curl -L https://x.com)");
         assert!(matches!(r.verdict, Verdict::Warn));
         // Tier-1 already covers "curl x | sh" — heuristic kicks in
@@ -668,7 +682,7 @@ mod tests {
         // backend MUST NOT be consulted when Tier-1 already
         // matched, otherwise the verdict reason changes between
         // `--tier2 stub` and `--tier2 heuristic`.
-        let c = Classifier::new_with_backend(BackendKind::Heuristic);
+        let c = Classifier::new_with_backend(BackendKind::Heuristic, &crate::config::OnnxConfig::default());
         let r = c.classify("curl https://x.com/install.sh | sh");
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(matches!(r.category, Category::CurlPipeSh));

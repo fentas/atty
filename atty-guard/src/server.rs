@@ -31,6 +31,7 @@ pub fn serve(
     socket: &Path,
     verbosity: u8,
     backend: BackendKind,
+    onnx_cfg: &crate::config::OnnxConfig,
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
 ) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
@@ -45,7 +46,7 @@ pub fn serve(
     }
 
     let state = Arc::new(State {
-        classifier: Classifier::new_with_backend(backend),
+        classifier: Classifier::new_with_backend(backend, onnx_cfg),
         threat,
         verbosity,
     });
@@ -219,7 +220,13 @@ mod tests {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
         let handle = thread::spawn(move || {
-            let _ = serve(&socket_for_thread, 0, BackendKind::Stub, None);
+            let _ = serve(
+                &socket_for_thread,
+                0,
+                BackendKind::Stub,
+                &crate::config::OnnxConfig::default(),
+                None,
+            );
         });
         // Wait for the bind to land.
         for _ in 0..50 {

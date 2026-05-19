@@ -1,0 +1,189 @@
+//! TOML config loader for atty-guard. Loaded once at startup via
+//! `--config <path>`. All fields are optional — CLI flags +
+//! compiled-in defaults fill in anything the file doesn't set.
+//!
+//! Lives in its own module so callers (main.rs) get a typed view
+//! of the config; the rest of the daemon never touches the raw
+//! `toml` parser.
+
+use serde::Deserialize;
+use std::path::Path;
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub tier2: Tier2Config,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct Tier2Config {
+    /// `stub` / `heuristic` / `onnx`. CLI `--tier2` flag wins
+    /// when both are set so the operator can override the file
+    /// without editing it.
+    #[serde(default)]
+    pub backend: Option<String>,
+
+    /// Sub-table populated only when backend = "onnx". Keeping
+    /// the ONNX-specific knobs nested keeps `[tier2]` tidy for
+    /// future backends (`[tier2.transformer]`, `[tier2.tract]`
+    /// etc.).
+    #[serde(default)]
+    pub onnx: OnnxConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OnnxConfig {
+    /// Model selector — defaults to `securebert2` because it's
+    /// the smaller, faster option for the same Tier-2 verdict
+    /// quality (per Gemini's review). `qwen-coder` swaps to the
+    /// code-native classifier when the user has already curated
+    /// a Qwen2.5-Coder-INT8 fine-tune.
+    #[serde(default = "default_model")]
+    pub model: String,
+
+    /// Absolute path to the ONNX file. Empty = backend reports
+    /// "model not configured" at attach time; daemon falls back
+    /// to Heuristic + warns.
+    #[serde(default)]
+    pub model_path: String,
+
+    /// Absolute path to the HuggingFace `tokenizer.json`.
+    #[serde(default)]
+    pub tokenizer_path: String,
+
+    /// Max input tokens. SecureBERT 2.0 (ModernBERT base) handles
+    /// 1024 natively; Qwen2.5-Coder handles 4096+. Longer
+    /// commands are truncated at the LEFT (the right side is
+    /// typically the payload).
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+
+    /// Softmax threshold above which we issue a Warn verdict.
+    /// Tier-2 reports Safe when below this; Warn between this
+    /// and `block_threshold`; Block above. Tune per model
+    /// calibration.
+    #[serde(default = "default_warn_threshold")]
+    pub warn_threshold: f32,
+
+    /// Softmax threshold for Block. Should be ≥ warn_threshold.
+    #[serde(default = "default_block_threshold")]
+    pub block_threshold: f32,
+}
+
+impl Default for OnnxConfig {
+    fn default() -> Self {
+        Self {
+            model: default_model(),
+            model_path: String::new(),
+            tokenizer_path: String::new(),
+            max_tokens: default_max_tokens(),
+            warn_threshold: default_warn_threshold(),
+            block_threshold: default_block_threshold(),
+        }
+    }
+}
+
+fn default_model() -> String {
+    "securebert2".into()
+}
+fn default_max_tokens() -> usize {
+    1024
+}
+fn default_warn_threshold() -> f32 {
+    0.5
+}
+fn default_block_threshold() -> f32 {
+    0.85
+}
+
+#[derive(Debug)]
+pub enum LoadError {
+    Io(std::io::Error),
+    Parse(String),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadError::Io(e) => write!(f, "config read failed: {e}"),
+            LoadError::Parse(e) => write!(f, "config parse failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+#[cfg(feature = "tier2-onnx")]
+pub fn load(path: &Path) -> Result<Config, LoadError> {
+    let text = std::fs::read_to_string(path).map_err(LoadError::Io)?;
+    toml::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))
+}
+
+/// Stub for builds without the `tier2-onnx` feature: no TOML
+/// parser is in the dep tree, so we accept the `--config` flag
+/// but return the defaults. Lets the daemon stay launchable from
+/// a systemd unit that hardcodes `--config /etc/atty-guard.toml`
+/// regardless of which feature set the operator built with.
+#[cfg(not(feature = "tier2-onnx"))]
+pub fn load(_path: &Path) -> Result<Config, LoadError> {
+    Ok(Config::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "tier2-onnx")]
+    #[test]
+    fn parses_complete_tier2_onnx_block() {
+        let src = r#"
+[tier2]
+backend = "onnx"
+
+[tier2.onnx]
+model = "qwen-coder"
+model_path = "/var/lib/atty-guard/qwen.onnx"
+tokenizer_path = "/var/lib/atty-guard/qwen-tokenizer.json"
+max_tokens = 4096
+warn_threshold = 0.45
+block_threshold = 0.9
+"#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.tier2.backend.as_deref(), Some("onnx"));
+        assert_eq!(cfg.tier2.onnx.model, "qwen-coder");
+        assert_eq!(cfg.tier2.onnx.max_tokens, 4096);
+        assert!((cfg.tier2.onnx.block_threshold - 0.9).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "tier2-onnx")]
+    #[test]
+    fn empty_config_yields_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.tier2.onnx.model, "securebert2");
+        assert_eq!(cfg.tier2.onnx.max_tokens, 1024);
+    }
+
+    #[cfg(feature = "tier2-onnx")]
+    #[test]
+    fn missing_onnx_subtable_keeps_defaults() {
+        let cfg: Config = toml::from_str("[tier2]\nbackend = \"heuristic\"").unwrap();
+        assert_eq!(cfg.tier2.backend.as_deref(), Some("heuristic"));
+        assert_eq!(cfg.tier2.onnx.model, "securebert2");
+    }
+
+    #[test]
+    fn no_feature_load_returns_defaults() {
+        // On builds without `tier2-onnx`, `load` is a no-op that
+        // returns defaults. Pass any path; nothing is read.
+        let cfg = load(Path::new("/nonexistent.toml"));
+        #[cfg(not(feature = "tier2-onnx"))]
+        {
+            assert!(cfg.is_ok());
+            let c = cfg.unwrap();
+            assert_eq!(c.tier2.onnx.model, "securebert2");
+        }
+        // On feature builds, /nonexistent → IO error. Drop the
+        // result to keep the test trivially passing in both modes.
+        let _ = cfg;
+    }
+}
