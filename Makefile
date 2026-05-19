@@ -39,9 +39,9 @@ ifdef CONFIG
 ZIG_CONFIG_ARG := -Dconfig=$(CONFIG)
 endif
 
-.PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update \
-        run install link unlink clean docker docker-binary fmt fmt-atty fmt-guard \
-        install-guard link-guard unlink-guard reload-guard
+.PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update run \
+        install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
+        clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard
 
 help:
 	@printf "atty — build targets\n\n"
@@ -61,16 +61,19 @@ help:
 	@printf "  itest           Run atty integration tests (real PTY).\n"
 	@printf "  e2e             Run end-to-end scenarios under tests/e2e/.\n"
 	@printf "  e2e-update      Refresh e2e goldens from current output.\n\n"
-	@printf "Install / link (atty)\n"
-	@printf "  run             Build and run atty.\n"
-	@printf "  install         Copy zig-out/bin/atty to \$$PREFIX/bin (default: ~/.local/bin).\n"
-	@printf "  link            Symlink \$$PREFIX/bin/atty -> this clone's zig-out/bin/atty.\n"
-	@printf "                  Rebuilds in this tree update the installed binary live.\n"
-	@printf "  unlink          Remove the symlink at \$$PREFIX/bin/atty (only if it's a symlink).\n\n"
-	@printf "Install / link (atty-guard sidecar)\n"
-	@printf "  install-guard   atty-guard/contrib/install.sh (binary + systemd-user unit, enabled).\n"
-	@printf "  link-guard      Symlink \$$PREFIX/bin/atty-guard -> atty-guard/target/$(GUARD_PROFILE)/atty-guard.\n"
-	@printf "  unlink-guard    Remove the symlink at \$$PREFIX/bin/atty-guard.\n"
+	@printf "Install (default = both subprojects)\n"
+	@printf "  install         Copy atty binary to \$$PREFIX/bin AND run atty-guard installer.\n"
+	@printf "  install-atty    Only copy zig-out/bin/atty to \$$PREFIX/bin (default: ~/.local/bin).\n"
+	@printf "  install-guard   Only run atty-guard/contrib/install.sh (binary + systemd-user unit).\n\n"
+	@printf "Link / unlink (default = both subprojects)\n"
+	@printf "  link            Symlink BOTH \$$PREFIX/bin/atty and \$$PREFIX/bin/atty-guard.\n"
+	@printf "  link-atty       Only symlink \$$PREFIX/bin/atty -> this clone's zig-out/bin/atty.\n"
+	@printf "  link-guard      Only symlink \$$PREFIX/bin/atty-guard -> atty-guard/target/$(GUARD_PROFILE)/atty-guard.\n"
+	@printf "  unlink          Remove BOTH symlinks (only if they're symlinks).\n"
+	@printf "  unlink-atty     Only remove the atty symlink.\n"
+	@printf "  unlink-guard    Only remove the atty-guard symlink.\n\n"
+	@printf "Run / reload\n"
+	@printf "  run             Build atty and run.\n"
 	@printf "  reload-guard    systemctl --user restart atty-guard (re-attaches eBPF when built\n"
 	@printf "                  with --features ebpf; otherwise just restarts the daemon).\n\n"
 	@printf "Misc\n"
@@ -79,7 +82,9 @@ help:
 	@printf "  fmt-guard       Only cargo fmt atty-guard.\n"
 	@printf "  docker          Build the Docker runtime image (atty:latest).\n"
 	@printf "  docker-binary   Build the binary in Docker, copy to ./dist/atty.\n"
-	@printf "  clean           Remove build artifacts (zig-out, .zig-cache, atty-guard/target, dist).\n\n"
+	@printf "  clean           Remove ALL build artifacts (both subprojects).\n"
+	@printf "  clean-atty      Only remove zig-out, .zig-cache, dist.\n"
+	@printf "  clean-guard     Only remove atty-guard/target.\n\n"
 	@printf "Variables: ZIG=$(ZIG)  CARGO=$(CARGO)  PREFIX=$(PREFIX)  TARGET=$(TARGET)  OPT=$(OPT)\n"
 	@printf "           GUARD_PROFILE=$(GUARD_PROFILE)  GUARD_FEATURES=$(GUARD_FEATURES)\n"
 	@printf "           CONFIG=<path>   custom config.zig location\n"
@@ -115,22 +120,36 @@ e2e-update:
 run: build-atty
 	./zig-out/bin/atty
 
-install: build-atty
+# Meta install — atty binary + atty-guard binary + systemd-user unit.
+# Run on a fresh clone to land a complete setup. Per-subproject
+# variants (`install-atty` / `install-guard`) stay available when you
+# only want one side.
+install: install-atty install-guard
+
+install-atty: build-atty
 	install -d $(PREFIX)/bin
 	install -m 0755 zig-out/bin/atty $(PREFIX)/bin/atty
 	@printf "→ installed to %s/bin/atty\n" "$(PREFIX)"
+
+# Meta link — symlink BOTH binaries from this clone. Source-of-truth
+# stays in the cargo/zig output dirs; $(PREFIX)/bin just points at them
+# so `make build && make reload-guard` picks up changes live.
+link: link-atty link-guard
 
 # Symlink the installed binary at $(PREFIX)/bin/atty to this clone's
 # zig-out/bin/atty. Same model as get.sh: source is the truth, install
 # dir is just a pointer. Re-running `make build` (or `zig build`) here
 # updates the live binary with no extra step.
-link: build-atty
+link-atty: build-atty
 	install -d $(PREFIX)/bin
 	ln -sfn $(CURDIR)/zig-out/bin/atty $(PREFIX)/bin/atty
 	@printf "→ linked %s/bin/atty → %s/zig-out/bin/atty\n" "$(PREFIX)" "$(CURDIR)"
 
+# Meta unlink — both subprojects.
+unlink: unlink-atty unlink-guard
+
 # Remove the symlink (but never a real file — guarded by [ -L ]).
-unlink:
+unlink-atty:
 	@if [ -L "$(PREFIX)/bin/atty" ]; then \
 	    rm "$(PREFIX)/bin/atty" && printf "→ removed %s/bin/atty\n" "$(PREFIX)"; \
 	elif [ -e "$(PREFIX)/bin/atty" ]; then \
@@ -144,8 +163,13 @@ fmt: fmt-atty fmt-guard
 fmt-atty:
 	$(ZIG) fmt src/ build.zig
 
-clean:
-	rm -rf zig-out .zig-cache dist atty-guard/target
+clean: clean-atty clean-guard
+
+clean-atty:
+	rm -rf zig-out .zig-cache dist
+
+clean-guard:
+	rm -rf atty-guard/target
 
 docker:
 	docker build -t atty:latest .
