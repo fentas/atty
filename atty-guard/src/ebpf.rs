@@ -116,7 +116,10 @@ mod with_libbpf {
             }
         }
 
-        let src = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/ebpf/atty_guard.bpf.o"));
+        let src = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ebpf/atty_guard.bpf.o"
+        ));
         if src.exists() {
             return Ok(src);
         }
@@ -187,21 +190,27 @@ mod with_libbpf {
             let lsm_link = obj
                 .progs_mut()
                 .find(|p| p.name() == "check_execve")
-                .ok_or_else(|| LoadError::LoadFailed("program check_execve missing from .o".into()))?
+                .ok_or_else(|| {
+                    LoadError::LoadFailed("program check_execve missing from .o".into())
+                })?
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach lsm: {e}")))?;
 
             let tp_execve_link = obj
                 .progs_mut()
                 .find(|p| p.name() == "trace_execve")
-                .ok_or_else(|| LoadError::LoadFailed("program trace_execve missing from .o".into()))?
+                .ok_or_else(|| {
+                    LoadError::LoadFailed("program trace_execve missing from .o".into())
+                })?
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach execve tracepoint: {e}")))?;
 
             let tp_socket_link = obj
                 .progs_mut()
                 .find(|p| p.name() == "trace_socket")
-                .ok_or_else(|| LoadError::LoadFailed("program trace_socket missing from .o".into()))?
+                .ok_or_else(|| {
+                    LoadError::LoadFailed("program trace_socket missing from .o".into())
+                })?
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach socket tracepoint: {e}")))?;
 
@@ -242,7 +251,9 @@ mod with_libbpf {
             let map = guard
                 .maps()
                 .find(|m| m.name() == "threat_map")
-                .ok_or_else(|| LoadError::LoadFailed("threat_map missing from loaded object".into()))?;
+                .ok_or_else(|| {
+                    LoadError::LoadFailed("threat_map missing from loaded object".into())
+                })?;
             let key = pid.to_ne_bytes();
             match level {
                 ThreatLevel::Low => {
