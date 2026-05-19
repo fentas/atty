@@ -78,6 +78,41 @@ test "csiUToLegacy: Ctrl+Shift+letter folds to the same control byte as Ctrl+let
     try std.testing.expectEqualSlices(u8, "\x1a", csiUToLegacy("\x1b[122;6u", &out).?);
 }
 
+test "csiUToLegacy: release/repeat events return null (caller drops or passes through)" {
+    // User-reported: in vim/nvim (which pushes a higher kitty kbd
+    // level than atty's flag 1), Ghostty emits BOTH press and
+    // release events for plain letters:
+    //   press:   \x1b[119;1u
+    //   release: \x1b[119;1:3u
+    // The body parser used to ignore the `event_type` sub-parameter
+    // after `:`, so both translated to 'w' and the user saw `ww`.
+    // '!' (shifted) didn't double because csiUToLegacy returns null
+    // for shifted ASCII anyway, and the raw CSI-u passes through to
+    // the alt-screen app.
+    //
+    // Fix: events with event_type != 1 (press) get null here too —
+    // there's no legacy form for "key release," so the caller drops
+    // or passes-through. In the proxy's alt-screen path that means
+    // vim sees the raw CSI-u (good — vim asked for it).
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[119;1:3u", &out)); // 'w' release
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[119;1:2u", &out)); // 'w' repeat
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[97;1:3u", &out)); // 'a' release
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[99;5:3u", &out)); // Ctrl+C release
+    // event_type = 1 (explicit press) still translates normally.
+    try std.testing.expectEqualSlices(u8, "w", csiUToLegacy("\x1b[119;1:1u", &out).?);
+    // associated-text sub-param after event_type — still drops on release.
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[119;1:3:119u", &out));
+    // event_type 0 is reserved/undefined in the kitty kbd spec — drop.
+    // Pins behaviour against a future "accept anything non-2/non-3" refactor.
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[119;1:0u", &out));
+    // Empty event_type (terminal emits trailing `:` then `u` for some
+    // reason) — fails parseInt, now drops via the round-1 follow-up's
+    // `catch return null`. Previously fell through to "press" and
+    // would have re-introduced doubling on weirdly-formed sequences.
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[119;1:u", &out));
+}
+
 test "csiUToLegacy: non-CSI-u input returns null without touching `out`" {
     var out: [4]u8 = undefined;
     try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x03", &out));
