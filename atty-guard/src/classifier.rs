@@ -112,6 +112,16 @@ impl Classifier {
         //     have enough signal to flag.
         // The hint is the EARLIEST Tier-1 offset — gives the
         // SLM's sliding-context-window the most leading context.
+        //
+        // V2-J semantic shift vs pre-PR: previously the SLM result
+        // ONLY upgraded a Tier-1 hit when its verdict was `Block`.
+        // Now any SLM hit at any verdict contributes its
+        // confidence to the accumulator — a Heuristic at 0.7
+        // combined with one atom at 0.6 reaches 0.88, where the
+        // old code would have stayed at 0.6. This is intentional:
+        // the accumulator's value is in its symmetry across
+        // tiers, and the verdict still surfaces from the primary
+        // (highest-confidence) hit.
         if tier1_combined < SLM_CONFIRM_THRESHOLD {
             let hint = hits.iter().map(|(_, off)| *off).min();
             if let Some(slm) = self.tier2.classify(command, hint) {
@@ -308,7 +318,13 @@ impl Tier1 {
         // Convenience wrapper used by tests + callers that want a
         // single representative hit. Returns the highest-confidence
         // hit from the full multi-hit walk; the byte-offset comes
-        // from that hit too.
+        // from that hit too. Tie-break (Rust stdlib `max_by`
+        // semantics): when two hits share the same confidence, the
+        // LAST one in the layer-emission order wins. Layer order
+        // is curl_pipe_sh → flagged_urls → npm → bash_c → atoms,
+        // so e.g. two 0.9 flagged-URL hits resolve to the second
+        // one. Callers that care about specific offsets should
+        // use `classify_all` directly.
         let hits = self.classify_all(line);
         hits.into_iter().max_by(|a, b| {
             a.0.confidence
@@ -911,6 +927,30 @@ mod tests {
         );
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.confidence > 0.9, "expected >0.9, got {}", r.confidence);
+    }
+
+    #[test]
+    fn slm_contributes_to_accumulator() {
+        // V2-J semantic shift: the Tier-2 SLM's confidence joins
+        // the accumulator regardless of its verdict (pre-V2-J,
+        // only a `Verdict::Block` SLM result was used). Verified
+        // via the HeuristicBackend's proc-substitution rule
+        // (0.85) combined with the `bash <(curl` atom (0.6) →
+        // `1 - (1-0.85)*(1-0.6) = 0.94`.
+        let c = Classifier::new_with_backend(
+            BackendKind::Heuristic,
+            &crate::config::OnnxConfig::default(),
+        );
+        let r = c.classify("bash <(curl -fsSL https://x.com/installer.sh)");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        // Combined should exceed the heuristic's 0.85 alone.
+        assert!(
+            r.confidence > 0.85,
+            "expected SLM+atom combined > 0.85, got {}",
+            r.confidence
+        );
+        // Multi-hit reason carries the "N signals fired" marker.
+        assert!(r.reason.contains("signals fired"));
     }
 
     #[test]
