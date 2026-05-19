@@ -88,7 +88,11 @@ impl AtomMatcher {
     /// no atom matches.
     pub fn find_first(&self, input: &str) -> Option<AtomHit> {
         let m = self.ac.find(input)?;
-        let atom = self.atoms.get(m.pattern().as_usize()).copied().unwrap_or("");
+        let atom = self
+            .atoms
+            .get(m.pattern().as_usize())
+            .copied()
+            .expect("aho-corasick pattern id out of bounds of self.atoms — invariant broken");
         Some(AtomHit {
             atom,
             byte_offset: m.start(),

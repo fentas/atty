@@ -1,11 +1,16 @@
 # Atomic threat fragments — V2-G AtomMatcher data file.
 #
-# Single source of truth. Both atty-guard (Rust, `include_str!` →
-# `aho-corasick`) and atty's in-proc security_guard (Zig,
-# `@embedFile` → linear scan; AC is over-engineered for in-proc
-# until atty grows beyond a couple hundred patterns) read THIS
-# file. One atom per line; `#` comments and blank lines stripped
-# at parse time.
+# Today: atty-guard (Rust) reads this via `include_str!` →
+# `aho-corasick`. atty's in-proc security_guard (Zig) does NOT
+# load this file yet — it ships its own narrower atom set inline.
+# V2-J queues a Zig-side `@embedFile` reader sharing this corpus
+# once the in-proc set grows past linear-scan range. The file
+# lives under `src/modules/security_guard/data/` because Zig's
+# `@embedFile` only reaches files inside its package root and we
+# want the eventual shared layout in place from day one.
+#
+# One atom per line; `#` comments and blank lines stripped at
+# parse time.
 #
 # Atom design rules (read before adding entries):
 #   - Min length 3 characters — anything shorter is high-FP noise.

@@ -29,9 +29,9 @@ The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable t
 
 - `aho-corasick` crate compiled at startup from a new `flagged_atoms.txt` data file (one atom per line, comment + blank-line stripping).
 - Single DFA scans the typed command in O(n) regardless of atom count — scales to thousand-pattern corpora.
-- New `Category::AtomMatch` reports the matched atom and its data-file line number for trust-cache + telemetry.
-- Sits BEFORE the existing precise regex Tier-1: cheap broad coverage first, precise high-confidence verdicts second.
-- Same data-file pattern as `flagged_npm.txt` / `flagged_urls.txt` — both Rust + Zig load via `include_str!` / `@embedFile`.
+- Atom hits reuse `Category::CurlPipeSh` as the verdict bucket today; the verdict reason carries the actual atom string so the banner is still informative. A dedicated `Category::AtomMatch` is queued for the protocol bump that adds the V2-J accumulator's combined score.
+- Runs AFTER the precise regex Tier-1 as a broad-signal fallback: high-confidence verdicts (curl|sh = 1.0, flagged-URLs = 0.9, npm = 1.0, bash -c base64 = 1.0) win; the AtomMatcher's medium-confidence 0.6 Warn only fires when nothing more specific matched. Inverting this would silently demote the strongest signals we have.
+- Same data-file pattern as `flagged_npm.txt` / `flagged_urls.txt` on the Rust side (`include_str!`). The Zig in-proc security_guard reads its own pattern set today; a Zig-side AtomMatcher reading the same `flagged_atoms.txt` via `@embedFile` is queued for V2-J when the in-proc corpus grows past linear-scan range.
 
 ### What V2-H brings (next)
 
