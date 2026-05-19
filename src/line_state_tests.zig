@@ -174,6 +174,28 @@ test "Up + sync(recall) + Ctrl-A + End + type 'e' preserves recalled line conten
     try std.testing.expectEqualSlices(u8, "which pvcontrole", l.current());
 }
 
+test "uncertain + same content + Left + sync preserves cursor_pos (mid-typing redraw guard)" {
+    // The proxy-side gate (`osc_input.len >= line.len` OR
+    // `uncertain`) lets bash's mid-typing PS1 redraws sync back —
+    // but `syncFromCapture` itself has an early-return when the
+    // content matches AND !uncertain. With this guard in place,
+    // a Left arrow inside a "redraw cycle that doesn't touch
+    // content" preserves cursor_pos: Left set cursor_pos < len
+    // BEFORE sync, and sync's early-return skips clobbering it.
+    var l = LineState{};
+    _ = l.applyInput("hello world");
+    _ = l.applyInput("\x1B[D"); // Left → cursor_pos = 10
+    _ = l.applyInput("\x1B[D"); // Left → cursor_pos = 9
+    try std.testing.expectEqual(@as(usize, 9), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+
+    // bash redraws the prompt with no content change — sync's
+    // early-return skips the write. cursor_pos survives.
+    l.syncFromCapture("hello world");
+    try std.testing.expectEqual(@as(usize, 9), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+}
+
 test "Right-stepping to EOL + backspace re-engages ghost (cursor stays at EOL)" {
     // User-reported follow-up #2: after Arrow-Up recall, Ctrl-A
     // (BOL), Arrow-Right ×N to step back to EOL, then backspace —
