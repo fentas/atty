@@ -215,6 +215,7 @@ test "DsrParser: abort mid-CSI (`\\x1b[12;abc`) restores byte stream verbatim" {
     // DSR reply but isn't, the parser must release the bytes so
     // keymap matching downstream still works.
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r = p.feed("\x1B[12;a", &out);
     try testing.expect(r.pos == null);
@@ -222,4 +223,58 @@ test "DsrParser: abort mid-CSI (`\\x1b[12;abc`) restores byte stream verbatim" {
     // pending) + `a` (abort). After abort the parser should have
     // released all 6 bytes through the output buffer.
     try testing.expectEqualStrings("\x1B[12;a", out[0..r.filtered_len]);
+}
+
+test "DsrParser: abort clears expecting_reply so subsequent ESCs pass through" {
+    // Round-1 review found: aborted parses left `expecting_reply`
+    // set, so the next user-typed Esc fell back into pending_buf
+    // and got eaten — same bug class as the original silent-ESC,
+    // re-armed after a single missed reply. Verifies all three
+    // abort branches (`.esc`, `.csi`, `.row_done`) clear the gate.
+
+    // .esc abort
+    var p = DsrParser{};
+    p.markQuerySent();
+    var out: [16]u8 = undefined;
+    _ = p.feed("\x1Bx", &out); // ESC + non-`[` aborts in .esc
+    try testing.expect(!p.expecting_reply);
+
+    // .csi abort
+    p = DsrParser{};
+    p.markQuerySent();
+    _ = p.feed("\x1B[a", &out); // ESC `[` + non-digit/`;` aborts in .csi
+    try testing.expect(!p.expecting_reply);
+
+    // .row_done abort
+    p = DsrParser{};
+    p.markQuerySent();
+    _ = p.feed("\x1B[12;x", &out); // ESC `[12;` + non-digit/`R` aborts in .row_done
+    try testing.expect(!p.expecting_reply);
+
+    // Composite: after an abort, a lone ESC passes through (the
+    // user-facing scenario the gate-clear unblocks).
+    p = DsrParser{};
+    p.markQuerySent();
+    _ = p.feed("\x1Bx", &out); // abort
+    try testing.expect(!p.expecting_reply);
+    const r = p.feed("\x1B", &out);
+    try testing.expectEqual(@as(usize, 1), r.filtered_len);
+    try testing.expectEqualSlices(u8, "\x1B", out[0..r.filtered_len]);
+}
+
+test "DsrParser: user Esc within the query window aborts the buffered byte" {
+    // Trade-off documented in DsrParser.expecting_reply's docstring:
+    // user-typed Esc DURING the ~100 ms query→reply window is
+    // briefly buffered, then the next byte (typed by the user OR
+    // arriving as the actual reply) aborts and flushes verbatim.
+    // We assert the verbatim flush + the cleared gate.
+    var p = DsrParser{};
+    p.markQuerySent();
+    var out: [16]u8 = undefined;
+    // Two ESCs in a row: the first enters .esc, the second aborts
+    // the buffered state (since `\x1B` != `[`) → both flushed.
+    const r = p.feed("\x1B\x1B", &out);
+    try testing.expectEqual(@as(usize, 2), r.filtered_len);
+    try testing.expectEqualSlices(u8, "\x1B\x1B", out[0..r.filtered_len]);
+    try testing.expect(!p.expecting_reply);
 }

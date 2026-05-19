@@ -57,7 +57,8 @@ pub const DsrParser = struct {
     pending_buf: [32]u8 = undefined,
     pending_len: u8 = 0,
     /// Set by `markQuerySent` after the proxy emits a `\x1B[6n` query
-    /// to the terminal; cleared on the next successful reply parse.
+    /// to the terminal; cleared on the next successful reply parse OR
+    /// any abort (`.esc` / `.csi` / `.row_done` non-matching byte).
     /// **Critical for lone-ESC keystrokes.** Without this gate, every
     /// `\x1B` (including a user's bare Esc with no follow-up byte in
     /// the same read) drops into `.esc` state and sits in `pending_buf`
@@ -68,6 +69,15 @@ pub const DsrParser = struct {
     /// reassembly working for the legitimate case (terminal's reply
     /// to atty's query, arriving immediately after the query write)
     /// while passing through stray ESCs unchanged.
+    ///
+    /// Worst-case window where a user-typed Esc would still be eaten:
+    /// `proxy.tick_interval_ms` (100 ms by default) between the
+    /// `writeQuery` and the next poll wake that delivers the reply.
+    /// Two of atty's query-emit sites fire at known-cool moments
+    /// (reserve-rows toggle, OSC 133 `;C` cmd_end); the window is
+    /// also bounded by clearing the gate on abort so a user's stray
+    /// keystroke during the query window aborts the buffered sequence
+    /// and unsticks subsequent ESCs immediately.
     expecting_reply: bool = false,
 
     const State = enum { ground, esc, csi, row_done };
@@ -116,11 +126,20 @@ pub const DsrParser = struct {
                     } else {
                         // Not the shape we want — flush pending +
                         // current byte verbatim so keymap matchers
-                        // downstream see the original sequence.
+                        // downstream see the original sequence. Clear
+                        // `expecting_reply` too: an aborted parse
+                        // means the query that armed this state
+                        // either won't be answered (terminal didn't
+                        // reply yet, or the user got there first with
+                        // their own keystroke). Leaving the gate set
+                        // would re-arm the buffer on the next ESC
+                        // — every ESC after a single missed-reply
+                        // would be re-eaten.
                         w += self.flushPending(out[w..]);
                         out[w] = b;
                         w += 1;
                         self.state = .ground;
+                        self.expecting_reply = false;
                     }
                 },
                 .csi => {
@@ -136,11 +155,14 @@ pub const DsrParser = struct {
                     } else {
                         // Anything else aborts (including a stray
                         // 'R' with no `;` — malformed reply). Flush
-                        // pending + the abort byte verbatim.
+                        // pending + the abort byte verbatim. Clear
+                        // the gate (see comment in the `.esc` abort
+                        // branch).
                         w += self.flushPending(out[w..]);
                         out[w] = b;
                         w += 1;
                         self.state = .ground;
+                        self.expecting_reply = false;
                     }
                 },
                 .row_done => {
@@ -161,11 +183,13 @@ pub const DsrParser = struct {
                         self.expecting_reply = false;
                     } else {
                         // Malformed (no terminator) — abandon, flush
-                        // pending + the abort byte.
+                        // pending + the abort byte. Clear the gate
+                        // (see comment in the `.esc` abort branch).
                         w += self.flushPending(out[w..]);
                         out[w] = b;
                         w += 1;
                         self.state = .ground;
+                        self.expecting_reply = false;
                     }
                 },
             }
