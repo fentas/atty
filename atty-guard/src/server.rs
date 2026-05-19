@@ -33,6 +33,7 @@ pub fn serve(
     backend: BackendKind,
     onnx_cfg: &crate::config::OnnxConfig,
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
+    osv: Option<Arc<crate::osv::OsvClient>>,
 ) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // Restrictive perms so a co-tenant user can't connect. UDS files
@@ -49,6 +50,7 @@ pub fn serve(
         classifier: Classifier::new_with_backend(backend, onnx_cfg),
         threat,
         verbosity,
+        osv,
     });
 
     for stream in listener.incoming() {
@@ -73,6 +75,13 @@ struct State {
     classifier: Classifier,
     threat: ThreatMap,
     verbosity: u8,
+    /// Optional V2-F live OSV.dev client. When present, the
+    /// classify dispatch runs an OSV lookup AFTER Tier-1's local
+    /// flagged-package list misses but the command IS an
+    /// `npm install <pkg>` shape — closes the gap between
+    /// "atty-guard ships a curated bad-list" and "actual OSV
+    /// disclosures land before atty-guard's next release".
+    osv: Option<Arc<crate::osv::OsvClient>>,
 }
 
 fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
@@ -145,6 +154,30 @@ fn dispatch(state: &State, req: Request) -> ResponseBody {
             // Tier-1 (and Tier-2 stub) classification.
             let mut result = state.classifier.classify(&command);
 
+            // V2-F live OSV lookup. Runs only when Tier-1 said Safe
+            // AND the command is an `npm install <pkg>` shape AND
+            // the daemon was started with --enable-osv. Catches
+            // packages that landed on OSV's advisory list AFTER
+            // atty-guard's last bundled-data update.
+            if matches!(result.verdict, Verdict::Safe) {
+                if let Some(osv) = &state.osv {
+                    if let Some(pkg) = extract_npm_install_pkg(&command) {
+                        match osv.lookup_npm(pkg) {
+                            Ok(verdict) => {
+                                if let Some(r) = crate::osv::osv_verdict_to_result(verdict, pkg) {
+                                    result = r;
+                                }
+                            }
+                            Err(e) => {
+                                if state.verbosity >= 2 {
+                                    eprintln!("atty-guard: OSV lookup failed for {pkg}: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Threat-map upgrade: if the source PID is already in
             // the high-threat map, force at least Warn. V2-B's
             // kernel side will already EPERM the execve at that
@@ -179,6 +212,70 @@ fn dispatch(state: &State, req: Request) -> ResponseBody {
             level: state.threat.get(pid),
         },
     }
+}
+
+/// Best-effort extraction of the package name from an
+/// `npm install <pkg>` (or pnpm/yarn variant) shape. Returns
+/// None when the shape doesn't fit OR the first non-flag token
+/// would be empty. Strips a trailing `@version` (with scoped-
+/// package support — matches the in-classifier semantics).
+///
+/// Pulled out as a free fn so the dispatch can call it without
+/// reaching into the Tier-1 internals AND so unit tests cover
+/// it directly.
+fn extract_npm_install_pkg(line: &str) -> Option<&str> {
+    let verbs = [
+        ("npm ", "install"),
+        ("npm ", "i "),
+        ("npm ", "add"),
+        ("pnpm ", "install"),
+        ("pnpm ", "i "),
+        ("pnpm ", "add"),
+        ("yarn ", "add"),
+    ];
+    for (cmd, verb) in verbs {
+        let Some(cmd_at) = line.find(cmd) else { continue };
+        if cmd_at != 0 {
+            let prev = line.as_bytes()[cmd_at - 1];
+            if !matches!(prev, b' ' | b';' | b'&' | b'|') {
+                continue;
+            }
+        }
+        let after_cmd = cmd_at + cmd.len();
+        let verb_end = after_cmd + verb.len();
+        if verb_end > line.len() {
+            continue;
+        }
+        if !line[after_cmd..verb_end].eq(verb) {
+            continue;
+        }
+        // For verbs that don't already include a trailing space
+        // require one (or EOL) before the args.
+        let args_start = if verb.ends_with(' ') {
+            verb_end
+        } else if verb_end == line.len() {
+            return None;
+        } else if line.as_bytes()[verb_end] == b' ' {
+            verb_end + 1
+        } else {
+            continue;
+        };
+        // Walk to the first non-flag token.
+        for tok in line[args_start..].split_whitespace() {
+            if tok.starts_with('-') {
+                continue;
+            }
+            // Strip `@version` suffix; preserve leading `@scope/`.
+            let name = match tok.rfind('@') {
+                Some(0) | None => tok,
+                Some(i) => &tok[..i],
+            };
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 fn write_response(writer: &mut impl Write, id: u64, body: ResponseBody) -> std::io::Result<()> {
@@ -225,6 +322,7 @@ mod tests {
                 0,
                 BackendKind::Stub,
                 &crate::config::OnnxConfig::default(),
+                None,
                 None,
             );
         });
@@ -322,5 +420,59 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
         let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn extract_npm_install_pkg_bare() {
+        assert_eq!(extract_npm_install_pkg("npm install lodash"), Some("lodash"));
+    }
+
+    #[test]
+    fn extract_npm_install_pkg_with_version() {
+        assert_eq!(
+            extract_npm_install_pkg("npm install lodash@4.17.21"),
+            Some("lodash")
+        );
+    }
+
+    #[test]
+    fn extract_npm_install_pkg_scoped() {
+        assert_eq!(
+            extract_npm_install_pkg("npm install @ctrl/tinycolor"),
+            Some("@ctrl/tinycolor")
+        );
+    }
+
+    #[test]
+    fn extract_npm_install_pkg_scoped_versioned() {
+        assert_eq!(
+            extract_npm_install_pkg("npm install @ctrl/tinycolor@1.0.0"),
+            Some("@ctrl/tinycolor")
+        );
+    }
+
+    #[test]
+    fn extract_npm_install_pkg_pnpm_add() {
+        assert_eq!(extract_npm_install_pkg("pnpm add react"), Some("react"));
+    }
+
+    #[test]
+    fn extract_npm_install_pkg_yarn_add() {
+        assert_eq!(extract_npm_install_pkg("yarn add vue"), Some("vue"));
+    }
+
+    #[test]
+    fn extract_npm_install_pkg_skips_flags() {
+        assert_eq!(
+            extract_npm_install_pkg("npm install --save-dev @types/node"),
+            Some("@types/node")
+        );
+    }
+
+    #[test]
+    fn extract_npm_install_pkg_not_install_shape() {
+        assert_eq!(extract_npm_install_pkg("ls -la"), None);
+        assert_eq!(extract_npm_install_pkg("npm test"), None);
+        assert_eq!(extract_npm_install_pkg("npm run build"), None);
     }
 }
