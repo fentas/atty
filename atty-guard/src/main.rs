@@ -129,38 +129,58 @@ fn parse_interval(s: &str) -> Result<Option<std::time::Duration>, String> {
     if s == "0" || s.is_empty() {
         return Ok(None);
     }
-    let (digits, suffix): (String, char) = {
+    let (digits, suffix): (&str, char) = {
         let last = s.chars().last().unwrap();
         if last.is_ascii_alphabetic() {
-            (s[..s.len() - 1].to_owned(), last)
+            (&s[..s.len() - 1], last)
         } else {
-            (s.to_owned(), 's')
+            (s, 's')
         }
     };
     let n: u64 = digits
         .parse()
         .map_err(|e| format!("atoms-update-interval `{s}`: {e}"))?;
-    let secs = match suffix {
-        's' => n,
-        'm' => n * 60,
-        'h' => n * 3600,
-        'd' => n * 86400,
+    // `checked_mul` guards against silent overflow on huge inputs
+    // — a wrapped duration would lock the cron thread into a near-
+    // zero sleep and DoS upstream. Cap at u32::MAX seconds anyway
+    // because Duration::from_secs takes u64 and we have nothing
+    // useful to do with a 100-year refresh interval.
+    let mult: u64 = match suffix {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
         other => return Err(format!("atoms-update-interval suffix `{other}` — expected s/m/h/d")),
     };
+    let secs = n
+        .checked_mul(mult)
+        .ok_or_else(|| format!("atoms-update-interval `{s}` overflows — pick a smaller value"))?;
     if secs < 60 {
         return Err(format!("atoms-update-interval `{s}` below 60s — be polite to upstream"));
     }
     Ok(Some(std::time::Duration::from_secs(secs)))
 }
 
+/// Parse `--atoms-sources foo,bar`. Empty = default-enabled set.
+/// Unknown tokens are LOGGED to stderr (not silently dropped) so a
+/// typo doesn't quietly leave the cron thread fetching nothing.
 fn parse_atom_sources(s: &str) -> Vec<atom_fetcher::SourceId> {
     let s = s.trim();
     if s.is_empty() {
         return atom_fetcher::SourceId::default_enabled().to_vec();
     }
-    s.split(',')
-        .filter_map(|name| atom_fetcher::SourceId::parse(name.trim()))
-        .collect()
+    let mut out = Vec::new();
+    for raw in s.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match atom_fetcher::SourceId::parse(name) {
+            Some(sid) => out.push(sid),
+            None => eprintln!("atty-guard: unknown atom source `{name}` — ignoring (valid: gtfobins)"),
+        }
+    }
+    out
 }
 
 fn default_socket_path() -> PathBuf {
@@ -297,15 +317,26 @@ fn main() -> std::io::Result<()> {
     // exit kills it cleanly because `server::serve` returns on
     // signal and we drop straight out of main().
     if let Some(iv) = interval {
-        let cfg = atom_fetcher::FetcherConfig::default();
-        if cli.verbosity >= 1 {
+        if cfg!(feature = "atoms-fetch") {
+            let cfg = atom_fetcher::FetcherConfig::default();
+            if cli.verbosity >= 1 {
+                eprintln!(
+                    "atty-guard: atom refresh cron enabled — every {}s, sources={:?}",
+                    iv.as_secs(),
+                    sources
+                );
+            }
+            atom_fetcher::spawn_periodic_refresh(cfg, sources, iv);
+        } else {
+            // Without the feature, `spawn_periodic_refresh` is a
+            // no-op. Loud warn so the operator knows their cron
+            // schedule is doing nothing — silently swallowing the
+            // request would be worse.
             eprintln!(
-                "atty-guard: atom refresh cron enabled — every {}s, sources={:?}",
-                iv.as_secs(),
-                sources
+                "atty-guard: --atoms-update-interval {}s ignored — built without `atoms-fetch` feature",
+                iv.as_secs()
             );
         }
-        atom_fetcher::spawn_periodic_refresh(cfg, sources, iv);
     }
 
     server::serve(
