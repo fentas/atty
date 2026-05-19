@@ -30,7 +30,16 @@ toml = { version = "0.8", optional = true }
 # V2-F live OSV.dev lookup. ureq is the smallest blocking HTTP
 # client in the ecosystem with rustls for TLS — no openssl
 # flakiness. Pulled in only when `osv-live` is enabled.
+# Also reused by V2-I atom-fetcher when both features are on.
 ureq = { version = "2.10", optional = true, default-features = false, features = ["tls", "json"] }
+# V2-I atom fetcher — pulls IOC corpora from GTFOBins (+ future
+# Sigma / LOLBAS) into `flagged_atoms.txt`. flate2 + tar to
+# extract upstream GitHub tarballs; serde_yaml to parse the
+# YAML-fronted manifests. All optional, gated behind
+# `atoms-fetch`. ~6 MB combined dep weight; default build skips.
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", optional = true, default-features = false }
+serde_yaml = { version = "0.9", optional = true }
 
 [features]
 default = []
@@ -44,6 +53,11 @@ tier2-onnx = ["dep:tract-onnx", "dep:tokenizers", "dep:toml"]
 # Build the V2-F live OSV.dev lookup. Hits the upstream API per
 # uncached `npm install <pkg>`; default off (network use is opt-in).
 osv-live = ["dep:ureq"]
+# Build the V2-I atom fetcher: `atty-guard atoms update` +
+# `--atoms-update-interval` cron-style background refresh.
+# Reuses ureq for HTTPS; adds flate2 + tar + serde_yaml for
+# tarball + YAML parsing. See `docs/security-guard-updates.md`.
+atoms-fetch = ["dep:ureq", "dep:flate2", "dep:tar", "dep:serde_yaml"]
 
 [dev-dependencies]
 

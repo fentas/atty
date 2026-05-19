@@ -20,8 +20,8 @@ Status: **V1 + V2 baseline shipped (atty side + sidecar + ONNX SLM + eBPF + OSV)
 | AF_ALG    | eBPF `sys_enter_socket` tracepoint — copy.fail-class kernel-LPE detector.             | #117  | ✅ merged       |
 | V2-F      | Live OSV.dev lookup for `npm install <pkg>` Tier-1 misses.                            | #118  | ✅ merged       |
 | V2-G      | AtomMatcher — Aho-Corasick over `flagged_atoms.txt` for thousand-scale patterns.       | #119  | ✅ merged       |
-| **V2-H**  | **Sliding-context-window for SLM** — `OnnxBackend` gets ±N chars around the AC hit.    | TBD   | 🟡 this PR     |
-| **V2-I**  | **Baked-in atom fetcher** — periodic refresh of `flagged_atoms.txt` from Sigma + GTFOBins + LOLBAS + OSV; one-shot CLI + cron-style interval mode. | TBD   | ⏳ after V2-H  |
+| V2-H      | Sliding-context-window for SLM — `OnnxBackend` gets ±N bytes around the AC hit.        | #120  | ✅ merged       |
+| **V2-I**  | **Baked-in atom fetcher** — periodic refresh of `flagged_atoms.txt` from Sigma + GTFOBins + LOLBAS + OSV; one-shot CLI + cron-style interval mode. | TBD   | 🟡 this PR     |
 
 The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-G+H+I are the pattern-matching scale + intelligence-freshness improvements that close the gap between curated bundles and live disclosures.
 

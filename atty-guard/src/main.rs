@@ -26,6 +26,7 @@
 //! - ONNX-runtime SLM (SecureBERT-class) integration in the
 //!   `classifier::tier2` slot.
 
+mod atom_fetcher;
 mod atom_matcher;
 mod classifier;
 mod config;
@@ -97,6 +98,89 @@ struct Cli {
     /// on-prem proxy when atty-guard runs in an air-gapped env.
     #[arg(long, default_value = "https://api.osv.dev")]
     osv_endpoint: String,
+
+    /// V2-I one-shot atom refresh. Fetches the configured IOC
+    /// corpora (default: GTFOBins; future: Sigma, LOLBAS), parses
+    /// them into atoms, writes `$XDG_DATA_HOME/atty-guard/
+    /// flagged_atoms.txt` atomically, and exits without starting
+    /// the UDS server. Requires `--features atoms-fetch`.
+    #[arg(long, default_value_t = false)]
+    update_atoms_now: bool,
+
+    /// V2-I cron mode. When set, the daemon serves AND spawns a
+    /// background thread that re-runs the atom fetch every
+    /// `<interval>`. Accepts "30m" / "6h" / "1d" suffixes; "0"
+    /// disables (default). Requires `--features atoms-fetch`.
+    #[arg(long, default_value = "0")]
+    atoms_update_interval: String,
+
+    /// Comma-separated source list for the V2-I fetcher.
+    /// Today: `gtfobins` (only). Empty = use the source-id default.
+    #[arg(long, default_value = "")]
+    atoms_sources: String,
+}
+
+/// Parse the `--atoms-update-interval` value into a Duration.
+/// `0` (default) means no cron. Suffixes: `s` / `m` / `h` / `d`.
+/// Returns None for the disabled sentinel, errors for malformed
+/// values.
+fn parse_interval(s: &str) -> Result<Option<std::time::Duration>, String> {
+    let s = s.trim();
+    if s == "0" || s.is_empty() {
+        return Ok(None);
+    }
+    let (digits, suffix): (&str, char) = {
+        let last = s.chars().last().unwrap();
+        if last.is_ascii_alphabetic() {
+            (&s[..s.len() - 1], last)
+        } else {
+            (s, 's')
+        }
+    };
+    let n: u64 = digits
+        .parse()
+        .map_err(|e| format!("atoms-update-interval `{s}`: {e}"))?;
+    // `checked_mul` guards against silent overflow on huge inputs
+    // — a wrapped duration would lock the cron thread into a near-
+    // zero sleep and DoS upstream. Cap at u32::MAX seconds anyway
+    // because Duration::from_secs takes u64 and we have nothing
+    // useful to do with a 100-year refresh interval.
+    let mult: u64 = match suffix {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        other => return Err(format!("atoms-update-interval suffix `{other}` — expected s/m/h/d")),
+    };
+    let secs = n
+        .checked_mul(mult)
+        .ok_or_else(|| format!("atoms-update-interval `{s}` overflows — pick a smaller value"))?;
+    if secs < 60 {
+        return Err(format!("atoms-update-interval `{s}` below 60s — be polite to upstream"));
+    }
+    Ok(Some(std::time::Duration::from_secs(secs)))
+}
+
+/// Parse `--atoms-sources foo,bar`. Empty = default-enabled set.
+/// Unknown tokens are LOGGED to stderr (not silently dropped) so a
+/// typo doesn't quietly leave the cron thread fetching nothing.
+fn parse_atom_sources(s: &str) -> Vec<atom_fetcher::SourceId> {
+    let s = s.trim();
+    if s.is_empty() {
+        return atom_fetcher::SourceId::default_enabled().to_vec();
+    }
+    let mut out = Vec::new();
+    for raw in s.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match atom_fetcher::SourceId::parse(name) {
+            Some(sid) => out.push(sid),
+            None => eprintln!("atty-guard: unknown atom source `{name}` — ignoring (valid: gtfobins)"),
+        }
+    }
+    out
 }
 
 fn default_socket_path() -> PathBuf {
@@ -120,6 +204,38 @@ fn libc_uid() -> u32 {
 
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
+    let sources = parse_atom_sources(&cli.atoms_sources);
+    let interval = parse_interval(&cli.atoms_update_interval)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
+    // V2-I one-shot path: refresh atoms + exit, don't serve UDS.
+    // Useful for `atty-guard --update-atoms-now` invocations from
+    // systemd timers / pre-commit hooks / CI atom-bundle builders.
+    if cli.update_atoms_now {
+        let cfg = atom_fetcher::FetcherConfig::default();
+        return match atom_fetcher::fetch_all(&cfg, &sources) {
+            Ok(report) => {
+                eprintln!(
+                    "atty-guard: atom refresh ok — {} atoms across {} sources → {}",
+                    report.atoms_total,
+                    report.per_source.len(),
+                    cfg.output_path.display()
+                );
+                for (sid, res) in &report.per_source {
+                    match res {
+                        Ok(n) => eprintln!("  {}: {n} atoms", sid.name()),
+                        Err(e) => eprintln!("  {}: FAILED — {e}", sid.name()),
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("atty-guard: atom refresh failed — {e}");
+                Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            }
+        };
+    }
+
     let socket = cli.socket.unwrap_or_else(default_socket_path);
     let backend = classifier::BackendKind::parse(&cli.tier2).unwrap_or(classifier::BackendKind::Stub);
 
@@ -195,6 +311,33 @@ fn main() -> std::io::Result<()> {
     } else {
         None
     };
+
+    // V2-I cron mode. Spawn the background refresh thread before
+    // entering the UDS accept loop. The thread is detached; daemon
+    // exit kills it cleanly because `server::serve` returns on
+    // signal and we drop straight out of main().
+    if let Some(iv) = interval {
+        if cfg!(feature = "atoms-fetch") {
+            let cfg = atom_fetcher::FetcherConfig::default();
+            if cli.verbosity >= 1 {
+                eprintln!(
+                    "atty-guard: atom refresh cron enabled — every {}s, sources={:?}",
+                    iv.as_secs(),
+                    sources
+                );
+            }
+            atom_fetcher::spawn_periodic_refresh(cfg, sources, iv);
+        } else {
+            // Without the feature, `spawn_periodic_refresh` is a
+            // no-op. Loud warn so the operator knows their cron
+            // schedule is doing nothing — silently swallowing the
+            // request would be worse.
+            eprintln!(
+                "atty-guard: --atoms-update-interval {}s ignored — built without `atoms-fetch` feature",
+                iv.as_secs()
+            );
+        }
+    }
 
     server::serve(
         &socket,
