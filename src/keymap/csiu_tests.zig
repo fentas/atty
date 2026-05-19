@@ -32,6 +32,21 @@ test "csiUToLegacy: named keys with legacy single-byte encodings" {
     try std.testing.expectEqualSlices(u8, "\x7f", csiUToLegacy("\x1b[127u", &out).?);
 }
 
+test "csiUToLegacy: unmodified printable ASCII translates to its literal byte" {
+    // xterm.js (VS Code / Windsurf integrated terminals) over-
+    // reports under kitty kbd flag 1 and emits CSI-u for printable
+    // ASCII too. Without translation, the unmapped-drop path
+    // silently swallows Space → typed line never grows. Regression
+    // for issue #123.
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, " ", csiUToLegacy("\x1b[32u", &out).?);
+    try std.testing.expectEqualSlices(u8, "a", csiUToLegacy("\x1b[97u", &out).?);
+    try std.testing.expectEqualSlices(u8, "Z", csiUToLegacy("\x1b[90u", &out).?);
+    try std.testing.expectEqualSlices(u8, "5", csiUToLegacy("\x1b[53u", &out).?);
+    try std.testing.expectEqualSlices(u8, "!", csiUToLegacy("\x1b[33u", &out).?);
+    try std.testing.expectEqualSlices(u8, "~", csiUToLegacy("\x1b[126u", &out).?);
+}
+
 test "csiUToLegacy: Shift+Tab → \\x1b[Z" {
     var out: [4]u8 = undefined;
     try std.testing.expectEqualSlices(u8, "\x1b[Z", csiUToLegacy("\x1b[9;2u", &out).?);

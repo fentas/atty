@@ -85,6 +85,19 @@ pub fn csiUToLegacy(input: []const u8, out: []u8) ?[]const u8 {
         13 => return writeOne(out, '\r'),
         27 => return writeOne(out, 0x1b),
         127 => return writeOne(out, 0x7f),
+        // Unmodified printable ASCII. atty pushes kitty kbd flag 1
+        // (disambiguate) which per spec only requires Tab/Enter/Esc/
+        // Backspace + the function keys to be CSI-u — printable
+        // chars should arrive as their literal bytes. Some terminal
+        // implementations (xterm.js in VS Code / Windsurf) over-
+        // report and emit `\x1b[32u` for Space too. Without this
+        // translation, the "unmapped + not in alt-screen → drop"
+        // path silently swallows Space (typed line never grows) and
+        // any other printable that the terminal CSI-u-ifies. Cover
+        // 0x20..0x7E so the failure mode can't show up for `!`,
+        // `~`, digits, letters either if a future terminal lib
+        // generalises the over-reporting.
+        0x20...0x7E => return writeOne(out, @intCast(kc)),
         else => {},
     };
 
