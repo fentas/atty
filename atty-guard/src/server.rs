@@ -27,16 +27,26 @@ use std::thread;
 /// an unbounded "line" past serde_json's recursion limit.
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 
-pub fn serve(socket: &Path, verbosity: u8, backend: BackendKind) -> std::io::Result<()> {
+pub fn serve(
+    socket: &Path,
+    verbosity: u8,
+    backend: BackendKind,
+    ebpf: Option<Arc<crate::ebpf::EbpfState>>,
+) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // Restrictive perms so a co-tenant user can't connect. UDS files
     // honour file permissions on Linux; mode 0600 == owner-only.
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
 
+    let mut threat = ThreatMap::new();
+    if let Some(es) = ebpf {
+        threat = threat.with_ebpf(es);
+    }
+
     let state = Arc::new(State {
         classifier: Classifier::new_with_backend(backend),
-        threat: ThreatMap::new(),
+        threat,
         verbosity,
     });
 
@@ -209,7 +219,7 @@ mod tests {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
         let handle = thread::spawn(move || {
-            let _ = serve(&socket_for_thread, 0, BackendKind::Stub);
+            let _ = serve(&socket_for_thread, 0, BackendKind::Stub, None);
         });
         // Wait for the bind to land.
         for _ in 0..50 {

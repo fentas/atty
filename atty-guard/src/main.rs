@@ -112,19 +112,23 @@ fn main() -> std::io::Result<()> {
     // OR the feature IS built but the kernel/caps aren't there
     // (also clean — log + continue). V2-A behaviour stays as a
     // graceful fallback for all failure modes.
-    if cli.enable_ebpf {
+    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if cli.enable_ebpf {
         match ebpf::EbpfState::attach() {
-            Ok(_state) => {
+            Ok(state) => {
                 if cli.verbosity >= 1 {
                     eprintln!("atty-guard: eBPF attached (LSM + execve tracepoint)");
                 }
+                Some(std::sync::Arc::new(state))
             }
             Err(e) => {
                 eprintln!("atty-guard: eBPF unavailable — {e}");
                 eprintln!("atty-guard: continuing in V2-A mode (in-memory threat map, no kernel enforcement)");
+                None
             }
         }
-    }
+    } else {
+        None
+    };
 
-    server::serve(&socket, cli.verbosity, backend)
+    server::serve(&socket, cli.verbosity, backend, ebpf_state)
 }
