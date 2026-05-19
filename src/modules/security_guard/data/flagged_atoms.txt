@@ -52,7 +52,6 @@ busybox nc -e
 base64 -d
 base64 --decode
 xxd -r
-echo $(echo
 printf %s | base64
 | sh -s --
 | bash -s --
@@ -114,7 +113,6 @@ splice(
 # in a fresh shell.
 
 postinstall.js
-.npmrc
 NPM_TOKEN
 shai-hulud
 bundle.js?shai

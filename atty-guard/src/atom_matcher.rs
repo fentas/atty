@@ -36,7 +36,7 @@ const FLAGGED_ATOMS_TXT: &str =
 pub fn parse_atoms() -> Vec<&'static str> {
     FLAGGED_ATOMS_TXT
         .lines()
-        .map(|l| l.trim_end())
+        .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect()
 }
@@ -72,11 +72,11 @@ impl AtomMatcher {
     /// Test seam — accepts a custom atom list. The production
     /// constructor is `new()` which reads the bundled data file.
     pub fn with_atoms(atoms: Vec<&'static str>) -> Self {
-        // LeftmostFirst gives deterministic "first match wins"
-        // semantics: if "nc -e" and "nc -e /bin/sh" both match,
-        // the longer wins when its start offset is ≤ the
-        // shorter's. We register longer atoms first in the data
-        // file when ambiguity matters.
+        // LeftmostLongest: among all patterns that start at the
+        // leftmost match position, the longest wins. Order in the
+        // data file doesn't affect the match — only pattern length
+        // does. If "nc -e" and "nc -e /bin/sh" both match at the
+        // same offset, the longer wins.
         let ac = AhoCorasickBuilder::new()
             .match_kind(MatchKind::LeftmostLongest)
             .build(&atoms)

