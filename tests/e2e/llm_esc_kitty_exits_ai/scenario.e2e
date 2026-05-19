@@ -1,3 +1,4 @@
+#
 # llm_esc_kitty_exits_ai — kitty-kbd CSI-u Esc (`\x1b[27u`) cancels
 # an in-progress AI dialog. Sibling of llm_esc_exits_ai which covers
 # the legacy lone-ESC byte path.

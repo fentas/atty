@@ -8,6 +8,7 @@ const DsrParser = mod.DsrParser;
 
 test "DsrParser: full reply in one chunk is consumed; position returned" {
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r = p.feed("\x1B[24;80R", &out);
     try testing.expectEqual(@as(usize, 0), r.filtered_len);
@@ -18,6 +19,7 @@ test "DsrParser: full reply in one chunk is consumed; position returned" {
 
 test "DsrParser: reply embedded between printable bytes — only reply consumed" {
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r = p.feed("a\x1B[10;5Rb", &out);
     try testing.expect(r.pos != null);
@@ -28,6 +30,7 @@ test "DsrParser: reply embedded between printable bytes — only reply consumed"
 
 test "DsrParser: unrelated CSI (`\\x1b[A` — Up arrow) passes through" {
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r = p.feed("\x1B[A", &out);
     try testing.expect(r.pos == null);
@@ -38,6 +41,7 @@ test "DsrParser: CSI with single param ending in `R` (no `;`) doesn't match" {
     // A real DSR reply always has row + col separated by `;`. A
     // sequence like `\x1B[24R` is malformed — pass through.
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r = p.feed("\x1B[24R", &out);
     try testing.expect(r.pos == null);
@@ -51,6 +55,7 @@ test "DsrParser: reply split across two feeds — NEITHER chunk leaks bytes" {
     // chunk's filtered output and forward to bash before learning
     // it was a reply.
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r1 = p.feed("\x1B[12;", &out);
     try testing.expect(r1.pos == null);
@@ -72,6 +77,7 @@ test "DsrParser: split reply with user bytes BEFORE the tail — user bytes pres
     // pending-buffer flush emits the partial-reply bytes
     // VERBATIM so keymap matchers still see them.
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r1 = p.feed("\x1B[12;", &out);
     try testing.expectEqual(@as(usize, 0), r1.filtered_len);
@@ -87,6 +93,7 @@ test "DsrParser: split reply with user bytes BEFORE the tail — user bytes pres
 
 test "DsrParser: in-flight pending across an idle feed call — bytes still withheld" {
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r1 = p.feed("\x1B[", &out);
     try testing.expectEqual(@as(usize, 0), r1.filtered_len);
@@ -106,6 +113,7 @@ test "DsrParser: in-flight pending across an idle feed call — bytes still with
 
 test "DsrParser: zero-param fields parse as 0 (caller's job to clamp)" {
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r = p.feed("\x1B[;R", &out);
     try testing.expect(r.pos != null);
@@ -115,6 +123,7 @@ test "DsrParser: zero-param fields parse as 0 (caller's job to clamp)" {
 
 test "DsrParser: massive digit values saturate at u16 max" {
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r = p.feed("\x1B[99999;88888R", &out);
     try testing.expect(r.pos != null);
@@ -122,21 +131,78 @@ test "DsrParser: massive digit values saturate at u16 max" {
     try testing.expectEqual(@as(u16, std.math.maxInt(u16)), r.pos.?.col);
 }
 
-test "DsrParser: writeQuery emits the standard sequence" {
+test "DsrParser: writeQuery emits the standard sequence + sets expecting_reply" {
+    var p = DsrParser{};
     var buf: [16]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try DsrParser.writeQuery(&w);
+    try testing.expect(!p.expecting_reply);
+    try p.writeQuery(&w);
     try testing.expectEqualStrings("\x1B[6n", buf[0..w.end]);
+    try testing.expect(p.expecting_reply);
 }
 
-test "DsrParser: two replies in a single chunk both parse" {
+test "DsrParser: lone Esc with no query outstanding passes through immediately" {
+    // Regression for the silent-ESC bug: user pressed Esc, parser
+    // ate it into pending_buf waiting for a follow-up byte that
+    // never came, the proxy's filter saw 0 bytes and skipped the
+    // keymap match. With expecting_reply gated to actual queries,
+    // a stray Esc forwards through unchanged.
+    var p = DsrParser{};
+    var out: [16]u8 = undefined;
+    const r = p.feed("\x1B", &out);
+    try testing.expectEqual(@as(usize, 1), r.filtered_len);
+    try testing.expectEqualSlices(u8, "\x1B", out[0..r.filtered_len]);
+    try testing.expect(r.pos == null);
+}
+
+test "DsrParser: arrow-key CSI without outstanding query passes through" {
+    // `\x1B[A` (Up arrow) used to enter the parser's `.esc` then
+    // `.csi` state and abort-flush on the `A`. Now it just streams
+    // through verbatim since no query is outstanding — saves the
+    // pending-buf round-trip and is observationally identical.
+    var p = DsrParser{};
+    var out: [16]u8 = undefined;
+    const r = p.feed("\x1B[A", &out);
+    try testing.expectEqual(@as(usize, 3), r.filtered_len);
+    try testing.expectEqualSlices(u8, "\x1B[A", out[0..r.filtered_len]);
+}
+
+test "DsrParser: reply parses correctly when query was marked" {
+    // The legitimate DSR-reply path still works when atty has
+    // explicitly emitted a query. Mirrors the existing "full reply
+    // in one chunk" test but exercises the gated path.
+    var p = DsrParser{};
+    p.markQuerySent();
+    var out: [64]u8 = undefined;
+    const r = p.feed("\x1B[12;34R", &out);
+    try testing.expectEqual(@as(usize, 0), r.filtered_len);
+    try testing.expect(r.pos != null);
+    try testing.expectEqual(@as(u16, 12), r.pos.?.row);
+    try testing.expectEqual(@as(u16, 34), r.pos.?.col);
+    // Successful parse clears the gate so the NEXT Esc (no new
+    // query yet) passes through.
+    try testing.expect(!p.expecting_reply);
+
+    const r2 = p.feed("\x1B", &out);
+    try testing.expectEqual(@as(usize, 1), r2.filtered_len);
+    try testing.expectEqualSlices(u8, "\x1B", out[0..r2.filtered_len]);
+}
+
+test "DsrParser: back-to-back queries each parse their own reply" {
+    // Two distinct DSR queries from atty, each followed by a reply.
+    // Caller re-marks expecting_reply before each round; without
+    // the re-mark the second reply would stream through verbatim
+    // (correct — atty isn't waiting on a reply it didn't request).
     var p = DsrParser{};
     var out: [64]u8 = undefined;
+
+    p.markQuerySent();
     const r1 = p.feed("\x1B[1;2R", &out);
     try testing.expect(r1.pos != null);
     try testing.expectEqual(@as(u16, 1), r1.pos.?.row);
     try testing.expectEqual(@as(u16, 2), r1.pos.?.col);
 
+    p.markQuerySent();
     var out2: [64]u8 = undefined;
     const r2 = p.feed("\x1B[3;4R", &out2);
     try testing.expect(r2.pos != null);
@@ -149,6 +215,7 @@ test "DsrParser: abort mid-CSI (`\\x1b[12;abc`) restores byte stream verbatim" {
     // DSR reply but isn't, the parser must release the bytes so
     // keymap matching downstream still works.
     var p = DsrParser{};
+    p.markQuerySent();
     var out: [64]u8 = undefined;
     const r = p.feed("\x1B[12;a", &out);
     try testing.expect(r.pos == null);
@@ -156,4 +223,58 @@ test "DsrParser: abort mid-CSI (`\\x1b[12;abc`) restores byte stream verbatim" {
     // pending) + `a` (abort). After abort the parser should have
     // released all 6 bytes through the output buffer.
     try testing.expectEqualStrings("\x1B[12;a", out[0..r.filtered_len]);
+}
+
+test "DsrParser: abort clears expecting_reply so subsequent ESCs pass through" {
+    // Round-1 review found: aborted parses left `expecting_reply`
+    // set, so the next user-typed Esc fell back into pending_buf
+    // and got eaten — same bug class as the original silent-ESC,
+    // re-armed after a single missed reply. Verifies all three
+    // abort branches (`.esc`, `.csi`, `.row_done`) clear the gate.
+
+    // .esc abort
+    var p = DsrParser{};
+    p.markQuerySent();
+    var out: [16]u8 = undefined;
+    _ = p.feed("\x1Bx", &out); // ESC + non-`[` aborts in .esc
+    try testing.expect(!p.expecting_reply);
+
+    // .csi abort
+    p = DsrParser{};
+    p.markQuerySent();
+    _ = p.feed("\x1B[a", &out); // ESC `[` + non-digit/`;` aborts in .csi
+    try testing.expect(!p.expecting_reply);
+
+    // .row_done abort
+    p = DsrParser{};
+    p.markQuerySent();
+    _ = p.feed("\x1B[12;x", &out); // ESC `[12;` + non-digit/`R` aborts in .row_done
+    try testing.expect(!p.expecting_reply);
+
+    // Composite: after an abort, a lone ESC passes through (the
+    // user-facing scenario the gate-clear unblocks).
+    p = DsrParser{};
+    p.markQuerySent();
+    _ = p.feed("\x1Bx", &out); // abort
+    try testing.expect(!p.expecting_reply);
+    const r = p.feed("\x1B", &out);
+    try testing.expectEqual(@as(usize, 1), r.filtered_len);
+    try testing.expectEqualSlices(u8, "\x1B", out[0..r.filtered_len]);
+}
+
+test "DsrParser: user Esc within the query window aborts the buffered byte" {
+    // Trade-off documented in DsrParser.expecting_reply's docstring:
+    // user-typed Esc DURING the ~100 ms query→reply window is
+    // briefly buffered, then the next byte (typed by the user OR
+    // arriving as the actual reply) aborts and flushes verbatim.
+    // We assert the verbatim flush + the cleared gate.
+    var p = DsrParser{};
+    p.markQuerySent();
+    var out: [16]u8 = undefined;
+    // Two ESCs in a row: the first enters .esc, the second aborts
+    // the buffered state (since `\x1B` != `[`) → both flushed.
+    const r = p.feed("\x1B\x1B", &out);
+    try testing.expectEqual(@as(usize, 2), r.filtered_len);
+    try testing.expectEqualSlices(u8, "\x1B\x1B", out[0..r.filtered_len]);
+    try testing.expect(!p.expecting_reply);
 }

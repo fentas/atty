@@ -1,3 +1,4 @@
+#
 # llm_esc_exits_ai — bare Esc cancels an in-progress AI dialog,
 # wipes the suggested-command line, clears AI mode.
 #

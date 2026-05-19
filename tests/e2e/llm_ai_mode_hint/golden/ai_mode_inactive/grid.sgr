@@ -1,1 +1,9 @@
-R7 C0-3 dim
+R7 C0-6 dim
+R7 C7-7 fg=141
+R7 C8-8 dim
+R7 C9-13 bold fg=14
+R7 C14-21 dim
+R7 C22-26 bold fg=14
+R7 C27-36 dim
+R7 C37-41 bold fg=14
+R7 C42-46 dim

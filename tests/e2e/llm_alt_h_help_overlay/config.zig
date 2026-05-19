@@ -12,7 +12,10 @@ pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.llm.configure(.{
         .api_base = "",
-        .models = &.{ "model-alpha", "model-beta" },
+        .models = &.{
+            .{ .name = "model-alpha" },
+            .{ .name = "model-beta" },
+        },
     }),
 };
 
