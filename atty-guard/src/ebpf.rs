@@ -150,7 +150,12 @@ mod with_libbpf {
     pub struct EbpfState {
         obj: Mutex<libbpf_rs::Object>,
         _lsm_link: libbpf_rs::Link,
-        _tp_link: libbpf_rs::Link,
+        _tp_execve_link: libbpf_rs::Link,
+        /// AF_ALG socket() tracepoint — copy.fail-class kernel-LPE
+        /// signal. Loaded as part of the same .o so the user pays
+        /// for one BPF object load even if they only care about
+        /// the execve enforcement path.
+        _tp_socket_link: libbpf_rs::Link,
     }
 
     // SAFETY: `libbpf_rs::Object` and `libbpf_rs::Link` wrap raw
@@ -186,17 +191,25 @@ mod with_libbpf {
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach lsm: {e}")))?;
 
-            let tp_link = obj
+            let tp_execve_link = obj
                 .progs_mut()
                 .find(|p| p.name() == "trace_execve")
                 .ok_or_else(|| LoadError::LoadFailed("program trace_execve missing from .o".into()))?
                 .attach()
-                .map_err(|e| LoadError::LoadFailed(format!("attach tracepoint: {e}")))?;
+                .map_err(|e| LoadError::LoadFailed(format!("attach execve tracepoint: {e}")))?;
+
+            let tp_socket_link = obj
+                .progs_mut()
+                .find(|p| p.name() == "trace_socket")
+                .ok_or_else(|| LoadError::LoadFailed("program trace_socket missing from .o".into()))?
+                .attach()
+                .map_err(|e| LoadError::LoadFailed(format!("attach socket tracepoint: {e}")))?;
 
             Ok(Self {
                 obj: Mutex::new(obj),
                 _lsm_link: lsm_link,
-                _tp_link: tp_link,
+                _tp_execve_link: tp_execve_link,
+                _tp_socket_link: tp_socket_link,
             })
         }
 

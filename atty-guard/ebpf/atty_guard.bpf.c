@@ -60,11 +60,20 @@ struct {
     __uint(max_entries, 1 << 20);
 } events SEC(".maps");
 
+// Tagged event union. `kind` discriminates which other fields are
+// meaningful — userspace switches on it. Kept POD + fixed-size so
+// the ringbuf carries one entry shape regardless of source.
+#define EVENT_EXECVE       1
+#define EVENT_AF_ALG       2 // AF_ALG socket() — used by copy.fail
+                             // class kernel LPEs (algif_aead).
+
 struct execve_event {
+    __u8  kind;           // EVENT_EXECVE / EVENT_AF_ALG
+    __u8  _pad[3];
     __u32 pid;
     __u32 ppid;
-    char comm[16];
-    char argv0[128];
+    char  comm[16];
+    char  argv0[128];     // EVENT_EXECVE: first argv. EVENT_AF_ALG: unused.
 };
 
 // LSM hook — fires after the kernel has resolved the new program
@@ -100,6 +109,7 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
         // surface the reason in atty's banner.
         struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
+            e->kind = EVENT_EXECVE;
             e->pid = child_pid;
             e->ppid = parent_pid;
             bpf_get_current_comm(e->comm, sizeof(e->comm));
@@ -128,6 +138,7 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     //   args[1] = const char __user *const __user *argv
     //   args[2] = const char __user *const __user *envp
     // The previous comment was misleading; argv is args[1].
+    e->kind = EVENT_EXECVE;
     e->pid = bpf_get_current_pid_tgid() >> 32;
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -148,6 +159,52 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
         bpf_probe_read_user_str(e->argv0, sizeof(e->argv0), arg0);
     else
         e->argv0[0] = '\0';
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+// AF_ALG socket() watcher — kernel-side detector for copy.fail-class
+// LPEs (CVE-2026-31431 and adjacent algif_aead misuse). The exploit
+// MUST create an AF_ALG socket to reach the splice()-into-page-cache
+// gadget; normal interactive shells essentially never do this. Any
+// hit is a worth-surfacing signal.
+//
+// We don't BLOCK the syscall here (would break legitimate users like
+// `cryptsetup` and crypto unit tests); the LSM `socket_create` hook
+// is the right place for blocking. This tracepoint just logs to the
+// ringbuf so userspace can upgrade the calling PID's threat level
+// and/or notify the user via atty's banner.
+//
+// sys_enter_socket args:
+//   args[0] = int family   (AF_ALG = 38)
+//   args[1] = int type
+//   args[2] = int protocol
+#define AF_ALG 38
+
+SEC("tracepoint/syscalls/sys_enter_socket")
+int trace_socket(struct trace_event_raw_sys_enter *ctx)
+{
+    int family = (int)ctx->args[0];
+    if (family != AF_ALG)
+        return 0;
+
+    struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->kind = EVENT_AF_ALG;
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *parent = NULL;
+    bpf_core_read(&parent, sizeof(parent), &task->real_parent);
+    e->ppid = 0;
+    if (parent)
+        bpf_core_read(&e->ppid, sizeof(e->ppid), &parent->tgid);
+
+    bpf_get_current_comm(e->comm, sizeof(e->comm));
+    e->argv0[0] = '\0';
 
     bpf_ringbuf_submit(e, 0);
     return 0;
