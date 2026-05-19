@@ -46,6 +46,10 @@ pub const Config = struct {
     /// Banner style — dim italic by default, same vocabulary as
     /// the guardrail module.
     warning_style: style_mod.Style = .{ .dim = true, .italic = true },
+    /// Refused style — bold red 8-color (fg=1) by default. Used by
+    /// the daemon's `Block` verdict path, which prints a one-shot
+    /// "refused" notice and clears readline instead of prompting.
+    refused_style: style_mod.Style = .{ .bold = true, .fg = 1 },
     /// When true, the module STOPS matching once incognito mode is
     /// active. Default is false — incognito means "don't record",
     /// not "don't protect"; turning protection off in incognito
@@ -209,7 +213,8 @@ pub fn configure(comptime cfg: Config) type {
             // SLM, V2-C). Falls through to in-proc on any sidecar
             // error so security degrades gracefully.
             if (cfg.daemon_socket_path.len > 0 and !rt.daemon_disabled) {
-                if (queryDaemon(rt, line)) |daemon_verdict| {
+                if (queryDaemon(rt, line, ctx)) |daemon_verdict| {
+                    if (daemon_verdict.refused) return .{ .replace = "\x15" };
                     if (daemon_verdict.armed) return .swallow;
                     // Daemon said safe — skip in-proc pattern walk
                     // entirely. The daemon's Tier-1 is a strict
@@ -257,25 +262,36 @@ pub fn configure(comptime cfg: Config) type {
 
         const DaemonVerdict = struct {
             armed: bool,
+            refused: bool,
         };
 
-        /// Ask the sidecar to classify `line`. On Warn/Block, arms
-        /// the banner and returns `armed=true`; on Safe, returns
-        /// `armed=false`. Returns an error on any I/O / parse
-        /// failure so the caller can fall through to in-proc
-        /// patterns.
-        fn queryDaemon(rt: *Runtime, line: []const u8) !DaemonVerdict {
+        /// Ask the sidecar to classify `line`. Returns:
+        ///   `armed=true`  — Warn: banner is up, next keystroke is
+        ///                   the user's [y]/[t]/cancel response.
+        ///   `refused=true`— Block: no prompt; the caller MUST
+        ///                   clear readline. A short red "refused"
+        ///                   message is already written and the
+        ///                   shell PID is marked Critical.
+        ///   neither true  — Safe: caller continues normally.
+        /// Returns an error on any I/O / parse failure so the
+        /// caller can fall through to in-proc patterns.
+        ///
+        /// Trust-cache hits short-circuit BOTH paths — a user who
+        /// previously trusted this exact category+match keeps the
+        /// "yes I really mean it" choice even when the operator
+        /// has opted into auto-Block. Operators who want auto-Block
+        /// to override prior trust should clear the trust cache.
+        fn queryDaemon(rt: *Runtime, line: []const u8, ctx: *m.Context) !DaemonVerdict {
             if (rt.daemon == null) {
                 var client = UdsClient.init(cfg.daemon_socket_path);
                 client.read_timeout_ms = cfg.daemon_timeout_ms;
                 rt.daemon = client;
             }
             const result = try rt.daemon.?.classifyOrErr(line, .{});
-            if (result.verdict == .safe) return .{ .armed = false };
+            if (result.verdict == .safe) return .{ .armed = false, .refused = false };
 
-            // Either warn or block — arm the banner. Trust cache
-            // logic uses the SIDECAR's category mapping so an
-            // in-proc category fires the same hash; daemon-only
+            // Trust cache logic uses the SIDECAR's category mapping
+            // so an in-proc category fires the same hash; daemon-only
             // categories skip the trust cache (the user can still
             // press `y` for one-shot allow, but `t` won't persist
             // a category atty doesn't model in-proc).
@@ -283,7 +299,13 @@ pub fn configure(comptime cfg: Config) type {
             if (local_cat) |lc| {
                 var hash_buf: [trust_mod.hex_len]u8 = undefined;
                 const hash = trust_mod.hashCategoryMatch(lc, result.matched, &hash_buf);
-                if (rt.trust.contains(hash)) return .{ .armed = false };
+                if (rt.trust.contains(hash)) return .{ .armed = false, .refused = false };
+            }
+
+            if (result.verdict == .block) {
+                writeRefused(rt, result.reason, result.matched);
+                markShellThreat(rt, ctx, daemonVerdictToThreat(result.verdict));
+                return .{ .armed = false, .refused = true };
             }
 
             rt.armed = true;
@@ -298,7 +320,7 @@ pub fn configure(comptime cfg: Config) type {
             rt.armed_match_len = copy_len;
 
             writeBanner(rt, result.reason, result.matched);
-            return .{ .armed = true };
+            return .{ .armed = true, .refused = false };
         }
 
         fn handleArmedResponse(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Action {
@@ -391,6 +413,39 @@ pub fn configure(comptime cfg: Config) type {
             };
             if (text.len == 0) return null;
             return text;
+        }
+
+        /// Daemon-`Block` refusal notice. Single red line + clears
+        /// readline; no prompt, no follow-up keystroke. The shell's
+        /// PID tree is already marked Critical by the caller.
+        fn writeRefused(rt: *Runtime, description: []const u8, matched: []const u8) void {
+            const max_match: usize = 256;
+            const trunc_match = if (matched.len > max_match) matched[0..max_match] else matched;
+            const ellipsis: []const u8 = if (matched.len > max_match) " …" else "";
+            var buf: [1024]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "\r\n{f}atty security_guard: REFUSED — {s}{s}\r\n        match: {s}{s}\r\n",
+                .{ cfg.refused_style, description, style_mod.reset, trunc_match, ellipsis },
+            ) catch {
+                var fb: [128]u8 = undefined;
+                const short = std.fmt.bufPrint(
+                    &fb,
+                    "\r\natty security_guard: REFUSED — {s}\r\n",
+                    .{description},
+                ) catch return;
+                if (rt.sink_fn) |f| {
+                    f(rt.sink_ctx.?, short) catch {};
+                    return;
+                }
+                _ = std.c.write(std.posix.STDERR_FILENO, short.ptr, short.len);
+                return;
+            };
+            if (rt.sink_fn) |f| {
+                f(rt.sink_ctx.?, msg) catch {};
+                return;
+            }
+            _ = std.c.write(std.posix.STDERR_FILENO, msg.ptr, msg.len);
         }
 
         fn writeBanner(rt: *Runtime, description: []const u8, matched: []const u8) void {
