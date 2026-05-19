@@ -246,10 +246,11 @@ pub const LineState = struct {
         //       text-to-right because the physical cursor is still
         //       wherever the user left it.
         //
-        //       `pending_author` / `pending_intent_len` are already
-        //       cleared by `markUncertain()` (the only path that
-        //       lands here with uncertain=true), so the early-return
-        //       doesn't need to touch them.
+        //       `pending_author` / `pending_intent_len` are cleared
+        //       by `markUncertain()` itself, and every writer that
+        //       lands us here with uncertain=true (Tab, lone ESC,
+        //       mid-line edits, …) goes through `markUncertain()`
+        //       — so the early-return doesn't need to touch them.
         if (self.len == n and std.mem.eql(u8, self.buffer[0..self.len], content[0..n])) {
             self.uncertain = false;
             return;
