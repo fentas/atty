@@ -8,13 +8,12 @@ CARGO ?= cargo
 PREFIX ?= $(HOME)/.local
 OPT ?= ReleaseSafe
 
-# atty-guard (Rust sidecar) build profile + Cargo features. Defaults
-# match the release-artifact build: full classifier (ONNX SLM), live
-# OSV.dev lookup for npm misses, and the atom fetcher. eBPF is opt-in
-# — `make GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf …`.
+# atty-guard (Rust sidecar) Cargo features. Defaults match the
+# release-artifact build: full classifier (ONNX SLM), live OSV.dev
+# lookup for npm misses, and the atom fetcher. eBPF is opt-in —
+# `make GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf …`.
 # eBPF additionally needs `libbpf-dev` on the build host AND
 # `AmbientCapabilities=CAP_BPF` on the systemd-user unit at runtime.
-GUARD_PROFILE ?= release
 GUARD_FEATURES ?= tier2-onnx,osv-live,atoms-fetch
 
 # Default target picks the path that builds reliably on the host:
@@ -48,7 +47,7 @@ help:
 	@printf "Build (default = both subprojects)\n"
 	@printf "  build           Build everything (atty + atty-guard).\n"
 	@printf "  build-atty      Build only atty → zig-out/bin/atty (ReleaseSafe).\n"
-	@printf "  build-guard     Build only atty-guard → atty-guard/target/$(GUARD_PROFILE)/atty-guard.\n"
+	@printf "  build-guard     Build only atty-guard → atty-guard/target/release/atty-guard.\n"
 	@printf "                  Features: $(GUARD_FEATURES).\n"
 	@printf "  debug           atty in Debug mode.\n"
 	@printf "                  Run with ATTY_TRACE=1 for diagnostic stderr logs\n"
@@ -64,11 +63,12 @@ help:
 	@printf "Install (default = both subprojects)\n"
 	@printf "  install         Copy atty binary to \$$PREFIX/bin AND run atty-guard installer.\n"
 	@printf "  install-atty    Only copy zig-out/bin/atty to \$$PREFIX/bin (default: ~/.local/bin).\n"
-	@printf "  install-guard   Only run atty-guard/contrib/install.sh (binary + systemd-user unit).\n\n"
+	@printf "  install-guard   Only build + run atty-guard/contrib/install.sh.\n"
+	@printf "                  Side effect: enables + starts atty-guard.service (systemd-user).\n\n"
 	@printf "Link / unlink (default = both subprojects)\n"
 	@printf "  link            Symlink BOTH \$$PREFIX/bin/atty and \$$PREFIX/bin/atty-guard.\n"
 	@printf "  link-atty       Only symlink \$$PREFIX/bin/atty -> this clone's zig-out/bin/atty.\n"
-	@printf "  link-guard      Only symlink \$$PREFIX/bin/atty-guard -> atty-guard/target/$(GUARD_PROFILE)/atty-guard.\n"
+	@printf "  link-guard      Only symlink \$$PREFIX/bin/atty-guard -> atty-guard/target/release/atty-guard.\n"
 	@printf "  unlink          Remove BOTH symlinks (only if they're symlinks).\n"
 	@printf "  unlink-atty     Only remove the atty symlink.\n"
 	@printf "  unlink-guard    Only remove the atty-guard symlink.\n\n"
@@ -86,7 +86,7 @@ help:
 	@printf "  clean-atty      Only remove zig-out, .zig-cache, dist.\n"
 	@printf "  clean-guard     Only remove atty-guard/target.\n\n"
 	@printf "Variables: ZIG=$(ZIG)  CARGO=$(CARGO)  PREFIX=$(PREFIX)  TARGET=$(TARGET)  OPT=$(OPT)\n"
-	@printf "           GUARD_PROFILE=$(GUARD_PROFILE)  GUARD_FEATURES=$(GUARD_FEATURES)\n"
+	@printf "           GUARD_FEATURES=$(GUARD_FEATURES)\n"
 	@printf "           CONFIG=<path>   custom config.zig location\n"
 
 # Default build target builds BOTH subprojects so a fresh clone +
@@ -200,7 +200,7 @@ docker-binary:
 # requirements at build/runtime.
 # ---------------------------------------------------------------------------
 build-guard:
-	cd atty-guard && $(CARGO) build --$(GUARD_PROFILE) --features $(GUARD_FEATURES)
+	cd atty-guard && $(CARGO) build --release --features $(GUARD_FEATURES)
 
 test-guard:
 	cd atty-guard && $(CARGO) test --quiet
@@ -214,7 +214,7 @@ fmt-guard:
 # the systemd policy stays in one place (atty-guard.service).
 install-guard: build-guard
 	@printf "→ %s will install + enable atty-guard.service (systemd-user)\n" "$@"
-	atty-guard/contrib/install.sh
+	PREFIX=$(PREFIX) atty-guard/contrib/install.sh
 
 # Symlink the daemon binary the same way `make link` does for atty:
 # source-of-truth is the cargo target dir, $(PREFIX)/bin is just a
@@ -223,9 +223,9 @@ install-guard: build-guard
 # symlink at ExecStart, not on every signal.
 link-guard: build-guard
 	install -d $(PREFIX)/bin
-	ln -sfn $(CURDIR)/atty-guard/target/$(GUARD_PROFILE)/atty-guard $(PREFIX)/bin/atty-guard
+	ln -sfn $(CURDIR)/atty-guard/target/release/atty-guard $(PREFIX)/bin/atty-guard
 	@printf "→ linked %s/bin/atty-guard → %s/atty-guard/target/%s/atty-guard\n" \
-	    "$(PREFIX)" "$(CURDIR)" "$(GUARD_PROFILE)"
+	    "$(PREFIX)" "$(CURDIR)" "release"
 	@printf "  (run \`make reload-guard\` to pick up changes in a running daemon)\n"
 
 unlink-guard:

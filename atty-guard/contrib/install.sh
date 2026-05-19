@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# atty-guard installer — drops the daemon binary in ~/.local/bin and
-# enables the systemd-user unit. Idempotent; safe to re-run.
+# atty-guard installer — drops the daemon binary in $PREFIX/bin (default
+# ~/.local/bin) and enables the systemd-user unit. Idempotent;
+# safe to re-run.
 #
 # Build first:
 #   cd atty-guard && cargo build --release
@@ -8,18 +9,25 @@
 # Then:
 #   ./contrib/install.sh
 #
+# To install under a non-default prefix (matches the top-level Makefile's
+# `PREFIX` variable):
+#   PREFIX=/opt/foo ./contrib/install.sh
+#
 # To remove:
 #   systemctl --user disable --now atty-guard
-#   rm -f ~/.local/bin/atty-guard \
-#         ~/.config/systemd/user/atty-guard.service
+#   rm -f "$PREFIX/bin/atty-guard" "$XDG_CONFIG_HOME/systemd/user/atty-guard.service"
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_SRC="$REPO_ROOT/target/release/atty-guard"
-BIN_DST="${HOME}/.local/bin/atty-guard"
+# Honour PREFIX (matches the top-level Makefile convention) so
+# `make install PREFIX=/opt/foo` lands BOTH atty and atty-guard under
+# the same root. Default keeps the prior `${HOME}/.local` install dir.
+PREFIX="${PREFIX:-${HOME}/.local}"
+BIN_DST="${PREFIX}/bin/atty-guard"
 UNIT_SRC="$REPO_ROOT/contrib/atty-guard.service"
-UNIT_DST="${HOME}/.config/systemd/user/atty-guard.service"
+UNIT_DST="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user/atty-guard.service"
 
 if [[ ! -x "$BIN_SRC" ]]; then
     echo "error: $BIN_SRC not found." >&2

@@ -147,7 +147,7 @@ jobs:
       # CI shortcut and respects the version pin.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild@0.20
+          tool: cargo-zigbuild@0.22
 
       - name: cargo zigbuild atty-guard
         working-directory: atty-guard
@@ -183,6 +183,10 @@ jobs:
             echo "unver=${unver}"
           } >> "$GITHUB_OUTPUT"
 
+      # Native-only smoke test. The aarch64 binary is cross-built but
+      # the runner is amd64 — we'd need QEMU to exec it, which the
+      # existing atty pattern also avoids. Aarch64 ships un-smoke-
+      # tested; if it links wrong, the link step would have errored.
       - name: smoke test (${{ matrix.target }})
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
