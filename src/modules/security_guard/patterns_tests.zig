@@ -79,6 +79,27 @@ test "npm install with version suffix — strips @" {
     try testing.expect(hit != null);
 }
 
+test "npm install @ctrl/tinycolor — scoped Shai-Hulud package hit" {
+    // Regression test for the @scope-vs-@version fix: the bare
+    // leading `@` of a scoped package name MUST NOT be treated
+    // as a version separator (which would have stripped the
+    // entire name to "" and missed the match).
+    const hit = matchNpmUnsafe("npm install @ctrl/tinycolor");
+    try testing.expect(hit != null);
+}
+
+test "npm install @ctrl/tinycolor@1.0.0 — scoped + versioned" {
+    // Combined case: leading `@scope/` + trailing `@version`.
+    // Should still hit because version-strip uses lastIndexOf.
+    const hit = matchNpmUnsafe("npm install @ctrl/tinycolor@1.0.0");
+    try testing.expect(hit != null);
+}
+
+test "npm install polyfill — polyfill.io takeover seed hit" {
+    const hit = matchNpmUnsafe("npm install polyfill");
+    try testing.expect(hit != null);
+}
+
 test "npm install with flag — flags skipped" {
     const hit = matchNpmUnsafe("npm install --save-dev event-stream");
     try testing.expect(hit != null);

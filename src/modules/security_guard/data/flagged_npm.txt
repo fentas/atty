@@ -1,0 +1,85 @@
+# Flagged npm packages — atty's V1 Tier-1 fast-path bad-list.
+#
+# Single source of truth: this file is `include_str!`-loaded by
+# atty-guard's classifier (Rust) AND `@embedFile`'d by atty's
+# in-proc security_guard module (Zig). Editing here updates both
+# sides on the next compile.
+#
+# Format: one package name per line. Lines starting with `#` are
+# comments; blank lines are skipped. Use the BARE package name
+# (no version, no scope-bracketing) — matching strips `@version`
+# suffixes before comparison and the regex pattern is anchored
+# at the `install` verb's argument boundary.
+#
+# Adding a new incident:
+#   1. Open a PR adding the package(s) under a new dated heading.
+#   2. Include a one-line citation to the disclosure or IOC source.
+#   3. Subagent-review pings the maintainer; the test suite has
+#      a sentinel test that asserts the seed entries below stay
+#      matched (so no one accidentally removes one in a regex
+#      tweak).
+#
+# Coverage philosophy: this list is the FAST PATH — the V1 user
+# gets warned today. The comprehensive answer is the V2-F OSV /
+# GitHub Advisory DB lookup which queries authoritative data at
+# classify time. Keep this list FOCUSED on high-profile,
+# high-blast-radius incidents the user is likely to encounter.
+
+# ---------------------------------------------------------------
+# event-stream (2018) — first widely-noticed npm supply-chain
+# compromise. Flatmap-stream injected dependency stole bitcoin
+# wallets from Copay desktop.
+# https://github.com/dominictarr/event-stream/issues/116
+event-stream
+flatmap-stream
+
+# ---------------------------------------------------------------
+# ua-parser-js (2021) — maintainer's npm account compromised,
+# malicious versions 0.7.29, 0.8.0, 1.0.0 published with
+# cryptominer + credential stealer.
+# https://github.com/faisalman/ua-parser-js/issues/536
+ua-parser-js
+
+# ---------------------------------------------------------------
+# coa / rc (2021) — similar npm account takeovers, same week.
+# Both pulled malicious post-install scripts.
+coa
+rc
+
+# ---------------------------------------------------------------
+# node-ipc (2022) — maintainer pushed sabotage code targeting
+# IPs geolocated to Russia / Belarus. Not a takeover but
+# trust-breaking; affected packages dropping node-ipc included
+# vue-cli and unity-webgl.
+node-ipc
+
+# ---------------------------------------------------------------
+# colors / faker (2022) — maintainer deliberately broke own
+# packages in protest. Wide blast radius (colors was a Nodejs
+# top-100 download).
+colors
+faker
+
+# ---------------------------------------------------------------
+# Shai-Hulud npm worm (2024-2025) — self-propagating worm
+# compromises maintainers' npm tokens via stolen secrets in
+# ~/.npmrc and CI env. Republishes itself + payload across
+# every package the maintainer can publish to. Initial wave
+# affected hundreds of packages; the seed list below covers
+# the most-downloaded confirmed-compromised names. For full
+# coverage atty-guard should fall back to OSV (V2-F).
+#
+# Citation: github.com/advisories/GHSA-* (multiple),
+# socket.dev investigation reports, npm security disclosures.
+@ctrl/tinycolor
+@ctrl/deluge
+@nativescript-community/sentry
+ngx-bootstrap
+
+# ---------------------------------------------------------------
+# polyfill.io takeover (June 2024) — Funnull bought the
+# polyfill.io domain + injected mobile-redirect malware into
+# ~100k+ sites. Not strictly an npm-install vector, but a
+# `npm install polyfill` of the legacy package proxies the
+# malicious CDN.
+polyfill

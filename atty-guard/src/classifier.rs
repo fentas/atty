@@ -99,6 +99,28 @@ struct Tier1 {
     flagged_npm_packages: Vec<&'static str>,
 }
 
+/// Raw `flagged_npm.txt` — single source of truth, lives in the
+/// Zig tree at `src/modules/security_guard/data/flagged_npm.txt`
+/// because Zig's `@embedFile` only reaches files inside its
+/// own package root. Rust loads from there too via this
+/// relative `include_str!` so both sides compile against the
+/// same bytes. Edit once, both classifiers pick it up next build.
+const FLAGGED_NPM_TXT: &str =
+    include_str!("../../src/modules/security_guard/data/flagged_npm.txt");
+
+/// Parse `flagged_npm.txt` at startup. Skips blank lines and
+/// `#`-prefixed comments; trims trailing whitespace. The leak
+/// of the static lifetime through `Vec<&'static str>` is
+/// deliberate — `FLAGGED_NPM_TXT` is `&'static str`, so any
+/// substring of it is also `'static`.
+fn parse_flagged_npm() -> Vec<&'static str> {
+    FLAGGED_NPM_TXT
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
 impl Tier1 {
     fn new() -> Self {
         // `curl|sh` family. Anchored at start of token boundary
@@ -125,16 +147,7 @@ impl Tier1 {
             curl_pipe_sh,
             npm_unsafe,
             bash_c,
-            flagged_npm_packages: vec![
-                "event-stream",
-                "flatmap-stream",
-                "ua-parser-js",
-                "coa",
-                "rc",
-                "node-ipc",
-                "colors",
-                "faker",
-            ],
+            flagged_npm_packages: parse_flagged_npm(),
         }
     }
 
@@ -156,7 +169,17 @@ impl Tier1 {
                 if tok.starts_with('-') {
                     continue;
                 }
-                let name = tok.split_once('@').map(|t| t.0).unwrap_or(tok);
+                // Strip a trailing `@version` suffix while keeping the
+                // leading `@scope/` intact. `@ctrl/tinycolor@1.0.0` →
+                // `@ctrl/tinycolor`; bare `event-stream@0.1.0` →
+                // `event-stream`; bare scope `@ctrl/tinycolor` →
+                // unchanged. Using rfind catches the version separator
+                // (the LAST `@`) rather than the leading scope marker
+                // (position 0).
+                let name = match tok.rfind('@') {
+                    Some(0) | None => tok,
+                    Some(i) => &tok[..i],
+                };
                 if self.flagged_npm_packages.contains(&name) {
                     return Some(ClassifyResult {
                         verdict: Verdict::Warn,
@@ -399,6 +422,49 @@ mod tests {
         let c = Classifier::new();
         let r = c.classify("pnpm add ua-parser-js@1.0.0");
         assert!(matches!(r.verdict, Verdict::Warn));
+    }
+
+    #[test]
+    fn npm_install_shai_hulud_seed_packages() {
+        // Regression test for the data-file load path AND the
+        // Shai-Hulud seed entries. If someone "tidies up" the
+        // npm parser, these stay flagged.
+        let c = Classifier::new();
+        for pkg in ["@ctrl/tinycolor", "@ctrl/deluge", "ngx-bootstrap"] {
+            let cmd = format!("npm install {pkg}");
+            let r = c.classify(&cmd);
+            assert!(matches!(r.verdict, Verdict::Warn), "{pkg} should warn");
+        }
+    }
+
+    #[test]
+    fn npm_install_polyfill_caught() {
+        let c = Classifier::new();
+        let r = c.classify("npm install polyfill@latest");
+        assert!(matches!(r.verdict, Verdict::Warn));
+    }
+
+    #[test]
+    fn flagged_npm_data_file_loaded_non_empty() {
+        // Sentinel — protects against the data file ever being
+        // emptied / mis-pathed in a refactor. We don't assert
+        // count to keep the test stable as entries are added.
+        let pkgs = parse_flagged_npm();
+        assert!(pkgs.len() >= 8, "expected at least 8 seed entries");
+        for seed in ["event-stream", "ua-parser-js"] {
+            assert!(pkgs.contains(&seed), "{seed} missing from data file");
+        }
+    }
+
+    #[test]
+    fn flagged_npm_skips_comments_and_blanks() {
+        // The data file has many `#` comment lines and blank
+        // separators between sections; the parser must skip them.
+        let pkgs = parse_flagged_npm();
+        for entry in &pkgs {
+            assert!(!entry.starts_with('#'), "leaked comment line: {entry}");
+            assert!(!entry.is_empty(), "leaked blank line");
+        }
     }
 
     #[test]
