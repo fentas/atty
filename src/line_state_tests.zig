@@ -210,6 +210,50 @@ test "mid-line append/backspace/killWord markUncertain instead of corrupting buf
     try std.testing.expectEqualSlices(u8, "hello world", l.current());
 }
 
+test "uncertain + DIFFERENT content + Tab + sync still clamps cursor_pos (Tab-with-completion path)" {
+    // Counterpart to the no-match guard below: Tab WITH a completion
+    // that grew the buffer falls through to the rewrite branch and
+    // clamps cursor_pos = new_len. Correct for the typical bash
+    // completion shape (insert at cursor, cursor ends up at the end
+    // of the inserted text — = new_len when the user didn't move
+    // past EOL after Arrow-Up). Without this test a future "preserve
+    // cursor_pos always" regression would silently break the common
+    // Tab-completion path.
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A");
+    l.syncFromCapture("git st");
+    _ = l.applyInput("\x09"); // Tab → markUncertain
+    try std.testing.expect(l.uncertain);
+
+    l.syncFromCapture("git status");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqual(@as(usize, 10), l.cursor_pos);
+    try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqualSlices(u8, "git status", l.current());
+}
+
+test "uncertain + same content + lone ESC + sync preserves cursor_pos (ESC-no-content guard)" {
+    // Lone ESC (0x1B with no `[` follower) also calls markUncertain;
+    // same shape as Tab-no-match. If the next syncFromCapture has
+    // unchanged content, the cursor must stay mid-line.
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A");
+    l.syncFromCapture("which pvcontrol");
+
+    _ = l.applyInput("\x1B[D"); // Left
+    _ = l.applyInput("\x1B[D"); // Left → cursor_pos = 13
+    try std.testing.expectEqual(@as(usize, 13), l.cursor_pos);
+
+    _ = l.applyInput("\x1B"); // lone ESC → markUncertain
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqual(@as(usize, 13), l.cursor_pos);
+
+    l.syncFromCapture("which pvcontrol");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 13), l.cursor_pos);
+}
+
 test "uncertain + same content + Tab + sync preserves cursor_pos (Tab-no-match guard)" {
     // User-reported: Arrow-Up → Arrow-Left × N → Tab (no completion
     // match) → ghost text appeared mid-line, overlaying the text

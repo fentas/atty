@@ -241,10 +241,15 @@ pub const LineState = struct {
         //       no bytes actually changed. Clear `uncertain` so
         //       ghost can re-engage, but PRESERVE `cursor_pos`.
         //       The OSC 133 stream carries no cursor info; clamping
-        //       to EOL would mid-line cases (Arrow-Left × N → Tab
-        //       with no completion match) paint ghost over text-
-        //       to-right because the physical cursor is still
+        //       to EOL would make mid-line cases (Arrow-Left × N →
+        //       Tab with no completion match) paint ghost over the
+        //       text-to-right because the physical cursor is still
         //       wherever the user left it.
+        //
+        //       `pending_author` / `pending_intent_len` are already
+        //       cleared by `markUncertain()` (the only path that
+        //       lands here with uncertain=true), so the early-return
+        //       doesn't need to touch them.
         if (self.len == n and std.mem.eql(u8, self.buffer[0..self.len], content[0..n])) {
             self.uncertain = false;
             return;
