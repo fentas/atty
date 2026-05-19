@@ -48,14 +48,20 @@ src/
     ├── integration.zig   real-PTY tests (zig build itest)
     └── e2e/              .e2e DSL scenarios + VT-grid diff harness
 
-atty-guard/                  Rust sidecar daemon — UDS + Tier-1/Tier-2 +
-│                            future eBPF LSM backstop. Optional install
-│                            via atty-guard/contrib/install.sh.
-├── Cargo.toml
+atty-guard/                  Rust sidecar daemon — UDS server with two-
+│                            tier classifier (Tier-1 regex/atom + Tier-2
+│                            SLM/heuristic), V2-J multi-hit accumulator,
+│                            eBPF LSM + execve/AF_ALG tracepoints, OSV
+│                            live npm lookup, V2-I atom fetcher
+│                            (GTFOBins / Sigma / LOLBAS). Optional
+│                            install via atty-guard/contrib/install.sh.
+├── Cargo.toml               feature flags: ebpf, tier2-onnx, osv-live, atoms-fetch
 ├── README.md
 ├── contrib/                 systemd-user unit + installer
-├── ebpf/                    V2-B kernel C source (skeleton; impl ahead)
-└── src/                     Rust daemon: classifier/protocol/server/threat_map
+├── ebpf/                    V2-B kernel C (LSM hook + execve + AF_ALG)
+└── src/                     atom_fetcher / atom_matcher / classifier /
+                             ebpf / onnx_backend / osv / protocol /
+                             sanitize / server / threat_map
 
 tests/e2e/<name>/scenario.e2e + tests/e2e/<name>/golden/{env.toml,cast.json,...}
 ```

