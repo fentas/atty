@@ -418,12 +418,19 @@ pub const LineState = struct {
             self.uncertain = true;
             return;
         }
+        // Mid-line insertion isn't modeled: bash splices the byte
+        // at cursor_pos and shifts the tail right; we'd need a
+        // memmove and bookkeeping we don't have. Mark uncertain
+        // so a subsequent OSC 133 capture restores the post-insert
+        // truth. Without this, len would lag the screen while
+        // cursor_pos slid back to len via Right-stepping, and
+        // ghost would re-engage on a stale buffer.
+        if (self.cursor_pos != self.len) {
+            self.markUncertain();
+            return;
+        }
         self.buffer[self.len] = b;
         self.len += 1;
-        // Assume cursor was at EOL when typing — the common case.
-        // Mid-line typing isn't modeled (the splice would land at
-        // `cursor_pos`, not `len`); cursor_moved would already be
-        // set in that path, so ghost stays suppressed regardless.
         self.cursor_pos = self.len;
         self.syncCursorMoved();
         self.generation +%= 1;
@@ -443,14 +450,18 @@ pub const LineState = struct {
             self.pending_intent_len = 0;
             return;
         }
+        // Mid-line backspace isn't modeled: bash removes at
+        // `cursor_pos - 1` and shifts the tail left. We'd be
+        // dropping the LAST byte of the buffer (wrong) — over time
+        // the buffer + screen would diverge silently. Mark
+        // uncertain and let OSC 133 resync. Same rationale as the
+        // append() mid-line guard above.
+        if (self.cursor_pos != self.len) {
+            self.markUncertain();
+            return;
+        }
         self.len -= 1;
-        // Backspace: cursor moves left by one along with the deletion.
-        // If cursor was at EOL (the common case after typing), new
-        // cursor stays at the new EOL — `cursor_pos -= 1` keeps
-        // `cursor_pos == len`, so ghost re-engages. If cursor was
-        // mid-line, both move left by one — cursor_moved stays true
-        // and ghost stays suppressed (correct).
-        if (self.cursor_pos > 0) self.cursor_pos -= 1;
+        self.cursor_pos = self.len;
         if (self.len == 0) {
             self.uncertain = false;
             // Buffer just emptied — drop the staged author too.
@@ -494,16 +505,21 @@ pub const LineState = struct {
             self.pending_intent_len = 0;
             return;
         }
+        // Mid-line Ctrl-W (readline kills the word BEFORE the
+        // cursor, leaving the tail intact). The keystroke model
+        // here scans from the end of the buffer — wrong when the
+        // cursor is mid-line. Mark uncertain and let OSC 133 sync.
+        // Same rationale as the append/backspace mid-line guards.
+        if (self.cursor_pos != self.len) {
+            self.markUncertain();
+            return;
+        }
         // Skip trailing spaces, then the word characters.
         var end = self.len;
         while (end > 0 and self.buffer[end - 1] == ' ') : (end -= 1) {}
         while (end > 0 and self.buffer[end - 1] != ' ') : (end -= 1) {}
         if (end != self.len) {
             self.len = end;
-            // Ctrl-W deletes BEFORE the cursor (readline) — model
-            // it as "cursor lands at the new EOL". Mid-line Ctrl-W
-            // would land cursor mid-line, but we don't model that
-            // (same simplification as backspace).
             self.cursor_pos = self.len;
             if (self.len == 0) {
                 self.uncertain = false;

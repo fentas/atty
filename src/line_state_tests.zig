@@ -174,6 +174,42 @@ test "Up + sync(recall) + Ctrl-A + End + type 'e' preserves recalled line conten
     try std.testing.expectEqualSlices(u8, "which pvcontrole", l.current());
 }
 
+test "mid-line append/backspace/killWord markUncertain instead of corrupting buffer" {
+    // Copilot review caught the hole: the cursor_pos refactor's
+    // "assume EOL" shortcut for append / backspace / killWord
+    // breaks when the user is actually mid-line. Bash splices the
+    // insert/delete at cursor_pos; line_state's keystroke model
+    // only knows EOL operations. Mark uncertain when mid-line so
+    // an OSC 133 syncFromCapture restores the post-edit content
+    // instead of letting buffer + screen drift apart silently.
+    var l = LineState{};
+    _ = l.applyInput("hello world");
+    _ = l.applyInput("\x01"); // Ctrl-A → cursor_pos = 0
+    try std.testing.expect(l.cursor_moved);
+
+    // Mid-line typing: buffer should NOT mutate; uncertain set.
+    _ = l.applyInput("X");
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqualSlices(u8, "hello world", l.current());
+    try std.testing.expectEqual(@as(usize, 11), l.len);
+
+    // Reset to a fresh state; same shape for backspace.
+    l.reset();
+    _ = l.applyInput("hello world");
+    _ = l.applyInput("\x01"); // Ctrl-A
+    _ = l.applyInput("\x7F"); // Backspace
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqualSlices(u8, "hello world", l.current()); // untouched
+
+    // killWord (Ctrl-W) mid-line.
+    l.reset();
+    _ = l.applyInput("hello world");
+    _ = l.applyInput("\x01"); // Ctrl-A
+    _ = l.applyInput("\x17"); // Ctrl-W
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqualSlices(u8, "hello world", l.current());
+}
+
 test "uncertain + same content + Left + sync preserves cursor_pos (mid-typing redraw guard)" {
     // The proxy-side gate (`osc_input.len >= line.len` OR
     // `uncertain`) lets bash's mid-typing PS1 redraws sync back —
@@ -336,22 +372,27 @@ test "empty buffer + Right/Home does NOT set cursor_moved" {
     try std.testing.expect(l.cursor_moved);
 }
 
-test "killWord-to-empty clears cursor_moved" {
+test "killWord-to-empty clears cursor_moved (EOL case)" {
+    // EOL killWord-to-empty: Ctrl-W on "hello" with cursor at EOL
+    // deletes the whole word, buffer goes empty, cursor_moved
+    // clears. Mid-line Ctrl-W is unmodeled (markUncertain — see
+    // the mid-line-guard test above).
     var l = LineState{};
     _ = l.applyInput("hello");
-    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true
-    try std.testing.expect(l.cursor_moved);
-    _ = l.applyInput("\x17"); // Ctrl+W → killWord, buffer goes to "" (one word)
+    try std.testing.expect(!l.cursor_moved);
+    _ = l.applyInput("\x17"); // Ctrl+W at EOL → kills "hello"
     try std.testing.expectEqual(@as(usize, 0), l.len);
     try std.testing.expect(!l.cursor_moved);
 }
 
-test "backspace-to-empty clears cursor_moved" {
+test "backspace-to-empty clears cursor_moved (EOL case)" {
+    // EOL backspace-to-empty: cursor at EOL, backspace twice
+    // drains the buffer. Mid-line backspace markUncertain's
+    // instead (see mid-line-guard test above).
     var l = LineState{};
     _ = l.applyInput("hi");
-    _ = l.applyInput("\x1B[D"); // Left
-    try std.testing.expect(l.cursor_moved);
-    _ = l.applyInput("\x7F\x7F"); // backspace twice → empty
+    try std.testing.expect(!l.cursor_moved);
+    _ = l.applyInput("\x7F\x7F"); // backspace twice from EOL → empty
     try std.testing.expectEqual(@as(usize, 0), l.len);
     try std.testing.expect(!l.cursor_moved);
 }
