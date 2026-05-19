@@ -56,6 +56,19 @@ pub const DsrParser = struct {
     /// digits>;<5 digits>R` = 13) with comfort.
     pending_buf: [32]u8 = undefined,
     pending_len: u8 = 0,
+    /// Set by `markQuerySent` after the proxy emits a `\x1B[6n` query
+    /// to the terminal; cleared on the next successful reply parse.
+    /// **Critical for lone-ESC keystrokes.** Without this gate, every
+    /// `\x1B` (including a user's bare Esc with no follow-up byte in
+    /// the same read) drops into `.esc` state and sits in `pending_buf`
+    /// indefinitely — the proxy's `\x1B`-then-nothing read filters to
+    /// 0 bytes and the keymap match never fires. Result: Esc bindings
+    /// (`llm_exec_cancel`, future vim-mode triggers) silently dead.
+    /// Gating on outstanding queries keeps cross-chunk DSR-reply
+    /// reassembly working for the legitimate case (terminal's reply
+    /// to atty's query, arriving immediately after the query write)
+    /// while passing through stray ESCs unchanged.
+    expecting_reply: bool = false,
 
     const State = enum { ground, esc, csi, row_done };
 
@@ -78,7 +91,14 @@ pub const DsrParser = struct {
         for (input) |b| {
             switch (self.state) {
                 .ground => {
-                    if (b == 0x1B) {
+                    // Only intercept `\x1B` when atty has explicitly
+                    // queried the terminal for a reply. Outside that
+                    // window every ESC is either a user keystroke
+                    // (Esc-bound action like `llm_exec_cancel`) or
+                    // the lead byte of an unrelated CSI sequence the
+                    // shell will parse — pass it through immediately
+                    // so the keymap matcher can do its job.
+                    if (b == 0x1B and self.expecting_reply) {
                         self.state = .esc;
                         self.pushPending(b);
                     } else {
@@ -130,12 +150,15 @@ pub const DsrParser = struct {
                         self.pushPending(b);
                     } else if (b == 'R') {
                         // Full reply received — drop pending buffer
-                        // (the DSR sequence is consumed).
+                        // (the DSR sequence is consumed) and clear
+                        // the expecting-reply gate so subsequent
+                        // ESCs pass through immediately.
                         self.col = parseClamped(self.digits_buf[0..self.digits_len]);
                         result_pos = .{ .row = self.row, .col = self.col };
                         self.pending_len = 0;
                         self.state = .ground;
                         self.digits_len = 0;
+                        self.expecting_reply = false;
                     } else {
                         // Malformed (no terminator) — abandon, flush
                         // pending + the abort byte.
@@ -172,8 +195,22 @@ pub const DsrParser = struct {
     /// Emit the DSR-6n query sequence into `w`. Caller writes the
     /// result to STDOUT; the terminal replies on stdin which `feed`
     /// will parse.
-    pub fn writeQuery(w: *std.Io.Writer) !void {
+    ///
+    /// **`self` form (recommended).** Pairs the query-emit with the
+    /// parser's `expecting_reply` gate so subsequent `feed` calls
+    /// know to buffer the reply's `\x1B[…R` shape. Without this gate
+    /// the parser would pass through `\x1B` immediately and the
+    /// reply would leak to bash as if the user had typed `[24;1R`.
+    pub fn writeQuery(self: *DsrParser, w: *std.Io.Writer) !void {
         try w.writeAll("\x1B[6n");
+        self.expecting_reply = true;
+    }
+
+    /// Mark a DSR query as sent without emitting the bytes — used
+    /// when the caller writes the query through a different channel
+    /// (e.g. raw POSIX write to stdout).
+    pub fn markQuerySent(self: *DsrParser) void {
+        self.expecting_reply = true;
     }
 };
 

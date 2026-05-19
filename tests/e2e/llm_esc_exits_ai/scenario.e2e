@@ -1,12 +1,3 @@
-# DISABLED — bare Esc does not currently exit AI mode.
-# Repro'd in real interactive use (PTY + script): typing #: prompt → Alt+S →
-# Esc leaves DIALOG mode active and the suggested command on the prompt.
-# Ctrl+Shift+X exits correctly via the same llm_exec_cancel action, so the
-# regression is somewhere in the Esc binding's path to dispatchAction —
-# either the keymap match fails or the LLM module's onAction returns false
-# for the Esc-triggered cancel. Disabled in scenario.e2e.disabled so the
-# e2e suite (and thus release.yml) is unblocked. Rename back to scenario.e2e
-# once the underlying bug is fixed.
 #
 # llm_esc_exits_ai — bare Esc cancels an in-progress AI dialog,
 # wipes the suggested-command line, clears AI mode.

@@ -578,7 +578,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // a source for THIS iteration's snapshot — the LLM
                 // module already captured (row, col) at toggle
                 // dispatch.
-                if (args.is_tty) DsrParser.writeQuery(&w_re) catch {};
+                if (args.is_tty) dsr_parser.writeQuery(&w_re) catch {};
                 cursor_tracker.setMaxRows(sb.effectiveRows());
                 if (post_scroll_row) |r| {
                     const c: u16 = post_scroll_col orelse 1;
@@ -1475,7 +1475,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 // before the next sensitive op.
                                 if (args.is_tty) {
                                     var w_dsr: std.Io.Writer = .fixed(&out_buf);
-                                    if (DsrParser.writeQuery(&w_dsr)) {
+                                    if (dsr_parser.writeQuery(&w_dsr)) {
                                         if (w_dsr.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_dsr.end]) catch {};
                                     } else |_| {}
                                 }
