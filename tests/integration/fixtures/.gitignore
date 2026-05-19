@@ -1,0 +1,2 @@
+# Scenario-time config artifacts (zig requires repo-relative paths).
+build-tmp/

