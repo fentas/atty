@@ -52,6 +52,36 @@ jobs:
           path: zig-out/bin/atty
           retention-days: 14
 
+  # atty-guard is a separate Rust crate. Test it on default features
+  # AND with the user-facing feature set (tier2-onnx + osv-live +
+  # atoms-fetch) so the build doesn't quietly break when a feature-
+  # gated module gets touched. eBPF is intentionally excluded — it
+  # needs libbpf-dev + CAP_BPF at runtime, neither of which the
+  # default runner provides.
+  guard:
+    name: cargo build + test (atty-guard)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: atty-guard
+
+      - name: cargo build (default features)
+        working-directory: atty-guard
+        run: cargo build --quiet
+
+      - name: cargo test (default features)
+        working-directory: atty-guard
+        run: cargo test --quiet
+
+      - name: cargo test (tier2-onnx + osv-live + atoms-fetch)
+        working-directory: atty-guard
+        run: cargo test --features tier2-onnx,osv-live,atoms-fetch --quiet
+
   docker:
     name: docker build
     runs-on: ubuntu-24.04
