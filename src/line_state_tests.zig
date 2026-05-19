@@ -106,6 +106,43 @@ test "End VT-form (`\\x1b[4~` / `\\x1b[8~`) clears cursor_moved" {
     try std.testing.expect(l.cursor_moved);
 }
 
+test "Ctrl-A / Ctrl-B / Ctrl-F set cursor_moved; Ctrl-E clears it" {
+    // Readline cursor-motion bindings encoded as single control bytes
+    // (legacy, no kitty kbd). The bash redraw after Ctrl-A leaves the
+    // line CONTENT unchanged — `syncFromCapture` would then clear
+    // `uncertain`, and without `cursor_moved` set the ghost would
+    // re-engage and over-paint the rest of the line. Regression for
+    // "Arrow Up + Ctrl-A + type → ghost hides recalled tail".
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    try std.testing.expect(!l.cursor_moved);
+
+    _ = l.applyInput("\x01"); // Ctrl-A — BOL
+    try std.testing.expect(l.cursor_moved);
+
+    l.cursor_moved = false;
+    _ = l.applyInput("\x02"); // Ctrl-B — back 1
+    try std.testing.expect(l.cursor_moved);
+
+    l.cursor_moved = false;
+    _ = l.applyInput("\x06"); // Ctrl-F — forward 1
+    try std.testing.expect(l.cursor_moved);
+
+    // Ctrl-E lands provably at EOL — clears even when sticky.
+    l.cursor_moved = true;
+    _ = l.applyInput("\x05");
+    try std.testing.expect(!l.cursor_moved);
+}
+
+test "Ctrl-A on empty buffer does NOT set cursor_moved" {
+    // Empty buffer → cursor already at col 1 == EOL == BOL.
+    // Same skip rationale as the CSI cursor-motion path: don't
+    // stickily suppress ghost at an empty prompt.
+    var l = LineState{};
+    _ = l.applyInput("\x01");
+    try std.testing.expect(!l.cursor_moved);
+}
+
 test "Arrow Up does NOT set cursor_moved (history recall replaces buffer)" {
     // Up/Down change buffer content (history navigation) so the
     // existing `uncertain → syncFromCapture` recovery path handles

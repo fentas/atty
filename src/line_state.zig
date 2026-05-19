@@ -307,9 +307,29 @@ pub const LineState = struct {
                 0x17 => self.killWord(),
                 // Tab — completion is shell-driven; we lose track.
                 0x09 => self.markUncertain(),
+                // Readline cursor-motion bindings. We pull these out of
+                // the generic "unmodelled control byte" bucket because
+                // markUncertain alone isn't enough: the shell's redraw
+                // after Ctrl-A/B/F leaves CONTENT unchanged, so the
+                // OSC 133 syncFromCapture path then clears `uncertain`
+                // and ghost re-engages — painting over the line content
+                // that's still to the right of the now-mid-line cursor.
+                // `cursor_moved` survives syncFromCapture (only clears
+                // on backspace-to-empty / killLine / killWord / submit /
+                // reset), so set it explicitly.
+                0x01 => if (self.len > 0) {
+                    self.cursor_moved = true;
+                }, // Ctrl-A: cursor to BOL
+                0x02 => if (self.len > 0) {
+                    self.cursor_moved = true;
+                }, // Ctrl-B: cursor back 1
+                0x06 => if (self.len > 0) {
+                    self.cursor_moved = true;
+                }, // Ctrl-F: cursor forward 1 — only ±1, no EOL guarantee
+                0x05 => self.cursor_moved = false, // Ctrl-E: cursor to EOL, provably
                 // Any other control byte we don't model. The ranges are
                 // carefully carved around the codes we *do* handle above.
-                0x00, 0x01, 0x02, 0x05, 0x06, 0x0B, 0x0C, 0x0E...0x14, 0x16, 0x18, 0x19, 0x1A, 0x1C...0x1F => {
+                0x00, 0x0B, 0x0C, 0x0E...0x14, 0x16, 0x18, 0x19, 0x1A, 0x1C...0x1F => {
                     self.markUncertain();
                 },
                 // Lone ESC (no '[' follower).
