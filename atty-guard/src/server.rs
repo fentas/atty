@@ -32,6 +32,7 @@ pub fn serve(
     verbosity: u8,
     backend: BackendKind,
     onnx_cfg: &crate::config::OnnxConfig,
+    block_threshold: Option<f32>,
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
     osv: Option<Arc<crate::osv::OsvClient>>,
 ) -> std::io::Result<()> {
@@ -47,7 +48,8 @@ pub fn serve(
     }
 
     let state = Arc::new(State {
-        classifier: Classifier::new_with_backend(backend, onnx_cfg),
+        classifier: Classifier::new_with_backend(backend, onnx_cfg)
+            .with_block_threshold(block_threshold),
         threat,
         verbosity,
         osv,
@@ -322,8 +324,9 @@ mod tests {
                 0,
                 BackendKind::Stub,
                 &crate::config::OnnxConfig::default(),
-                None,
-                None,
+                None, // accumulator block_threshold
+                None, // ebpf
+                None, // osv
             );
         });
         // Wait for the bind to land.

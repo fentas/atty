@@ -1,0 +1,7 @@
+*
+!.gitignore
+!b.lock
+!b.yaml
+# for ease of use, no big overhead
+!b
+!argsh

