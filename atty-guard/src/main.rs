@@ -30,6 +30,7 @@ mod classifier;
 mod config;
 mod ebpf;
 mod onnx_backend;
+mod osv;
 mod protocol;
 mod sanitize;
 mod server;
@@ -84,6 +85,17 @@ struct Cli {
     /// `AmbientCapabilities` config. See `ebpf/README.md`.
     #[arg(long, default_value_t = false)]
     enable_ebpf: bool,
+
+    /// Enable V2-F live OSV.dev lookups for `npm install <pkg>`
+    /// Tier-1 misses. Off by default (network use is opt-in).
+    /// Requires `--features osv-live`. See `docs/security-guard-osv.md`.
+    #[arg(long, default_value_t = false)]
+    enable_osv: bool,
+
+    /// OSV API endpoint. Useful for pointing at a mirror or an
+    /// on-prem proxy when atty-guard runs in an air-gapped env.
+    #[arg(long, default_value = "https://api.osv.dev")]
+    osv_endpoint: String,
 }
 
 fn default_socket_path() -> PathBuf {
@@ -162,5 +174,33 @@ fn main() -> std::io::Result<()> {
         None
     };
 
-    server::serve(&socket, cli.verbosity, backend, &file_cfg.tier2.onnx, ebpf_state)
+    // V2-F live OSV.dev lookup. Opt-in via --enable-osv, separately
+    // feature-gated via `osv-live`. Same graceful-fallback story as
+    // eBPF: if the daemon's lookup_npm errors at runtime (network
+    // down, parse failure) atty-guard logs + carries on with
+    // Tier-1's local list as the only npm signal.
+    let osv_client: Option<std::sync::Arc<osv::OsvClient>> = if cli.enable_osv {
+        let cfg = osv::OsvConfig {
+            endpoint: cli.osv_endpoint.clone(),
+            ..osv::OsvConfig::default()
+        };
+        if cli.verbosity >= 1 {
+            eprintln!(
+                "atty-guard: OSV lookup enabled (endpoint={})",
+                cli.osv_endpoint
+            );
+        }
+        Some(std::sync::Arc::new(osv::OsvClient::new(cfg)))
+    } else {
+        None
+    };
+
+    server::serve(
+        &socket,
+        cli.verbosity,
+        backend,
+        &file_cfg.tier2.onnx,
+        ebpf_state,
+        osv_client,
+    )
 }
