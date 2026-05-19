@@ -4,7 +4,11 @@ Status: **design + skeleton (no auto-loading yet).** The userspace loader that d
 
 ## What this does
 
-Two BPF programs cooperating with the userspace daemon over two maps:
+Three BPF programs cooperating with the userspace daemon over two maps:
+
+- `lsm/bprm_check_security` — sync execve gating against the threat map.
+- `tracepoint:syscalls:sys_enter_execve` — async execve log.
+- `tracepoint:syscalls:sys_enter_socket` — **AF_ALG socket() detector**, kernel-side signal for copy.fail-class LPEs (CVE-2026-31431 + adjacent algif_aead misuse). Interactive shells essentially never open AF_ALG sockets; any hit is worth surfacing.
 
 ```
                   ┌─────────────────────────────────────┐
