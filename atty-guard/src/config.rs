@@ -44,6 +44,14 @@ pub struct AccumulatorConfig {
     /// the [y]/[t]/cancel choice for unambiguous-but-legitimate
     /// shapes like `curl … | sh` (the canonical install-script
     /// pattern).
+    ///
+    /// Validation happens at classifier construction, not here:
+    /// `Classifier::with_block_threshold` accepts only
+    /// `(WARN_THRESHOLD, 1.0]`, finite. Out-of-range values
+    /// degrade to `None` with a stderr warning at daemon start
+    /// — TOML deserialization itself only enforces "must be a
+    /// number," so e.g. `block_threshold = 2.0` parses fine and
+    /// is then rejected at runtime.
     #[serde(default)]
     pub block_threshold: Option<f32>,
 }

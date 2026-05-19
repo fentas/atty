@@ -48,4 +48,12 @@ TOML
   step "re-classify the multi-atom command from above"
   expect "verdict: Warn (default off — no auto-block)"
   confirm "default-off backwards compat"
+
+  step "write an out-of-range value to the config + restart daemon:"
+  step "  sed -i 's/block_threshold = ${threshold}/block_threshold = -1.0/' ${cfg}"
+  step "  atty-guard --config ${cfg} --tier2 heuristic &"
+  expect "stderr line: 'atty-guard: ignoring [accumulator] block_threshold = -1 …'"
+  step "re-classify the multi-atom command — must be Warn (degraded to default)"
+  expect "verdict: Warn (range guard rejected the value)"
+  confirm "out-of-range value degrades to default + warns"
 }
