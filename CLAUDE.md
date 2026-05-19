@@ -51,12 +51,10 @@ src/
 atty-guard/                  Rust sidecar daemon — UDS server with two-
 │                            tier classifier (Tier-1 regex/atom + Tier-2
 │                            SLM/heuristic), V2-J multi-hit accumulator,
-│                            V2-J-2 opt-in auto-Block escalation
-│                            (`[accumulator] block_threshold` in TOML;
-│                            atty side renders a red `REFUSED` line and
-│                            clears readline when verdict is Block),
-│                            eBPF LSM + execve/AF_ALG tracepoints, OSV
-│                            live npm lookup, V2-I atom fetcher
+│                            V2-J-2 opt-in auto-Block (`[accumulator]
+│                            block_threshold`; red `REFUSED` line atty-
+│                            side), eBPF LSM + execve/AF_ALG tracepoints,
+│                            OSV live npm lookup, V2-I atom fetcher
 │                            (GTFOBins / Sigma / LOLBAS). Optional
 │                            install via atty-guard/contrib/install.sh.
 ├── Cargo.toml               feature flags: ebpf, tier2-onnx, osv-live, atoms-fetch
@@ -125,7 +123,7 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 - **`atty doctor`** emits a shell snippet (`eval "$(atty doctor)"`) that diagnoses the OSC 133 integration chain — `$ATTY` set, shell detected, functions defined, `PROMPT_COMMAND` wired (array AND string form), PS1 contains `;A` / `;B` markers. Use when `Alt+S` reports "needs OSC 133" after running `atty init bash`. The typical failure is the init's `exec atty bash` step replaces the shell process and discards the in-memory function defs — eval needs to be in `.bashrc` (canonical) or run a SECOND time inside the atty session (`ATTY=1` skips the exec, runs OSC 133 setup in-place).
 - **`Config.enter_action`** (LLM module) controls what bare Enter on `#: …` does. Default `.none` makes Enter a no-op in AI mode — Alt+A / Alt+S / Alt+Shift+S are the explicit triggers. `.single` / `.dialog` / `.auto` re-bind Enter to the corresponding action for muscle-memory users. The default exists to defend against accidental LLM calls when typing `#:` comments at the prompt.
 - **syncFromCapture is length-aware AND cursor-preserving.** The proxy's `line_state.syncFromCapture(osc.input)` call only fires when (a) line_state is `uncertain` (recovery path — Arrow-Up recall, Tab completion) OR (b) `osc.input.len >= line_state.current().len`. Without the gate, bash readline's mid-typing PS1 redraws (which re-emit `;A`/`;B` markers and clear `osc.input`) would wipe the keystroke buffer between characters, observed as "ghost text matches last N-1 chars when typing N chars fast." See `src/proxy.zig` `syncFromCapture` site. **Inside `syncFromCapture` itself**, the early-return clears `uncertain` but preserves `cursor_pos` when the capture's content matches the existing buffer — the OSC 133 stream carries no cursor information, so clamping to EOL would falsely re-engage ghost when the user is mid-line after Arrow-Left × N + Tab (no completion match). Only the rewrite branch (content actually changed) clamps `cursor_pos = new_len`.
-- **security_guard's daemon-`Block` path actually refuses outright** (V2-J-2 round 3). `queryDaemon` branches on verdict before arming: Safe → forward, Warn → arm the `[y]/[t]/cancel` banner, **Block → write a red `REFUSED — <reason>` line, mark the shell PID Critical, and clear readline (`{.replace = "\x15"}`) with no follow-up keystroke.** Trust-cache hits short-circuit BOTH paths so prior `[t]rust` choices survive auto-Block enablement; operators who want auto-Block to override trust must clear the trust file. Render style is `Config.refused_style` (bold red 8-color default, distinct from `warning_style`'s dim italic). Without the verdict-branch in `queryDaemon`, the atty side used to arm the same banner for Warn AND Block — contradicting the V2-J-2 docs' "refuses outright" claim.
+- **security_guard's daemon-`Block` path refuses outright.** `queryDaemon` branches on verdict before arming: Safe → forward, Warn → arm the `[y]/[t]/cancel` banner, **Block → write a red `REFUSED — <reason>` line, mark the shell PID Critical, and clear readline (`{.replace = "\x15"}`) with no follow-up keystroke.** Trust-cache hits short-circuit BOTH paths so prior `[t]rust` choices survive auto-Block enablement; operators who want auto-Block to override trust must clear the trust file. Render style is `Config.refused_style` (bold red 8-color default, distinct from `warning_style`'s dim italic).
 - **e2e goldens are config-sensitive.** The e2e harness uses the user's compiled binary. If `src/config.zig` has `statusbar.enabled = true`, snapshots include the bar. CI/release builds use `config.def.zig` defaults (statusbar off) — that's the canonical environment.
 - **First-paint after activate** of the statusbar should clear the reserved rows (old shell content can leak through DECSTBM otherwise).
 

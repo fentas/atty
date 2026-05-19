@@ -527,7 +527,7 @@ Optional sidecar (after `atty-guard/contrib/install.sh`):
 }),
 ```
 
-**Block-refuse path (V2-J-2).** When the daemon returns `Verdict::Block` — either via the auto-Block escalation knob (`[accumulator] block_threshold = 0.95` in TOML) or because the eBPF/PID-tree map says this PID is already Critical — atty does NOT prompt. It writes a one-shot `REFUSED — <reason>` line styled by `Config.refused_style` (bold red 8-color default), marks the shell PID Critical, and clears readline (Ctrl+U). Trust-cache hits short-circuit BOTH the Warn-prompt path and the Block-refuse path so prior `[t]rust` choices survive.
+**Block-refuse path (V2-J-2).** When the daemon returns `Verdict::Block` — either via the auto-Block escalation knob (`[accumulator] block_threshold = 0.95` in TOML) or because the PID-tree threat map says this PID is already Critical — atty does NOT prompt. It writes a one-shot `REFUSED — <reason>` line styled by `Config.refused_style` (bold red 8-color default), marks the shell PID Critical, and clears readline (Ctrl+U). Trust-cache hits short-circuit BOTH the Warn-prompt path and the Block-refuse path so prior `[t]rust` choices survive.
 
 Full architecture: `docs/security-guard-design.md`. Daemon: `atty-guard/`.
 
