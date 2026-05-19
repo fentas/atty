@@ -85,19 +85,37 @@ fn matchCurlPipeSh(line: []const u8) ?[]const u8 {
 // ---------------------------------------------------------------------------
 // npm install <flagged-package>
 //
-// Tiny hardcoded list. Real coverage belongs in V2's OSV / GitHub
-// Advisory DB consumer; this is the suckless-friendly stub.
+// Load the package list from the SHARED data file in
+// `atty-guard/data/flagged_npm.txt`. The Rust sidecar's classifier
+// includes the same file via `include_str!`. Editing the .txt
+// updates both sides on the next build.
 
-const flagged_npm_packages = [_][]const u8{
-    "event-stream",
-    "flatmap-stream",
-    "ua-parser-js",
-    "coa",
-    "rc",
-    "node-ipc",
-    "colors",
-    "faker",
-};
+const flagged_npm_raw = @embedFile("data/flagged_npm.txt");
+
+/// Comptime-parse the embedded data file: split on '\n', trim
+/// trailing CR/space, skip blank lines + '#'-prefixed comments.
+/// Returns a slice of static-lifetime strings (all slices reference
+/// the original `@embedFile` buffer).
+fn parseFlaggedNpm() []const []const u8 {
+    @setEvalBranchQuota(20000);
+    comptime {
+        var packages: [256][]const u8 = undefined;
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, flagged_npm_raw, '\n');
+        while (it.next()) |raw| {
+            const trimmed = std.mem.trim(u8, raw, " \t\r");
+            if (trimmed.len == 0) continue;
+            if (trimmed[0] == '#') continue;
+            if (n >= packages.len) @compileError("flagged_npm.txt exceeds 256 entries — bump the buffer");
+            packages[n] = trimmed;
+            n += 1;
+        }
+        const final = packages[0..n].*;
+        return &final;
+    }
+}
+
+const flagged_npm_packages = parseFlaggedNpm();
 
 fn matchNpmUnsafe(line: []const u8) ?[]const u8 {
     // Accepts: `npm install <pkg>`, `npm i <pkg>`, `npm add <pkg>`,
@@ -145,11 +163,19 @@ fn matchNpmUnsafe(line: []const u8) ?[]const u8 {
         while (i < line.len and line[i] != ' ' and line[i] != '\n' and line[i] != '\r') i += 1;
         if (tok_start == i) break;
         const tok = line[tok_start..i];
-        // Skip flags.
+        // Skip flags. Note: the outer-while's leading-space skipper
+        // re-runs on next iter, so `continue` here is fine — it
+        // doesn't strand us at the same token.
         if (tok.len > 0 and tok[0] == '-') continue;
-        // Strip version suffix `@1.2.3` for comparison.
-        const at = std.mem.indexOfScalar(u8, tok, '@');
-        const name = if (at) |idx| tok[0..idx] else tok;
+        // Strip a trailing `@version` suffix while keeping the
+        // leading `@scope/` intact. `@ctrl/tinycolor@1.0.0` →
+        // `@ctrl/tinycolor`; bare `event-stream@0.1.0` →
+        // `event-stream`; bare scope `@ctrl/tinycolor` →
+        // unchanged. Using lastIndexOf catches the version
+        // separator (LAST `@`) rather than the leading scope
+        // marker (position 0).
+        const last_at = std.mem.lastIndexOfScalar(u8, tok, '@');
+        const name = if (last_at) |idx| (if (idx == 0) tok else tok[0..idx]) else tok;
         for (flagged_npm_packages) |bad| {
             if (std.mem.eql(u8, name, bad)) return line[match_start.?..i];
         }
