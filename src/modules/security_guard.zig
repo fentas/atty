@@ -115,11 +115,51 @@ pub fn configure(comptime cfg: Config) type {
             /// computing a trust hash — daemon-only verdicts
             /// can't be persistently trusted via the V1 cache.
             armed_daemon_category: ?uds_client_mod.Category = null,
+            /// Threat level the armed pattern would impose on the
+            /// shell's PID tree if the user accepts (`y`/`t`).
+            /// Set at arm time; consumed (or cleared) at the
+            /// response keystroke.
+            pending_threat: ?uds_client_mod.Client.ThreatLevel = null,
+            /// Sticky "this shell session has a high-risk command
+            /// in flight" indicator — surfaced via `statusText`
+            /// AND sent to atty-guard via `set_threat_level` so the
+            /// V2-B kernel LSM hook can gate descendant execves.
+            /// Cleared when the user types a CLEAN line + Enter
+            /// (no pattern hit), so the indicator stays visible
+            /// for as long as the suspect command's process tree
+            /// might still be running.
+            active_threat: ?uds_client_mod.Client.ThreatLevel = null,
             /// Test seam — when set, the banner writes here
             /// instead of stderr.
             sink_ctx: ?*anyopaque = null,
             sink_fn: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void = null,
         };
+
+        /// Convert an in-proc pattern's category to a threat level
+        /// for the V2-B PID-tree marking. `bash_c_base64` is the
+        /// most-obviously-malicious shape (encoded payloads exist
+        /// almost exclusively to evade detection) — Critical
+        /// makes the kernel LSM hook EPERM children outright.
+        /// Other categories are still high-risk but legitimate
+        /// users hit them (`curl|sh` installers, `npm install`
+        /// supply-chain hits), so Warn-level (High) which the
+        /// hook surfaces but doesn't auto-block.
+        fn categoryToThreat(c: patterns_mod.Category) uds_client_mod.Client.ThreatLevel {
+            return switch (c) {
+                .curl_pipe_sh, .npm_unsafe_install => .high,
+                .bash_c_base64 => .critical,
+            };
+        }
+
+        /// Daemon verdict → threat level. `Block` is the daemon's
+        /// strongest signal; everything else (Warn) is High.
+        fn daemonVerdictToThreat(v: uds_client_mod.Verdict) ?uds_client_mod.Client.ThreatLevel {
+            return switch (v) {
+                .safe => null,
+                .warn => .high,
+                .block => .critical,
+            };
+        }
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
             _ = io;
@@ -152,7 +192,7 @@ pub fn configure(comptime cfg: Config) type {
 
             // Armed state: the previous Enter tripped a pattern;
             // the current keystroke is the user's response.
-            if (rt.armed) return handleArmedResponse(rt, input);
+            if (rt.armed) return handleArmedResponse(rt, ctx, input);
 
             const is_enter = blk: {
                 for (input) |b| if (b == 0x0D or b == 0x0A) break :blk true;
@@ -195,6 +235,7 @@ pub fn configure(comptime cfg: Config) type {
                 rt.armed = true;
                 rt.armed_pattern_idx = idx;
                 rt.armed_daemon_category = null;
+                rt.pending_threat = categoryToThreat(pat.category);
                 const copy_len = @min(matched.len, rt.armed_match.len);
                 @memcpy(rt.armed_match[0..copy_len], matched[0..copy_len]);
                 rt.armed_match_len = copy_len;
@@ -202,6 +243,15 @@ pub fn configure(comptime cfg: Config) type {
                 writeBanner(rt, pat.description, matched);
                 return .swallow;
             }
+
+            // Clean line passed all patterns + the daemon — clear
+            // any sticky high-threat indicator from a prior command.
+            // The user has typed something normal; we can stop
+            // gating the descendant tree on the previous mark.
+            // (Future V2-B: also fire a SetThreatLevel(.low) RPC
+            // to the daemon to clear the kernel-side BPF map
+            // entry — left for the same PR that wires libbpf-rs.)
+            rt.active_threat = null;
             return .forward;
         }
 
@@ -238,6 +288,7 @@ pub fn configure(comptime cfg: Config) type {
 
             rt.armed = true;
             rt.armed_daemon_category = result.category;
+            rt.pending_threat = daemonVerdictToThreat(result.verdict);
             // Use a fake pattern index so handleArmedResponse can
             // look up the local category via armed_daemon_category
             // instead.
@@ -250,14 +301,19 @@ pub fn configure(comptime cfg: Config) type {
             return .{ .armed = true };
         }
 
-        fn handleArmedResponse(rt: *Runtime, input: []const u8) m.Action {
+        fn handleArmedResponse(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Action {
             if (input.len == 0) return .swallow;
             rt.armed = false;
             const armed_daemon_cat = rt.armed_daemon_category;
             rt.armed_daemon_category = null;
+            const pending = rt.pending_threat;
+            rt.pending_threat = null;
             const c = input[0];
             switch (c) {
-                'y', 'Y' => return .{ .replace = "\r" },
+                'y', 'Y' => {
+                    markShellThreat(rt, ctx, pending);
+                    return .{ .replace = "\r" };
+                },
                 't', 'T' => {
                     // Compute the local category — either from the
                     // armed in-proc pattern index, or from the
@@ -282,10 +338,59 @@ pub fn configure(comptime cfg: Config) type {
                             rt.trust.persist(cfg.trust_cache_path) catch {};
                         }
                     }
+                    markShellThreat(rt, ctx, pending);
                     return .{ .replace = "\r" };
                 },
-                else => return .{ .replace = "\x15" },
+                else => {
+                    // Cancel — Ctrl+U clears readline buffer.
+                    // Don't mark the shell's PID; nothing risky is
+                    // about to execute.
+                    return .{ .replace = "\x15" };
+                },
             }
+        }
+
+        /// Push `level` to atty-guard for the shell's PID tree
+        /// AND latch `rt.active_threat` so `statusText` reflects
+        /// it until the user types a clean command. Silently no-op
+        /// when the daemon isn't configured / reachable, or when
+        /// we don't know the shell's PID (non-TTY tests).
+        fn markShellThreat(
+            rt: *Runtime,
+            ctx: *m.Context,
+            level: ?uds_client_mod.Client.ThreatLevel,
+        ) void {
+            const lvl = level orelse return;
+            rt.active_threat = lvl;
+            const pid = ctx.shell_pid orelse return;
+            if (rt.daemon == null or rt.daemon_disabled) return;
+            // Best-effort. If the daemon is wedged we already
+            // know (daemon_disabled would be true) — if it's
+            // alive and this RPC fails the verdict already
+            // landed in the user's banner, so the consequence
+            // of a missed kernel-side mark is "no kernel
+            // enforcement this time", which is the V2-A
+            // fallback semantics anyway.
+            rt.daemon.?.setThreatLevel(pid, lvl) catch {};
+        }
+
+        /// Statusbar segment — emits a brief threat-level icon
+        /// while the most-recent command tree is flagged. Returns
+        /// null at idle so the segment disappears (rather than
+        /// staying as dead chrome).
+        pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            _ = ctx;
+            const lvl = rt.active_threat orelse return null;
+            // Allocate in the per-Runtime tiny buffer. Statusbar
+            // joins segments with " │ " so the icon needs no
+            // surrounding chrome.
+            const text: []const u8 = switch (lvl) {
+                .low => "",
+                .high => "\u{1F6E1} high",
+                .critical => "\u{1F6E1} critical",
+            };
+            if (text.len == 0) return null;
+            return text;
         }
 
         fn writeBanner(rt: *Runtime, description: []const u8, matched: []const u8) void {

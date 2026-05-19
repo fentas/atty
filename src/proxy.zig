@@ -399,6 +399,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         // the contract documented on `Context.cursor_row`.
         .cursor_row = if (args.is_tty) cursor_tracker.currentRow() else null,
         .cursor_col = if (args.is_tty) cursor_tracker.currentCol() else null,
+        // `shell_pid` is the kernel-level PID of atty's direct
+        // child (typically bash/zsh/fish). Stays stable for the
+        // whole atty session — the proxy doesn't fork more
+        // children. Null in tests / non-TTY runs that don't
+        // spawn a real shell.
+        .shell_pid = if (args.is_tty and child_pid > 0)
+            @intCast(child_pid)
+        else
+            null,
     };
 
     var pfds = [_]posix.pollfd{

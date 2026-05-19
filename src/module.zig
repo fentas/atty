@@ -191,6 +191,18 @@ pub const Context = struct {
     /// Terminal column count. Same null-on-non-TTY semantics.
     terminal_cols: ?u16 = null,
 
+    /// PID of atty's direct child — i.e. the shell process atty
+    /// `fork`+`exec`'d at startup. Null on non-TTY runs and in
+    /// unit tests that don't spawn a real shell. Used by the
+    /// `security_guard` module to mark the shell's process tree
+    /// as high-risk over the atty-guard UDS when a Tier-1 pattern
+    /// fires — the V2-B BPF LSM hook then gates every descendant
+    /// execve on that mark. Lives on Context (not on a module
+    /// Runtime) because multiple modules will eventually want to
+    /// reason about the shell's PID (e.g. a future `oom-guard`
+    /// that watches RSS).
+    shell_pid: ?u32 = null,
+
     /// Convenience wrapper around `formatCwd` — modules call this
     /// from `onLineCommit` when they want a `--cwd` string that
     /// reflects the user's current location. When subprocess is
