@@ -26,6 +26,7 @@
 //! - ONNX-runtime SLM (SecureBERT-class) integration in the
 //!   `classifier::tier2` slot.
 
+mod atom_matcher;
 mod classifier;
 mod config;
 mod ebpf;

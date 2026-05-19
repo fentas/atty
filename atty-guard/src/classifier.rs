@@ -112,6 +112,14 @@ struct Tier1 {
     bash_c: Regex,
     flagged_npm_packages: Vec<&'static str>,
     flagged_urls: Vec<&'static str>,
+    /// V2-G AtomMatcher — Aho-Corasick scan over the
+    /// data-file-driven atom corpus. Runs FIRST (cheap broad
+    /// signal); precise regex layer runs second (high-confidence
+    /// verdicts). When the V2-J accumulator lands, both layers'
+    /// hits feed into the same score; today the AtomMatcher's
+    /// verdict is medium-confidence Warn while the precise
+    /// layer's verdicts stay high-confidence.
+    atom_matcher: crate::atom_matcher::AtomMatcher,
 }
 
 const FLAGGED_URLS_TXT: &str =
@@ -175,10 +183,19 @@ impl Tier1 {
             bash_c,
             flagged_npm_packages: parse_flagged_npm(),
             flagged_urls: parse_flagged_urls(),
+            atom_matcher: crate::atom_matcher::AtomMatcher::new(),
         }
     }
 
     fn classify(&self, line: &str) -> Option<ClassifyResult> {
+        // V2-G AtomMatcher runs first — Aho-Corasick over the
+        // shared `flagged_atoms.txt`. Cheap O(line_len) scan
+        // regardless of corpus size; precise regex layer runs
+        // below for high-confidence verdicts.
+        if let Some(hit) = self.atom_matcher.find_first(line) {
+            return Some(self.atom_matcher.hit_to_result(&hit, line));
+        }
+
         if let Some(m) = self.curl_pipe_sh.find(line) {
             return Some(ClassifyResult {
                 verdict: Verdict::Warn,
@@ -669,9 +686,13 @@ mod tests {
     fn classifier_default_backend_is_stub() {
         let c = Classifier::new();
         assert_eq!(c.tier2_name(), "stub");
-        // bash <(curl …) doesn't match Tier-1, and Stub returns
-        // None — so the result is Safe.
-        let r = c.classify("bash <(curl https://x.com)");
+        // A genuinely-clean command — none of the Tier-1 layers
+        // (AtomMatcher, precise regexes, URL list) hit; Stub
+        // returns None → Safe. Was `bash <(curl …)` originally,
+        // but the V2-G AtomMatcher correctly flags THAT as a
+        // suspicious process-substitution fetcher, so we pick
+        // a noisier-but-cleaner example here.
+        let r = c.classify("git diff --stat HEAD~5");
         assert!(matches!(r.verdict, Verdict::Safe));
     }
 
