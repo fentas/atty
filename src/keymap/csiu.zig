@@ -83,7 +83,11 @@ pub fn csiUToLegacy(input: []const u8, out: []u8) ?[]const u8 {
         if (mod_end < after.len) {
             const ev_rest = after[mod_end + 1 ..];
             const ev_end = std.mem.indexOfScalar(u8, ev_rest, ':') orelse ev_rest.len;
-            const ev = std.fmt.parseInt(u32, ev_rest[0..ev_end], 10) catch 1;
+            // Fail-closed like the kc/mod parsers above — a malformed
+            // event_type (`:xu`, `:9u`, …) is just as un-translatable
+            // as a release/repeat: hand the raw CSI-u to the caller's
+            // drop-or-passthrough path instead of fabricating a press.
+            const ev = std.fmt.parseInt(u32, ev_rest[0..ev_end], 10) catch return null;
             if (ev != 1) return null;
         }
     } else {

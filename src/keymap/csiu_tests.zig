@@ -103,6 +103,14 @@ test "csiUToLegacy: release/repeat events return null (caller drops or passes th
     try std.testing.expectEqualSlices(u8, "w", csiUToLegacy("\x1b[119;1:1u", &out).?);
     // associated-text sub-param after event_type — still drops on release.
     try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[119;1:3:119u", &out));
+    // event_type 0 is reserved/undefined in the kitty kbd spec — drop.
+    // Pins behaviour against a future "accept anything non-2/non-3" refactor.
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[119;1:0u", &out));
+    // Empty event_type (terminal emits trailing `:` then `u` for some
+    // reason) — fails parseInt, now drops via the round-1 follow-up's
+    // `catch return null`. Previously fell through to "press" and
+    // would have re-introduced doubling on weirdly-formed sequences.
+    try std.testing.expectEqual(@as(?[]const u8, null), csiUToLegacy("\x1b[119;1:u", &out));
 }
 
 test "csiUToLegacy: non-CSI-u input returns null without touching `out`" {
