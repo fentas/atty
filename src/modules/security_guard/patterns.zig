@@ -26,11 +26,55 @@ pub const Pattern = struct {
     match: *const fn (line: []const u8) ?[]const u8,
 };
 
-pub const default_patterns: [3]Pattern = .{
+pub const default_patterns: [4]Pattern = .{
     .{ .category = .curl_pipe_sh, .description = "remote-fetch-and-execute (`curl … | sh`)", .match = matchCurlPipeSh },
     .{ .category = .npm_unsafe_install, .description = "`npm install` of a flagged package name", .match = matchNpmUnsafe },
     .{ .category = .bash_c_base64, .description = "`bash -c` with a long base64-shaped payload", .match = matchBashCBase64 },
+    // Flagged-URL matcher last so prior tests indexed at [0..2]
+    // keep referring to the same patterns. The category re-uses
+    // `curl_pipe_sh` because the trust-cache + threat-level
+    // mapping is identical (a flagged IOC URL is morally the
+    // same shape as a `curl|sh`); future work can split this
+    // into its own category if banner reasons need finer
+    // distinction.
+    .{ .category = .curl_pipe_sh, .description = "command references a flagged-URL substring (known IOC / exploit-PoC host)", .match = matchFlaggedUrl },
 };
+
+// ---------------------------------------------------------------------------
+// Flagged URLs — substring match against the typed line. Loaded from
+// the shared data file (same approach as flagged_npm.txt).
+
+const flagged_urls_raw = @embedFile("data/flagged_urls.txt");
+
+fn parseFlaggedUrls() []const []const u8 {
+    @setEvalBranchQuota(20000);
+    comptime {
+        var urls: [128][]const u8 = undefined;
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, flagged_urls_raw, '\n');
+        while (it.next()) |raw| {
+            const trimmed = std.mem.trim(u8, raw, " \t\r");
+            if (trimmed.len == 0) continue;
+            if (trimmed[0] == '#') continue;
+            if (n >= urls.len) @compileError("flagged_urls.txt exceeds 128 entries");
+            urls[n] = trimmed;
+            n += 1;
+        }
+        const final = urls[0..n].*;
+        return &final;
+    }
+}
+
+const flagged_urls = parseFlaggedUrls();
+
+fn matchFlaggedUrl(line: []const u8) ?[]const u8 {
+    for (flagged_urls) |needle| {
+        if (std.mem.indexOf(u8, line, needle)) |at| {
+            return line[at .. at + needle.len];
+        }
+    }
+    return null;
+}
 
 // ---------------------------------------------------------------------------
 // curl|sh / wget|sh family

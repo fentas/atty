@@ -17,6 +17,11 @@ const matchBashCBase64 = struct {
         return mod.default_patterns[2].match(line);
     }
 }.call;
+const matchFlaggedUrl = struct {
+    fn call(line: []const u8) ?[]const u8 {
+        return mod.default_patterns[3].match(line);
+    }
+}.call;
 
 test "curl | sh — bare positive" {
     const hit = matchCurlPipeSh("curl https://example.com/install.sh | sh");
@@ -159,5 +164,23 @@ test "INTENTIONAL false negative: curl … | sudo sh (pipe target = sudo)" {
 
 test "INTENTIONAL false negative: bash -c mixed payload (b64 + literals)" {
     const hit = matchBashCBase64("bash -c \"echo c29tZWJhc2U2NA== | base64 -d | sh\"");
+    try testing.expect(hit == null);
+}
+
+// ---------------------------------------------------------------------------
+// Flagged-URL substring matches — copy.fail-class IOCs.
+
+test "flagged URL: curl https://copyfail.security/poc.c → hit" {
+    const hit = matchFlaggedUrl("curl https://copyfail.security/poc.c -o /tmp/x.c");
+    try testing.expect(hit != null);
+}
+
+test "flagged URL: git clone github.com/theori-io/copyfail → hit" {
+    const hit = matchFlaggedUrl("git clone https://github.com/theori-io/copyfail.git");
+    try testing.expect(hit != null);
+}
+
+test "flagged URL: clean example.com URL → no hit" {
+    const hit = matchFlaggedUrl("curl https://example.com/x.tar.gz -o /tmp/x.tar.gz");
     try testing.expect(hit == null);
 }
