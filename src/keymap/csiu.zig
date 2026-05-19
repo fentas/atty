@@ -59,9 +59,17 @@ pub fn csiUToLegacy(input: []const u8, out: []u8) ?[]const u8 {
     // Body = the digits/semicolons between `ESC [` and `u`.
     const body = input[2 .. input.len - 1];
 
-    // Format: `<keycode>[ ; <modifier> [ : <text-as-codepoints> ] ]`.
-    // The `:` form appears under the "Report associated text" flag,
-    // which we don't push — but we tolerate it defensively.
+    // Format: `<keycode>[ ; <modifier>[:<event_type>[:<text-cp>]] ]`.
+    // - `event_type`: 1=press (default), 2=repeat, 3=release. Pushed
+    //   under flag 2 (REPORT_EVENTS) and higher. atty itself only
+    //   pushes flag 1, but alt-screen apps (nvim with kitty kbd, …)
+    //   may push higher levels; the terminal then emits ALL their
+    //   events back through atty's stdin. Without filtering, the
+    //   press+release pair for a single 'w' press both translate to
+    //   'w' and get forwarded — vim sees `ww`. Repeats would worsen
+    //   it further.
+    // - `text-as-codepoints`: REPORT_ASSOCIATED_TEXT (flag 8). We
+    //   don't push it but tolerate it defensively.
     var kc: u32 = 0;
     var mod: u32 = 1;
     if (std.mem.indexOfScalar(u8, body, ';')) |semi| {
@@ -69,6 +77,15 @@ pub fn csiUToLegacy(input: []const u8, out: []u8) ?[]const u8 {
         const after = body[semi + 1 ..];
         const mod_end = std.mem.indexOfScalar(u8, after, ':') orelse after.len;
         mod = std.fmt.parseInt(u32, after[0..mod_end], 10) catch return null;
+        // Reject release / repeat events — no legacy form exists.
+        // Caller drops (non-alt-screen) or passes the raw CSI-u
+        // through (alt-screen, where the app handles events itself).
+        if (mod_end < after.len) {
+            const ev_rest = after[mod_end + 1 ..];
+            const ev_end = std.mem.indexOfScalar(u8, ev_rest, ':') orelse ev_rest.len;
+            const ev = std.fmt.parseInt(u32, ev_rest[0..ev_end], 10) catch 1;
+            if (ev != 1) return null;
+        }
     } else {
         kc = std.fmt.parseInt(u32, body, 10) catch return null;
     }
