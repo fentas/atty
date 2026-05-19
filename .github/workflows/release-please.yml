@@ -72,9 +72,13 @@ jobs:
           # version. The action labels its PRs `autorelease: pending`
           # and titles them `chore: release master` (per the title-
           # pattern in release-please-config.json). The newest such
-          # merged PR is the one we want.
+          # merged PR is the one we want. Belt-and-braces: filter by
+          # head-branch too — release-please-action always opens its
+          # PRs on `release-please--branches--<base>`, so this rules
+          # out any out-of-band `chore: release …` PR a maintainer
+          # might have mislabelled.
           pr=$(gh pr list --state merged --label "autorelease: pending" \
-              --search "in:title chore release" \
+              --head "release-please--branches--master" \
               --json number,mergeCommit \
               --jq '.[0] | "\(.number) \(.mergeCommit.oid)"' 2>/dev/null || true)
           if [ -z "$pr" ] || [ "$pr" = "null null" ]; then
@@ -83,6 +87,15 @@ jobs:
           fi
           pr_num=$(echo "$pr" | cut -d' ' -f1)
           pr_sha=$(echo "$pr" | cut -d' ' -f2)
+
+          # Verify the merge SHA is actually in the local tree — a
+          # rebased/force-pushed merged PR (rare) would have a stale
+          # mergeCommit.oid; tag-from-missing-sha would surface as a
+          # confusing `unknown revision` error otherwise.
+          if ! git cat-file -e "${pr_sha}^{commit}" 2>/dev/null; then
+            echo "error: PR #${pr_num}'s merge SHA ${pr_sha} not in local tree" >&2
+            exit 1
+          fi
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
