@@ -1,0 +1,41 @@
+# Flagged URL substrings — atty's Tier-1 fast-path for known
+# malicious / high-risk fetch targets.
+#
+# Single source of truth, like flagged_npm.txt. Rust includes
+# this via `include_str!`; Zig via `@embedFile`. The matcher
+# fires when ANY fetcher pattern's URL contains one of these
+# substrings (case-sensitive, simple substring; not glob).
+#
+# Format: one URL substring per line, comments start with `#`.
+# Don't put http(s):// prefixes — match the domain + path bits
+# that are stable across schemes / proxies.
+#
+# Adding a new entry:
+#   1. Open a PR with the substring + a one-line citation
+#      (CVE link, IOC source, security blog post).
+#   2. Include a regression test in the sibling _tests.zig /
+#      classifier.rs file that pins the new match.
+#   3. Subagent review checks for over-broad substrings that
+#      could false-positive a legitimate domain.
+#
+# Out of scope here:
+#   - Generic blocklists (StopForumSpam, OISD): too noisy for a
+#     pre-Enter banner. Belongs in the V2-F OSV-style live lookup.
+#   - Phishing domains for credential theft: atty doesn't see
+#     those — they're hit from a browser, not a shell.
+
+# ---------------------------------------------------------------
+# Known PoC / exploit-publication hosts. These are LEGITIMATE
+# research repos, but pasting their raw curl-piped URLs into a
+# shell is a strong "user knows they're running an exploit"
+# signal and the Warn-level confirm earns its keep.
+
+# CVE-2026-31431 — copy.fail (Linux kernel LPE via algif_aead +
+# splice). Theori disclosure + public PoC hosting.
+copyfail.security
+github.com/theori-io/copyfail
+
+# Shai-Hulud worm artefacts. Bundles + extraction scripts often
+# hosted on transient infra; the user-facing IOC is the bundle
+# filename pattern.
+bundle.js?shai-hulud

