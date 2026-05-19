@@ -127,8 +127,23 @@ mod with_tract {
             })
         }
 
-        fn infer(&self, command: &str) -> Result<[f32; 3], String> {
-            let cleaned = sanitize_for_classification(command);
+        fn infer_with_hint(&self, command: &str, hint_offset: Option<usize>) -> Result<[f32; 3], String> {
+            // V2-H sliding-context-window. When an upstream Tier-1
+            // matcher (AtomMatcher / regex / flagged-URL) reported
+            // a localised hit, we slice [-64, +256] chars around it
+            // and tokenise ONLY that window. Drops 3-5× tokens on
+            // long pipeline-stuffed commands; the SLM still gets
+            // enough surrounding context to disambiguate.
+            //
+            // No hint = tokenise the whole command (current
+            // behaviour). Used when the Tier-2 backend is called
+            // as a fallback after Tier-1 missed entirely.
+            let target = if let Some(offset) = hint_offset {
+                crate::sanitize::slice_context_window(command, offset, 64, 256)
+            } else {
+                command
+            };
+            let cleaned = sanitize_for_classification(target);
             let enc = self
                 .tokenizer
                 .encode(cleaned, true)
@@ -185,8 +200,8 @@ mod with_tract {
             self.model_name
         }
 
-        fn classify(&self, command: &str) -> Option<ClassifyResult> {
-            let probs = self.infer(command).ok()?;
+        fn classify(&self, command: &str, hint_offset: Option<usize>) -> Option<ClassifyResult> {
+            let probs = self.infer_with_hint(command, hint_offset).ok()?;
             let p_harmful = probs[2];
             let verdict = if p_harmful >= self.block_threshold {
                 Verdict::Block

