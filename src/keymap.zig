@@ -47,6 +47,7 @@ pub const kitty_kbd_pop = csiu.kitty_kbd_pop;
 /// (which doesn't speak the protocol).
 pub const csiUToLegacy = csiu.csiUToLegacy;
 pub const isCsiU = csiu.isCsiU;
+pub const isModifiedVtCsi = csiu.isModifiedVtCsi;
 pub const csiULen = csiu.csiULen;
 pub const translateCsiUStream = csiu.translateCsiUStream;
 

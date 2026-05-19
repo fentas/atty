@@ -1091,6 +1091,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     } else {
                         trace.logBytes(.csiu, "csiu_unmapped_passthrough_to_alt_screen", input);
                     }
+                } else if (!matched_binding and config.terminal.enable_kitty_keyboard and keymap.isModifiedVtCsi(input)) {
+                    // Modifier-augmented VT-style CSI under kitty kbd
+                    // (e.g. Ctrl+Insert `\x1b[2;5~`, Ctrl+Delete
+                    // `\x1b[3;5~`). No legacy form; bash beeps and
+                    // echoes the trailing `<m>~` tail as if it were
+                    // typed input. Drop when no binding matched, same
+                    // shape as the CSI-u unmapped-drop above. Alt-screen
+                    // apps that opt in to kitty kbd see the raw bytes
+                    // (TUIs decode them directly).
+                    if (!alt_screen.active) {
+                        trace.logBytes(.csiu, "vt_modified_dropped (not in alt-screen)", input);
+                        swallow_after_binding = true;
+                    } else {
+                        trace.logBytes(.csiu, "vt_modified_passthrough_to_alt_screen", input);
+                    }
                 } else if (!matched_binding and config.terminal.enable_kitty_keyboard) {
                     trace.log(.csiu, "isCsiU=false on input (forwarded as-is)", .{});
                 }
