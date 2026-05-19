@@ -234,10 +234,21 @@ pub const LineState = struct {
     /// so ghost-text providers know to recompute.
     pub fn syncFromCapture(self: *LineState, content: []const u8) void {
         const n = @min(content.len, max_line);
-        // Skip the write when the buffer is already in sync — avoids
-        // unnecessary generation bumps that would force ghost-text
-        // providers to redo their work each tick.
-        if (self.len == n and std.mem.eql(u8, self.buffer[0..self.len], content[0..n]) and !self.uncertain) return;
+        // Buffer already matches the capture region. Two sub-cases:
+        //   1. !uncertain — already in sync, nothing to do.
+        //   2.  uncertain — keystroke tracker hit something unmodelled
+        //       (Tab, lone ESC, …) but the capture region tells us
+        //       no bytes actually changed. Clear `uncertain` so
+        //       ghost can re-engage, but PRESERVE `cursor_pos`.
+        //       The OSC 133 stream carries no cursor info; clamping
+        //       to EOL would mid-line cases (Arrow-Left × N → Tab
+        //       with no completion match) paint ghost over text-
+        //       to-right because the physical cursor is still
+        //       wherever the user left it.
+        if (self.len == n and std.mem.eql(u8, self.buffer[0..self.len], content[0..n])) {
+            self.uncertain = false;
+            return;
+        }
         @memcpy(self.buffer[0..n], content[0..n]);
         self.len = n;
         self.uncertain = false;
