@@ -56,34 +56,31 @@ test "CSI escape marks uncertain" {
 }
 
 test "Left/Right/Home set cursor_moved; End clears it (lands provably at EOL)" {
-    // Left/Right/Home leave the cursor potentially mid-buffer, so
-    // ghost rendering at the new position would overwrite the
-    // character to its right (looks like deletion). End lands the
-    // cursor at EOL by definition — clearing the flag lets the user
-    // re-engage ghost after navigating back to EOL via End.
+    // Cursor-motion CSIs maintain `cursor_pos`; `cursor_moved` is
+    // derived as `(cursor_pos != len)`. Left mid-buffer flips it
+    // on; End jumps cursor to len and flips it off.
     var l = LineState{};
     _ = l.applyInput("hello");
     try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
 
-    _ = l.applyInput("\x1B[D"); // Left
+    _ = l.applyInput("\x1B[D"); // Left → cursor_pos 5→4
     try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
 
-    l.cursor_moved = false; // simulate a fresh prompt for the next case
-    _ = l.applyInput("\x1B[C"); // Right — only ±1, no EOL guarantee
+    // Right moves cursor_pos forward by 1; lands at len → clears.
+    _ = l.applyInput("\x1B[C"); // Right → cursor_pos 4→5 (EOL)
+    try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
+
+    _ = l.applyInput("\x1B[H"); // Home → cursor_pos = 0
     try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 0), l.cursor_pos);
 
-    l.cursor_moved = false;
-    _ = l.applyInput("\x1B[H"); // Home
-    try std.testing.expect(l.cursor_moved);
-
-    // End (xterm cursor-style) — provably at EOL, clears the flag.
+    // End — cursor_pos jumps to len, flag clears.
     _ = l.applyInput("\x1B[F");
     try std.testing.expect(!l.cursor_moved);
-
-    // Sticky flag + End should clear too.
-    l.cursor_moved = true;
-    _ = l.applyInput("\x1B[F");
-    try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
 }
 
 test "End VT-form (`\\x1b[4~` / `\\x1b[8~`) clears cursor_moved" {
@@ -92,46 +89,48 @@ test "End VT-form (`\\x1b[4~` / `\\x1b[8~`) clears cursor_moved" {
     // the flag — same EOL guarantee as the cursor-style `F`.
     var l = LineState{};
     _ = l.applyInput("hello");
-    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true
+    _ = l.applyInput("\x1B[D"); // Left → cursor_pos=4, cursor_moved=true
     try std.testing.expect(l.cursor_moved);
-    _ = l.applyInput("\x1B[4~"); // End
+    _ = l.applyInput("\x1B[4~"); // End → cursor_pos=5, flag clears
     try std.testing.expect(!l.cursor_moved);
 
-    l.cursor_moved = true;
-    _ = l.applyInput("\x1B[8~"); // vt220 End
+    _ = l.applyInput("\x1B[D"); // Left again → cursor_pos=4
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput("\x1B[8~"); // vt220 End → cursor_pos=5
     try std.testing.expect(!l.cursor_moved);
 
-    // Home VT-form still SETS the flag.
+    // Home VT-form still SETS the flag (cursor_pos = 0).
     _ = l.applyInput("\x1B[1~");
     try std.testing.expect(l.cursor_moved);
 }
 
-test "Ctrl-A / Ctrl-B / Ctrl-F set cursor_moved; Ctrl-E clears it" {
+test "Ctrl-A / Ctrl-B / Ctrl-F maintain cursor_pos; Ctrl-E jumps to EOL" {
     // Readline cursor-motion bindings encoded as single control bytes
-    // (legacy, no kitty kbd). The bash redraw after Ctrl-A leaves the
-    // line CONTENT unchanged — `syncFromCapture` would then clear
-    // `uncertain`, and without `cursor_moved` set the ghost would
-    // re-engage and over-paint the rest of the line. Regression for
-    // "Arrow Up + Ctrl-A + type → ghost hides recalled tail".
+    // (legacy, no kitty kbd). Each updates `cursor_pos`; `cursor_moved`
+    // derives from `(cursor_pos != len)`. Regression for
+    // "Arrow Up + Ctrl-A + type → ghost hides recalled tail" AND for
+    // "Right-stepping back to EOL re-engages ghost".
     var l = LineState{};
     _ = l.applyInput("hello");
     try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
 
-    _ = l.applyInput("\x01"); // Ctrl-A — BOL
+    _ = l.applyInput("\x01"); // Ctrl-A — cursor_pos = 0
     try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 0), l.cursor_pos);
 
-    l.cursor_moved = false;
-    _ = l.applyInput("\x02"); // Ctrl-B — back 1
+    _ = l.applyInput("\x06"); // Ctrl-F — cursor_pos = 1
     try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 1), l.cursor_pos);
 
-    l.cursor_moved = false;
-    _ = l.applyInput("\x06"); // Ctrl-F — forward 1
+    _ = l.applyInput("\x02"); // Ctrl-B — cursor_pos = 0
     try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 0), l.cursor_pos);
 
-    // Ctrl-E lands provably at EOL — clears even when sticky.
-    l.cursor_moved = true;
+    // Ctrl-E — cursor_pos = len, flag clears.
     _ = l.applyInput("\x05");
     try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
 }
 
 test "Up + sync(recall) + Ctrl-A + End + type 'e' preserves recalled line content" {
@@ -173,6 +172,37 @@ test "Up + sync(recall) + Ctrl-A + End + type 'e' preserves recalled line conten
     // recalled line plus 'e'.
     _ = l.applyInput("e");
     try std.testing.expectEqualSlices(u8, "which pvcontrole", l.current());
+}
+
+test "Right-stepping to EOL + backspace re-engages ghost (cursor stays at EOL)" {
+    // User-reported follow-up #2: after Arrow-Up recall, Ctrl-A
+    // (BOL), Arrow-Right ×N to step back to EOL, then backspace —
+    // the user expects ghost suggestions for the shortened line.
+    // Current behavior: cursor_moved stays true (sticky from
+    // Right-arrow's "±1, no EOL guarantee" setting), so ghost
+    // remains suppressed until the buffer empties entirely.
+    //
+    // The root issue is that Right-arrow can't tell when it
+    // LANDS at EOL — it only moves ±1. Without tracking cursor
+    // offset explicitly, line_state can't know the cursor is
+    // back at EOL.
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A"); // Up
+    l.syncFromCapture("which pvcontrol"); // OSC 133 sync
+    _ = l.applyInput("\x01"); // Ctrl-A
+    try std.testing.expect(l.cursor_moved);
+
+    // Right ×15 to reach EOL (cursor steps back through each char).
+    var i: usize = 0;
+    while (i < 15) : (i += 1) _ = l.applyInput("\x1B[C");
+
+    // Backspace at EOL — cursor stays at the new EOL.
+    _ = l.applyInput("\x7F");
+    try std.testing.expectEqualSlices(u8, "which pvcontro", l.current());
+
+    // Cursor is at the new EOL. Ghost SHOULD engage.
+    // DESIRED: cursor_moved cleared. (Currently fails — sticky.)
+    try std.testing.expect(!l.cursor_moved);
 }
 
 test "cursor-motion CSIs do NOT set uncertain (content unchanged)" {
@@ -304,28 +334,27 @@ test "backspace-to-empty clears cursor_moved" {
     try std.testing.expect(!l.cursor_moved);
 }
 
-test "syncFromCapture does NOT touch cursor_moved" {
-    // The fix's core invariant: OSC 133 sync clears `uncertain` based
-    // on bash's content view, but it does NOT clear `cursor_moved`
-    // because OSC 133 carries no cursor-position info. renderGhost
-    // gates on `cursor_moved` independently, so a Left arrow stays
-    // ghost-suppressed even after sync re-confirms the content.
-    //
-    // Note: Left arrow no longer sets `uncertain` (cursor-motion
-    // CSIs don't change buffer content) — so we manually flip it
-    // here to mimic the "uncertain via some buffer-changing path
-    // + cursor mid-line" combined state the original concern was
-    // about.
+test "syncFromCapture lands cursor at EOL of the captured content" {
+    // After a recovery sync (Arrow-Up recall, Tab completion, ...)
+    // bash echoes the new line and the cursor ends at the EOL of
+    // that line. The sync mirrors that: `cursor_pos = len`, so
+    // `cursor_moved` clears and ghost can re-engage on what bash
+    // just drew. Previous model "sync doesn't know cursor" caused
+    // the post-recall ghost to be suppressed forever.
     var l = LineState{};
-    _ = l.applyInput("hello");
-    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true, uncertain stays false
-    try std.testing.expect(l.cursor_moved);
+    l.syncFromCapture("recalled line");
     try std.testing.expect(!l.uncertain);
+    try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 13), l.cursor_pos);
 
-    l.uncertain = true; // simulate prior buffer-changing CSI
-    l.syncFromCapture("hello"); // same content from OSC 133
-    try std.testing.expect(!l.uncertain); // sync cleared it
-    try std.testing.expect(l.cursor_moved); // but NOT cursor_moved
+    // A subsequent Left arrow still moves cursor mid-line and
+    // sets cursor_moved. The next sync with same content + no
+    // uncertainty is short-circuited by the early-return guard,
+    // so Left's effect survives.
+    _ = l.applyInput("\x1B[D");
+    try std.testing.expect(l.cursor_moved);
+    l.syncFromCapture("recalled line"); // same content, !uncertain → skip
+    try std.testing.expect(l.cursor_moved); // Left's effect preserved
 }
 
 test "Tab marks uncertain (shell completion changes the line behind atty's back)" {

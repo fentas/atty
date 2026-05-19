@@ -52,19 +52,31 @@ pub const LineState = struct {
     /// `reset()` (Ctrl+C / new prompt) — i.e. when there's a fresh
     /// prompt where the cursor is back at the end of an empty line.
     ///
-    /// **Why this exists separately from `uncertain`:** OSC 133's
-    /// `syncFromCapture` confirms buffer CONTENT matches what bash
-    /// drew and clears `uncertain`. But OSC 133 doesn't carry cursor
-    /// position, so a Left arrow leaves CONTENT intact (sync clears
-    /// uncertain) while CURSOR has actually moved. Ghost text would
-    /// then re-paint AT the new cursor position, overwriting the
-    /// character to the right of the cursor — looks like deletion.
+    /// Cached derivation of `cursor_pos != len` — "the cursor is
+    /// mid-buffer, ghost would over-paint right-side text".
+    /// `cursor_pos` is the source of truth; `syncCursorMoved()`
+    /// updates this field after any operation that changes either.
     ///
-    /// The flag is read by `renderGhost` (proxy.zig) as an extra
-    /// gate beyond `uncertain`. Other line-state consumers (atuin
-    /// ghost text producer, history, …) can still see `len`/`buffer`
-    /// accurately via OSC sync.
+    /// **Why we expose this as a flag:** `renderGhost` (proxy.zig)
+    /// reads it as an extra gate beyond `uncertain`; keeping the
+    /// derived form lets existing read-sites stay unchanged when
+    /// the underlying tracking moved from "sticky on/off" to
+    /// "explicit offset". Other line-state consumers (atuin ghost
+    /// text producer, history, …) see `len`/`buffer` directly.
     cursor_moved: bool = false,
+    /// Cursor offset from the start of the input buffer (0..=len).
+    /// Bumped on append, decremented on backspace, and shifted by
+    /// Ctrl-A/E/B/F + Left/Right/Home/End. `cursor_moved` is then
+    /// just the cached form of `(cursor_pos != len)` — having both
+    /// keeps existing call-sites that read `cursor_moved` unchanged.
+    ///
+    /// When this is < len (cursor is mid-line), ghost rendering
+    /// would over-paint the right-side text. When it equals len,
+    /// the cursor is at EOL and ghost can engage. Tracking explicit
+    /// offset (instead of a sticky "moved" flag) lets us recognise
+    /// that Right-stepping to EOL re-engages ghost — the original
+    /// flag-only model couldn't tell when Right landed AT EOL.
+    cursor_pos: usize = 0,
     /// Incremented every time the buffer changes. Providers can compare
     /// against a remembered generation to skip duplicate work.
     generation: u64 = 0,
@@ -124,8 +136,19 @@ pub const LineState = struct {
         self.committed_intent_len = 0;
     }
 
+    /// Sync the cached `cursor_moved` flag from `cursor_pos` / `len`.
+    /// Call after any operation that changes either. Keeping the flag
+    /// as a cached derivation lets existing read-sites stay unchanged
+    /// while the new tracking gives accurate "is the cursor at EOL?"
+    /// answers — Right-arrow stepping back to EOL now re-engages the
+    /// ghost overlay (the old sticky-flag model couldn't tell).
+    fn syncCursorMoved(self: *LineState) void {
+        self.cursor_moved = self.cursor_pos != self.len;
+    }
+
     pub fn reset(self: *LineState) void {
         self.len = 0;
+        self.cursor_pos = 0;
         self.uncertain = false;
         self.cursor_moved = false;
         self.generation +%= 1;
@@ -218,6 +241,13 @@ pub const LineState = struct {
         @memcpy(self.buffer[0..n], content[0..n]);
         self.len = n;
         self.uncertain = false;
+        // Bash's redraw lands the cursor at the EOL of the input
+        // region by the time `;B` fires + the input is echoed.
+        // Clamp cursor_pos to len so callers see "cursor at EOL"
+        // after a successful sync. (If something downstream knows
+        // better — e.g. a DSR-6n reply — it can overwrite.)
+        self.cursor_pos = n;
+        self.syncCursorMoved();
         self.generation +%= 1;
     }
 
@@ -288,25 +318,36 @@ pub const LineState = struct {
                     // `.llm` author on that line would be wrong.
                     self.markUncertain();
                 }
-                // Set the cursor_moved flag separately. Skip when the
-                // buffer is empty — cursor is already at col 1 == EOL,
-                // no character can be over-painted, and a sticky flag
-                // would suppress ghost through the next typing session.
+                // Update cursor_pos for the modeled cursor-motion CSIs.
+                // Right (`C`) explicitly increments instead of jumping
+                // to EOL — N consecutive Rights land at min(cursor + N,
+                // len), so a sequence of Rights after Ctrl-A reaches
+                // EOL exactly when N == len. That's what re-engages
+                // ghost after the user steps back to EOL without
+                // pressing End. Skip the update on empty buffer:
+                // cursor is already at col 1 == EOL == BOL.
                 if (j < input.len and self.len > 0) {
                     switch (input[j]) {
-                        'D', 'H' => self.cursor_moved = true, // Left / Home
-                        'C' => self.cursor_moved = true, // Right — only ±1, no EOL guarantee
-                        'F' => self.cursor_moved = false, // End lands provably at EOL
+                        'D' => if (self.cursor_pos > 0) {
+                            self.cursor_pos -= 1; // Left
+                        },
+                        'C' => if (self.cursor_pos < self.len) {
+                            self.cursor_pos += 1; // Right
+                        },
+                        'H' => self.cursor_pos = 0, // Home
+                        'F' => self.cursor_pos = self.len, // End
                         '~' => {
                             const param = input[i + 2 .. j];
                             if (std.mem.eql(u8, param, "4") or std.mem.eql(u8, param, "8")) {
-                                self.cursor_moved = false; // End
-                            } else {
-                                self.cursor_moved = true;
+                                self.cursor_pos = self.len; // End
+                            } else if (std.mem.eql(u8, param, "1") or std.mem.eql(u8, param, "7")) {
+                                self.cursor_pos = 0; // Home
                             }
+                            // 5~/6~ (PgUp/PgDn): no col change.
                         },
                         else => {},
                     }
+                    self.syncCursorMoved();
                 }
                 i = j + 1;
                 continue;
@@ -325,26 +366,27 @@ pub const LineState = struct {
                 0x17 => self.killWord(),
                 // Tab — completion is shell-driven; we lose track.
                 0x09 => self.markUncertain(),
-                // Readline cursor-motion bindings. We pull these out of
-                // the generic "unmodelled control byte" bucket because
-                // markUncertain alone isn't enough: the shell's redraw
-                // after Ctrl-A/B/F leaves CONTENT unchanged, so the
-                // OSC 133 syncFromCapture path then clears `uncertain`
-                // and ghost re-engages — painting over the line content
-                // that's still to the right of the now-mid-line cursor.
-                // `cursor_moved` survives syncFromCapture (only clears
-                // on backspace-to-empty / killLine / killWord / submit /
-                // reset), so set it explicitly.
-                0x01 => if (self.len > 0) {
-                    self.cursor_moved = true;
-                }, // Ctrl-A: cursor to BOL
-                0x02 => if (self.len > 0) {
-                    self.cursor_moved = true;
-                }, // Ctrl-B: cursor back 1
-                0x06 => if (self.len > 0) {
-                    self.cursor_moved = true;
-                }, // Ctrl-F: cursor forward 1 — only ±1, no EOL guarantee
-                0x05 => self.cursor_moved = false, // Ctrl-E: cursor to EOL, provably
+                // Readline cursor-motion bindings. We model them like
+                // the CSI cursor-motion siblings: update `cursor_pos`,
+                // sync the cached `cursor_moved` flag. Ctrl-F (forward)
+                // increments; N Ctrl-F presses from BOL land at EOL
+                // exactly, re-engaging ghost.
+                0x01 => {
+                    self.cursor_pos = 0; // Ctrl-A: cursor to BOL
+                    self.syncCursorMoved();
+                },
+                0x05 => {
+                    self.cursor_pos = self.len; // Ctrl-E: cursor to EOL
+                    self.syncCursorMoved();
+                },
+                0x02 => {
+                    if (self.cursor_pos > 0) self.cursor_pos -= 1; // Ctrl-B
+                    self.syncCursorMoved();
+                },
+                0x06 => {
+                    if (self.cursor_pos < self.len) self.cursor_pos += 1; // Ctrl-F
+                    self.syncCursorMoved();
+                },
                 // Any other control byte we don't model. The ranges are
                 // carefully carved around the codes we *do* handle above.
                 0x00, 0x0B, 0x0C, 0x0E...0x14, 0x16, 0x18, 0x19, 0x1A, 0x1C...0x1F => {
@@ -378,6 +420,12 @@ pub const LineState = struct {
         }
         self.buffer[self.len] = b;
         self.len += 1;
+        // Assume cursor was at EOL when typing — the common case.
+        // Mid-line typing isn't modeled (the splice would land at
+        // `cursor_pos`, not `len`); cursor_moved would already be
+        // set in that path, so ghost stays suppressed regardless.
+        self.cursor_pos = self.len;
+        self.syncCursorMoved();
         self.generation +%= 1;
     }
 
@@ -396,17 +444,20 @@ pub const LineState = struct {
             return;
         }
         self.len -= 1;
+        // Backspace: cursor moves left by one along with the deletion.
+        // If cursor was at EOL (the common case after typing), new
+        // cursor stays at the new EOL — `cursor_pos -= 1` keeps
+        // `cursor_pos == len`, so ghost re-engages. If cursor was
+        // mid-line, both move left by one — cursor_moved stays true
+        // and ghost stays suppressed (correct).
+        if (self.cursor_pos > 0) self.cursor_pos -= 1;
         if (self.len == 0) {
             self.uncertain = false;
-            // Buffer just emptied — cursor is back at col 1 == EOL
-            // == BOL; nothing to over-paint. Clear `cursor_moved`
-            // so the ghost overlay can re-engage on the next typed
-            // character (instead of staying stickily suppressed
-            // until Enter).
-            self.cursor_moved = false;
+            // Buffer just emptied — drop the staged author too.
             self.pending_author = .user;
             self.pending_intent_len = 0;
         }
+        self.syncCursorMoved();
         self.generation +%= 1;
     }
 
@@ -421,6 +472,7 @@ pub const LineState = struct {
             return;
         }
         self.len = 0;
+        self.cursor_pos = 0;
         self.uncertain = false;
         // Same rationale as `backspace`-to-empty above — the line is
         // gone, so the cursor's "mid-line"ness is meaningless.
@@ -448,16 +500,17 @@ pub const LineState = struct {
         while (end > 0 and self.buffer[end - 1] != ' ') : (end -= 1) {}
         if (end != self.len) {
             self.len = end;
+            // Ctrl-W deletes BEFORE the cursor (readline) — model
+            // it as "cursor lands at the new EOL". Mid-line Ctrl-W
+            // would land cursor mid-line, but we don't model that
+            // (same simplification as backspace).
+            self.cursor_pos = self.len;
             if (self.len == 0) {
                 self.uncertain = false;
-                // Same rationale as `backspace`/`killLine` empty-result
-                // paths — clear cursor_moved so ghost can re-engage
-                // on the next typed character instead of staying
-                // stickily suppressed.
-                self.cursor_moved = false;
                 self.pending_author = .user;
                 self.pending_intent_len = 0;
             }
+            self.syncCursorMoved();
             self.generation +%= 1;
         }
     }
@@ -486,6 +539,7 @@ pub const LineState = struct {
             self.committed_intent_len = self.pending_intent_len;
         }
         self.len = 0;
+        self.cursor_pos = 0;
         self.uncertain = false;
         self.cursor_moved = false;
         self.pending_author = .user;
