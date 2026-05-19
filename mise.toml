@@ -1,2 +1,7 @@
 [tools]
 zig = "0.16.0"
+
+[env]
+PATH_BASE = "{{config_root}}"
+PATH_BIN = "{{config_root}}/.bin"
+_.path = ["{{config_root}}/.bin"]

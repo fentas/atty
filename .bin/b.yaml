@@ -1,0 +1,5 @@
+binaries:
+    b: {}
+    argsh:
+        version: v0.10.0
+        onPost: "argsh builtin ${B_EVENT}"

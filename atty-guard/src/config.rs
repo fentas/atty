@@ -13,6 +13,39 @@ use std::path::Path;
 pub struct Config {
     #[serde(default)]
     pub tier2: Tier2Config,
+    /// V2-J Phase 2: accumulator tuning. Empty by default —
+    /// every knob has a conservative compiled-in fallback.
+    #[serde(default)]
+    pub accumulator: AccumulatorConfig,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct AccumulatorConfig {
+    /// V2-J Phase 2: auto-`Block` threshold. When the combined
+    /// confidence of multiple Tier-1 + Tier-2 signals reaches
+    /// this value AND at least 2 distinct signals fired, the
+    /// classifier escalates the verdict from `Warn` to `Block`.
+    /// `Block` means atty refuses the command outright instead
+    /// of prompting the user, so this is a load-bearing policy
+    /// knob — default `None` keeps the conservative "always
+    /// prompt" behaviour.
+    ///
+    /// Recommended values when opting in:
+    /// - `0.95`: requires ≥ 5 atoms OR an atom + a high-conf
+    ///   regex/SLM signal. Low false-positive risk; some legit
+    ///   scripted runs may still trip and get refused.
+    /// - `0.99`: practically needs 8+ atoms or multiple high-
+    ///   confidence rules. Very low false-positive risk; only
+    ///   the most signal-saturated commands auto-block.
+    ///
+    /// The minimum-hit-count guard (≥ 2 distinct signals) is
+    /// non-configurable — a single regex hit at 1.0 confidence
+    /// always stays a `Warn`, because we want users to retain
+    /// the [y]/[t]/cancel choice for unambiguous-but-legitimate
+    /// shapes like `curl … | sh` (the canonical install-script
+    /// pattern).
+    #[serde(default)]
+    pub block_threshold: Option<f32>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

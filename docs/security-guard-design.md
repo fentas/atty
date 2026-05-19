@@ -23,7 +23,8 @@ Status: **V1 + V2 baseline shipped (atty side + sidecar + ONNX SLM + eBPF + OSV)
 | V2-H      | Sliding-context-window for SLM — `OnnxBackend` gets ±N bytes around the AC hit.        | #120  | ✅ merged       |
 | V2-I      | Baked-in atom fetcher — periodic refresh of `flagged_atoms.txt`; one-shot CLI + cron-style interval mode. GTFOBins shipped first.                  | #121  | ✅ merged       |
 | V2-I-2    | Sigma + LOLBAS sources — extend the V2-I fetcher with the SigmaHQ Linux rule corpus and LOLBAS Windows-binary corpus.                              | #125  | ✅ merged       |
-| **V2-J**  | **Threat-level accumulator** — multi-hit Tier-1 + Tier-2 SLM combined via independent-probability math; multi-atom commands surface a higher combined confidence. | TBD   | 🟡 this PR     |
+| V2-J      | Threat-level accumulator — multi-hit Tier-1 + Tier-2 SLM combined via independent-probability math; multi-atom commands surface a higher combined confidence. | #126  | ✅ merged       |
+| **V2-J-2**| **Auto-Block escalation** — opt-in TOML knob `[accumulator] block_threshold` lets the accumulator escalate Warn → Block when combined confidence reaches the configured value AND ≥ 2 distinct signals fired. | TBD   | 🟡 this PR     |
 
 The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-G+H+I are the pattern-matching scale + intelligence-freshness improvements that close the gap between curated bundles and live disclosures.
 
@@ -55,14 +56,31 @@ The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable t
 
 After V2-G/H/I land, the threat-level accumulator across the AC + precise + SLM tiers becomes the natural follow-up (V2-J).
 
-### What V2-J brings (this PR)
+### What V2-J brings (#126)
 
 - `AtomMatcher::find_all` — walks every non-overlapping atom hit in a command, not just the first. With the Sigma + LOLBAS corpus (#125) a single command realistically carries 2-5 atoms.
 - `Tier1::classify_all` — collects EVERY signal that fired (regex layers + flagged-URL substrings + npm + bash-c-base64 + all atom hits) instead of returning the first match.
 - Independent-probability accumulator: `p_combined = 1 - prod(1 - p_i)`. Three atoms at 0.6 each combine to 0.936; a single regex hit at 1.0 stays 1.0. Saturates toward 1.0 monotonically as more signals fire.
 - SLM second-stage gating moved to `combined_conf < 0.9` — when Tier-1 already has enough signal we skip the ~50 ms SLM call.
-- Verdict policy: **no auto-`Block` escalation in this phase**. The accumulator boosts the confidence NUMBER (used by the banner UI + future trust-cache ranking) while the verdict still comes from the primary (highest-confidence) hit. Per-policy auto-block is deferred to a future PR with a user-configurable threshold.
+- Verdict policy in Phase 1: no auto-`Block` escalation. The accumulator boosts the confidence NUMBER while the verdict still comes from the primary hit. Auto-block lands in V2-J-2.
 - Banner reason for multi-hit: `"N signals fired: <reason1>; <reason2>; ..."` — each layer's attribution preserved.
+
+### What V2-J-2 brings (this PR)
+
+- Opt-in TOML knob:
+
+  ```toml
+  [accumulator]
+  block_threshold = 0.95
+  ```
+
+  When set, the accumulator escalates `Warn` → `Block` if the combined confidence reaches `block_threshold` **AND** at least 2 distinct signals fired. Default `None` = no auto-block (preserves V2-J Phase 1 behaviour exactly).
+
+- The minimum-hit-count guard (`hits.len() >= 2`) is **non-configurable** on purpose: a single regex hit at confidence 1.0 (e.g. `curl … | sh`) always stays `Warn`, so users keep the [y]/[t]/cancel choice for unambiguous-but-legitimate shapes like the canonical install-script pattern.
+
+- Recommended values when opting in:
+  - `0.95`: ≥ 5 atoms OR atom + high-conf SLM. Low false-positive risk.
+  - `0.99`: practically requires 8+ atoms OR multiple high-conf rules. Very low false-positive risk.
 
 ## TL;DR — three-component architecture
 
