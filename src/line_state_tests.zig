@@ -134,6 +134,83 @@ test "Ctrl-A / Ctrl-B / Ctrl-F set cursor_moved; Ctrl-E clears it" {
     try std.testing.expect(!l.cursor_moved);
 }
 
+test "Up + sync(recall) + Ctrl-A + End + type 'e' preserves recalled line content" {
+    // User-reported follow-up to the Ctrl-A fix: after Arrow-Up
+    // (history recall), Ctrl-A, End, then typing 'e' — the ghost
+    // overlay matches against just "e", not against the recalled
+    // line + 'e'. Root cause: the End CSI called markUncertain,
+    // which then let the proxy sync from a stale OSC capture
+    // (just "e", or "") and clobber the keystroke buffer.
+    var l = LineState{};
+
+    // Step 1: Arrow Up — markUncertain because Arrow Up changes
+    // buffer content (history recall is unmodeled until OSC 133
+    // or syncFromCapture restores it).
+    _ = l.applyInput("\x1B[A");
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqualSlices(u8, "", l.current());
+
+    // Step 2: shell echoes recall → OSC 133 capture region picks
+    // it up → proxy calls syncFromCapture with the recalled line.
+    l.syncFromCapture("which pvcontrol");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "which pvcontrol", l.current());
+
+    // Step 3: Ctrl-A — cursor to BOL; buffer unchanged.
+    _ = l.applyInput("\x01");
+    try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqualSlices(u8, "which pvcontrol", l.current());
+
+    // Step 4: End (xterm cursor-style) — cursor lands at EOL;
+    // cursor_moved cleared; buffer preserved AND uncertain stays
+    // false because End doesn't change buffer content.
+    _ = l.applyInput("\x1B[F");
+    try std.testing.expect(!l.cursor_moved);
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "which pvcontrol", l.current());
+
+    // Step 5: type 'e' — appends at EOL. Buffer is the full
+    // recalled line plus 'e'.
+    _ = l.applyInput("e");
+    try std.testing.expectEqualSlices(u8, "which pvcontrole", l.current());
+}
+
+test "cursor-motion CSIs do NOT set uncertain (content unchanged)" {
+    // End/Home/Left/Right only move the cursor. Marking the buffer
+    // uncertain would force a syncFromCapture recovery path that
+    // can clobber the keystroke buffer when the OSC 133 input
+    // region is stale.
+    var l = LineState{};
+    _ = l.applyInput("hello world");
+    try std.testing.expect(!l.uncertain);
+
+    // xterm cursor-style: D=Left, C=Right, H=Home, F=End.
+    _ = l.applyInput("\x1B[D");
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("\x1B[C");
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("\x1B[H");
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("\x1B[F");
+    try std.testing.expect(!l.uncertain);
+
+    // VT-style: 1~/7~ = Home, 4~/8~ = End, 5~/6~ = PageUp/Down.
+    _ = l.applyInput("\x1B[1~");
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("\x1B[4~");
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("\x1B[5~");
+    try std.testing.expect(!l.uncertain);
+
+    // Sanity: buffer-changing CSIs DO set uncertain.
+    _ = l.applyInput("\x1B[A"); // Arrow Up
+    try std.testing.expect(l.uncertain);
+    l.syncFromCapture("hello world"); // back to certain
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("\x1B[3~"); // Delete
+    try std.testing.expect(l.uncertain);
+}
+
 test "Ctrl-A on empty buffer does NOT set cursor_moved" {
     // Empty buffer → cursor already at col 1 == EOL == BOL.
     // Same skip rationale as the CSI cursor-motion path: don't
@@ -233,12 +310,19 @@ test "syncFromCapture does NOT touch cursor_moved" {
     // because OSC 133 carries no cursor-position info. renderGhost
     // gates on `cursor_moved` independently, so a Left arrow stays
     // ghost-suppressed even after sync re-confirms the content.
+    //
+    // Note: Left arrow no longer sets `uncertain` (cursor-motion
+    // CSIs don't change buffer content) — so we manually flip it
+    // here to mimic the "uncertain via some buffer-changing path
+    // + cursor mid-line" combined state the original concern was
+    // about.
     var l = LineState{};
     _ = l.applyInput("hello");
-    _ = l.applyInput("\x1B[D"); // Left
-    try std.testing.expect(l.uncertain);
+    _ = l.applyInput("\x1B[D"); // Left → cursor_moved=true, uncertain stays false
     try std.testing.expect(l.cursor_moved);
+    try std.testing.expect(!l.uncertain);
 
+    l.uncertain = true; // simulate prior buffer-changing CSI
     l.syncFromCapture("hello"); // same content from OSC 133
     try std.testing.expect(!l.uncertain); // sync cleared it
     try std.testing.expect(l.cursor_moved); // but NOT cursor_moved

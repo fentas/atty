@@ -237,52 +237,70 @@ pub const LineState = struct {
                     const c = input[j];
                     if (c >= 0x40 and c <= 0x7E) break;
                 }
-                // Treat any CSI as uncertainty — most likely a cursor
-                // movement or history navigation we don't model. We
-                // also drop `pending_author` here: a CSI we don't
-                // model could be Arrow-Up (history recall) which
-                // replaces the buffer with content we haven't seen,
-                // and a staged `.llm` author on that line would be
-                // wrong. Caller re-stages if it still wants the tag.
-                self.markUncertain();
-                // Cursor-motion CSIs (Left/Right/Home/End) leave the
-                // buffer CONTENT intact but move the cursor off the
-                // end of line. OSC 133 syncFromCapture clears
-                // `uncertain` because content matches, but ghost
-                // rendering at the new cursor position would
-                // overwrite the character to the right of the cursor.
-                // Set the cursor_moved flag so renderGhost suppresses.
+                // Classify the CSI before deciding whether to set
+                // `uncertain`. Cursor-motion CSIs (Left/Right/Home/End
+                // and their VT-style siblings) only move the cursor —
+                // they DON'T change buffer content. Marking them
+                // uncertain forces the proxy's syncFromCapture
+                // recovery path to fire, which can clobber the
+                // keystroke buffer when the OSC 133 input region is
+                // stale (mid-typing PS1 redraw, bash's history recall
+                // not echoed into the capture region, ...). Set
+                // `cursor_moved` for ghost suppression instead and
+                // leave `uncertain` alone. All other CSIs (Arrow
+                // Up/Down history recall, Delete, F-keys, ...) may
+                // change buffer content — markUncertain so the proxy
+                // can resync.
                 //
                 // Final-byte taxonomy:
                 //   D = Left, C = Right (xterm cursor-style)
                 //   H = Home, F = End (xterm cursor-style)
-                //   ~ = VT-style Home/End/Delete/PageUp/PageDown — the
-                //       parameter distinguishes them (1/4/3/5/6 etc.).
-                //       Home/End/Delete move the cursor mid-line.
-                //       PageUp/PageDown rarely move the cursor in a
-                //       shell context. Be conservative: tag any `~`
-                //       CSI as a cursor motion. The follow-up cost is
-                //       a slightly over-suppressed ghost for PageUp/
-                //       PageDown — better than the deletion-illusion
-                //       bug.
-                // Skip the flag when the buffer is empty — cursor is
-                // already at col 1 == EOL, no character can be over-
-                // painted. Avoids stickily suppressing ghost when
-                // the user presses Right/Home/End at an empty prompt
-                // (no-op in shells, but flag would persist for the
-                // whole next typing session).
+                //   ~ = VT-style — the parameter distinguishes
+                //       1/7=Home, 4/8=End, 5/6=PageUp/Down (all
+                //       cursor-motion), 2=Insert, 3=Delete (both
+                //       edit buffer).
+                //   A/B = Arrow Up/Down (history recall — buffer
+                //       changes)
+                //   Other = unknown, conservative markUncertain.
+                var content_changing = true;
+                if (j < input.len) {
+                    switch (input[j]) {
+                        'D', 'C', 'H', 'F' => content_changing = false,
+                        '~' => {
+                            const param = input[i + 2 .. j];
+                            if (std.mem.eql(u8, param, "4") or std.mem.eql(u8, param, "8") or // End
+                                std.mem.eql(u8, param, "1") or std.mem.eql(u8, param, "7") or // Home
+                                std.mem.eql(u8, param, "5") or std.mem.eql(u8, param, "6")) // PgUp/PgDn
+                            {
+                                content_changing = false;
+                            }
+                            // 2~ / 3~ (Insert / Delete) and the F-keys
+                            // (>= 15) edit the buffer — content_changing
+                            // stays true.
+                        },
+                        else => {},
+                    }
+                }
+                if (content_changing) {
+                    // CSI we don't model — drop `pending_author` too:
+                    // a CSI like Arrow-Up could replace the buffer
+                    // with content we haven't seen, and a staged
+                    // `.llm` author on that line would be wrong.
+                    self.markUncertain();
+                }
+                // Set the cursor_moved flag separately. Skip when the
+                // buffer is empty — cursor is already at col 1 == EOL,
+                // no character can be over-painted, and a sticky flag
+                // would suppress ghost through the next typing session.
                 if (j < input.len and self.len > 0) {
                     switch (input[j]) {
                         'D', 'H' => self.cursor_moved = true, // Left / Home
                         'C' => self.cursor_moved = true, // Right — only ±1, no EOL guarantee
                         'F' => self.cursor_moved = false, // End lands provably at EOL
                         '~' => {
-                            // VT-style — peek at the param substring to
-                            // distinguish End (4~, 8~) from Home / Delete
-                            // / PageUp / PageDown.
                             const param = input[i + 2 .. j];
                             if (std.mem.eql(u8, param, "4") or std.mem.eql(u8, param, "8")) {
-                                self.cursor_moved = false;
+                                self.cursor_moved = false; // End
                             } else {
                                 self.cursor_moved = true;
                             }
