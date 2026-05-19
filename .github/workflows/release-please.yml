@@ -19,12 +19,77 @@ jobs:
     name: maintain release PR
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       # The action reads commits since the last release and:
       #   • opens (or updates) a "chore(release): X.Y.Z" PR
-      #   • on merge of that PR, creates the vX.Y.Z tag
+      #   • on merge of that PR (merge-commit style), creates the
+      #     vX.Y.Z tag.
       # The tag push then triggers .github/workflows/release.yml.
       - uses: googleapis/release-please-action@v5
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Squash-merge workaround.
+      #
+      # release-please-action's tag-push only fires when the release
+      # PR is merged via "Create a merge commit." This repo squashes
+      # everything (see CLAUDE.md), so the action's heuristic finds
+      # no merge commit matching its PR's tracked SHA and silently
+      # skips the tag. Every subsequent run then sees "untagged
+      # release PR outstanding" and aborts.
+      #
+      # This step closes the gap: after each push to master we check
+      # whether the manifest version on master has a corresponding
+      # git tag, and if not, push it. Idempotent — re-runs on
+      # unrelated pushes just see the tag already exists and exit.
+      # Also flips the merged release PR's `autorelease: pending`
+      # label to `autorelease: tagged` so the action doesn't keep
+      # re-detecting the same PR.
+      - name: auto-tag squash-merged release PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ver=$(jq -r '.["."]' .release-please-manifest.json)
+          tag="v${ver}"
+
+          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "tag $tag already exists locally; nothing to do"
+            exit 0
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" >/dev/null 2>&1; then
+            echo "tag $tag already exists on remote; nothing to do"
+            exit 0
+          fi
+
+          # Identify the PR whose merge brought the manifest to this
+          # version. The action labels its PRs `autorelease: pending`
+          # and titles them `chore: release master` (per the title-
+          # pattern in release-please-config.json). The newest such
+          # merged PR is the one we want.
+          pr=$(gh pr list --state merged --label "autorelease: pending" \
+              --search "in:title chore release" \
+              --json number,mergeCommit \
+              --jq '.[0] | "\(.number) \(.mergeCommit.oid)"' 2>/dev/null || true)
+          if [ -z "$pr" ] || [ "$pr" = "null null" ]; then
+            echo "no pending release PR to tag (HEAD manifest=$ver, no matching merged PR)"
+            exit 0
+          fi
+          pr_num=$(echo "$pr" | cut -d' ' -f1)
+          pr_sha=$(echo "$pr" | cut -d' ' -f2)
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" "$pr_sha" -m "Release $tag"
+          git push origin "$tag"
+          echo "tagged $tag at $pr_sha (from PR #$pr_num)"
+
+          gh pr edit "$pr_num" \
+              --remove-label "autorelease: pending" \
+              --add-label "autorelease: tagged"

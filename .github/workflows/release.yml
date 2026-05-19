@@ -217,6 +217,8 @@ jobs:
     needs: [binaries, guard-binaries]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v6
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -224,6 +226,28 @@ jobs:
 
       - name: list
         run: ls -la dist/
+
+      # Extract the section of CHANGELOG.md that matches this tag's
+      # version so the Release body is populated with the per-version
+      # notes release-please wrote (instead of empty). release-please-
+      # action normally calls the Release API itself, but the squash-
+      # merge auto-tag path bypasses that — see release-please.yml's
+      # `auto-tag` step. This pulls the same content from CHANGELOG.md.
+      - name: extract changelog section
+        id: changelog
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\["ver"\\]" { in_section = 1; next }
+            in_section && /^## \[/ { exit }
+            in_section { print }
+          ' CHANGELOG.md > /tmp/release_body.md
+          if [ ! -s /tmp/release_body.md ]; then
+            echo "warning: no CHANGELOG.md section for $version; Release body will be empty"
+          fi
+          echo "--- preview (first 20 lines) ---"
+          head -20 /tmp/release_body.md || true
 
       - uses: softprops/action-gh-release@v3
         with:
@@ -238,6 +262,7 @@ jobs:
             dist/atty-*-linux-*
             dist/atty-linux-*
             dist/atty-guard-linux-*
+          body_path: /tmp/release_body.md
           generate_release_notes: false
           fail_on_unmatched_files: true
 
