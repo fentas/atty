@@ -107,6 +107,7 @@ impl AtomMatcher {
     /// trusting one occurrence of `nc -e` doesn't blanket-trust
     /// every other atom.
     pub fn hit_to_result(&self, hit: &AtomHit, command: &str) -> ClassifyResult {
+        let _ = command;
         ClassifyResult {
             verdict: Verdict::Warn,
             // Re-use CurlPipeSh as the placeholder category until
@@ -119,7 +120,6 @@ impl AtomMatcher {
             reason: format!("AtomMatcher flagged `{}`", hit.atom),
             matched: hit.atom.to_owned(),
         }
-        .also_carrying(command, hit)
     }
 
     /// Returns the count of compiled atoms — exposed for the
@@ -133,23 +133,6 @@ impl AtomMatcher {
 impl Default for AtomMatcher {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-trait CarryingExt: Sized {
-    fn also_carrying(self, command: &str, hit: &AtomHit) -> Self;
-}
-
-impl CarryingExt for ClassifyResult {
-    fn also_carrying(mut self, _command: &str, hit: &AtomHit) -> Self {
-        // We don't store the byte_offset in ClassifyResult today
-        // — V2-H will plumb a separate `hit_offset` field through
-        // the classifier into OnnxBackend so sliding-context-
-        // window slicing has the index it needs. Until V2-H, the
-        // matched substring is sufficient for the user-visible
-        // banner.
-        let _ = hit;
-        self
     }
 }
 

