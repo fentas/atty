@@ -439,22 +439,32 @@ const shell_doctor_snippet =
     \\            # and returns nothing.
     \\            if [ "$__atty_doctor_guard_mode" = "user" ]; then
     \\                __atty_doctor_guard_execstart="$(systemctl --user show atty-guard.service -p ExecStart --value 2>/dev/null || true)"
-    \\                __atty_doctor_guard_journal_cmd='journalctl --user -u atty-guard.service -b'
+    \\                __atty_doctor_guard_journal_probe='journalctl --user -u atty-guard.service -b'
+    \\                __atty_doctor_guard_journal_hint="$__atty_doctor_guard_journal_probe"
     \\            else
     \\                __atty_doctor_guard_execstart="$(systemctl show atty-guard.service -p ExecStart --value 2>/dev/null || true)"
-    \\                __atty_doctor_guard_journal_cmd='sudo journalctl -u atty-guard.service -b'
+    \\                # Probe WITHOUT sudo first. Many setups have the
+    \\                # operator in the `systemd-journal` group (or
+    \\                # equivalent) and root isn't needed to read
+    \\                # service logs. Falls through to a sudo-prefixed
+    \\                # HINT (not an execution) if the unprivileged
+    \\                # probe yields no journal entries — `eval
+    \\                # "$(atty doctor)"` should NEVER block on a sudo
+    \\                # password prompt mid-output.
+    \\                __atty_doctor_guard_journal_probe='journalctl -u atty-guard.service -b'
+    \\                __atty_doctor_guard_journal_hint='sudo journalctl -u atty-guard.service -b'
     \\            fi
     \\            if echo "$__atty_doctor_guard_execstart" | grep -q -- '--enable-ebpf'; then
     \\                # Scope the journald scan to the current boot —
     \\                # the "eBPF attached" line is emitted once per
     \\                # daemon start, so a unit up >24h with no restart
     \\                # would spuriously warn with a fixed time window.
-    \\                # `-b` is faster than a sized window AND captures
-    \\                # exactly the running instance's log.
-    \\                if eval "$__atty_doctor_guard_journal_cmd" 2>/dev/null | grep -q 'eBPF attached'; then
+    \\                # `-b` is faster AND captures exactly the running
+    \\                # instance's log.
+    \\                if eval "$__atty_doctor_guard_journal_probe" 2>/dev/null | grep -q 'eBPF attached'; then
     \\                    __atty_doctor_ok 'eBPF: compiled + ExecStart --enable-ebpf + journald shows "eBPF attached" this boot'
     \\                else
-    \\                    __atty_doctor_warn "eBPF: compiled + ExecStart has --enable-ebpf BUT journald shows no 'eBPF attached' this boot. Run \`$__atty_doctor_guard_journal_cmd | grep -i ebpf\` to see the actual reason (typical: kernel lacks BPF LSM, daemon lacks CAP_BPF, or the .bpf.o object isn't on the loader's search path)."
+    \\                    __atty_doctor_warn "eBPF: compiled + ExecStart has --enable-ebpf BUT no 'eBPF attached' line visible to this user this boot. Run \`$__atty_doctor_guard_journal_hint | grep -i ebpf\` to see the actual reason (typical: kernel lacks BPF LSM, daemon lacks CAP_BPF, or the .bpf.o object isn't on the loader's search path). If you're not in the systemd-journal group, the sudo'd hint is the visible-to-you path."
     \\                fi
     \\            else
     \\                __atty_doctor_warn 'eBPF: compiled in BUT ExecStart does NOT pass --enable-ebpf. The drop-in at /etc/systemd/system/atty-guard.service.d/ebpf.conf is missing — install via `sudo make install-guard GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf`'
@@ -476,7 +486,8 @@ const shell_doctor_snippet =
     \\      __atty_doctor_guard_unit __atty_doctor_guard_unit_sys \
     \\      __atty_doctor_guard_unit_user __atty_doctor_guard_mode \
     \\      __atty_doctor_guard_sock __atty_doctor_guard_features_rc \
-    \\      __atty_doctor_guard_execstart __atty_doctor_guard_journal_cmd 2>/dev/null
+    \\      __atty_doctor_guard_execstart __atty_doctor_guard_journal_probe \
+    \\      __atty_doctor_guard_journal_hint 2>/dev/null
     \\
 ;
 
