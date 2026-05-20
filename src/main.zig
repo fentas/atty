@@ -309,21 +309,39 @@ const shell_doctor_snippet =
     \\# Each check is non-fatal: a fresh atty install runs fine with
     \\# the in-proc Tier-1 only (no daemon). The checks fire only
     \\# when there's evidence the operator INTENDED to install the
-    \\# sidecar (`atty-guard` binary on PATH OR the unit file in
-    \\# place); otherwise the section is silent.
+    \\# sidecar (system binary present OR system unit installed);
+    \\# otherwise the section is silent. The doctor knows about both
+    \\# the system-daemon install (post-#140 default) AND the legacy
+    \\# systemd-user install (pre-#140 — flagged with a one-line
+    \\# migration nudge).
     \\__atty_doctor_guard_bin=""
     \\if command -v atty-guard >/dev/null 2>&1; then
     \\    __atty_doctor_guard_bin="$(command -v atty-guard)"
+    \\elif [ -x /usr/local/bin/atty-guard ]; then
+    \\    __atty_doctor_guard_bin="/usr/local/bin/atty-guard"
     \\elif [ -x "$HOME/.local/bin/atty-guard" ]; then
     \\    __atty_doctor_guard_bin="$HOME/.local/bin/atty-guard"
     \\fi
-    \\__atty_doctor_guard_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service"
-    \\if [ -n "$__atty_doctor_guard_bin" ] || [ -f "$__atty_doctor_guard_unit" ]; then
+    \\__atty_doctor_guard_unit_sys=/etc/systemd/system/atty-guard.service
+    \\__atty_doctor_guard_unit_user="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service"
+    \\__atty_doctor_guard_unit=""
+    \\__atty_doctor_guard_mode=""
+    \\if [ -f "$__atty_doctor_guard_unit_sys" ]; then
+    \\    __atty_doctor_guard_unit="$__atty_doctor_guard_unit_sys"
+    \\    __atty_doctor_guard_mode=system
+    \\elif [ -f "$__atty_doctor_guard_unit_user" ]; then
+    \\    __atty_doctor_guard_unit="$__atty_doctor_guard_unit_user"
+    \\    __atty_doctor_guard_mode=user
+    \\fi
+    \\if [ -n "$__atty_doctor_guard_bin" ] || [ -n "$__atty_doctor_guard_unit" ]; then
     \\    printf '\n\033[1matty doctor\033[0m — atty-guard sidecar\n\n'
-    \\    # Bare label when the binary isn't found — otherwise the
-    \\    # check renders "binary present ()" with empty parens on
-    \\    # the failure path, which reads like "we know where it is,
-    \\    # we just won't tell you" rather than "couldn't find it".
+    \\    if [ "$__atty_doctor_guard_mode" = "user" ]; then
+    \\        # Pre-#140 install. Still works for the bundled-corpus
+    \\        # path but doesn't have the dedicated `atty` user / file
+    \\        # ownership protections. Nudge to migrate but don't fail
+    \\        # the check.
+    \\        __atty_doctor_warn 'systemd-user install detected (pre-#140). Migrate to the system-daemon install by running `sudo make install-guard` from the atty source tree — moves atty-guard under a dedicated `atty` user with permission-checked atom files at /var/lib/atty-guard/.'
+    \\    fi
     \\    if [ -n "$__atty_doctor_guard_bin" ]; then
     \\        __atty_doctor_guard_bin_label="atty-guard binary present ($__atty_doctor_guard_bin)"
     \\    else
@@ -331,28 +349,28 @@ const shell_doctor_snippet =
     \\    fi
     \\    __atty_doctor_check '[ -n "'"$__atty_doctor_guard_bin"'" ]' \
     \\        "$__atty_doctor_guard_bin_label" \
-    \\        'install with `make install-guard` (from the atty source tree) or download the binary from https://github.com/fentas/atty/releases'
-    \\    __atty_doctor_check '[ -f "'"$__atty_doctor_guard_unit"'" ]' \
-    \\        'atty-guard.service systemd-user unit installed' \
-    \\        '`make install-guard` writes the unit + enables it; do that to get auto-start on login'
+    \\        'install with `sudo make install-guard` (from the atty source tree) or download the binary from https://github.com/fentas/atty/releases'
+    \\    __atty_doctor_check '[ -f "'"$__atty_doctor_guard_unit_sys"'" ] || [ -f "'"$__atty_doctor_guard_unit_user"'" ]' \
+    \\        'atty-guard.service unit installed' \
+    \\        '`sudo make install-guard` writes the system unit to /etc/systemd/system/ and enables it'
     \\    if command -v systemctl >/dev/null 2>&1; then
-    \\        # `--quiet` swallows the exit code path noise but
-    \\        # `systemctl --user` still emits to stderr when there's
-    \\        # no user bus (containers without `--user`, SSH without
-    \\        # `loginctl enable-linger`, etc.). Redirect to keep the
-    \\        # doctor output clean — the check's remediation already
-    \\        # tells the operator what to do.
-    \\        __atty_doctor_check 'systemctl --user is-active --quiet atty-guard.service 2>/dev/null' \
-    \\            'atty-guard.service is active' \
-    \\            'systemctl --user start atty-guard.service (check `systemctl --user status atty-guard` for the actual reason if it refuses)'
+    \\        if [ "$__atty_doctor_guard_mode" = "system" ]; then
+    \\            __atty_doctor_check 'systemctl is-active --quiet atty-guard.service 2>/dev/null' \
+    \\                'atty-guard.service is active' \
+    \\                'sudo systemctl start atty-guard.service (check `systemctl status atty-guard` for the actual reason if it refuses)'
+    \\        else
+    \\            __atty_doctor_check 'systemctl --user is-active --quiet atty-guard.service 2>/dev/null' \
+    \\                'atty-guard.service is active (systemd-user — legacy)' \
+    \\                'systemctl --user start atty-guard.service (and consider migrating to the system install per the warning above)'
+    \\        fi
     \\    fi
-    \\    # Mirror the daemon's actual fallback (atty-guard/src/main.rs:
-    \\    # XDG_RUNTIME_DIR/atty-guard.sock → /tmp/atty-guard-<uid>.sock).
-    \\    # A bare `/tmp/atty-guard.sock` fallback would miss the daemon
-    \\    # on systems without XDG_RUNTIME_DIR (no logind session, some
-    \\    # containers) where the daemon DOES bind under /tmp with the
-    \\    # uid suffix.
-    \\    if [ -n "${XDG_RUNTIME_DIR-}" ]; then
+    \\    # Socket path differs by install mode. System daemon binds
+    \\    # /run/atty-guard/atty-guard.sock (atty:atty 0750 group-
+    \\    # readable). Legacy systemd-user binds under $XDG_RUNTIME_DIR
+    \\    # or /tmp/atty-guard-<uid>.sock.
+    \\    if [ "$__atty_doctor_guard_mode" = "system" ]; then
+    \\        __atty_doctor_guard_sock=/run/atty-guard/atty-guard.sock
+    \\    elif [ -n "${XDG_RUNTIME_DIR-}" ]; then
     \\        __atty_doctor_guard_sock="$XDG_RUNTIME_DIR/atty-guard.sock"
     \\    else
     \\        __atty_doctor_guard_sock="/tmp/atty-guard-$(id -u).sock"
@@ -360,6 +378,15 @@ const shell_doctor_snippet =
     \\    __atty_doctor_check '[ -S "'"$__atty_doctor_guard_sock"'" ]' \
     \\        "UDS socket reachable ($__atty_doctor_guard_sock)" \
     \\        'service started but socket missing — likely a permission or path mismatch; the daemon prints the bind error to journald on startup'
+    \\    if [ "$__atty_doctor_guard_mode" = "system" ]; then
+    \\        # System-daemon mode requires the user to be in the
+    \\        # `atty` group to connect to the socket.
+    \\        if id -nG 2>/dev/null | grep -qw atty; then
+    \\            __atty_doctor_ok 'user is in `atty` group (can connect to the daemon socket)'
+    \\        else
+    \\            __atty_doctor_fail 'user not in `atty` group' 'sudo usermod -aG atty $USER; then log out + back in (or `newgrp atty` for a single shell)'
+    \\        fi
+    \\    fi
     \\    # Atom corpus check intentionally NOT done here. atty-guard's
     \\    # AtomMatcher reads its corpus via `include_str!` at compile
     \\    # time — there is no runtime atom file the daemon loads
@@ -389,7 +416,8 @@ const shell_doctor_snippet =
     \\unset -f __atty_doctor_ok __atty_doctor_fail __atty_doctor_warn __atty_doctor_check 2>/dev/null
     \\unset __atty_doctor_pass __atty_doctor_fail_count \
     \\      __atty_doctor_guard_bin __atty_doctor_guard_bin_label \
-    \\      __atty_doctor_guard_unit \
+    \\      __atty_doctor_guard_unit __atty_doctor_guard_unit_sys \
+    \\      __atty_doctor_guard_unit_user __atty_doctor_guard_mode \
     \\      __atty_doctor_guard_sock 2>/dev/null
     \\
 ;

@@ -62,26 +62,36 @@ after our init eval ran" or similar.
 ## 2. Install atty-guard (sidecar)
 
 ```sh
-make install-guard
+sudo make install-guard
 ```
+
+atty-guard is a SYSTEM daemon (post-#140) — installed and run under
+a dedicated `atty` user/group, NOT as systemd-user. WHY: atom files
+and URL trust state influence detection. A user-writable trust file
+is a DOS vector — a malicious process running as $USER could poison
+the atom corpus with common-command atoms (`ls`, `cd`, ` `), every
+keystroke fires Block, user disables atty-guard to regain a usable
+shell, defense gone. atty:atty-owned files in `/var/lib/atty-guard/`
+keep detection state outside the user's write reach.
 
 What this does:
 
 1. Builds `atty-guard/target/release/atty-guard` with the default
    feature set: `tier2-onnx`, `osv-live`, `atoms-fetch`. eBPF is
    opt-in — see §4 below.
-2. Installs the binary to `$PREFIX/bin/atty-guard` (defaults to
-   `~/.local/bin`).
-3. Drops `atty-guard.service` into `$XDG_CONFIG_HOME/systemd/user/`
-   (or `~/.config/systemd/user/` if the env var is unset).
-4. Runs `systemctl --user daemon-reload && enable --now`. The
-   daemon is now running and bound to
-   `$XDG_RUNTIME_DIR/atty-guard.sock`.
+2. Creates a system `atty` user/group (no home, no login shell).
+3. Installs the binary to `/usr/local/bin/atty-guard`.
+4. Drops `atty-guard.service` into `/etc/systemd/system/`.
+5. Creates `/var/lib/atty-guard/` owned `atty:atty` mode 0750.
+6. Runs `systemctl daemon-reload && enable --now`. The daemon
+   binds `/run/atty-guard/atty-guard.sock` (the unit's
+   `RuntimeDirectory=` creates that path owned `atty:atty 0750`).
 
-To use a non-default prefix:
+Then add your user to the `atty` group so atty proxies can connect:
 
 ```sh
-make install-guard PREFIX=/opt/atty
+sudo usermod -aG atty $USER
+# log out + back in (or `newgrp atty` for a single shell)
 ```
 
 To wire atty's `security_guard` module to the daemon socket, edit
@@ -91,18 +101,34 @@ To wire atty's `security_guard` module to the daemon socket, edit
 pub const modules = .{
     atty.modules.security_guard.configure(.{
         .enabled = true,
-        // Literal path — no `${VAR}` expansion happens at runtime.
-        // Default daemon socket lives at $XDG_RUNTIME_DIR/atty-guard.sock
-        // (typically /run/user/<uid>/) and falls back to
-        // /tmp/atty-guard-<uid>.sock when XDG_RUNTIME_DIR is unset.
-        // Swap in your actual uid; `id -u` prints it.
-        .daemon_socket_path = "/run/user/1000/atty-guard.sock",
+        // System-daemon path — the systemd unit's
+        // RuntimeDirectory=atty-guard creates this with the right
+        // perms. User must be in the `atty` group to connect.
+        .daemon_socket_path = "/run/atty-guard/atty-guard.sock",
     }),
 };
 ```
 
 Then rebuild atty (`make build-atty`) and `make link-atty` so the
 new binary picks up the wired path.
+
+### Migrating from a pre-#140 systemd-user install
+
+If you previously installed atty-guard as systemd-user (the binary
+lived at `~/.local/bin/atty-guard`, unit at
+`~/.config/systemd/user/atty-guard.service`), `atty doctor` will
+detect that install and prompt you to migrate. Tear it down before
+installing the system daemon:
+
+```sh
+systemctl --user disable --now atty-guard.service
+rm -f ~/.local/bin/atty-guard
+rm -f ~/.config/systemd/user/atty-guard.service
+rm -rf ~/.config/systemd/user/atty-guard.service.d
+systemctl --user daemon-reload
+```
+
+Then `sudo make install-guard` for the new system daemon.
 
 ## 3. Atom corpus (bundled today, refresh roadmap)
 
@@ -156,11 +182,11 @@ make build-guard GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf
 ```
 
 Requires `libbpf-dev` on the build host. The daemon also needs
-`CAP_BPF` at runtime — edit the systemd-user unit:
+`CAP_BPF` at runtime — edit the system unit:
 
 ```sh
-mkdir -p ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d
-cat > ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d/ebpf.conf <<EOF
+sudo mkdir -p /etc/systemd/system/atty-guard.service.d
+sudo tee /etc/systemd/system/atty-guard.service.d/ebpf.conf <<EOF >/dev/null
 [Service]
 AmbientCapabilities=CAP_BPF CAP_PERFMON
 # Also need to lift one of the MAC restrictions — eBPF program
@@ -175,16 +201,16 @@ RestrictNamespaces=
 SystemCallFilter=bpf perf_event_open
 # Pass --enable-ebpf to the daemon.
 ExecStart=
-ExecStart=%h/.local/bin/atty-guard --enable-ebpf
+ExecStart=/usr/local/bin/atty-guard --enable-ebpf
 EOF
-systemctl --user daemon-reload
-systemctl --user restart atty-guard
+sudo systemctl daemon-reload
+sudo systemctl restart atty-guard
 ```
 
 Check that the kernel programs attached:
 
 ```sh
-journalctl --user -u atty-guard -n 50 | grep eBPF
+sudo journalctl -u atty-guard -n 50 | grep eBPF
 # Expected: "atty-guard: eBPF attached (LSM + execve tracepoint)"
 # If you see "atty-guard: eBPF unavailable — <reason>" the daemon
 # fell back to V2-A in-memory threat-map mode.
@@ -214,7 +240,7 @@ atty doctor — atty-guard sidecar
   ✓  atty-guard.service systemd-user unit installed
   ✓  atty-guard.service is active
   ✓  UDS socket reachable (/run/user/1000/atty-guard.sock)
-  !  eBPF status is runtime-only — `journalctl --user -u atty-guard | grep -i ebpf` will show ...
+  !  eBPF status is runtime-only — `sudo journalctl -u atty-guard | grep -i ebpf` will show ...
 ```
 
 The eBPF line is always informational (yellow `!`) — doctor doesn't
@@ -268,23 +294,31 @@ refuses the `execve` if the user shells out without atty.
 
 ## Removing it
 
-`make install-guard` writes a REAL binary (not a symlink) via
-`atty-guard/contrib/install.sh`, so `make unlink-guard` (which
-only unlinks dev-mode symlinks from `make link-guard`) refuses to
-touch it. Remove the installed paths directly:
+`sudo make install-guard` writes the system daemon's binary + unit +
+state dir + creates the `atty` user. `make unlink-guard` only unlinks
+dev-mode symlinks from `make link-guard`. Full removal:
 
 ```sh
-systemctl --user disable --now atty-guard.service
-rm -f ~/.local/bin/atty-guard
-rm -f ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service
-rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d
-systemctl --user daemon-reload
-rm -f ~/.local/share/atty-guard/flagged_atoms.txt
+# Stop + disable the service.
+sudo systemctl disable --now atty-guard.service
+
+# Remove the installed paths.
+sudo rm -f /usr/local/bin/atty-guard
+sudo rm -f /etc/systemd/system/atty-guard.service
+sudo rm -rf /etc/systemd/system/atty-guard.service.d
+sudo rm -rf /var/lib/atty-guard
+sudo systemctl daemon-reload
+
+# Optional: remove the dedicated user/group.
+sudo userdel atty 2>/dev/null || true
+sudo groupdel atty 2>/dev/null || true
+
+# Optional: clear user-side trust cache.
 rm -rf ~/.cache/atty
 ```
 
 (If you used `make link-guard` for dev-mode, `make unlink-guard`
-DOES handle that — it only refuses on real-file installs.)
+DOES handle the symlink — it only refuses on real-file installs.)
 
 The trust cache (`~/.cache/atty/security_trust.txt`) survives — clear
 it explicitly if you want a fresh start.

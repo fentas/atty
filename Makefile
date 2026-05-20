@@ -225,8 +225,8 @@ fmt-guard:
 # enable+start the service. Delegates to the canonical installer so
 # the systemd policy stays in one place (atty-guard.service).
 install-guard: build-guard
-	@printf "→ %s will install + enable atty-guard.service (systemd-user)\n" "$@"
-	PREFIX=$(PREFIX) atty-guard/contrib/install.sh
+	@printf "→ %s will install + enable atty-guard.service (SYSTEM daemon — requires sudo)\n" "$@"
+	atty-guard/contrib/install.sh
 
 # Symlink the daemon binary the same way `make link` does for atty:
 # source-of-truth is the cargo target dir, $(PREFIX)/bin is just a
@@ -249,20 +249,26 @@ unlink-guard:
 	    printf "(nothing to unlink)\n"; \
 	fi
 
-# Restart the systemd-user unit. systemd-user resolves the symlink/path
-# at ExecStart, so this is what makes a freshly-built binary actually run.
-# When built with --features ebpf, the restart also unloads the old
-# kernel-side BPF programs (libbpf-rs drops them on process exit) and
-# the new daemon re-attaches them on startup.
+# Restart the systemd unit (system-daemon, post-#140) — needed when
+# you rebuild the binary so the new image actually runs. When built
+# with --features ebpf the restart also unloads the old kernel-side
+# BPF programs (libbpf-rs drops them on process exit) and the new
+# daemon re-attaches them on startup. Falls back to the legacy
+# systemd-user path for installs that haven't migrated yet.
 reload-guard:
 	@if ! command -v systemctl >/dev/null 2>&1; then \
 	    printf "⚠ systemctl not on \$$PATH — start atty-guard yourself with the new binary\n"; \
 	    exit 1; \
 	fi
-	@unit_path="$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user/atty-guard.service"; \
-	if [ ! -f "$$unit_path" ]; then \
-	    printf "⚠ atty-guard.service not installed (%s) — run \`make install-guard\` first\n" "$$unit_path"; \
+	@sys_unit=/etc/systemd/system/atty-guard.service; \
+	user_unit="$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user/atty-guard.service"; \
+	if [ -f "$$sys_unit" ]; then \
+	    sudo systemctl restart atty-guard.service && \
+	    printf "→ atty-guard restarted (system daemon; eBPF re-attached if built with --features ebpf)\n"; \
+	elif [ -f "$$user_unit" ]; then \
+	    systemctl --user restart atty-guard.service && \
+	    printf "→ atty-guard restarted (systemd-user — legacy install; consider running \`sudo make install-guard\` to migrate)\n"; \
+	else \
+	    printf "⚠ atty-guard.service not installed at %s or %s — run \`sudo make install-guard\` first\n" "$$sys_unit" "$$user_unit"; \
 	    exit 1; \
 	fi
-	systemctl --user restart atty-guard.service
-	@printf "→ atty-guard restarted (eBPF re-attached if built with --features ebpf)\n"

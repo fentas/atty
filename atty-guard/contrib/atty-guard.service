@@ -1,27 +1,48 @@
 [Unit]
 Description=atty security guard sidecar
 Documentation=https://github.com/fentas/atty/blob/master/atty-guard/README.md
-After=default.target
-# Don't fight other security agents during boot — wait until the
-# user session is otherwise quiet before starting.
-Wants=default.target
+After=network.target
 
 [Service]
-ExecStart=%h/.local/bin/atty-guard
+# atty-guard runs as a SYSTEM daemon under a dedicated `atty` user,
+# not as systemd-user. The atty:atty user/group is created by
+# `contrib/install.sh` (which requires sudo). atty proxies running as
+# regular users connect to the daemon's UDS at
+# /run/atty-guard/atty-guard.sock — group-readable by the `atty`
+# group, so users in that group can talk to the daemon.
+#
+# WHY this shape (not systemd-user): atom files + URL trust decisions
+# influence detection. User-writable trust state is a DOS vector — a
+# malicious process running as $USER could poison atoms with common
+# commands and force the user to disable atty-guard. Putting the
+# daemon under a dedicated user keeps detection state outside the
+# user's write reach; mutations go through `sudo atty-guard atoms
+# add/remove` etc. so admin intent is required.
+User=atty
+Group=atty
+
+ExecStart=/usr/local/bin/atty-guard
 Restart=on-failure
 RestartSec=2
-# Daemon is short-running per request and small in memory; restart
-# fast if it crashes so atty sessions don't keep latching daemon_disabled.
 StartLimitIntervalSec=10
 StartLimitBurst=5
 
-# Lockdown — daemon does no FS writes outside the UDS path, no
-# network, no privileges. Tighter than the default systemd
-# protections; matches the threat model from
-# docs/security-guard-design.md.
+# /run/atty-guard/ created by systemd, owned atty:atty, group-
+# readable so atty proxies (added to the `atty` group) can read the
+# socket. Daemon binds atty-guard.sock under here at startup.
+RuntimeDirectory=atty-guard
+RuntimeDirectoryMode=0750
+# /var/lib/atty-guard/ for atom files + user URL decisions. Owned
+# atty:atty, NOT user-writable; mutations go through the daemon's
+# sudo-mediated CLI.
+StateDirectory=atty-guard
+StateDirectoryMode=0750
+
+# Lockdown — same shape as the prior systemd-user unit, adjusted
+# for the system-daemon context.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 PrivateNetwork=yes
@@ -41,10 +62,6 @@ RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
-# Read-write socket directory must remain accessible. systemd
-# user instance already binds $XDG_RUNTIME_DIR; expose it explicitly
-# so the strict ProtectSystem doesn't shadow it.
-ReadWritePaths=%t
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

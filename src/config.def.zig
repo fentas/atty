@@ -167,7 +167,9 @@ const atty = @import("atty");
 // //     // I/O error falls back to the V1 static rules and latches the
 // //     // session into in-proc-only mode. Build atty-guard from the
 // //     // `atty-guard/` Rust crate at the repo root.
-// //     .daemon_socket_path = "",       // e.g. "/run/user/1000/atty-guard.sock"
+// //     .daemon_socket_path = "",       // e.g. "/run/atty-guard/atty-guard.sock"
+// //                                     // (the post-#140 system-daemon path;
+// //                                     // user must be in the `atty` group)
 // //     .daemon_timeout_ms = 50,        // per-classify keystroke budget
 // // }),
 
