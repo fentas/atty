@@ -35,20 +35,28 @@ set -euo pipefail
 
 # Parse args (before sudo re-exec so the flag forwards through).
 WITH_EBPF=0
+WITHOUT_EBPF=0
 for arg in "$@"; do
     case "$arg" in
         --with-ebpf)
             WITH_EBPF=1
             ;;
+        --without-ebpf)
+            WITHOUT_EBPF=1
+            ;;
         --help|-h)
             sed -n '2,32p' "$0" | sed 's/^# \?//'
             echo
             echo "Flags:"
-            echo "  --with-ebpf   Install the eBPF systemd drop-in (CAP_BPF +"
-            echo "                SystemCallFilter widening + --enable-ebpf on"
-            echo "                ExecStart). Requires the binary to be built"
-            echo "                with --features ebpf (verified via"
-            echo "                --print-features post-install)."
+            echo "  --with-ebpf      Install the eBPF systemd drop-in (CAP_BPF +"
+            echo "                   SystemCallFilter widening + --enable-ebpf on"
+            echo "                   ExecStart). Requires the binary to be built"
+            echo "                   with --features ebpf (verified via"
+            echo "                   --print-features post-install)."
+            echo "  --without-ebpf   Explicitly remove the eBPF drop-in if present."
+            echo "                   Use when downgrading from an ebpf install:"
+            echo "                   without this flag a plain re-install leaves"
+            echo "                   the existing drop-in in place (warn-only)."
             exit 0
             ;;
         *)
@@ -57,6 +65,11 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [[ $WITH_EBPF -eq 1 && $WITHOUT_EBPF -eq 1 ]]; then
+    echo "error: --with-ebpf and --without-ebpf are mutually exclusive" >&2
+    exit 1
+fi
 
 # Re-exec under sudo if not already root. This mirrors the pattern
 # in other system installers (e.g. rustup, ohmyzsh) — keep the
@@ -184,12 +197,23 @@ EOF
     mv -f "$EBPF_DROPIN_FILE.tmp.$$" "$EBPF_DROPIN_FILE"
     chmod 0644 "$EBPF_DROPIN_FILE"
     echo "installed $EBPF_DROPIN_FILE"
+elif [[ $WITHOUT_EBPF -eq 1 ]]; then
+    if [[ -f "$EBPF_DROPIN_FILE" ]]; then
+        rm -f "$EBPF_DROPIN_FILE"
+        echo "removed $EBPF_DROPIN_FILE (--without-ebpf)"
+        # Also try the parent dir — `rmdir` is a no-op if other
+        # drop-ins live there (e.g. an operator's custom override),
+        # so this is safe.
+        rmdir "$EBPF_DROPIN_DIR" 2>/dev/null || true
+    else
+        echo "note: no eBPF drop-in at $EBPF_DROPIN_FILE — nothing to remove."
+    fi
 elif [[ -f "$EBPF_DROPIN_FILE" ]]; then
     # Operator previously ran --with-ebpf, now re-running plain.
-    # Leave the drop-in alone but warn — explicit removal is
-    # always available via `rm -f`.
+    # Leave the drop-in alone but warn — explicit removal via
+    # --without-ebpf is the documented path.
     echo "note: existing eBPF drop-in at $EBPF_DROPIN_FILE left in place."
-    echo "      pass --with-ebpf to re-confirm, or 'rm' it manually to disable."
+    echo "      pass --with-ebpf to re-confirm, --without-ebpf to remove."
 fi
 
 systemctl daemon-reload

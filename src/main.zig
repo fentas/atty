@@ -428,27 +428,33 @@ const shell_doctor_snippet =
     \\        elif "$__atty_doctor_guard_bin" --print-features 2>/dev/null | grep -qx ebpf; then
     \\            # Check whether the running unit was configured to
     \\            # actually load the BPF programs. ExecStart must
-    \\            # carry `--enable-ebpf`; without it the daemon
-    \\            # skips the loader regardless of the feature being
-    \\            # baked in. Read from the live systemd state to
-    \\            # honour any drop-in (the ebpf.conf installed by
-    \\            # `install.sh --with-ebpf` lives at
+    \\            # carry `--enable-ebpf`; without it the daemon skips
+    \\            # the loader regardless of the feature being baked in.
+    \\            # Read from the live systemd state to honour any
+    \\            # drop-in (the ebpf.conf installed by `install.sh
+    \\            # --with-ebpf` lives at
     \\            # /etc/systemd/system/atty-guard.service.d/).
-    \\            __atty_doctor_guard_execstart="$(systemctl show atty-guard.service -p ExecStart --value 2>/dev/null || true)"
+    \\            # `systemctl show` is mode-sensitive: legacy user
+    \\            # installs need `--user` or it queries the system bus
+    \\            # and returns nothing.
+    \\            if [ "$__atty_doctor_guard_mode" = "user" ]; then
+    \\                __atty_doctor_guard_execstart="$(systemctl --user show atty-guard.service -p ExecStart --value 2>/dev/null || true)"
+    \\                __atty_doctor_guard_journal_cmd='journalctl --user -u atty-guard.service -b'
+    \\            else
+    \\                __atty_doctor_guard_execstart="$(systemctl show atty-guard.service -p ExecStart --value 2>/dev/null || true)"
+    \\                __atty_doctor_guard_journal_cmd='sudo journalctl -u atty-guard.service -b'
+    \\            fi
     \\            if echo "$__atty_doctor_guard_execstart" | grep -q -- '--enable-ebpf'; then
-    \\                # Look for the daemon's "eBPF attached" log
-    \\                # line in the last 24h. If absent, surface
-    \\                # whatever error landed instead (typically
-    \\                # `eBPF unavailable — <reason>`).
-    \\                if [ "$__atty_doctor_guard_mode" = "user" ]; then
-    \\                    __atty_doctor_guard_journal_cmd='journalctl --user -u atty-guard.service --since=24h'
-    \\                else
-    \\                    __atty_doctor_guard_journal_cmd='sudo journalctl -u atty-guard.service --since=24h'
-    \\                fi
+    \\                # Scope the journald scan to the current boot —
+    \\                # the "eBPF attached" line is emitted once per
+    \\                # daemon start, so a unit up >24h with no restart
+    \\                # would spuriously warn with a fixed time window.
+    \\                # `-b` is faster than a sized window AND captures
+    \\                # exactly the running instance's log.
     \\                if eval "$__atty_doctor_guard_journal_cmd" 2>/dev/null | grep -q 'eBPF attached'; then
-    \\                    __atty_doctor_ok 'eBPF: compiled + ExecStart --enable-ebpf + journald shows "eBPF attached"'
+    \\                    __atty_doctor_ok 'eBPF: compiled + ExecStart --enable-ebpf + journald shows "eBPF attached" this boot'
     \\                else
-    \\                    __atty_doctor_warn "eBPF: compiled + ExecStart has --enable-ebpf BUT journald shows no 'eBPF attached' in the last 24h. Run \`$__atty_doctor_guard_journal_cmd | grep -i ebpf\` to see the actual reason (typical: kernel lacks BPF LSM, daemon lacks CAP_BPF, or the .bpf.o object isn't on the loader's search path)."
+    \\                    __atty_doctor_warn "eBPF: compiled + ExecStart has --enable-ebpf BUT journald shows no 'eBPF attached' this boot. Run \`$__atty_doctor_guard_journal_cmd | grep -i ebpf\` to see the actual reason (typical: kernel lacks BPF LSM, daemon lacks CAP_BPF, or the .bpf.o object isn't on the loader's search path)."
     \\                fi
     \\            else
     \\                __atty_doctor_warn 'eBPF: compiled in BUT ExecStart does NOT pass --enable-ebpf. The drop-in at /etc/systemd/system/atty-guard.service.d/ebpf.conf is missing — install via `sudo make install-guard GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf`'
