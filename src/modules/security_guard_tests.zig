@@ -370,6 +370,13 @@ test "enabled — `B` on atom-only match (no host) degrades to cancel" {
     try testing.expect(action == .replace);
     try testing.expectEqualSlices(u8, "\x15", action.replace);
     try testing.expectEqual(@as(u8, 0), rt.session_blocked_hosts_count);
+    // Tighter: lens array must ALSO be all-zero. An off-by-one
+    // bug where the counter stays at 0 but a slot got partially
+    // populated would slip past the count check alone — this
+    // assertion would catch it.
+    for (rt.session_blocked_hosts_lens) |len| {
+        try testing.expectEqual(@as(u8, 0), len);
+    }
 }
 
 test "enabled — non-Enter while not armed is passthrough" {
