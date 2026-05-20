@@ -43,7 +43,7 @@
         <span class="bar-dot dot-g"></span>
         <span class="bar-title">~/code/atty — atty bash</span>
       </div>
-      <div class="demo-body" id="demo-screen">
+      <div class="demo-body" id="demo-screen" aria-hidden="true">
         <!-- Static fallback for no-JS / crawlers. JS replaces on load. -->
         <div class="line"><span class="prompt">$ </span><span class="typed">git checkout featu</span><span class="ghost">re/auth-refactor</span></div>
         <div class="line dim">  → atuin: dim ghost suggests your last matching command — →/End to accept</div>
@@ -96,20 +96,23 @@
       }
 
       var currentRun = 0;
-      var timers = [];
+      var timers = new Map();
 
       function sleep(ms) {
         return new Promise(function (resolve) {
-          var id = setTimeout(resolve, ms);
-          timers.push({ id: id, resolve: resolve });
+          var id = setTimeout(function () {
+            timers.delete(id);
+            resolve();
+          }, ms);
+          timers.set(id, resolve);
         });
       }
       function flushTimers() {
-        for (var i = 0; i < timers.length; i++) {
-          clearTimeout(timers[i].id);
-          timers[i].resolve();
-        }
-        timers = [];
+        timers.forEach(function (resolve, id) {
+          clearTimeout(id);
+          resolve();
+        });
+        timers.clear();
       }
       function el(cls, text) {
         var d = document.createElement('div');
@@ -214,10 +217,10 @@
       }
 
       if (replayBtn) replayBtn.addEventListener('click', restart);
-      document.addEventListener('visibilitychange', function () {
-        if (!document.hidden) restart();
-        else flushTimers();
-      });
+      // Browsers throttle setTimeout in background tabs to ~1Hz already,
+      // so we don't need a hand-rolled pause/resume — and explicitly
+      // restarting on visible would yank a deep scene back to scene 1
+      // every tab focus-flip.
 
       restart();
     })();

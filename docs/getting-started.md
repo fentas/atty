@@ -92,8 +92,12 @@ git ch                          # → git checkout featu...
 # Try a guardrail-tripping command. It WILL prompt before running.
 rm -rf /home/work/
 
-# Type a prompt-style line with `#:` and an instruction.
-#: list large files in this directory       # → du -sh * | sort -h
+# Type a prompt-style line with `#:` and an instruction, then
+# press Alt+A — atty replaces the line with a shell command,
+# Enter runs it. (Bare Enter on `#:` is a no-op by default to
+# defend against accidental LLM calls; flip `enter_action` in
+# config if you'd rather Enter trigger directly.)
+#: list large files in this directory       # Alt+A → du -sh * | sort -h
 ```
 
 If something's misbehaving, run:

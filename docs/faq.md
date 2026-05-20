@@ -103,11 +103,19 @@ Yes. atty ships with a `history` module (default) that reads
 `~/.bash_history` / `~/.zsh_history` directly. No daemon, no shell
 plugin. Atuin is opt-in for people who already use it.
 
-## Why is the front-page demo all ASCII art?
+## Why is the front-page demo a typing animation and not a real recording?
 
-Because that's what atty looks like — it's a terminal program. The
-ASCII demo shows real ghost text, a real guardrail prompt, and a
-real status bar in the order you'd see them.
+Because the homepage should still be readable when JavaScript is
+disabled — search-engine crawlers, NoScript users, reader-mode
+browsers all see the same first frame the animation lands on. A
+real `asciinema` cast would be a black box for those readers, and
+a video would push the page weight up by an order of magnitude
+for very little extra information. The text-driven playback is
+honest about what atty is — a terminal program — without trading
+accessibility for production value. If the animation isn't moving,
+your browser is in a reduced-motion mode (the page honors
+`prefers-reduced-motion: reduce`) — the static fallback shows the
+same three scenes side by side.
 
 ## How do I report a bug?
 

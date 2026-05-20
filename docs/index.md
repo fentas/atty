@@ -24,9 +24,11 @@ Your shell stays your shell. atty is the layer above.
 - **Guardrail** — `rm -rf /`, `dd if=`, `curl … | sh` shapes get a
   one-key confirmation before they run.
 - **`#: prompt` shortcut (opt-in)** — type `#: list large files`,
-  press Enter, atty replaces the line with the actual shell command.
-  Works with Ollama, OpenAI, llama.cpp's server, anything
-  OpenAI-compatible.
+  press `Alt+A`, atty fills the line with the actual shell command;
+  Enter runs it. Works with Ollama, OpenAI, llama.cpp's server,
+  anything OpenAI-compatible. (Bare Enter is deliberately a no-op
+  so `#:` comments at the prompt don't accidentally call a model;
+  set `enter_action = .single` if you want one-key invocation.)
 - **Status bar (opt-in)** — DECSTBM-reserved row at the bottom of
   your terminal, with module-contributed segments + a notification
   row for hints + errors.
