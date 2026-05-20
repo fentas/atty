@@ -1,0 +1,33 @@
+<aside class="sidebar" aria-label="Documentation navigation">
+  <nav class="sidebar-nav">
+    <div class="sidebar-group">
+      <h3>Guide</h3>
+      <ul>
+        <li><a href="{{ '/getting-started/' | relative_url }}"{% if page.url == '/getting-started/' %} class="active"{% endif %}>Getting started</a></li>
+        <li><a href="{{ '/faq/' | relative_url }}"{% if page.url == '/faq/' %} class="active"{% endif %}>FAQ</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-group">
+      <h3>Modules</h3>
+      <ul>
+        <li><a href="{{ '/providers/' | relative_url }}"{% if page.url == '/providers/' %} class="active"{% endif %}>Built-in modules</a></li>
+        <li><a href="{{ '/llm/' | relative_url }}"{% if page.url == '/llm/' %} class="active"{% endif %}>LLM module</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-group">
+      <h3>Advanced</h3>
+      <ul>
+        <li><a href="{{ '/architecture/' | relative_url }}"{% if page.url == '/architecture/' %} class="active"{% endif %}>Architecture</a></li>
+        <li><a href="{{ '/modules/' | relative_url }}"{% if page.url == '/modules/' %} class="active"{% endif %}>Writing a module</a></li>
+        <li><a href="{{ '/operator-workflow/' | relative_url }}"{% if page.url == '/operator-workflow/' %} class="active"{% endif %}>Operator workflow</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-group">
+      <h3>External</h3>
+      <ul>
+        <li><a href="https://github.com/fentas/atty" rel="noopener">GitHub&nbsp;↗</a></li>
+        <li><a href="https://github.com/fentas/atty/issues" rel="noopener">Report a bug&nbsp;↗</a></li>
+      </ul>
+    </div>
+  </nav>
+</aside>
