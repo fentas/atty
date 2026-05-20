@@ -60,6 +60,8 @@ osv-live = ["dep:ureq"]
 atoms-fetch = ["dep:ureq", "dep:flate2", "dep:tar", "dep:serde_yaml"]
 
 [dev-dependencies]
+# trust_store tests use tempdir-rooted file ops; no global env mutation.
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

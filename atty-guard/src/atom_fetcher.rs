@@ -161,6 +161,37 @@ pub fn default_atoms_path() -> PathBuf {
     base.join("atty-guard").join("flagged_atoms.txt")
 }
 
+/// Public alias for the placeholder-atom check used by both
+/// atom_fetcher's feature-gated extractor and the trust_store's
+/// `atoms add` validator. Lifted out of `mod imp` so it's
+/// always available regardless of feature flags — the predicate
+/// itself has zero dependencies (pure string ops).
+pub fn is_placeholder_atom_public(atom: &str) -> bool {
+    // Sigma directory-path placeholder convention.
+    if atom.contains("/path/to/") {
+        return true;
+    }
+    // LOLBAS-style `{PATH:.ext}` / `{PATH_ABSOLUTE:.ext}` templates.
+    if atom.contains("{PATH:") || atom.contains("{PATH_ABSOLUTE:") {
+        return true;
+    }
+    // Angle-bracket placeholders — `<hostname>`, `<user>`, `<ip>`.
+    if let Some(lt) = atom.find('<') {
+        let after_lt = &atom[lt + 1..];
+        if let Some(gt_off) = after_lt.find('>') {
+            let inner = &after_lt[..gt_off];
+            if !inner.is_empty()
+                && inner
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug)]
 pub enum FetchError {
     /// Only constructed by the `#[cfg(not(feature = "atoms-fetch"))]`
@@ -563,38 +594,12 @@ mod imp {
     /// anyway — the other two literal atoms carry the signal via
     /// V2-J multi-hit accumulation.
     fn is_placeholder_atom(atom: &str) -> bool {
-        // Sigma directory-path placeholder convention.
-        if atom.contains("/path/to/") {
-            return true;
-        }
-        // LOLBAS-style `{PATH:.ext}` / `{PATH_ABSOLUTE:.ext}`
-        // templates also appear in some Sigma rules that derive
-        // from LOLBAS metadata.
-        if atom.contains("{PATH:") || atom.contains("{PATH_ABSOLUTE:") {
-            return true;
-        }
-        // Angle-bracket placeholders — `<hostname>`, `<user>`, `<ip>` etc.
-        // We check the FIRST `<...>` span only: if its inner is pure
-        // identifier chars (alnum / `_` / `-`), it's a placeholder.
-        // A wider sweep (e.g. first `<` to last `>`) misclassifies real
-        // shell sequences like `connect <user>@<host>` (which is
-        // genuinely a placeholder — caught here, good) but also
-        // `cmd 2>&1 < input.txt` (which isn't — caught by the "no `>`
-        // after `<`" early-out).
-        if let Some(lt) = atom.find('<') {
-            let after_lt = &atom[lt + 1..];
-            if let Some(gt_off) = after_lt.find('>') {
-                let inner = &after_lt[..gt_off];
-                if !inner.is_empty()
-                    && inner
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        // Delegate to the always-available top-level fn so the
+        // predicate is shared between the atom-fetcher's extract
+        // path and the trust_store's `atoms add` validator —
+        // operators can't sneak placeholder-shaped atoms into the
+        // user overlay any more than the fetcher would accept them.
+        super::is_placeholder_atom_public(atom)
     }
 
     /// Atomic write: tmp file in the same dir + rename. Reader

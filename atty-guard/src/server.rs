@@ -35,6 +35,7 @@ pub fn serve(
     block_threshold: Option<f32>,
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
     osv: Option<Arc<crate::osv::OsvClient>>,
+    trust_store: Arc<crate::trust_store::TrustStore>,
 ) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // Socket perms: owner (the daemon's `atty` user) read+write, group
@@ -67,6 +68,7 @@ pub fn serve(
             .with_block_threshold(block_threshold),
         threat,
         verbosity,
+        trust_store,
         osv,
     });
 
@@ -99,9 +101,110 @@ struct State {
     /// "atty-guard ships a curated bad-list" and "actual OSV
     /// disclosures land before atty-guard's next release".
     osv: Option<Arc<crate::osv::OsvClient>>,
+    /// PR #141 — per-UID atom + URL trust state. Mutating
+    /// dispatch arms gate on connecting client's EUID via
+    /// SO_PEERCRED (`PeerCred` below).
+    trust_store: Arc<crate::trust_store::TrustStore>,
+}
+
+/// Peer credentials read from the UDS via SO_PEERCRED at accept
+/// time. Carried by the connection-handler so each request's
+/// dispatch can check the caller's UID/EUID without re-reading.
+#[derive(Debug, Clone, Copy)]
+struct PeerCred {
+    uid: u32,
+    is_root: bool,
+}
+
+impl PeerCred {
+    fn from_stream(stream: &UnixStream) -> std::io::Result<Self> {
+        // SO_PEERCRED on Linux returns the connecting process's
+        // pid/uid/gid at connect time. Per `socket(7)`: "The
+        // credentials returned to the listening process correspond
+        // to the credentials of the peer process at the time of
+        // call to connect()". Good enough for our threat model —
+        // a SUID binary that drops privs before connecting would
+        // appear root-credentialled, but that's an explicit choice
+        // of the calling binary author. Standard `sudo atty-guard
+        // ...` runs the CLI binary post-credential-set, so EUID 0
+        // at connect = sudo'd invocation.
+        //
+        // `UnixStream::peer_cred()` is still unstable as of Rust
+        // 1.82 (issue #42839), so we go straight to getsockopt
+        // SO_PEERCRED via libc. The wire format is `struct ucred {
+        // pid_t pid; uid_t uid; gid_t gid }` — three u32s on Linux.
+        use std::os::fd::AsRawFd;
+
+        #[repr(C)]
+        struct Ucred {
+            pid: i32,
+            uid: u32,
+            gid: u32,
+        }
+        // Linux ABI: SOL_SOCKET=1, SO_PEERCRED=17. socklen_t is
+        // typedef'd to `unsigned int` (u32) on all glibc/musl
+        // targets we ship to; aliasing to u32 here matches the
+        // libc crate's definition for our supported triples.
+        type SocklenT = u32;
+        const SOL_SOCKET: i32 = 1;
+        const SO_PEERCRED: i32 = 17;
+
+        extern "C" {
+            fn getsockopt(
+                sockfd: i32,
+                level: i32,
+                optname: i32,
+                optval: *mut std::ffi::c_void,
+                optlen: *mut SocklenT,
+            ) -> i32;
+        }
+
+        let fd = stream.as_raw_fd();
+        let mut cred = Ucred {
+            pid: 0,
+            uid: u32::MAX,
+            gid: u32::MAX,
+        };
+        let mut len = std::mem::size_of::<Ucred>() as SocklenT;
+        let rc = unsafe {
+            getsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_PEERCRED,
+                &mut cred as *mut Ucred as *mut std::ffi::c_void,
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            // getsockopt failed; errno is meaningful here.
+            return Err(std::io::Error::last_os_error());
+        }
+        if len != std::mem::size_of::<Ucred>() as SocklenT {
+            // Short read — kernel returned success but a smaller
+            // struct than we expect. Treat as a hard error since
+            // we can't trust partial credentials. errno isn't
+            // set in this path, so build a synthetic error.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SO_PEERCRED returned {} bytes, expected {}",
+                    len,
+                    std::mem::size_of::<Ucred>()
+                ),
+            ));
+        }
+        Ok(Self {
+            uid: cred.uid,
+            is_root: cred.uid == 0,
+        })
+    }
 }
 
 fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
+    let peer = PeerCred::from_stream(&stream)?;
+    if state.verbosity >= 2 {
+        eprintln!("atty-guard: peer uid={} root={}", peer.uid, peer.is_root);
+    }
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
     let mut line_buf = String::new();
@@ -165,7 +268,7 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
             }
         };
 
-        let response = dispatch(&state, request);
+        let response = dispatch(&state, request, peer);
         if state.verbosity >= 2 {
             eprintln!("atty-guard: -> id={id} {response:?}");
         }
@@ -174,7 +277,9 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
     Ok(())
 }
 
-fn dispatch(state: &State, req: Request) -> ResponseBody {
+fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
+    use crate::protocol::{AtomScope, UrlDecisionEntry};
+    use crate::trust_store::{ListScope, UrlDecision};
     match req {
         Request::Health => ResponseBody::Health {
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -182,6 +287,49 @@ fn dispatch(state: &State, req: Request) -> ResponseBody {
         Request::Classify { command, context } => {
             // Tier-1 (and Tier-2 stub) classification.
             let mut result = state.classifier.classify(&command);
+
+            // PR #141 — per-UID atom overlay. Persistent atoms
+            // (from `atoms add`) + session atoms (from the proxy's
+            // `[A]llow always` taps — PR #142 wires the proxy side)
+            // get checked as substrings. A hit upgrades a Safe
+            // verdict to Warn; existing Warn/Block are left alone
+            // (no point fighting V2-J's accumulator with a single
+            // overlay hit).
+            //
+            // Substring scan rather than a per-UID AC automaton is
+            // an explicit trade-off: the overlay is typically
+            // dozens of atoms per user, AC build cost would dwarf
+            // the scan savings. Re-evaluate if a user's overlay
+            // grows past ~100 atoms (none today).
+            if matches!(result.verdict, Verdict::Safe) {
+                // ensure_loaded is a no-op after first call per UID
+                // per daemon lifetime — keeps the hot path off disk.
+                // Mutations re-load the cache directly.
+                let _ = state.trust_store.ensure_loaded(peer.uid);
+                let overlay_persistent = state.trust_store.list_atoms(
+                    peer.uid,
+                    crate::trust_store::ListScope::Persistent,
+                );
+                let overlay_session = state.trust_store.list_atoms(
+                    peer.uid,
+                    crate::trust_store::ListScope::Session,
+                );
+                for atom in overlay_persistent.iter().chain(overlay_session.iter()) {
+                    if command.contains(atom.as_str()) {
+                        result = ClassifyResult {
+                            verdict: Verdict::Warn,
+                            category: Category::None,
+                            confidence: 0.6,
+                            reason: format!(
+                                "user-overlay atom matched: `{}`",
+                                atom
+                            ),
+                            matched: atom.clone(),
+                        };
+                        break;
+                    }
+                }
+            }
 
             // V2-F live OSV lookup. Runs only when Tier-1 said Safe
             // AND the command is an `npm install <pkg>` shape AND
@@ -242,6 +390,215 @@ fn dispatch(state: &State, req: Request) -> ResponseBody {
         Request::GetThreatLevel { pid } => ResponseBody::ThreatLevel {
             level: state.threat.get(pid),
         },
+
+        // --- PR #141 mediated trust-state ops ---
+        Request::AtomsAdd {
+            pattern,
+            target_uid,
+        } => {
+            if !peer.is_root {
+                return require_root_error("atoms add");
+            }
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.persistent_add_atom(uid, &pattern) {
+                Ok(()) => ResponseBody::Ok,
+                Err(e) => ResponseBody::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::AtomsRemove {
+            pattern,
+            target_uid,
+        } => {
+            if !peer.is_root {
+                return require_root_error("atoms remove");
+            }
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.persistent_remove_atom(uid, &pattern) {
+                Ok(true) => ResponseBody::Ok,
+                Ok(false) => ResponseBody::Error {
+                    message: format!("atom not present: `{pattern}`"),
+                },
+                Err(e) => ResponseBody::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::AtomsList { scope, target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match scope {
+                AtomScope::System => ResponseBody::AtomsList {
+                    atoms: state.classifier.system_atoms_snapshot(),
+                },
+                AtomScope::User => {
+                    let _ = state.trust_store.ensure_loaded(uid);
+                    ResponseBody::AtomsList {
+                        atoms: state.trust_store.list_atoms(uid, ListScope::Persistent),
+                    }
+                }
+                AtomScope::Session => ResponseBody::AtomsList {
+                    atoms: state.trust_store.list_atoms(uid, ListScope::Session),
+                },
+            }
+        }
+        Request::UrlsAllow { host, target_uid } => {
+            if !peer.is_root {
+                return require_root_error("urls allow");
+            }
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state
+                .trust_store
+                .persistent_add_url(uid, &host, UrlDecision::Allow)
+            {
+                Ok(()) => ResponseBody::Ok,
+                Err(e) => ResponseBody::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::UrlsBlock { host, target_uid } => {
+            if !peer.is_root {
+                return require_root_error("urls block");
+            }
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state
+                .trust_store
+                .persistent_add_url(uid, &host, UrlDecision::Block)
+            {
+                Ok(()) => ResponseBody::Ok,
+                Err(e) => ResponseBody::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::UrlsList { target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            let _ = state.trust_store.ensure_loaded(uid);
+            let entries: Vec<UrlDecisionEntry> = state
+                .trust_store
+                .list_urls(uid)
+                .into_iter()
+                .map(|(host, dec)| UrlDecisionEntry {
+                    host,
+                    decision: dec.as_wire_str().to_owned(),
+                })
+                .collect();
+            ResponseBody::UrlsList { entries }
+        }
+        Request::SessionList { target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            let (atoms, urls_allow, urls_block) = state.trust_store.session_summary(uid);
+            ResponseBody::SessionList {
+                atoms,
+                urls_allow,
+                urls_block,
+            }
+        }
+        Request::SessionClear { target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            state.trust_store.session_clear(uid);
+            ResponseBody::Ok
+        }
+        Request::SessionWrite { target_uid } => {
+            if !peer.is_root {
+                return require_root_error("session write");
+            }
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.session_write(uid) {
+                Ok(report) => {
+                    if state.verbosity >= 1 {
+                        eprintln!(
+                            "atty-guard: session write uid={} atoms={} allow={} block={} invalid={}",
+                            uid,
+                            report.atoms_added,
+                            report.urls_allow_added,
+                            report.urls_block_added,
+                            report.invalid.len()
+                        );
+                    }
+                    // Surface the invalid list to the CLI via the
+                    // structured response so the operator sees
+                    // exactly which entries stayed in session.
+                    if report.invalid.is_empty() {
+                        ResponseBody::Ok
+                    } else {
+                        let lines: Vec<String> = report
+                            .invalid
+                            .iter()
+                            .map(|(e, r)| format!("  `{e}` — {r}"))
+                            .collect();
+                        ResponseBody::Error {
+                            message: format!(
+                                "session write partial — atoms={} allow={} block={}, kept {} \
+                                 invalid entr{} in session for review:\n{}",
+                                report.atoms_added,
+                                report.urls_allow_added,
+                                report.urls_block_added,
+                                report.invalid.len(),
+                                if report.invalid.len() == 1 { "y" } else { "ies" },
+                                lines.join("\n")
+                            ),
+                        }
+                    }
+                }
+                Err(e) => ResponseBody::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+    }
+}
+
+/// Resolve the UID to operate on. If `target_uid` is None or
+/// matches the peer's own UID, use peer.uid. Non-root callers can't
+/// target another UID — this prevents a regular user from poking
+/// into root's (or another user's) atom set via a forged request.
+fn resolve_target_uid(peer: PeerCred, target_uid: Option<u32>) -> Result<u32, String> {
+    match target_uid {
+        None => Ok(peer.uid),
+        Some(t) if t == peer.uid => Ok(t),
+        Some(t) if peer.is_root => Ok(t),
+        Some(t) => Err(format!(
+            "non-root caller (uid {}) cannot target a different uid (requested {t})",
+            peer.uid
+        )),
+    }
+}
+
+fn require_root_error(op: &str) -> ResponseBody {
+    ResponseBody::Error {
+        message: format!(
+            "`{op}` requires root — run as `sudo atty-guard {op} ...` so the \
+             mutating request reaches the daemon with EUID 0 over SO_PEERCRED"
+        ),
     }
 }
 
@@ -349,7 +706,16 @@ mod tests {
     fn spawn_server() -> (std::path::PathBuf, thread::JoinHandle<()>) {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
+        // Trust store rooted at a tempdir so server tests can
+        // exercise the mutating dispatch arms without ever touching
+        // /var/lib/atty-guard/. The TempDir is moved INTO the
+        // spawned thread so its Drop fires when the thread exits —
+        // proper cleanup, no `std::mem::forget` leak.
+        let trust_tmp = tempfile::tempdir().expect("tempdir");
+        let trust_root = trust_tmp.path().to_path_buf();
+        let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
         let handle = thread::spawn(move || {
+            let _trust_tmp_owned = trust_tmp; // moved-in, Drop on exit
             let _ = serve(
                 &socket_for_thread,
                 0,
@@ -358,6 +724,7 @@ mod tests {
                 None, // accumulator block_threshold
                 None, // ebpf
                 None, // osv
+                trust_store,
             );
         });
         // Wait for the bind to land.
@@ -453,6 +820,169 @@ mod tests {
         let reply = round_trip(&mut stream, r#"{not json"#);
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn atoms_add_requires_root() {
+        // Test runs as the cargo test user (not root); the daemon's
+        // SO_PEERCRED check should reject AtomsAdd with the
+        // "requires root" error message.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"atoms_add","pattern":"test atom xyz"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        assert!(
+            v["message"].as_str().unwrap().contains("requires root"),
+            "expected 'requires root' error, got: {}",
+            v["message"]
+        );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn atoms_list_system_returns_bundled_corpus() {
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"atoms_list","scope":"system"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "atoms_list");
+        let atoms = v["atoms"].as_array().expect("atoms array");
+        // Bundled corpus has ~150+ atoms; just verify non-empty + a
+        // known seed.
+        assert!(atoms.len() > 50);
+        let any_nc_e = atoms.iter().any(|a| a.as_str() == Some("nc -e"));
+        assert!(any_nc_e, "expected `nc -e` in bundled corpus");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn atoms_list_user_empty_initially() {
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"atoms_list","scope":"user"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "atoms_list");
+        assert!(v["atoms"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn session_list_empty_initially() {
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"session_list"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "session_list");
+        assert!(v["atoms"].as_array().unwrap().is_empty());
+        assert!(v["urls_allow"].as_array().unwrap().is_empty());
+        assert!(v["urls_block"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn session_clear_no_sudo_required() {
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"session_clear"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "ok");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn session_write_requires_root() {
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"session_write"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        assert!(v["message"].as_str().unwrap().contains("requires root"));
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn urls_list_initially_empty() {
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"urls_list"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "urls_list");
+        assert!(v["entries"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn non_root_cannot_target_other_uid() {
+        // Non-root caller (test runs as cargo user) requests
+        // target_uid=12345 (some other UID). Daemon must refuse
+        // with the "cannot target a different uid" error to prevent
+        // a regular user from peeking into root's or another user's
+        // atom set via a forged request.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"atoms_list","scope":"user","target_uid":12345}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot target a different uid"),
+            "expected uid-target rejection, got: {}",
+            v["message"]
+        );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn target_uid_matching_own_is_accepted() {
+        // When target_uid == peer.uid, the request goes through
+        // even for non-root callers — this is the documented
+        // semantics so a future shell wrapper can always include
+        // target_uid without changing behaviour.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let own_uid = unsafe {
+            extern "C" {
+                fn geteuid() -> u32;
+            }
+            geteuid()
+        };
+        let reply = round_trip(
+            &mut stream,
+            &format!(
+                r#"{{"id":1,"method":"atoms_list","scope":"session","target_uid":{own_uid}}}"#
+            ),
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "atoms_list");
+        assert!(v["atoms"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_file(socket);
     }
 

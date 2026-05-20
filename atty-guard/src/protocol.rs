@@ -33,6 +33,116 @@ pub enum Request {
     /// Read back the current threat level for a PID. Returns
     /// `ThreatLevel::Low` for unmapped PIDs.
     GetThreatLevel { pid: u32 },
+
+    // --- Mediated trust-state mutations (PR #141) ---
+    //
+    // All "mutating" variants below require the connecting client to
+    // have EUID 0 (verified by daemon via SO_PEERCRED at accept).
+    // Read-only variants are open to any client. The CLI subcommands
+    // in atty-guard's main.rs (`atoms`, `urls`, `session`) drive
+    // these and surface a friendly error when sudo is missing.
+    //
+    // Per-UID isolation: every request below carries an optional
+    // `target_uid`. When the CLI is invoked via `sudo`, it reads the
+    // SUDO_UID env (set by sudo to the invoking user's UID) and
+    // forwards it as target_uid; the daemon writes into that UID's
+    // dir, NOT root's. When target_uid is None, the daemon falls
+    // back to the connecting peer's UID. Non-root callers cannot
+    // request a target_uid different from their own (the daemon
+    // rejects with an error to prevent privilege confusion).
+    //
+    // Session state is similarly keyed by target_uid (or peer.uid if
+    // None). The same user's multiple atty proxies share one
+    // session; sudo'd CLI invocations forwarding SUDO_UID see + mutate
+    // the SAME state as the proxies.
+    /// Append `pattern` to the persistent atoms.user.txt for the
+    /// target UID. Daemon validates length, rejects placeholder-
+    /// shaped atoms (see atom_fetcher::is_placeholder_atom), and
+    /// reloads its matcher. Requires EUID 0 client.
+    AtomsAdd {
+        pattern: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// Remove `pattern` from atoms.user.txt for the target UID.
+    /// Requires EUID 0 client.
+    AtomsRemove {
+        pattern: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// List atoms in scope `system` (always-on bundled set),
+    /// `user` (per-UID overlay), or `session` (ephemeral in-memory).
+    /// No privilege check.
+    AtomsList {
+        scope: AtomScope,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+
+    /// Append `host` to the persistent urls.decisions.txt for the
+    /// target UID as an "allow" decision. EUID 0 required.
+    UrlsAllow {
+        host: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// Same shape but records "block". EUID 0 required.
+    UrlsBlock {
+        host: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// List recorded URL decisions for the target UID + the
+    /// in-memory session overlay (combined for the read path).
+    /// No privilege check.
+    UrlsList {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+
+    /// Read the target UID's in-memory session-state pending
+    /// decisions — anything added via the atty proxy's `[A]llow
+    /// always` / `[B]lock host forever` inline prompts in this
+    /// session. Empty for a fresh login.
+    SessionList {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// Drop the target UID's in-memory session state (does not
+    /// touch any persistent file).
+    SessionClear {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// Persist the target UID's in-memory session state into the
+    /// per-UID atoms.user.txt + urls.decisions.txt files. The
+    /// session is then cleared. Requires EUID 0 client because
+    /// the target files live under /var/lib/atty-guard/ and are
+    /// `atty:atty 0640` — only root (or atty itself) can write.
+    SessionWrite {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+}
+
+/// Scope selector for `AtomsList`. The matcher serves the union of
+/// all three at classification time; this lets the operator see
+/// where any given atom came from (debugging an unexpected hit).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AtomScope {
+    /// Compile-time bundled corpus from
+    /// `src/modules/security_guard/data/flagged_atoms.txt`. Read-only;
+    /// hand-curated by atty maintainers + refreshed pre-release.
+    System,
+    /// Per-UID `atoms.user.txt`. Mutated via `atoms add/remove` or
+    /// `session write`. Persisted to /var/lib/atty-guard/users/<uid>/.
+    User,
+    /// In-memory daemon session state for the caller's UID.
+    /// Ephemeral; survives only until daemon restart OR `session clear`
+    /// / `session write`.
+    Session,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -112,6 +222,28 @@ pub enum ResponseBody {
     Classify(ClassifyResult),
     ThreatLevel { level: ThreatLevel },
     Error { message: String },
+    /// Reply to AtomsList. Each entry is the atom string verbatim
+    /// (no metadata) — CLI renders them one per line.
+    AtomsList { atoms: Vec<String> },
+    /// Reply to UrlsList. Pairs of (host, decision) where decision
+    /// is `"allow"`, `"block"`, or `"session-allow"` /
+    /// `"session-block"` for entries that are session-only.
+    UrlsList { entries: Vec<UrlDecisionEntry> },
+    /// Reply to SessionList. Lists pending atoms/url-decisions held
+    /// in the caller's in-memory session.
+    SessionList {
+        atoms: Vec<String>,
+        urls_allow: Vec<String>,
+        urls_block: Vec<String>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UrlDecisionEntry {
+    pub host: String,
+    /// `"allow"` / `"block"` (persistent) or `"session-allow"` /
+    /// `"session-block"` (in-memory only).
+    pub decision: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

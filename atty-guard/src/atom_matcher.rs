@@ -170,6 +170,16 @@ impl AtomMatcher {
     pub fn atom_count(&self) -> usize {
         self.atoms.len()
     }
+
+    /// Returns a sorted snapshot of every atom currently compiled
+    /// into the matcher. Used by `atty-guard atoms list --system`
+    /// to show operators what the always-on baseline corpus
+    /// catches. Allocates — not for hot-path use.
+    pub fn atoms_snapshot(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.atoms.iter().map(|s| (*s).to_owned()).collect();
+        v.sort();
+        v
+    }
 }
 
 impl Default for AtomMatcher {
