@@ -998,6 +998,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
+            // Single-mode is one-shot — never resume. Each `Alt+A`
+            // gets a fresh CLI session. Otherwise unrelated
+            // single-shots would thread into the same conversation
+            // forever (no reset path exists for single mode).
+            rt.shared.request_session_id_len = 0;
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
 
@@ -1255,12 +1260,32 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     rt.shared.res_len = 0;
                     rt.shared.explanation_len = 0;
                     rt.shared.error_len = 0;
+                    // Stale responses must also drop a captured
+                    // session id — otherwise a later non-stale
+                    // response that lacks an init event would leave
+                    // the stale id in `response_session_id_buf` and
+                    // `captureSessionId` would pick it up on the
+                    // next pollShellInput.
+                    rt.shared.response_session_id_len = 0;
                     return null;
                 }
                 res_kind = rt.shared.res_kind;
                 n = rt.shared.res_len;
                 @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
                 rt.inject_len = n;
+
+                // Capture the CLI's session id (dialog mode only —
+                // single-mode is one-shot and intentionally
+                // discards any captured id). Subsequent dialog
+                // turns inject it via the configured `--resume
+                // <id>`-shaped argv slot.
+                if (rt.shared.res_kind == .dialog) {
+                    captureSessionId(rt);
+                } else {
+                    // Drain the slot so a future dialog request
+                    // doesn't pick up a stale single-mode id.
+                    rt.shared.response_session_id_len = 0;
+                }
 
                 // Latch the explanation (single mode only). Dialog
                 // responses never populate `explanation_buf` — the
@@ -1668,6 +1693,36 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     by construction (dispatchOsc sets active before
         ///     incrementing the counter); kept defensively in case
         ///     the parser ever changes shape.
+        /// Copy `rt.session_id` into the worker's `request_session_id`
+        /// slot under the assumed-held `rt.shared.mutex`. Caller
+        /// must already hold the lock; this just does the buffer
+        /// copy + length write.
+        fn publishSessionId(rt: *Runtime) void {
+            if (rt.session_id.len == 0) {
+                rt.shared.request_session_id_len = 0;
+                return;
+            }
+            const n = @min(rt.session_id.len, rt.shared.request_session_id_buf.len);
+            @memcpy(rt.shared.request_session_id_buf[0..n], rt.session_id[0..n]);
+            rt.shared.request_session_id_len = n;
+        }
+
+        /// Read the worker's `response_session_id` slot under the
+        /// assumed-held `rt.shared.mutex` and copy a fresh id into
+        /// `rt.session_id`. Caller holds the lock. Owned allocation
+        /// — frees any previous id before replacing. Zeros the
+        /// shared slot after consuming so subsequent
+        /// no-init-event responses don't re-pull the same id.
+        fn captureSessionId(rt: *Runtime) void {
+            const len = rt.shared.response_session_id_len;
+            if (len == 0) return;
+            defer rt.shared.response_session_id_len = 0;
+            if (rt.session_id.len == len and std.mem.eql(u8, rt.session_id, rt.shared.response_session_id_buf[0..len])) return;
+            const owned = rt.allocator.dupe(u8, rt.shared.response_session_id_buf[0..len]) catch return;
+            if (rt.session_id.len > 0) rt.allocator.free(rt.session_id);
+            rt.session_id = owned;
+        }
+
         fn latchOsc133Diag(rt: *Runtime) void {
             const fed = rt.osc133_capture.total_bytes_fed;
             const dispatches = rt.osc133_capture.total_dispatches;
@@ -1955,6 +2010,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
+            publishSessionId(rt);
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
             rt.dialog_state = .generating;

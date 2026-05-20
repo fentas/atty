@@ -346,6 +346,35 @@ Available as `Config.provider.subprocess.<field>`:
 | `prompt_via`   | `.final_arg`   | `.final_arg` = append prompt to argv; `.stdin` = pipe prompt via stdin (close stdin = EOF).    |
 | `output`       | `.raw`         | `.raw` = stdout text IS the response; `.{ .json_field = "name" }` = parse stdout as JSON, take the named top-level string field; `.{ .json_stream = .{ .field = "result" } }` = newline-delimited JSON (claude's `--output-format stream-json`), skips intermediate `system` / `assistant` events and takes the named field from the `type="result"` line. |
 | `timeout_ms`   | `30_000`       | Wall-clock timeout in ms. A watchdog thread sends SIGTERM (then SIGKILL after 200 ms grace) when the budget expires. Set to `0` to disable. |
+| `session`      | `.none`        | CLI-side session continuation. `.none` sends the full rendered conversation each request (works for any CLI). `.{ .continuation = .{ .flag = "--resume", .id_field = "session_id" } }` captures the session id from the CLI's stream-json `type=system,subtype=init` event and reuses it via the named argv flag on subsequent turns. Only meaningful with `output = .json_stream`. Use `providers.claudeCodeStream(.{ .continuation = true })` for the canned claude shape. |
+
+### Session continuation — trade-offs
+
+With `.session = .continuation` the CLI owns the conversation
+transcript: atty sends only the latest user turn each request
+and lets the CLI's own session state (`claude`'s `--resume <id>`)
+maintain history. Saves tokens and CLI-side compute (no
+re-uploading the transcript every turn) at the cost of:
+
+- **Atty still records every turn it sees**, so the chat overlay
+  (Alt+C / Alt+Shift+C) shows the full conversation atty
+  participated in: user turns the user typed + assistant turns
+  the CLI replied with. What changes is only the prompt atty
+  **sends to the CLI on each subsequent request** — instead of
+  re-rendering the whole `turns[]` ring as one big text body,
+  atty sends only the latest user turn and trusts the CLI's
+  session state to remember the rest. If the user inspects mid-
+  session they see atty's full record; the CLI's view may
+  include side-effects atty never recorded (e.g. tool calls
+  invoked by the CLI itself).
+- **Session id is per-dialog.** `Alt+Shift+R` (cancel) and any
+  `action: "done"` from the model both reset `rt.session_id` —
+  the next dialog starts a fresh CLI session. atty doesn't try
+  to persist session ids across atty restarts; the
+  `chat_persist` file is atty's own memory.
+
+Without continuation (default) every request rebuilds the full
+prompt from atty's `turns[]` ring — atty is the sole memory.
 
 The `atty.modules.llm.providers.claudeCode(...)` factory returns a
 pre-shaped subprocess provider for `claude -p --output-format

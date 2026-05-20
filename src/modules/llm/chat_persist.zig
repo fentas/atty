@@ -21,6 +21,13 @@
 //!    parser on read. Multi-line content (assistant envelopes,
 //!    observation output) round-trips through the JSON string
 //!    encoding cleanly.
+//!
+//! 3. **`rt.session_id` is intentionally NOT persisted.** Native
+//!    CLI session continuation (`--resume <id>`) is per-process —
+//!    the CLI may garbage-collect ids between atty runs, and a
+//!    stale id from a prior session would either error or resume
+//!    state the user doesn't remember. Restart begins a fresh CLI
+//!    session even though the chat ring loads prior turns.
 
 const std = @import("std");
 

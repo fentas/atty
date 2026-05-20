@@ -147,6 +147,20 @@ pub const SubprocessProvider = struct {
     /// partials) are skipped, the value of the named field on the
     /// `type="result"` line is the final response.
     output: Output = .raw,
+    /// Native CLI-side session continuation. `.none` (default)
+    /// sends the full rendered conversation history with every
+    /// request — works for any prompt-in / text-out CLI. `.continuation`
+    /// captures a session id from the CLI's response (e.g.
+    /// `claude --output-format stream-json`'s `session_id` field
+    /// on its `type="system",subtype="init"` event) and reuses it
+    /// via the configured argv flag on subsequent turns. The CLI
+    /// then maintains the conversation; atty sends only the
+    /// LATEST user turn each time.
+    ///
+    /// Off by default — opt-in because the user is delegating
+    /// conversation memory to a process they didn't write.
+    session: Session = .none,
+
     /// Wall-clock timeout in ms. A watchdog thread spawns
     /// alongside the child; on expiry it sends SIGKILL via
     /// `std.posix.kill` (bypassing `std.process.Child.kill`'s
@@ -172,6 +186,30 @@ pub const SubprocessProvider = struct {
     pub const JsonStream = struct {
         /// Top-level field on the `type="result"` line to extract.
         field: []const u8 = "result",
+    };
+
+    pub const Session = union(enum) {
+        none,
+        continuation: Continuation,
+    };
+
+    pub const Continuation = struct {
+        /// Argv flag for resuming a previously-captured session.
+        /// `claude` uses `--resume <id>`; other CLIs may differ.
+        flag: []const u8 = "--resume",
+        /// JSON field on a stream event whose value is the
+        /// session id. For claude's stream-json output the id
+        /// lives on the `type="system",subtype="init"` line in
+        /// the `session_id` field.
+        id_field: []const u8 = "session_id",
+        // NOTE on resume semantics: atty assumes the CLI re-applies
+        // the original system prompt + conversation history when
+        // invoked with `flag <id>`. claude does. CLIs whose
+        // `--session <id>` carries only the history but not the
+        // framing instructions would see naked user turns
+        // (`renderLatestUserTurn` strips system + assistant content
+        // on resumed turns). Verify your CLI's resume contract
+        // before enabling.
     };
 };
 

@@ -729,9 +729,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_pending = false;
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
+            rt.shared.request_session_id_len = 0;
+            rt.shared.response_session_id_len = 0;
             rt.shared.mutex.unlock(io);
 
             freeTurns(rt);
+            // The CLI-side session id is a per-dialog handle —
+            // cancelling or completing the dialog means the next
+            // turn should start a fresh CLI session, not resume the
+            // dead one.
+            if (rt.session_id.len > 0) {
+                rt.allocator.free(rt.session_id);
+                rt.session_id = &.{};
+            }
             rt.dialog_state = .idle;
             rt.captured_output_len = 0;
             rt.captured_truncated = false;

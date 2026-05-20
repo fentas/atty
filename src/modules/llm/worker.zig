@@ -208,6 +208,22 @@ pub fn Module(comptime cfg: Config) type {
             /// the shared mutex by the worker; wraps around modulo
             /// list length.
             fixture_idx: usize = 0,
+
+            /// Session id for native CLI-side continuation
+            /// (`cfg.provider.subprocess.session = .continuation`).
+            /// `request_session_id_*` is written by trigger sites
+            /// when a session is in flight — the worker injects
+            /// `[flag, id]` into the subprocess argv. `response_
+            /// session_id_*` is written by the worker when the
+            /// stream parses out a fresh id from the CLI's response;
+            /// the main thread consumes it via `pollShellInput`.
+            /// 256 bytes is comfortably wider than any session id
+            /// any CLI is likely to emit (claude's are 36-char
+            /// UUIDs).
+            request_session_id_buf: [256]u8 = undefined,
+            request_session_id_len: usize = 0,
+            response_session_id_buf: [256]u8 = undefined,
+            response_session_id_len: usize = 0,
         };
 
         /// Write a static string into `dst` and return how many
@@ -568,6 +584,11 @@ pub fn Module(comptime cfg: Config) type {
             io: std.Io,
             sub: SubprocessProvider,
             prompt: []const u8,
+            /// Extra argv slots inserted between `sub.argv` and the
+            /// prompt slot. atty uses this for session continuation
+            /// (`["--resume", "<id>"]`) without baking session state
+            /// into `sub.argv` itself.
+            prepend_argv: []const []const u8,
             error_out: []u8,
             err_len_out: *usize,
         ) ![]u8 {
@@ -575,6 +596,7 @@ pub fn Module(comptime cfg: Config) type {
             var argv_list: std.ArrayList([]const u8) = .empty;
             defer argv_list.deinit(gpa);
             try argv_list.appendSlice(gpa, sub.argv);
+            try argv_list.appendSlice(gpa, prepend_argv);
             if (sub.prompt_via == .final_arg) {
                 try argv_list.append(gpa, prompt);
             }
@@ -750,6 +772,45 @@ pub fn Module(comptime cfg: Config) type {
             return stdout_bytes;
         }
 
+        /// Scan a stream-json body for the first `type="system",
+        /// subtype="init"` line and extract `<field>` (typically
+        /// `session_id`). Returns the byte count written to `out`,
+        /// or 0 if no init event was found / the field was missing
+        /// or non-string.
+        pub fn extractStreamSessionId(body: []const u8, field: []const u8, out: []u8) usize {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            var it = std.mem.splitScalar(u8, body, '\n');
+            while (it.next()) |raw_line| {
+                const line = std.mem.trim(u8, raw_line, " \t\r");
+                if (line.len == 0) continue;
+                _ = arena.reset(.retain_capacity);
+                const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), line, .{}) catch continue;
+                if (parsed != .object) continue;
+                const type_val = parsed.object.get("type") orelse continue;
+                if (type_val != .string) continue;
+                if (!std.mem.eql(u8, type_val.string, "system")) continue;
+                // claude wraps init events as subtype="init". Other
+                // CLIs may emit `type=system` without subtype — we
+                // only match the init flavor to avoid picking up a
+                // mid-stream `type=system,subtype=info`.
+                const subtype_val = parsed.object.get("subtype") orelse continue;
+                if (subtype_val != .string) continue;
+                if (!std.mem.eql(u8, subtype_val.string, "init")) continue;
+                const id_val = parsed.object.get(field) orelse continue;
+                if (id_val != .string) continue;
+                // Reject ids that don't fit in `out` outright —
+                // returning a truncated half-id and using it for
+                // `--resume <id>` would silently corrupt the CLI's
+                // resume protocol. Better to act like no init
+                // event was seen than to ship a broken handle.
+                if (id_val.string.len > out.len) return 0;
+                @memcpy(out[0..id_val.string.len], id_val.string);
+                return id_val.string.len;
+            }
+            return 0;
+        }
+
         /// Parse a stream-json subprocess output (one JSON object
         /// per line) and write the value of `<field>` on the
         /// `type="result"` event into `out`. Returns the byte
@@ -812,11 +873,15 @@ pub fn Module(comptime cfg: Config) type {
             context_blob: []const u8,
             prompt: []const u8,
             model: []const u8,
+            prepend_argv: []const []const u8,
+            session_id_out: []u8,
+            session_id_len_out: *usize,
             out: []u8,
             explanation_out: []u8,
             error_out: []u8,
         ) !RequestResult {
             _ = model; // CLI tools take --model in argv (user-configured)
+            session_id_len_out.* = 0;
 
             // Compose the same prompt body that the HTTP path
             // builds, minus the JSON envelope. The subprocess gets
@@ -844,10 +909,26 @@ pub fn Module(comptime cfg: Config) type {
             defer gpa.free(full_prompt);
 
             var err_len: usize = 0;
-            const stdout = runSubprocess(gpa, io, sub, full_prompt, error_out, &err_len) catch {
+            const stdout = runSubprocess(gpa, io, sub, full_prompt, prepend_argv, error_out, &err_len) catch {
                 return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_len };
             };
             defer gpa.free(stdout);
+
+            // When session continuation is configured AND the
+            // output is stream-json, scan the body for the CLI's
+            // session id (typically the `session_id` on the first
+            // `type=system,subtype=init` event). The caller writes
+            // this into `rt.session_id` so future requests can
+            // resume the session via the configured argv flag.
+            switch (sub.session) {
+                .none => {},
+                .continuation => |c| switch (sub.output) {
+                    .json_stream => {
+                        session_id_len_out.* = extractStreamSessionId(stdout, c.id_field, session_id_out);
+                    },
+                    else => {}, // session capture only defined for stream-json today
+                },
+            }
 
             // Decode to the assistant content text per the
             // configured output shape.
@@ -894,19 +975,42 @@ pub fn Module(comptime cfg: Config) type {
             io: std.Io,
             sub: SubprocessProvider,
             body: []const u8,
+            prepend_argv: []const []const u8,
+            session_active: bool,
+            session_id_out: []u8,
+            session_id_len_out: *usize,
             out: []u8,
             error_out: []u8,
         ) !RequestResult {
-            const rendered = renderDialogBodyAsPrompt(gpa, body) catch {
-                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "couldn't render dialog body for subprocess") };
-            };
+            session_id_len_out.* = 0;
+            // When a session is active the CLI maintains the
+            // conversation — send only the latest user turn instead
+            // of re-rendering the whole history.
+            const rendered = if (session_active)
+                renderLatestUserTurn(gpa, body) catch {
+                    return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "couldn't extract latest user turn for resumed session") };
+                }
+            else
+                renderDialogBodyAsPrompt(gpa, body) catch {
+                    return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "couldn't render dialog body for subprocess") };
+                };
             defer gpa.free(rendered);
 
             var err_len: usize = 0;
-            const stdout = runSubprocess(gpa, io, sub, rendered, error_out, &err_len) catch {
+            const stdout = runSubprocess(gpa, io, sub, rendered, prepend_argv, error_out, &err_len) catch {
                 return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_len };
             };
             defer gpa.free(stdout);
+
+            switch (sub.session) {
+                .none => {},
+                .continuation => |c| switch (sub.output) {
+                    .json_stream => {
+                        session_id_len_out.* = extractStreamSessionId(stdout, c.id_field, session_id_out);
+                    },
+                    else => {},
+                },
+            }
 
             const content_n = switch (sub.output) {
                 .raw => blk: {
@@ -928,6 +1032,44 @@ pub fn Module(comptime cfg: Config) type {
             // saying not to.
             const stripped_n = stripJsonFence(out[0..content_n], out);
             return RequestResult{ .cmd_len = stripped_n, .exp_len = 0 };
+        }
+
+        /// Render the LATEST user message from an OpenAI-style
+        /// body — for session-continuation mode where the CLI
+        /// already has the conversation history and only needs
+        /// the new user turn. Falls back to the full body if no
+        /// user role is found (degrades to the same behavior as
+        /// the non-session path).
+        fn renderLatestUserTurn(gpa: std.mem.Allocator, body: []const u8) ![]u8 {
+            const Message = struct {
+                role: []const u8,
+                content: []const u8,
+            };
+            const Parsed = struct {
+                model: []const u8 = "",
+                messages: []const Message = &.{},
+                stream: bool = false,
+            };
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            const parsed = std.json.parseFromSliceLeaky(Parsed, arena.allocator(), body, .{ .ignore_unknown_fields = true }) catch {
+                // Fall through to the role-rendered fallback rather
+                // than hand raw JSON to the CLI — the parse path is
+                // unreachable today (dialog.buildRequestBody is the
+                // sole producer) but a future producer change would
+                // otherwise silently send bytes the model can't
+                // make sense of.
+                return renderDialogBodyAsPrompt(gpa, body);
+            };
+            var i: usize = parsed.messages.len;
+            while (i > 0) {
+                i -= 1;
+                const msg = parsed.messages[i];
+                if (std.mem.eql(u8, msg.role, "user")) {
+                    return gpa.dupe(u8, msg.content);
+                }
+            }
+            return renderDialogBodyAsPrompt(gpa, body);
         }
 
         /// Render an OpenAI-style request body as plain text for a
@@ -1106,6 +1248,13 @@ pub fn Module(comptime cfg: Config) type {
                 // comptime-static, the resolved slice's storage
                 // outlives the worker thread.
                 const idx = shared.model_idx;
+                // Snapshot the session id under the same lock so the
+                // worker has a stable view while building argv.
+                var session_id_local: [256]u8 = undefined;
+                const session_id_len = shared.request_session_id_len;
+                if (session_id_len > 0) {
+                    @memcpy(session_id_local[0..session_id_len], shared.request_session_id_buf[0..session_id_len]);
+                }
                 shared.mutex.unlock(io);
 
                 const model_for_request: []const u8 = if (idx < cfg.models.len)
@@ -1120,6 +1269,24 @@ pub fn Module(comptime cfg: Config) type {
                 var response_buf: [cfg.max_response_bytes]u8 = undefined;
                 var explanation_local: [512]u8 = undefined;
                 var error_local: [256]u8 = undefined;
+                var captured_session_id: [256]u8 = undefined;
+                var captured_session_id_len: usize = 0;
+                // Build the resume-flag argv slot ONCE up here so
+                // the comptime switch arms stay readable. Empty
+                // when no session is in flight; the subprocess
+                // helpers treat an empty prepend as a no-op.
+                var resume_argv_storage: [2][]const u8 = undefined;
+                const resume_argv: []const []const u8 = switch (comptime cfg.provider) {
+                    .subprocess => |sub| switch (sub.session) {
+                        .continuation => |c| if (session_id_len > 0) blk: {
+                            resume_argv_storage[0] = c.flag;
+                            resume_argv_storage[1] = session_id_local[0..session_id_len];
+                            break :blk resume_argv_storage[0..2];
+                        } else &.{},
+                        .none => &.{},
+                    },
+                    .http => &.{},
+                };
                 const result = switch (comptime cfg.provider) {
                     .http => if (req_kind == .single)
                         doRequest(
@@ -1162,6 +1329,9 @@ pub fn Module(comptime cfg: Config) type {
                             context_blob,
                             prompt_local[0..prompt_len],
                             model_for_request,
+                            resume_argv,
+                            &captured_session_id,
+                            &captured_session_id_len,
                             &response_buf,
                             &explanation_local,
                             &error_local,
@@ -1176,6 +1346,10 @@ pub fn Module(comptime cfg: Config) type {
                             io,
                             sub,
                             body_local[0..body_len],
+                            resume_argv,
+                            session_id_len > 0,
+                            &captured_session_id,
+                            &captured_session_id_len,
                             &response_buf,
                             &error_local,
                         ) catch RequestResult{
@@ -1211,6 +1385,16 @@ pub fn Module(comptime cfg: Config) type {
                     } else {
                         shared.error_len = 0;
                     }
+                }
+                // Publish a freshly-captured session id (if any).
+                // Zero-length writes leave the previous response
+                // slot untouched on purpose — a result event that
+                // didn't carry an init line shouldn't clobber the
+                // id captured on the first turn.
+                if (captured_session_id_len > 0) {
+                    const en = @min(captured_session_id_len, shared.response_session_id_buf.len);
+                    @memcpy(shared.response_session_id_buf[0..en], captured_session_id[0..en]);
+                    shared.response_session_id_len = en;
                 }
                 shared.res_gen = serving_gen;
                 shared.res_kind = req_kind;
