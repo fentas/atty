@@ -1,3 +1,9 @@
+// OnnxConfig / LoadError / OnnxBackend type definitions are
+// referenced by both the feature-on impl + the no-feature stub.
+// Without `tier2-onnx` they compile for API stability but never
+// get constructed; silence the dead-code lint for that build only.
+#![cfg_attr(not(feature = "tier2-onnx"), allow(dead_code, unused_imports))]
+
 //! ONNX-runtime Tier-2 backend.
 //!
 //! Supports two model lineages via `OnnxConfig.model`:
@@ -33,6 +39,10 @@ use crate::protocol::{Category, ClassifyResult, Verdict};
 
 #[derive(Debug)]
 pub enum LoadError {
+    /// Only constructed by the `#[cfg(not(feature = "tier2-onnx"))]`
+    /// stub below. With the feature ON this variant is unreachable;
+    /// `#[allow(dead_code)]` keeps the API uniform.
+    #[allow(dead_code)]
     FeatureNotBuilt,
     ModelMissing(String),
     TokenizerMissing(String),

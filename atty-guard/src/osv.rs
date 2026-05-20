@@ -1,3 +1,9 @@
+// OsvConfig / LookupError / Verdict definitions are referenced by
+// the feature-on impl below + the no-feature stub. Without
+// `osv-live` they compile but are never constructed; silence the
+// dead-code lint for that build only.
+#![cfg_attr(not(feature = "osv-live"), allow(dead_code))]
+
 //! V2-F live OSV.dev lookup for `npm install <pkg>` Tier-1 misses.
 //!
 //! Flow:
@@ -72,8 +78,17 @@ pub enum OsvVerdict {
 
 #[derive(Debug)]
 pub enum LookupError {
+    /// Only constructed by the `#[cfg(not(feature = "osv-live"))]`
+    /// stub below. With the feature ON this variant is unreachable;
+    /// `#[allow(dead_code)]` keeps the API uniform.
+    #[allow(dead_code)]
     FeatureNotBuilt,
     NetworkError(String),
+    /// Reserved for future JSON-shape mismatches the OSV API might
+    /// throw at us. Today the stub treats every non-200 as
+    /// NetworkError; the variant exists so a stricter
+    /// schema-validating path can land without breaking callers.
+    #[allow(dead_code)]
     ParseError(String),
 }
 

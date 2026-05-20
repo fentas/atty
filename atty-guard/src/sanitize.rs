@@ -1,3 +1,8 @@
+// Sanitize is exercised only by the ONNX Tier-2 backend (V2-H
+// sliding-context-window slice + classification cleanup). Without
+// `tier2-onnx` the functions compile but no one calls them.
+#![cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
+
 //! Strip terminal control sequences from a command string before
 //! it reaches the SLM tokeniser.
 //!

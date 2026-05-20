@@ -80,6 +80,13 @@ impl EbpfState {
     pub fn attach() -> Result<Self, LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
+    /// Stub for builds without the `ebpf` feature. `get_threat` on
+    /// the no-eBPF path would always be Low since there's no kernel
+    /// map to read; the in-memory `ThreatMap` is the only source.
+    /// `#[allow(dead_code)]` because nobody calls this on the
+    /// feature-off side today (the threat-map module is the single
+    /// caller and it skips the eBPF mirror when state is None).
+    #[allow(dead_code)]
     pub fn get_threat(&self, _pid: u32) -> ThreatLevel {
         ThreatLevel::Low
     }

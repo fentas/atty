@@ -60,7 +60,12 @@ pub struct AccumulatorConfig {
 pub struct Tier2Config {
     /// `stub` / `heuristic` / `onnx`. CLI `--tier2` flag wins
     /// when both are set so the operator can override the file
-    /// without editing it.
+    /// without editing it — that override path is the reason main.rs
+    /// doesn't consume this field directly. `#[allow(dead_code)]`
+    /// because the file-defaults path (use this when CLI omitted)
+    /// is queued for a follow-up; today every invocation explicitly
+    /// passes `--tier2`.
+    #[allow(dead_code)]
     #[serde(default)]
     pub backend: Option<String>,
 
@@ -73,6 +78,7 @@ pub struct Tier2Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
 pub struct OnnxConfig {
     /// Model selector — defaults to `securebert2` because it's
     /// the smaller, faster option for the same Tier-2 verdict
@@ -138,6 +144,7 @@ fn default_block_threshold() -> f32 {
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
 pub enum LoadError {
     Io(std::io::Error),
     Parse(String),

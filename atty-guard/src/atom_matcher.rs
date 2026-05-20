@@ -57,6 +57,14 @@ pub struct AtomMatcher {
 pub struct AtomHit {
     pub atom: &'static str,
     pub byte_offset: usize,
+    /// `byte_offset + atom.len()` — kept for the V2-H sliding-context-
+    /// window code that slices `command[offset..end]` to feed the SLM
+    /// a localized snippet. The current dispatch passes `byte_offset`
+    /// only and recomputes the end from the atom string, so this
+    /// field is dead at the call site today. Keeping it in the struct
+    /// avoids a wider refactor when the SLM slicer learns to span
+    /// multiple atom hits.
+    #[allow(dead_code)]
     pub byte_end: usize,
 }
 
@@ -86,6 +94,14 @@ impl AtomMatcher {
 
     /// Walk the input for the first atom hit. Returns None when
     /// no atom matches.
+    ///
+    /// Today's classify dispatch uses `find_all` for accumulator
+    /// math, so this method is dead at the call site. Kept as part
+    /// of the public matcher API: future single-hit consumers
+    /// (e.g. a "fast path" for incognito mode that skips accumulator
+    /// work) should use this without re-implementing the pattern-id
+    /// → atom lookup. Reachable from `cargo test atom_matcher`.
+    #[allow(dead_code)]
     pub fn find_first(&self, input: &str) -> Option<AtomHit> {
         let m = self.ac.find(input)?;
         let atom = self
@@ -148,6 +164,9 @@ impl AtomMatcher {
     /// Returns the count of compiled atoms — exposed for the
     /// startup log line and for the V2-I fetcher's "did the
     /// refresh actually grow the corpus?" sanity check.
+    /// Currently only consumed by tests; the startup log path lands
+    /// in a follow-up. `#[allow(dead_code)]` until then.
+    #[allow(dead_code)]
     pub fn atom_count(&self) -> usize {
         self.atoms.len()
     }
