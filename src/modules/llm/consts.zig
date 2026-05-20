@@ -7,15 +7,18 @@ const types = @import("types.zig");
 
 pub fn Module(comptime cfg: types.Config) type {
     return struct {
-        /// Comptime-built notification for inert mode. Mentions the
-        /// configured env-var names (`cfg.api_base_env` /
-        /// `api_base_fallback_env`) so users who renamed them see
-        /// THEIR names rather than the upstream defaults, plus a
-        /// hint to use the static `Config.api_base` if they'd
-        /// rather skip env-var resolution entirely.
-        pub const inert_error_msg: []const u8 = "no endpoint set — export $" ++
-            cfg.api_base_env ++ " / $" ++ cfg.api_base_fallback_env ++
-            ", or set Config.api_base in config.zig";
+        /// Comptime-built notification for inert mode. For HTTP
+        /// transport mentions the configured env-var names so users
+        /// who renamed them see THEIR names rather than the upstream
+        /// defaults. For subprocess transport this is unused — the
+        /// subprocess path is never inert at attach time (CLI
+        /// availability surfaces as a per-request error instead).
+        pub const inert_error_msg: []const u8 = switch (cfg.provider) {
+            .http => |http| "no endpoint set — export $" ++
+                http.api_base_env ++ " / $" ++ http.api_base_fallback_env ++
+                ", or set Config.provider.http.api_base in config.zig",
+            .subprocess => "subprocess provider in use — this shouldn't render",
+        };
 
         /// Dialog-mode system prompt. Locks the model into a strict
         /// JSON-envelope response so we can parse `action` /

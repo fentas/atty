@@ -530,7 +530,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         std.mem.trim(u8, line[cfg.prefix.len..], " \t")
                     else
                         std.mem.trim(u8, line, " \t");
-                    if (body.len > 0 and body.len <= cfg.max_prompt_bytes and rt.api_base.len > 0 and rt.osc133_capture.active) {
+                    if (body.len > 0 and body.len <= cfg.max_prompt_bytes and !rt.inert and rt.osc133_capture.active) {
                         const initial = rt.allocator.dupe(u8, body) catch return .forward;
                         pushTurn(rt, .user, initial) catch {
                             rt.allocator.free(initial);
@@ -575,7 +575,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // path. Gated on api_base.len for the same
                     // reason: inert mode keeps the user in AI mode
                     // so they can fix config + retry.
-                    if (rt.api_base.len != 0 and result == .replace_commit) {
+                    if (!rt.inert and result == .replace_commit) {
                         rt.ai_mode_active = false;
                     }
                     return result;
@@ -667,7 +667,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // config + re-try, so leave them IN AI mode
                     // — the error notification points at the
                     // fix.
-                    if (rt.api_base.len != 0) rt.ai_mode_active = false;
+                    if (!rt.inert) rt.ai_mode_active = false;
                     return true;
                 },
                 // Alt+S / Alt+Shift+S TOGGLE persistent mode rather
@@ -735,7 +735,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         std.fmt.bufPrint(buf[0..32], " ({d}/{d})", .{ rt.current_model_idx + 1, cfg.models.len }) catch ""
                     else
                         "";
-                    const endpoint: []const u8 = if (rt.api_base.len > 0) rt.api_base else "(inert — no endpoint)";
+                    const endpoint: []const u8 = if (rt.inert)
+                        "(inert — no endpoint)"
+                    else switch (comptime cfg.provider) {
+                        .http => rt.api_base,
+                        .subprocess => |sub| if (sub.argv.len > 0) sub.argv[0] else "(subprocess)",
+                    };
                     // Message goes into the remaining bytes. cycle_info
                     // is referenced before its underlying storage is
                     // overwritten — bufPrint copies the formatted
@@ -960,7 +965,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ) m.Action {
             const body = std.mem.trim(u8, line[cfg.prefix.len..], " \t");
             if (body.len == 0 or body.len > cfg.max_prompt_bytes) return .forward;
-            if (rt.api_base.len == 0) {
+            if (rt.inert) {
                 // Inert mode — the user has the module configured
                 // but no endpoint resolved at attach time. Latch
                 // the muted-red ⚠ error notification.
@@ -1700,7 +1705,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 latchHint(rt, "prompt too long — shorten the task and try again");
                 return .forward;
             }
-            if (rt.api_base.len == 0) {
+            if (rt.inert) {
                 latchErr(rt, inert_error_msg);
                 return .forward;
             }
@@ -1810,7 +1815,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 latchHint(rt, "prompt too long — shorten the task and try again");
                 return true;
             }
-            if (rt.api_base.len == 0) {
+            if (rt.inert) {
                 latchErr(rt, inert_error_msg);
                 return true;
             }

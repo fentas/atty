@@ -45,7 +45,9 @@ const std = @import("std");
 
 const parse = @import("parse.zig");
 const dialog = @import("dialog.zig");
-const Config = @import("types.zig").Config;
+const types = @import("types.zig");
+const Config = types.Config;
+const SubprocessProvider = types.SubprocessProvider;
 
 pub fn Module(comptime cfg: Config) type {
     return struct {
@@ -551,15 +553,366 @@ pub fn Module(comptime cfg: Config) type {
             return RequestResult{ .cmd_len = n, .exp_len = 0 };
         }
 
+        // ─────────────────────────────────────────────────────────
+        // Subprocess transport
+        // ─────────────────────────────────────────────────────────
+
+        /// Spawn the configured CLI, deliver the prompt (final argv
+        /// slot or stdin per `sub.prompt_via`), read stdout to EOF,
+        /// wait for exit. Returns owned bytes; caller frees via the
+        /// same allocator. On any failure returns
+        /// `error.SubprocessFailed` and populates `error_out`.
+        pub fn runSubprocess(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            sub: SubprocessProvider,
+            prompt: []const u8,
+            error_out: []u8,
+            err_len_out: *usize,
+        ) ![]u8 {
+            err_len_out.* = 0;
+            var argv_list: std.ArrayList([]const u8) = .empty;
+            defer argv_list.deinit(gpa);
+            try argv_list.appendSlice(gpa, sub.argv);
+            if (sub.prompt_via == .final_arg) {
+                try argv_list.append(gpa, prompt);
+            }
+
+            const want_stdin = sub.prompt_via == .stdin;
+            var child = std.process.spawn(io, .{
+                .argv = argv_list.items,
+                .stdin = if (want_stdin) .pipe else .ignore,
+                .stdout = .pipe,
+                .stderr = .pipe,
+            }) catch {
+                err_len_out.* = writeStatic(error_out, "subprocess spawn failed (binary on $PATH?)");
+                return error.SubprocessFailed;
+            };
+
+            if (want_stdin) {
+                if (child.stdin) |stdin_file| {
+                    var write_buf: [4096]u8 = undefined;
+                    var w = stdin_file.writer(io, &write_buf);
+                    // EPIPE here is fine — the child can legitimately
+                    // close stdin before we finish writing (it had
+                    // all the bytes it needed). Other write errors
+                    // would still result in a downstream stdout-read
+                    // failure that surfaces a useful message.
+                    w.interface.writeAll(prompt) catch {};
+                    w.interface.flush() catch {};
+                    stdin_file.close(io);
+                    child.stdin = null;
+                }
+            }
+
+            // Read stdout to EOF. The Reader's internal buffer is
+            // the only allocation hot-path; cap the alloc at the
+            // worker's max-response window × 16 to match the HTTP
+            // path's `response_cap` (JSON envelope overhead can be
+            // ~10× the content for small responses).
+            const read_cap = cfg.max_response_bytes * 16;
+            const stdout_file = child.stdout orelse {
+                child.kill(io);
+                _ = child.wait(io) catch {};
+                err_len_out.* = writeStatic(error_out, "subprocess produced no stdout pipe");
+                return error.SubprocessFailed;
+            };
+            // Drain stderr concurrently with stdout. Sequentially
+            // reading stdout to EOF first deadlocks on any tool
+            // that emits >~64 KB on stderr (kernel pipe buffer is
+            // 64 KB by default on Linux) — the child blocks
+            // writing stderr while we're stuck waiting on its
+            // never-arriving stdout EOF. Spawn a tiny drainer
+            // thread that runs the stderr read to completion.
+            const StderrDrainer = struct {
+                fn run(d_io: std.Io, file: std.Io.File, ally: std.mem.Allocator) void {
+                    var buf: [4096]u8 = undefined;
+                    var r = file.reader(d_io, &buf);
+                    const bytes = r.interface.allocRemaining(ally, .limited(64 * 1024)) catch return;
+                    ally.free(bytes);
+                }
+            };
+            const stderr_thread: ?std.Thread = if (child.stderr) |stderr_file|
+                std.Thread.spawn(.{}, StderrDrainer.run, .{ io, stderr_file, gpa }) catch null
+            else
+                null;
+
+            var read_buf: [4096]u8 = undefined;
+            var reader = stdout_file.reader(io, &read_buf);
+            const stdout_bytes = reader.interface.allocRemaining(gpa, .limited(read_cap)) catch {
+                child.kill(io);
+                if (stderr_thread) |t| t.join();
+                _ = child.wait(io) catch {};
+                err_len_out.* = writeStatic(error_out, "subprocess stdout read failed");
+                return error.SubprocessFailed;
+            };
+            errdefer gpa.free(stdout_bytes);
+
+            if (stderr_thread) |t| t.join();
+
+            const term = child.wait(io) catch {
+                err_len_out.* = writeStatic(error_out, "subprocess wait failed");
+                return error.SubprocessFailed;
+            };
+            switch (term) {
+                .exited => |code| if (code != 0) {
+                    const formatted = std.fmt.bufPrint(error_out, "subprocess exit {d}", .{code}) catch null;
+                    err_len_out.* = if (formatted) |s| s.len else writeStatic(error_out, "subprocess non-zero exit");
+                    return error.SubprocessFailed;
+                },
+                .signal, .stopped, .unknown => {
+                    err_len_out.* = writeStatic(error_out, "subprocess killed by signal");
+                    return error.SubprocessFailed;
+                },
+            }
+
+            return stdout_bytes;
+        }
+
+        /// Extract a top-level string field from a JSON object by
+        /// name. Writes the JSON-decoded value into `out` and
+        /// returns the byte count (0 on parse failure, missing
+        /// field, wrong-shape document, or non-string value). Uses
+        /// `std.json` so escape sequences including `\uXXXX`
+        /// (smart quotes, emoji, non-ASCII paths in `claude -p`'s
+        /// `result`) round-trip correctly.
+        pub fn extractJsonStringField(body: []const u8, field: []const u8, out: []u8) usize {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), body, .{}) catch return 0;
+            if (parsed != .object) return 0;
+            const val = parsed.object.get(field) orelse return 0;
+            if (val != .string) return 0;
+            const s = val.string;
+            const n = @min(s.len, out.len);
+            @memcpy(out[0..n], s[0..n]);
+            return n;
+        }
+
+        /// Single-mode subprocess round-trip. Mirrors `doRequest`'s
+        /// contract: success → `cmd_len > 0`; failure → `cmd_len ==
+        /// 0` and `err_len > 0` with a human message.
+        pub fn doSubprocessRequest(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            sub: SubprocessProvider,
+            shell_name: []const u8,
+            context_blob: []const u8,
+            prompt: []const u8,
+            model: []const u8,
+            out: []u8,
+            explanation_out: []u8,
+            error_out: []u8,
+        ) !RequestResult {
+            _ = model; // CLI tools take --model in argv (user-configured)
+
+            // Compose the same prompt body that the HTTP path
+            // builds, minus the JSON envelope. The subprocess gets
+            // system_prompt + user_message concatenated as plain
+            // text; the CLI's own model handles it as one shot.
+            const user_msg = if (context_blob.len > 0)
+                try std.fmt.allocPrint(
+                    gpa,
+                    "Generate a {s} command to: {s}\n\nContext: {s}",
+                    .{ shell_name, prompt, context_blob },
+                )
+            else
+                try std.fmt.allocPrint(
+                    gpa,
+                    "Generate a {s} command to: {s}",
+                    .{ shell_name, prompt },
+                );
+            defer gpa.free(user_msg);
+
+            const full_prompt = try std.fmt.allocPrint(
+                gpa,
+                "{s}\n\n{s}",
+                .{ effective_system_prompt, user_msg },
+            );
+            defer gpa.free(full_prompt);
+
+            var err_len: usize = 0;
+            const stdout = runSubprocess(gpa, io, sub, full_prompt, error_out, &err_len) catch {
+                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_len };
+            };
+            defer gpa.free(stdout);
+
+            // Decode to the assistant content text per the
+            // configured output shape.
+            var content_buf: [cfg.max_response_bytes]u8 = undefined;
+            const content = switch (sub.output) {
+                .raw => blk: {
+                    const trimmed = std.mem.trim(u8, stdout, " \t\r\n");
+                    const n = @min(trimmed.len, content_buf.len);
+                    @memcpy(content_buf[0..n], trimmed[0..n]);
+                    break :blk content_buf[0..n];
+                },
+                .json_field => |fname| blk: {
+                    const n = extractJsonStringField(stdout, fname, &content_buf);
+                    if (n == 0) {
+                        return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "subprocess JSON missing requested field") };
+                    }
+                    break :blk content_buf[0..n];
+                },
+            };
+
+            const extracted = extractExplanationAndCommand(content, out, explanation_out);
+            if (extracted.cmd_len == 0) {
+                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "couldn't extract a command from the subprocess output") };
+            }
+            return RequestResult{ .cmd_len = extracted.cmd_len, .exp_len = extracted.explanation_len };
+        }
+
+        /// Dialog-mode subprocess round-trip. Mirrors
+        /// `doDialogRequest`: `body` arrives as the OpenAI-style
+        /// JSON envelope built by `dialog.buildRequestBody`. We
+        /// parse it, render the messages as plain text, hand to
+        /// the subprocess, return the raw response (the dialog
+        /// state machine on the main thread does the JSON-envelope
+        /// parse).
+        pub fn doSubprocessDialogRequest(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            sub: SubprocessProvider,
+            body: []const u8,
+            out: []u8,
+            error_out: []u8,
+        ) !RequestResult {
+            const rendered = renderDialogBodyAsPrompt(gpa, body) catch {
+                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "couldn't render dialog body for subprocess") };
+            };
+            defer gpa.free(rendered);
+
+            var err_len: usize = 0;
+            const stdout = runSubprocess(gpa, io, sub, rendered, error_out, &err_len) catch {
+                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_len };
+            };
+            defer gpa.free(stdout);
+
+            const content_n = switch (sub.output) {
+                .raw => blk: {
+                    const trimmed = std.mem.trim(u8, stdout, " \t\r\n");
+                    const n = @min(trimmed.len, out.len);
+                    @memcpy(out[0..n], trimmed[0..n]);
+                    break :blk n;
+                },
+                .json_field => |fname| extractJsonStringField(stdout, fname, out),
+            };
+            if (content_n == 0) {
+                return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "empty response from subprocess") };
+            }
+
+            // Strip surrounding fence the way `extractRawContent`
+            // does for the HTTP dialog path — small models like to
+            // wrap JSON in ```json … ``` despite the system prompt
+            // saying not to.
+            const stripped_n = stripJsonFence(out[0..content_n], out);
+            return RequestResult{ .cmd_len = stripped_n, .exp_len = 0 };
+        }
+
+        /// Render an OpenAI-style request body as plain text for a
+        /// subprocess that has no notion of "messages". Walks the
+        /// JSON, emits each message as `ROLE:\n<content>\n\n`.
+        fn renderDialogBodyAsPrompt(gpa: std.mem.Allocator, body: []const u8) ![]u8 {
+            const Message = struct {
+                role: []const u8,
+                content: []const u8,
+            };
+            const Parsed = struct {
+                model: []const u8 = "",
+                messages: []const Message = &.{},
+                stream: bool = false,
+            };
+            // ParseFromSliceLeaky over a single-use arena — every
+            // string borrows from the arena bytes, freed in one go.
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            const parsed = std.json.parseFromSliceLeaky(Parsed, arena.allocator(), body, .{ .ignore_unknown_fields = true }) catch {
+                // Body wasn't parseable as the expected shape — fall
+                // back to handing the whole body verbatim. Better
+                // than failing the request.
+                return gpa.dupe(u8, body);
+            };
+
+            var allocating: std.Io.Writer.Allocating = .init(gpa);
+            errdefer allocating.deinit();
+            for (parsed.messages) |msg| {
+                try allocating.writer.print("{s}:\n{s}\n\n", .{ msg.role, msg.content });
+            }
+            return allocating.toOwnedSlice();
+        }
+
+        /// Strip ```json … ``` (or bare ``` … ```) wrapping if
+        /// present. In-place safe — `out` and `buf` may overlap;
+        /// data is read before being overwritten because the trim
+        /// only moves bytes earlier.
+        fn stripJsonFence(buf: []const u8, out: []u8) usize {
+            const trimmed = std.mem.trim(u8, buf, " \t\r\n");
+            if (!std.mem.startsWith(u8, trimmed, "```")) {
+                if (trimmed.ptr != out.ptr) {
+                    @memmove(out[0..trimmed.len], trimmed);
+                }
+                return trimmed.len;
+            }
+            const nl = std.mem.indexOfScalar(u8, trimmed[3..], '\n') orelse {
+                if (trimmed.ptr != out.ptr) @memmove(out[0..trimmed.len], trimmed);
+                return trimmed.len;
+            };
+            const after_open = 3 + nl + 1;
+            const close_at = std.mem.indexOfPos(u8, trimmed, after_open, "```") orelse {
+                if (trimmed.ptr != out.ptr) @memmove(out[0..trimmed.len], trimmed);
+                return trimmed.len;
+            };
+            if (close_at <= after_open) {
+                if (trimmed.ptr != out.ptr) @memmove(out[0..trimmed.len], trimmed);
+                return trimmed.len;
+            }
+            const inner = std.mem.trim(u8, trimmed[after_open..close_at], " \t\r\n");
+            @memmove(out[0..inner.len], inner);
+            return inner.len;
+        }
+
+        /// Apply the explanation + fenced-command shape to an
+        /// already-decoded assistant content string. Parallel to
+        /// `extractResponse` minus the `decodeContent` step that
+        /// pulls the field out of an OpenAI JSON envelope.
+        fn extractExplanationAndCommand(content: []const u8, cmd_out: []u8, explanation_out: []u8) ExtractedResponse {
+            const fence_open_idx = std.mem.indexOf(u8, content, "```") orelse {
+                return .{
+                    .cmd_len = parse.sanitizeCommand(content, cmd_out),
+                    .explanation_len = 0,
+                };
+            };
+            const after_open = fence_open_idx + 3;
+            const inner_start = if (std.mem.indexOfScalar(u8, content[after_open..], '\n')) |nl|
+                after_open + nl + 1
+            else
+                after_open;
+            const fence_close_idx = std.mem.indexOfPos(u8, content, inner_start, "```") orelse {
+                return .{
+                    .cmd_len = parse.sanitizeCommand(content, cmd_out),
+                    .explanation_len = 0,
+                };
+            };
+            const explanation_raw = std.mem.trim(u8, content[0..fence_open_idx], " \t\r\n");
+            const fence_body = content[inner_start..fence_close_idx];
+            return .{
+                .cmd_len = parse.sanitizeCommand(fence_body, cmd_out),
+                .explanation_len = parse.sanitizeExplanation(explanation_raw, explanation_out),
+            };
+        }
+
         /// Worker thread function. Owns the lock-and-wait loop:
         /// waits on `shared.cv` until either `shared.shutdown` or
         /// `shared.req_pending` is set, then dispatches based on
-        /// `shared.req_kind`. Either fires the configured HTTP
-        /// endpoint (`doRequest` / `doDialogRequest`) or — when
-        /// `cfg.fixture_responses` is non-empty — replays the next
-        /// canned response from the cursor (test path). Always
-        /// signals completion via `res_done = true` so the proxy
-        /// can clear `in_flight` regardless of outcome.
+        /// `shared.req_kind`. Comptime-switches on `cfg.provider`
+        /// to pick HTTP (`doRequest` / `doDialogRequest`) or
+        /// subprocess (`doSubprocessRequest` / `doSubprocessDialogRequest`).
+        /// Fixture-replay (`cfg.fixture_responses` non-empty) is
+        /// provider-agnostic — replays canned responses before any
+        /// transport dispatch. Always signals completion via
+        /// `res_done = true` so the proxy can clear `in_flight`
+        /// regardless of outcome.
         pub fn worker(
             shared: *Shared,
             io: std.Io,
@@ -640,43 +993,77 @@ pub fn Module(comptime cfg: Config) type {
                 else
                     cfg.model;
 
-                // Fire the HTTP request OUTSIDE the lock — it may
-                // block for many seconds.
+                // Fire the request OUTSIDE the lock — it may block
+                // for many seconds. Comptime-switch on `cfg.provider`
+                // so the wrong-transport path doesn't compile (and
+                // doesn't ship as dead code).
                 var response_buf: [cfg.max_response_bytes]u8 = undefined;
                 var explanation_local: [512]u8 = undefined;
                 var error_local: [256]u8 = undefined;
-                const result = if (req_kind == .single)
-                    doRequest(
-                        gpa,
-                        io,
-                        api_base,
-                        api_key,
-                        shell_name,
-                        context_blob,
-                        prompt_local[0..prompt_len],
-                        model_for_request,
-                        &response_buf,
-                        &explanation_local,
-                        &error_local,
-                    ) catch RequestResult{
-                        .cmd_len = 0,
-                        .exp_len = 0,
-                        .err_len = writeStatic(&error_local, "internal error in worker"),
-                    }
-                else
-                    doDialogRequest(
-                        gpa,
-                        io,
-                        api_base,
-                        api_key,
-                        body_local[0..body_len],
-                        &response_buf,
-                        &error_local,
-                    ) catch RequestResult{
-                        .cmd_len = 0,
-                        .exp_len = 0,
-                        .err_len = writeStatic(&error_local, "internal error in worker"),
-                    };
+                const result = switch (comptime cfg.provider) {
+                    .http => if (req_kind == .single)
+                        doRequest(
+                            gpa,
+                            io,
+                            api_base,
+                            api_key,
+                            shell_name,
+                            context_blob,
+                            prompt_local[0..prompt_len],
+                            model_for_request,
+                            &response_buf,
+                            &explanation_local,
+                            &error_local,
+                        ) catch RequestResult{
+                            .cmd_len = 0,
+                            .exp_len = 0,
+                            .err_len = writeStatic(&error_local, "internal error in worker"),
+                        }
+                    else
+                        doDialogRequest(
+                            gpa,
+                            io,
+                            api_base,
+                            api_key,
+                            body_local[0..body_len],
+                            &response_buf,
+                            &error_local,
+                        ) catch RequestResult{
+                            .cmd_len = 0,
+                            .exp_len = 0,
+                            .err_len = writeStatic(&error_local, "internal error in worker"),
+                        },
+                    .subprocess => |sub| if (req_kind == .single)
+                        doSubprocessRequest(
+                            gpa,
+                            io,
+                            sub,
+                            shell_name,
+                            context_blob,
+                            prompt_local[0..prompt_len],
+                            model_for_request,
+                            &response_buf,
+                            &explanation_local,
+                            &error_local,
+                        ) catch RequestResult{
+                            .cmd_len = 0,
+                            .exp_len = 0,
+                            .err_len = writeStatic(&error_local, "internal error in worker"),
+                        }
+                    else
+                        doSubprocessDialogRequest(
+                            gpa,
+                            io,
+                            sub,
+                            body_local[0..body_len],
+                            &response_buf,
+                            &error_local,
+                        ) catch RequestResult{
+                            .cmd_len = 0,
+                            .exp_len = 0,
+                            .err_len = writeStatic(&error_local, "internal error in worker"),
+                        },
+                };
 
                 // Signal completion regardless of outcome — proxy
                 // needs to clear `in_flight` so the 🧠 thinking…
@@ -712,4 +1099,8 @@ pub fn Module(comptime cfg: Config) type {
             }
         }
     };
+}
+
+test {
+    _ = @import("worker_tests.zig");
 }
