@@ -296,6 +296,106 @@ fn session_add_trust_validates_hash_shape() {
 }
 
 #[test]
+fn persistent_trust_add_then_list_roundtrips() {
+    let (store, _tmp) = fresh_store();
+    let hash_a = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let hash_b = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    store.persistent_add_trust(1000, hash_a).unwrap();
+    store.persistent_add_trust(1000, hash_b).unwrap();
+    let listed = store.list_persistent_trust(1000);
+    assert_eq!(listed.len(), 2);
+    // Sorted output → hash_a first (starts with 0…).
+    assert_eq!(listed[0], hash_a);
+    assert_eq!(listed[1], hash_b);
+}
+
+#[test]
+fn persistent_trust_rejects_bad_shape() {
+    let (store, _tmp) = fresh_store();
+    let err = store.persistent_add_trust(1000, "short").unwrap_err();
+    assert!(err.to_string().contains("length"));
+    let err = store
+        .persistent_add_trust(
+            1000,
+            "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("lowercase"));
+}
+
+#[test]
+fn persistent_trust_round_trip_via_disk() {
+    // Write via one store, read via a fresh store pointing at the
+    // same data_root — verifies the file format parses cleanly.
+    let tmp = tempfile::tempdir().unwrap();
+    let path_root = tmp.path().to_path_buf();
+    let hash = "deadbeef0000000000000000000000000000000000000000000000000000beef";
+    {
+        let store = TrustStore::new(path_root.clone());
+        store.persistent_add_trust(1000, hash).unwrap();
+    }
+    let store = TrustStore::new(path_root);
+    store.load_persistent(1000).unwrap();
+    let listed = store.list_persistent_trust(1000);
+    assert_eq!(listed, vec![hash.to_owned()]);
+}
+
+#[test]
+fn persistent_trust_silently_skips_malformed_legacy_lines() {
+    // A hand-edited commands.trusted.txt with one uppercase line
+    // (a legacy entry someone uppercased) + one valid line + one
+    // comment should load only the valid line. Silent skip is the
+    // documented behaviour — surfacing the bad line would
+    // lock the operator out of valid entries.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("1000").join("commands.trusted.txt");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "# header comment\n\
+         ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789  # legacy uppercase\n\
+         0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # good entry\n\
+         truncated # bad shape\n",
+    )
+    .unwrap();
+    let store = TrustStore::new(tmp.path().to_path_buf());
+    store.load_persistent(1000).unwrap();
+    let listed = store.list_persistent_trust(1000);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0],
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
+}
+
+#[test]
+fn persistent_trust_idempotent_re_add() {
+    let (store, _tmp) = fresh_store();
+    let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    store.persistent_add_trust(1000, hash).unwrap();
+    store.persistent_add_trust(1000, hash).unwrap();
+    let listed = store.list_persistent_trust(1000);
+    assert_eq!(listed.len(), 1);
+}
+
+#[test]
+fn session_write_persists_trust_into_permanent_file() {
+    // Banner `[a]llow always` populates session_trust; the operator
+    // later runs `sudo atty-guard session write`; trust hashes
+    // should land in the persistent commands.trusted.txt.
+    let (store, _tmp) = fresh_store();
+    let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    store.session_add_trust(1000, hash).unwrap();
+    let report = store.session_write(1000).unwrap();
+    assert_eq!(report.trust_added, 1);
+    // session cleared, persistent populated.
+    let (_, _, _, session_trust) = store.session_summary(1000);
+    assert!(session_trust.is_empty());
+    let listed = store.list_persistent_trust(1000);
+    assert_eq!(listed, vec![hash.to_owned()]);
+}
+
+#[test]
 fn session_clear_drops_trust_set() {
     let (store, _tmp) = fresh_store();
     store

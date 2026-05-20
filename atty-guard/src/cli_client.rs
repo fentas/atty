@@ -22,7 +22,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
-    use crate::{AtomsOp, SessionOp, Subcommand, UrlsOp};
+    use crate::{AtomsOp, SessionOp, Subcommand, TrustOp, UrlsOp};
     let target_uid = sudo_target_uid();
     match sub {
         Subcommand::Atoms { op } => match op {
@@ -75,6 +75,33 @@ pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
             SessionOp::Clear => send_and_check(socket, Request::SessionClear { target_uid }),
             SessionOp::Write => send_and_check(socket, Request::SessionWrite { target_uid }),
         },
+        Subcommand::Trust { op } => match op {
+            TrustOp::List => handle_trust_list(socket, target_uid),
+            TrustOp::Add { hash } => send_and_check(
+                socket,
+                Request::TrustAdd { hash, target_uid },
+            ),
+        },
+    }
+}
+
+fn handle_trust_list(socket: &Path, target_uid: Option<u32>) -> std::io::Result<()> {
+    let response = send_request(socket, Request::TrustList { target_uid })?;
+    match response {
+        ResponseBody::TrustList { trust } => {
+            for hash in trust {
+                println!("{hash}");
+            }
+            Ok(())
+        }
+        ResponseBody::Error { message } => {
+            eprintln!("atty-guard: {message}");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("atty-guard: unexpected response: {other:?}");
+            std::process::exit(1);
+        }
     }
 }
 

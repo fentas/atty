@@ -46,6 +46,15 @@ pub struct PerUserState {
     pub persistent_urls_allow: HashSet<String>,
     /// Persistent URL block decisions from `urls.decisions.txt`.
     pub persistent_urls_block: HashSet<String>,
+    /// Persistent trust hashes loaded from `commands.trusted.txt`.
+    /// SHA-256 hex of `<category>:<matched>` — the same shape the
+    /// atty proxy used to write to `~/.cache/atty/security_trust.txt`
+    /// before the daemon-side migration. The daemon does NOT consult
+    /// this set at classify time — atty proxy seeds its own in-proc
+    /// trust set from `TrustList` at module attach + on banner `[t]`,
+    /// then short-circuits before any UDS round-trip. This field is
+    /// the source of truth for cross-shell sharing + visibility.
+    pub persistent_trust: HashSet<String>,
     /// Session-only atom adds (from `[A]llow always` taps on atoms).
     pub session_atoms: HashSet<String>,
     /// Session-only URL allow decisions.
@@ -111,12 +120,14 @@ impl TrustStore {
         // I/O first, no locks held.
         let atoms = read_atoms_file(&self.user_atoms_path(uid))?;
         let (allow, block) = read_urls_file(&self.user_urls_path(uid))?;
+        let trust = read_trust_file(&self.user_trust_path(uid))?;
         // Brief locked swap.
         let mut state = self.state.lock().expect("trust_store poisoned");
         let entry = state.entry(uid).or_default();
         entry.persistent_atoms = atoms;
         entry.persistent_urls_allow = allow;
         entry.persistent_urls_block = block;
+        entry.persistent_trust = trust;
         drop(state);
         self.loaded
             .lock()
@@ -404,16 +415,51 @@ impl TrustStore {
             }
         }
 
+        // Trust hashes go to commands.trusted.txt (post-#143
+        // migration). Same valid-stays-out / invalid-stays-in
+        // semantics as atoms / urls. Per-UID cap applies.
+        let sess_trust = {
+            let state = self.state.lock().expect("trust_store poisoned");
+            state
+                .get(&uid)
+                .map(|e| e.session_trust.clone())
+                .unwrap_or_default()
+        };
+        if !sess_trust.is_empty() {
+            let path = self.user_trust_path(uid);
+            ensure_parent_dir(&path)?;
+            let mut existing = read_trust_file(&path)?;
+            for h in &sess_trust {
+                match validate_trust_hash(h) {
+                    Ok(()) => {
+                        // Duplicate-of-already-persisted is a silent
+                        // no-op (matches persistent_add_trust); we
+                        // only surface "cap full" when adding a NEW
+                        // entry would exceed the cap.
+                        if existing.contains(h) {
+                            // Already persisted; nothing to do.
+                        } else if existing.len() >= PERSISTENT_TRUST_CAP {
+                            report.invalid.push((
+                                h.clone(),
+                                format!("trust file full ({PERSISTENT_TRUST_CAP})"),
+                            ));
+                        } else {
+                            existing.insert(h.clone());
+                            report.trust_added += 1;
+                        }
+                    }
+                    Err(reason) => report.invalid.push((h.clone(), reason)),
+                }
+            }
+            if report.trust_added > 0 {
+                write_trust_file(&path, &existing)?;
+            }
+        }
+
         // Re-sync in-memory + clear session, but ONLY for the
         // entries that actually got persisted — surviving entries
         // (those that failed validation) stay in the session for
         // the operator to inspect via `session list`.
-        //
-        // session_trust hashes have no persistent target file
-        // today (deferred to the trust_cache.zig migration PR);
-        // session write clears them outright so the operator's
-        // "ok I'm done with this session" intent matches what
-        // they see in `session list` afterwards.
         self.load_persistent(uid)?;
         {
             let mut state = self.state.lock().expect("trust_store poisoned");
@@ -427,7 +473,13 @@ impl TrustStore {
                 entry
                     .session_urls_block
                     .retain(|h| validate_host(h).is_err());
-                entry.session_trust.clear();
+                // Trust hashes: drop the ones we successfully
+                // persisted (now in persistent_trust); keep
+                // malformed ones for inspection (already in
+                // report.invalid).
+                entry
+                    .session_trust
+                    .retain(|h| validate_trust_hash(h).is_err());
             }
         }
         Ok(report)
@@ -443,6 +495,61 @@ impl TrustStore {
             .join(uid.to_string())
             .join("urls.decisions.txt")
     }
+    fn user_trust_path(&self, uid: u32) -> PathBuf {
+        self.data_root
+            .join(uid.to_string())
+            .join("commands.trusted.txt")
+    }
+
+    /// Append `hash` to the user's persistent trust file + reload
+    /// the in-memory layer. Atomic write via tmp+rename. Validates
+    /// the hash shape (64 lowercase hex chars). No sudo gate — this
+    /// is the daemon-side analog of the banner's `[t]rust permanently`
+    /// keystroke, which has always been a non-sudo action (since
+    /// PR #1's atty-side trust_cache.txt write); per-UID file
+    /// ownership stays sound because the connecting peer's UID
+    /// scopes which file gets written.
+    pub fn persistent_add_trust(&self, uid: u32, hash: &str) -> std::io::Result<()> {
+        validate_trust_hash(hash)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let path = self.user_trust_path(uid);
+        ensure_parent_dir(&path)?;
+        let mut existing = read_trust_file(&path)?;
+        if existing.contains(hash) {
+            return Ok(()); // idempotent
+        }
+        if existing.len() >= PERSISTENT_TRUST_CAP {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "persistent trust file full ({PERSISTENT_TRUST_CAP} entries) \
+                     — `atty-guard atoms remove` won't help (different file); \
+                     edit `commands.trusted.txt` directly to prune",
+                ),
+            ));
+        }
+        existing.insert(hash.to_owned());
+        write_trust_file(&path, &existing)?;
+        self.load_persistent(uid)?;
+        Ok(())
+    }
+
+    /// Snapshot of the caller's persistent trust hashes. atty
+    /// proxy fetches this at module attach to seed its local
+    /// runtime trust set, so subsequent banner-armed paths can
+    /// short-circuit without an extra UDS round-trip. The daemon
+    /// itself does NOT consult trust at classify time — atty is
+    /// authoritative for the runtime check (its in-proc trust set
+    /// fires BEFORE the daemon's Classify dispatch ever sees the
+    /// command).
+    pub fn list_persistent_trust(&self, uid: u32) -> Vec<String> {
+        let state = self.state.lock().expect("trust_store poisoned");
+        let entry = match state.get(&uid) {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
+        sorted_vec(&entry.persistent_trust)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -450,6 +557,7 @@ pub struct SessionWriteReport {
     pub atoms_added: usize,
     pub urls_allow_added: usize,
     pub urls_block_added: usize,
+    pub trust_added: usize,
     /// Entries that failed validation and stayed in the session
     /// for the operator to review/correct. Each `(entry, reason)`
     /// pair surfaces in the CLI's `session write` output and via
@@ -497,6 +605,15 @@ const HOST_MAX_LEN: usize = 253; // RFC 1035
 /// operator pace; hitting it means something's wrong + the
 /// operator should `session write` or `session clear`.
 const SESSION_PER_KIND_CAP: usize = 4096;
+
+/// Per-UID cap on persistent trust hashes (`commands.trusted.txt`).
+/// Larger than the session cap because trust hashes ARE intended to
+/// accumulate over the lifetime of a user account — every `[t]rust
+/// permanently` keystroke at the banner adds one. 16K is roughly
+/// "decades of routine use before any operator hits it"; if you
+/// do hit it, you have a different problem (likely the same atom
+/// firing on slightly-different commands → cache mostly garbage).
+const PERSISTENT_TRUST_CAP: usize = 16384;
 
 fn validate_atom(atom: &str) -> Result<(), String> {
     if atom.len() < ATOM_MIN_LEN {
@@ -572,6 +689,47 @@ fn validate_host(host: &str) -> Result<(), String> {
         return Err("host contains `#` (reserved character)".into());
     }
     Ok(())
+}
+
+fn read_trust_file(path: &Path) -> std::io::Result<HashSet<String>> {
+    let mut out = HashSet::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    let content = std::fs::read_to_string(path)?;
+    for line in content.lines() {
+        // Trust lines are bare 64-char hex; strip inline metadata
+        // first (same convention as atoms.user.txt).
+        let body = strip_inline_comment(line).trim();
+        if body.is_empty() {
+            continue;
+        }
+        // Silently skip malformed lines instead of erroring — a
+        // hand-edited file with one bad line shouldn't lock the
+        // operator out of the rest of their trust state.
+        if validate_trust_hash(body).is_ok() {
+            out.insert(body.to_owned());
+        }
+    }
+    Ok(out)
+}
+
+fn write_trust_file(path: &Path, hashes: &HashSet<String>) -> std::io::Result<()> {
+    let mut sorted: Vec<&String> = hashes.iter().collect();
+    sorted.sort();
+    let mut content = String::with_capacity(64 + hashes.len() * 80);
+    content.push_str("# atty-guard persistent trust file. Each line is a SHA-256\n");
+    content.push_str("# hex digest of `<category>:<matched>` — see\n");
+    content.push_str("# atty's `src/modules/security_guard/trust_cache.zig::hashCategoryMatch`.\n");
+    content.push_str("# Edit by hand to prune entries. New writes go through\n");
+    content.push_str("# `atty-guard trust add <hash>` or the banner's [t]rust\n");
+    content.push_str("# permanently keystroke.\n");
+    content.push_str("\n");
+    let stamp = utc_timestamp_ymd();
+    for h in &sorted {
+        content.push_str(&format!("{h} # set {stamp}\n"));
+    }
+    write_atomic(path, content.as_bytes())
 }
 
 fn read_atoms_file(path: &Path) -> std::io::Result<HashSet<String>> {

@@ -133,6 +133,15 @@ pub fn configure(comptime cfg: Config) type {
             /// user feels a paper-cut latency that an absent
             /// sidecar shouldn't introduce.
             daemon_disabled: bool = false,
+            /// True once we've fetched the daemon's persistent
+            /// trust list and seeded `rt.trust` from it. Flipped
+            /// inside `queryDaemon` on first successful classify
+            /// (lazy seed — avoids paying the connect cost at
+            /// attach time for sessions that never type a flagged
+            /// command). Sticky for the runtime's lifetime; daemon
+            /// reconnects (after `daemon_disabled` resets) re-seed
+            /// since the flag stays false until a successful seed.
+            daemon_trust_seeded: bool = false,
             /// Set when the LAST armed banner came from the daemon
             /// instead of an in-proc pattern. The category may not
             /// have a `patterns_mod.Category` equivalent (the
@@ -325,6 +334,21 @@ pub fn configure(comptime cfg: Config) type {
                 rt.daemon = client;
             }
             const result = try rt.daemon.?.classifyOrErr(line, .{});
+            // Lazy seed of in-proc trust set from the daemon's
+            // commands.trusted.txt. Runs once per atty session after
+            // the FIRST successful daemon classify — by then the
+            // daemon is proven reachable + the connect cost is
+            // already amortized. Errors are swallowed: the local
+            // trust file from `~/.cache/atty/security_trust.txt`
+            // is already loaded at attach, so the seed only ADDS
+            // (specifically, picks up trust hashes the user set on
+            // a different atty session under the same UID).
+            if (!rt.daemon_trust_seeded) {
+                if (rt.allocator) |a| {
+                    rt.daemon.?.trustList(a, &rt.trust) catch {};
+                }
+                rt.daemon_trust_seeded = true;
+            }
             if (result.verdict == .safe) return .{ .armed = false, .refused = false };
 
             // Trust cache logic uses the SIDECAR's category mapping
@@ -421,6 +445,15 @@ pub fn configure(comptime cfg: Config) type {
                         if (rt.allocator) |a| {
                             _ = rt.trust.add(a, hash) catch {};
                             rt.trust.persist(cfg.trust_cache_path) catch {};
+                        }
+                        // Mirror to daemon-side commands.trusted.txt
+                        // (post-trust-cache-migration). Best-effort —
+                        // the local-file write above is authoritative
+                        // for the runtime check; the daemon mirror
+                        // is for cross-shell consistency + visibility
+                        // via `atty-guard trust list`.
+                        if (rt.daemon) |*client| {
+                            client.trustAdd(hash) catch {};
                         }
                     }
                     markShellThreat(rt, ctx, pending);
