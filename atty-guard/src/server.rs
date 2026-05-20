@@ -938,6 +938,60 @@ mod tests {
     }
 
     #[test]
+    fn session_add_trust_then_session_list_round_trip() {
+        // Test gap from #141 / #142 review: there was no real-UDS
+        // integration test that sent SessionAddTrust + asserted the
+        // next SessionList Response carries the hash. Closes that
+        // gap so a future refactor of the SessionList serialization
+        // can't silently drop the trust field.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let add = round_trip(
+            &mut stream,
+            &format!(r#"{{"id":1,"method":"session_add_trust","hash":"{hash}"}}"#),
+        );
+        let v: serde_json::Value = serde_json::from_str(&add).unwrap();
+        assert_eq!(v["type"], "ok");
+
+        let list = round_trip(&mut stream, r#"{"id":2,"method":"session_list"}"#);
+        let v: serde_json::Value = serde_json::from_str(&list).unwrap();
+        assert_eq!(v["type"], "session_list");
+        let trust = v["trust"].as_array().expect("trust array");
+        assert_eq!(trust.len(), 1);
+        assert_eq!(trust[0], hash);
+        // Atoms / urls fields must still be empty.
+        assert!(v["atoms"].as_array().unwrap().is_empty());
+        assert!(v["urls_allow"].as_array().unwrap().is_empty());
+        assert!(v["urls_block"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn session_add_url_block_then_session_list_round_trip() {
+        // Sibling test for the urls_block kind, same threat model
+        // (no-sudo session adds via the banner's [B]lock host
+        // forever keystroke). Pins the SessionList urls_block
+        // wire-format symmetrically with the trust test above.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let add = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"session_add_url_block","host":"evil.example"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&add).unwrap();
+        assert_eq!(v["type"], "ok");
+
+        let list = round_trip(&mut stream, r#"{"id":2,"method":"session_list"}"#);
+        let v: serde_json::Value = serde_json::from_str(&list).unwrap();
+        assert_eq!(v["type"], "session_list");
+        let block = v["urls_block"].as_array().expect("urls_block array");
+        assert_eq!(block.len(), 1);
+        assert_eq!(block[0], "evil.example");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
     fn session_clear_no_sudo_required() {
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
