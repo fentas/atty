@@ -46,8 +46,11 @@ use std::path::PathBuf;
 #[command(name = "atty-guard", version)]
 struct Cli {
     /// Path to bind the UDS server on. Defaults to
-    /// `$XDG_RUNTIME_DIR/atty-guard.sock`, falling back to
-    /// `/tmp/atty-guard-<uid>.sock` if XDG_RUNTIME_DIR is unset.
+    /// `/run/atty-guard/atty-guard.sock` for the system-daemon
+    /// install (the systemd unit creates `RuntimeDirectory=atty-guard`
+    /// owned `atty:atty` mode 0750 — atty proxies in the `atty`
+    /// group can connect). For dev runs as a regular user, override
+    /// with `--socket /tmp/atty-guard-dev.sock` or similar.
     #[arg(long)]
     socket: Option<PathBuf>,
 
@@ -115,7 +118,7 @@ struct Cli {
     atoms_update_interval: String,
 
     /// Comma-separated source list for the V2-I fetcher.
-    /// Valid: `gtfobins`, `sigma`, `lolbas`. Empty = all enabled.
+    /// Valid: `gtfobins`, `sigma`. Empty = all enabled.
     #[arg(long, default_value = "")]
     atoms_sources: String,
 }
@@ -183,29 +186,26 @@ fn parse_atom_sources(s: &str) -> Vec<atom_fetcher::SourceId> {
         }
         match atom_fetcher::SourceId::parse(name) {
             Some(sid) => out.push(sid),
-            None => eprintln!("atty-guard: unknown atom source `{name}` — ignoring (valid: gtfobins, sigma, lolbas)"),
+            None => eprintln!("atty-guard: unknown atom source `{name}` — ignoring (valid: gtfobins, sigma)"),
         }
     }
     out
 }
 
 fn default_socket_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        let mut p = PathBuf::from(dir);
-        p.push("atty-guard.sock");
-        return p;
-    }
-    let uid = libc_uid();
-    PathBuf::from(format!("/tmp/atty-guard-{}.sock", uid))
-}
-
-extern "C" {
-    fn getuid() -> u32;
-}
-fn libc_uid() -> u32 {
-    // Wrapping the FFI call here to keep `main` warning-free without
-    // disabling `unused_unsafe` globally.
-    unsafe { getuid() }
+    // System-daemon default — the systemd unit's
+    // `RuntimeDirectory=atty-guard` creates /run/atty-guard/ owned
+    // atty:atty mode 0750 before the daemon starts. Dev runs as a
+    // regular user must `--socket /tmp/atty-guard-dev.sock` or
+    // similar (the default path isn't writable from non-root).
+    //
+    // WHY not /tmp/atty-guard-<uid>.sock (the prior systemd-user
+    // default): the post-PR-#140 architecture runs atty-guard under
+    // a dedicated `atty` user, not under each end-user's session.
+    // /run/atty-guard/ is the FHS-blessed location for system-
+    // daemon runtime sockets and matches systemd's RuntimeDirectory
+    // contract.
+    PathBuf::from("/run/atty-guard/atty-guard.sock")
 }
 
 fn main() -> std::io::Result<()> {

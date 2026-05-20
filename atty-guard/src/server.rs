@@ -37,10 +37,25 @@ pub fn serve(
     osv: Option<Arc<crate::osv::OsvClient>>,
 ) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
-    // Restrictive perms so a co-tenant user can't connect. UDS files
-    // honour file permissions on Linux; mode 0600 == owner-only.
+    // Socket perms: owner (the daemon's `atty` user) read+write, group
+    // (the `atty` system group, which user accounts are added to via
+    // `sudo usermod -aG atty $USER`) read+write so atty proxies can
+    // connect, others nothing. UDS files honour file permissions on
+    // Linux; mode 0660 keeps the threat model intact (co-tenant users
+    // NOT in the `atty` group can't connect) while letting the
+    // group-permission path work as documented.
+    //
+    // Pre-#140 the daemon ran as the same user as the atty proxy,
+    // so 0600 was correct then — both ends shared owner. Post-#140
+    // the daemon runs as `atty` and proxies run as `$USER`, so
+    // group-readable is the only way for the connection to work
+    // without world-readability.
+    //
+    // For dev runs as a regular user (--socket /tmp/...), the file
+    // ends up `$USER:$USER` 0660; nothing else can connect, which is
+    // also what we want.
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660))?;
 
     let mut threat = ThreatMap::new();
     if let Some(es) = ebpf {

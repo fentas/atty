@@ -134,8 +134,26 @@ impl Default for FetcherConfig {
 }
 
 /// Resolve the data directory the fetched atoms file lives under.
-/// `XDG_DATA_HOME` wins; otherwise `$HOME/.local/share`.
+/// Priority: `STATE_DIRECTORY` (set by systemd when the unit has
+/// `StateDirectory=atty-guard` — points at `/var/lib/atty-guard/`
+/// owned `atty:atty` mode 0750, the canonical post-#140 location)
+/// > `XDG_DATA_HOME` > `$HOME/.local/share` > literal `/var/lib`.
+///
+/// Why STATE_DIRECTORY first: the system daemon runs as the `atty`
+/// user with `ProtectHome=yes` + `--home-dir /nonexistent`. Falling
+/// through to `$HOME/.local/share` would land at `/nonexistent/`
+/// (or fail with ENOENT). systemd guarantees STATE_DIRECTORY exists
+/// + is writable before the unit starts, so it's the safest path.
 pub fn default_atoms_path() -> PathBuf {
+    if let Ok(state_dir) = std::env::var("STATE_DIRECTORY") {
+        // STATE_DIRECTORY can be a `:`-separated list when the unit
+        // sets multiple StateDirectory= entries; the first wins.
+        if let Some(first) = state_dir.split(':').next() {
+            if !first.is_empty() {
+                return PathBuf::from(first).join("flagged_atoms.txt");
+            }
+        }
+    }
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))

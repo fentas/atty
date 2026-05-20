@@ -13,7 +13,7 @@ OPT ?= ReleaseSafe
 # lookup for npm misses, and the atom fetcher. eBPF is opt-in —
 # `make GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf …`.
 # eBPF additionally needs `libbpf-dev` on the build host AND
-# `AmbientCapabilities=CAP_BPF` on the systemd-user unit at runtime.
+# `AmbientCapabilities=CAP_BPF` on the system unit at runtime.
 GUARD_FEATURES ?= tier2-onnx,osv-live,atoms-fetch
 
 # Default target picks the path that builds reliably on the host:
@@ -66,7 +66,8 @@ help:
 	@printf "  install         Copy atty binary to \$$PREFIX/bin AND run atty-guard installer.\n"
 	@printf "  install-atty    Only copy zig-out/bin/atty to \$$PREFIX/bin (default: ~/.local/bin).\n"
 	@printf "  install-guard   Only build + run atty-guard/contrib/install.sh.\n"
-	@printf "                  Side effect: enables + starts atty-guard.service (systemd-user).\n\n"
+	@printf "                  Requires sudo. Creates the atty user/group, installs the system\n"
+	@printf "                  unit to /etc/systemd/system/, enables + starts atty-guard.service.\n\n"
 	@printf "Link / unlink (default = both subprojects)\n"
 	@printf "  link            Symlink BOTH \$$PREFIX/bin/atty and \$$PREFIX/bin/atty-guard.\n"
 	@printf "  link-atty       Only symlink \$$PREFIX/bin/atty -> this clone's zig-out/bin/atty.\n"
@@ -132,15 +133,15 @@ integration-test-full:
 run: build-atty
 	./zig-out/bin/atty
 
-# Meta install — atty binary + atty-guard binary + systemd-user unit.
+# Meta install — atty binary + atty-guard binary + system unit.
 # Run on a fresh clone to land a complete setup. Per-subproject
 # variants (`install-atty` / `install-guard`) stay available when you
-# only want one side.
+# only want one side. install-guard requires sudo.
 #
 # Recursive `$(MAKE)` calls instead of prerequisite-list serialise the
 # two steps even under `make -j`: install-guard's contrib/install.sh
-# does multi-step systemd-user setup (daemon-reload + enable + start)
-# that races badly with concurrent installs.
+# does multi-step systemd setup (user creation, daemon-reload, enable,
+# start) that races badly with concurrent installs.
 install:
 	$(MAKE) install-atty
 	$(MAKE) install-guard
@@ -221,18 +222,19 @@ test-guard:
 fmt-guard:
 	cd atty-guard && $(CARGO) fmt
 
-# Full install — binary into $(PREFIX)/bin AND systemd-user unit AND
-# enable+start the service. Delegates to the canonical installer so
-# the systemd policy stays in one place (atty-guard.service).
+# Full install — binary into /usr/local/bin, system unit into
+# /etc/systemd/system/, creates the atty user/group, enables + starts
+# the service. Delegates to contrib/install.sh (which re-execs under
+# sudo) so the systemd policy stays in one place.
 install-guard: build-guard
-	@printf "→ %s will install + enable atty-guard.service (systemd-user)\n" "$@"
-	PREFIX=$(PREFIX) atty-guard/contrib/install.sh
+	@printf "→ %s will install + enable atty-guard.service (system daemon — requires sudo)\n" "$@"
+	atty-guard/contrib/install.sh
 
 # Symlink the daemon binary the same way `make link` does for atty:
 # source-of-truth is the cargo target dir, $(PREFIX)/bin is just a
 # pointer. The daemon must be restarted (`make reload-guard`) for a
-# newly-rebuilt binary to actually run — systemd-user resolves the
-# symlink at ExecStart, not on every signal.
+# newly-rebuilt binary to actually run — systemd resolves the symlink
+# at ExecStart, not on every signal.
 link-guard: build-guard
 	install -d $(PREFIX)/bin
 	ln -sfn $(CURDIR)/atty-guard/target/release/atty-guard $(PREFIX)/bin/atty-guard
@@ -249,20 +251,26 @@ unlink-guard:
 	    printf "(nothing to unlink)\n"; \
 	fi
 
-# Restart the systemd-user unit. systemd-user resolves the symlink/path
-# at ExecStart, so this is what makes a freshly-built binary actually run.
-# When built with --features ebpf, the restart also unloads the old
-# kernel-side BPF programs (libbpf-rs drops them on process exit) and
-# the new daemon re-attaches them on startup.
+# Restart the systemd unit (system-daemon, post-#140) — needed when
+# you rebuild the binary so the new image actually runs. When built
+# with --features ebpf the restart also unloads the old kernel-side
+# BPF programs (libbpf-rs drops them on process exit) and the new
+# daemon re-attaches them on startup. Falls back to the legacy
+# systemd-user path for installs that haven't migrated yet.
 reload-guard:
 	@if ! command -v systemctl >/dev/null 2>&1; then \
 	    printf "⚠ systemctl not on \$$PATH — start atty-guard yourself with the new binary\n"; \
 	    exit 1; \
 	fi
-	@unit_path="$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user/atty-guard.service"; \
-	if [ ! -f "$$unit_path" ]; then \
-	    printf "⚠ atty-guard.service not installed (%s) — run \`make install-guard\` first\n" "$$unit_path"; \
+	@sys_unit=/etc/systemd/system/atty-guard.service; \
+	user_unit="$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user/atty-guard.service"; \
+	if [ -f "$$sys_unit" ]; then \
+	    sudo systemctl restart atty-guard.service && \
+	    printf "→ atty-guard restarted (system daemon; eBPF re-attached if built with --features ebpf)\n"; \
+	elif [ -f "$$user_unit" ]; then \
+	    systemctl --user restart atty-guard.service && \
+	    printf "→ atty-guard restarted (systemd-user — legacy install; consider running \`sudo make install-guard\` to migrate)\n"; \
+	else \
+	    printf "⚠ atty-guard.service not installed at %s or %s — run \`sudo make install-guard\` first\n" "$$sys_unit" "$$user_unit"; \
 	    exit 1; \
 	fi
-	systemctl --user restart atty-guard.service
-	@printf "→ atty-guard restarted (eBPF re-attached if built with --features ebpf)\n"
