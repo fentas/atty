@@ -360,19 +360,16 @@ const shell_doctor_snippet =
     \\    __atty_doctor_check '[ -S "'"$__atty_doctor_guard_sock"'" ]' \
     \\        "UDS socket reachable ($__atty_doctor_guard_sock)" \
     \\        'service started but socket missing — likely a permission or path mismatch; the daemon prints the bind error to journald on startup'
-    \\    __atty_doctor_guard_atoms="${XDG_DATA_HOME:-$HOME/.local/share}/atty-guard/flagged_atoms.txt"
-    \\    __atty_doctor_check '[ -f "'"$__atty_doctor_guard_atoms"'" ]' \
-    \\        "atom corpus present ($__atty_doctor_guard_atoms)" \
-    \\        'run `atty-guard --update-atoms-now` (needs `--features atoms-fetch`) to pull GTFOBins / Sigma / LOLBAS into a flagged_atoms.txt'
-    \\    # Freshness — non-fatal, surfaced as a warn so an old install
-    \\    # doesn't fail the check entirely.
-    \\    if [ -f "$__atty_doctor_guard_atoms" ]; then
-    \\        if find "$__atty_doctor_guard_atoms" -mtime +30 2>/dev/null | grep -q .; then
-    \\            __atty_doctor_warn 'atom corpus is >30 days old — schedule refresh with `atty-guard --atoms-update-interval 1d` or re-run `--update-atoms-now`'
-    \\        else
-    \\            __atty_doctor_ok 'atom corpus is fresh (<30 days)'
-    \\        fi
-    \\    fi
+    \\    # Atom corpus check intentionally NOT done here. atty-guard's
+    \\    # AtomMatcher reads its corpus via `include_str!` at compile
+    \\    # time — there is no runtime atom file the daemon loads
+    \\    # today. The optional `--update-atoms-now` writes to
+    \\    # $XDG_DATA_HOME but the daemon ignores that file. Checking
+    \\    # for it would either fail (file absent) for users on a
+    \\    # bundled-only install (the supported path), or pass (file
+    \\    # present) but mislead — the file's existence has no effect
+    \\    # on detection. Runtime atom loading is on the post-#139
+    \\    # roadmap; the doctor check returns when it's wired up.
     \\    # eBPF — informational. `--enable-ebpf` is in the CLI help
     \\    # unconditionally (the flag exists even when the binary is
     \\    # built without the `ebpf` Cargo feature, in which case it
@@ -393,7 +390,7 @@ const shell_doctor_snippet =
     \\unset __atty_doctor_pass __atty_doctor_fail_count \
     \\      __atty_doctor_guard_bin __atty_doctor_guard_bin_label \
     \\      __atty_doctor_guard_unit \
-    \\      __atty_doctor_guard_sock __atty_doctor_guard_atoms 2>/dev/null
+    \\      __atty_doctor_guard_sock 2>/dev/null
     \\
 ;
 

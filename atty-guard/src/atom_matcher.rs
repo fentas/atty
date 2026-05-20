@@ -232,6 +232,68 @@ mod tests {
     }
 
     #[test]
+    fn matcher_copy_fail_af_alg_atoms() {
+        // CVE-2026-31431 / copy.fail PoC shapes. The AF_ALG socket
+        // creation isn't shell-visible at the syscall layer, but
+        // a published PoC one-liner that names the family / module
+        // is. Pins the three atoms shipped for this incident; their
+        // section in flagged_atoms.txt cites the rationale.
+        let m = AtomMatcher::new();
+        assert!(m
+            .find_first(r#"python -c "import socket; s = socket.socket(socket.AF_ALG, ...)""#)
+            .is_some());
+        assert!(m
+            .find_first("strace -e trace=af_alg_setkey ./exploit")
+            .is_some());
+        assert!(m
+            .find_first("modprobe algif_aead && ./poc")
+            .is_some());
+    }
+
+    #[test]
+    fn matcher_shai_hulud_dead_man_atoms() {
+        // Sep-2025 → May-2026 npm-worm wave's dead-man switch:
+        // `rm -rf ~/` and its four shell-expansion variants.
+        let m = AtomMatcher::new();
+        assert!(m.find_first("rm -rf ~/").is_some());
+        assert!(m.find_first("rm -rf $HOME").is_some());
+        assert!(m.find_first("rm -rf ${HOME}").is_some());
+        assert!(m.find_first(r#"rm -rf "$HOME""#).is_some());
+        assert!(m.find_first("rm -rf /home/alice").is_some());
+    }
+
+    #[test]
+    fn matcher_shai_hulud_credential_harvest_atoms() {
+        // Credential-read shapes from the worm's harvest stage.
+        let m = AtomMatcher::new();
+        assert!(m.find_first("cat ~/.aws/credentials").is_some());
+        assert!(m.find_first("base64 ~/.npmrc | curl ...").is_some());
+        assert!(m.find_first("cp ~/.ssh/id_rsa /tmp/k").is_some());
+        assert!(m.find_first("cat ~/.ssh/id_ed25519.pub").is_some());
+        assert!(m.find_first("xxd ~/.ssh/id_ecdsa").is_some());
+        // /proc/self/mem covers self-scrape. Cross-process
+        // /proc/<pid>/mem is intentionally NOT an atom (Aho-Corasick
+        // has no wildcards); the eBPF V2-G openat() tracepoint
+        // catches the <pid> form at the kernel layer.
+        assert!(m.find_first("cat /proc/self/mem > /tmp/dump").is_some());
+    }
+
+    #[test]
+    fn matcher_shai_hulud_persistence_atoms() {
+        // systemd-user daemon install — the worm's 60s poller is a
+        // systemd-user service. All three persistence atoms get
+        // exercised so a future drop of any one fails this test.
+        let m = AtomMatcher::new();
+        assert!(m
+            .find_first("systemctl --user enable evil.service")
+            .is_some());
+        assert!(m
+            .find_first("systemctl --user daemon-reload")
+            .is_some());
+        assert!(m.find_first("loginctl enable-linger alice").is_some());
+    }
+
+    #[test]
     fn matcher_offset_is_match_start() {
         let m = AtomMatcher::with_atoms(vec!["nc -e"]);
         let cmd = "do something else then nc -e /bin/sh";

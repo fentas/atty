@@ -104,54 +104,42 @@ pub const modules = .{
 Then rebuild atty (`make build-atty`) and `make link-atty` so the
 new binary picks up the wired path.
 
-## 3. Pull the atom corpus
+## 3. Atom corpus (bundled today, refresh roadmap)
 
-The IOC atom file (`flagged_atoms.txt`) lives at
-`$XDG_DATA_HOME/atty-guard/flagged_atoms.txt` (defaults to
-`~/.local/share/atty-guard/flagged_atoms.txt`). atty-guard ships a
-small bundled seed corpus; the V2-I fetcher refreshes from upstream
-rule sets:
+atty-guard ships with a hand-curated atom corpus baked into the
+binary at compile time (`include_str!` of
+`src/modules/security_guard/data/flagged_atoms.txt`). That's the ONLY
+corpus the running daemon uses today — no runtime file is read for
+atoms. Update flow today:
 
-```sh
-# One-shot fetch — current sources: gtfobins / sigma / lolbas.
-atty-guard --update-atoms-now
-```
+1. The bundled corpus is refreshed pre-release by maintainers running
+   `atty-guard --update-atoms-now`, reviewing the diff, and committing
+   the refresh into the source tree.
+2. Users get the refreshed corpus via `git pull && make install-guard`
+   on release-please cadence.
 
-To limit sources:
+The `--update-atoms-now` CLI flag DOES exist on the shipped binary
+(behind `--features atoms-fetch`) and it does write to
+`$XDG_DATA_HOME/atty-guard/flagged_atoms.txt`. But that file is
+currently informational only — atty-guard does NOT load it at
+runtime. Running the fetch as an unprivileged user is harmless but
+doesn't change detection behaviour.
 
-```sh
-atty-guard --update-atoms-now --atoms-sources gtfobins,sigma
-```
+Why not runtime-load: a user-writable atoms file is a DOS vector. A
+process running as the user could append `ls`, `cd`, ` ` etc. to the
+file; on daemon reload every keystroke would fire Block; the user
+would disable atty-guard to regain a usable shell; detection gone.
+The fix (planned, post-#139): atty-guard runs under a dedicated
+`atty` user/group, atom files live at `/var/lib/atty-guard/`
+mode-0640 atty:atty, mutations go through `sudo atty-guard atoms
+add/remove`, daemon refuses to load on permission drift.
 
-Expected output:
-
-```
-atty-guard: atom refresh ok — 1543 atoms across 3 sources → /home/.../flagged_atoms.txt
-  gtfobins: 751 atoms
-  sigma: 369 atoms
-  lolbas: 423 atoms
-```
-
-### Keep it fresh
-
-Schedule a daily refresh via the daemon itself (cron-style, runs in
-the background while serving the UDS):
-
-```sh
-# Edit the systemd unit drop-in:
-mkdir -p ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d
-cat > ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d/override.conf <<EOF
-[Service]
-ExecStart=
-ExecStart=%h/.local/bin/atty-guard --atoms-update-interval 1d
-EOF
-systemctl --user daemon-reload
-systemctl --user restart atty-guard
-```
-
-The daemon now serves the UDS AND refreshes atoms every 24 h. A
-failed fetch (network down, source moved) keeps the previous corpus
-in place — never fails open.
+Sources fetched: `gtfobins` (~357 atoms after filter) and `sigma`
+(`/rules/linux/**` only, ~369 atoms). LOLBAS was dropped because it's
+Windows-native by definition. Placeholder atoms (Sigma's `/path/to/`,
+`{PATH:.exe}`, angle-bracket `<hostname>` shapes) are filtered at
+extract time because Aho-Corasick has no wildcards — they'd never
+match real input.
 
 ## 4. Enable eBPF (optional, opt-in)
 
@@ -226,14 +214,14 @@ atty doctor — atty-guard sidecar
   ✓  atty-guard.service systemd-user unit installed
   ✓  atty-guard.service is active
   ✓  UDS socket reachable (/run/user/1000/atty-guard.sock)
-  ✓  atom corpus present (...)
-  ✓  atom corpus is fresh (<30 days)
-  !  binary built WITH `ebpf` feature — run with `--enable-ebpf` + CAP_BPF
+  !  eBPF status is runtime-only — `journalctl --user -u atty-guard | grep -i ebpf` will show ...
 ```
 
 The eBPF line is always informational (yellow `!`) — doctor doesn't
 try to verify kernel-side attach state (that requires CAP_BPF +
-reading `/sys/fs/bpf`, too noisy for a shell snippet).
+reading `/sys/fs/bpf`, too noisy for a shell snippet). The atom
+corpus isn't checked here either — atty-guard reads its corpus at
+compile time via `include_str!`, there's no runtime file to verify.
 
 The atty-guard section is **silent** when there's no evidence the
 operator intended to install the sidecar (no binary AND no unit
@@ -331,7 +319,7 @@ via GitHub Actions cache poisoning).
 | Initial install | `npm install <flagged>` — V2-F live OSV.dev lookup + `flagged_npm.txt`. Caught at the prompt before bash runs the postinstall. |
 | Dead-man switch | `rm -rf ~/`, `rm -rf $HOME`, `rm -rf ${HOME}`, `rm -rf /home/<user>` — all four canonical forms ship as atoms. |
 | Credential harvest | `~/.aws/credentials`, `~/.npmrc`, `~/.ssh/id_{rsa,ed25519,ecdsa}`, `/proc/self/mem` — atoms cover file-read shapes and the self-scrape memory variant. Cross-process `/proc/<pid>/mem` reads aren't an atom (Aho-Corasick has no wildcards); eBPF V2-G's `openat()` tracepoint catches them at the kernel layer. |
-| systemd persistence | `systemctl --user enable`, `loginctl enable-linger` — atoms catch the daemon-install commands. |
+| systemd persistence | `systemctl --user enable`, `systemctl --user daemon-reload`, `loginctl enable-linger` — atoms catch each step of the daemon-install command sequence. |
 | V2-J auto-Block (opt-in) | With `[accumulator] block_threshold = 0.95`, multi-hit Shai-Hulud command chains (dead-man + credential read + persistence in one line) escalate from Warn to outright REFUSED. |
 
 ## See also
