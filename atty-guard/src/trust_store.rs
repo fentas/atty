@@ -52,6 +52,14 @@ pub struct PerUserState {
     pub session_urls_allow: HashSet<String>,
     /// Session-only URL block decisions.
     pub session_urls_block: HashSet<String>,
+    /// Session trust hashes — `[a]llow always` taps from the
+    /// security_guard banner. Each entry is the lowercase hex
+    /// SHA-256 of `<category>:<matched>` as computed atty-side in
+    /// `security_guard/trust_cache.zig::hashCategoryMatch`. atty
+    /// proxy enforces the bypass locally; the daemon-side set
+    /// exists for `atty-guard session list` visibility + future
+    /// `session write` persistence.
+    pub session_trust: HashSet<String>,
 }
 
 /// Daemon-wide trust store. Keyed by UID. Persistent data dir is
@@ -168,16 +176,20 @@ impl TrustStore {
         out
     }
 
-    pub fn session_summary(&self, uid: u32) -> (Vec<String>, Vec<String>, Vec<String>) {
+    pub fn session_summary(
+        &self,
+        uid: u32,
+    ) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
         let state = self.state.lock().expect("trust_store poisoned");
         let entry = match state.get(&uid) {
             Some(e) => e,
-            None => return (Vec::new(), Vec::new(), Vec::new()),
+            None => return (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
         (
             sorted_vec(&entry.session_atoms),
             sorted_vec(&entry.session_urls_allow),
             sorted_vec(&entry.session_urls_block),
+            sorted_vec(&entry.session_trust),
         )
     }
 
@@ -187,7 +199,65 @@ impl TrustStore {
             entry.session_atoms.clear();
             entry.session_urls_allow.clear();
             entry.session_urls_block.clear();
+            entry.session_trust.clear();
         }
+    }
+
+    /// Add a SHA-256 trust hash to the session set. Validates
+    /// the hash shape (64 lowercase hex chars) to keep the set
+    /// from filling with malformed strings. Per-UID cap protects
+    /// against an unprivileged process spamming unique hashes to
+    /// grow daemon memory unbounded — `[a]llow always` from a
+    /// real banner is a once-per-prompt event, the cap is many
+    /// thousands of multiples above any realistic operator pace.
+    pub fn session_add_trust(&self, uid: u32, hash: &str) -> Result<(), String> {
+        validate_trust_hash(hash)?;
+        let mut state = self.state.lock().expect("trust_store poisoned");
+        let entry = state.entry(uid).or_default();
+        if entry.session_trust.len() >= SESSION_PER_KIND_CAP
+            && !entry.session_trust.contains(hash)
+        {
+            return Err(format!(
+                "session trust set full ({} entries) — run `sudo atty-guard session write` to persist + clear, or `atty-guard session clear`",
+                SESSION_PER_KIND_CAP
+            ));
+        }
+        entry.session_trust.insert(hash.to_owned());
+        Ok(())
+    }
+
+    /// Mirror an atty-side `[B]lock host forever` keystroke into
+    /// the per-UID session_urls_block set. atty proxy enforces
+    /// locally; this is the visibility log. Per-UID cap (see
+    /// `session_add_trust` for rationale).
+    pub fn session_add_url_block(&self, uid: u32, host: &str) -> Result<(), String> {
+        validate_host(host)?;
+        let mut state = self.state.lock().expect("trust_store poisoned");
+        let entry = state.entry(uid).or_default();
+        if entry.session_urls_block.len() >= SESSION_PER_KIND_CAP
+            && !entry.session_urls_block.contains(host)
+        {
+            return Err(format!(
+                "session url-block set full ({} entries)",
+                SESSION_PER_KIND_CAP
+            ));
+        }
+        entry.session_urls_block.insert(host.to_owned());
+        Ok(())
+    }
+
+    /// Daemon-side hot-path predicate: is `hash` in the caller's
+    /// session trust set? Today no daemon code path calls this —
+    /// the runtime check is atty-side. Kept as a hook for a future
+    /// daemon-side defense-in-depth check, OR for PR #143's
+    /// `commands.trusted.txt` persistence path.
+    #[allow(dead_code)]
+    pub fn is_session_trusted(&self, uid: u32, hash: &str) -> bool {
+        let state = self.state.lock().expect("trust_store poisoned");
+        state
+            .get(&uid)
+            .map(|e| e.session_trust.contains(hash))
+            .unwrap_or(false)
     }
 
     /// Append a session-only atom add. Called from a daemon-side hook
@@ -338,6 +408,12 @@ impl TrustStore {
         // entries that actually got persisted — surviving entries
         // (those that failed validation) stay in the session for
         // the operator to inspect via `session list`.
+        //
+        // session_trust hashes have no persistent target file
+        // today (deferred to the trust_cache.zig migration PR);
+        // session write clears them outright so the operator's
+        // "ok I'm done with this session" intent matches what
+        // they see in `session list` afterwards.
         self.load_persistent(uid)?;
         {
             let mut state = self.state.lock().expect("trust_store poisoned");
@@ -351,6 +427,7 @@ impl TrustStore {
                 entry
                     .session_urls_block
                     .retain(|h| validate_host(h).is_err());
+                entry.session_trust.clear();
             }
         }
         Ok(report)
@@ -412,6 +489,15 @@ const ATOM_MAX_LEN: usize = 200;
 const ATOM_MIN_LEN: usize = 3;
 const HOST_MAX_LEN: usize = 253; // RFC 1035
 
+/// Per-UID cap on each kind of session entry (atoms, urls-allow,
+/// urls-block, trust hashes). Defends against an unprivileged
+/// caller spamming the no-sudo session RPCs to grow daemon memory
+/// unbounded. Real banner-driven taps are at most one-per-prompt,
+/// so the cap is many thousands of multiples above any realistic
+/// operator pace; hitting it means something's wrong + the
+/// operator should `session write` or `session clear`.
+const SESSION_PER_KIND_CAP: usize = 4096;
+
 fn validate_atom(atom: &str) -> Result<(), String> {
     if atom.len() < ATOM_MIN_LEN {
         return Err(format!(
@@ -451,6 +537,21 @@ fn validate_atom(atom: &str) -> Result<(), String> {
              these match no real input"
                 .into(),
         );
+    }
+    Ok(())
+}
+
+fn validate_trust_hash(hash: &str) -> Result<(), String> {
+    // SHA-256 in lowercase hex = exactly 64 chars `[0-9a-f]`. Keeps
+    // the session_trust set from collecting bogus uppercase /
+    // truncated values that would never match a real hash on
+    // dispatch. The shape is fixed atty-side in
+    // security_guard/trust_cache.zig::hashCategoryMatch.
+    if hash.len() != 64 {
+        return Err(format!("trust hash length {} (expected 64)", hash.len()));
+    }
+    if !hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err("trust hash contains non-lowercase-hex chars".into());
     }
     Ok(())
 }

@@ -124,6 +124,42 @@ pub enum Request {
         #[serde(default)]
         target_uid: Option<u32>,
     },
+
+    /// In-banner `[a]llow always` taps. atty proxy
+    /// computes the (category, matched) SHA-256 trust hash the
+    /// same way it does for `[t]rust permanently` (see
+    /// security_guard/trust_cache.zig::hashCategoryMatch) and
+    /// sends it here so the daemon can MIRROR the decision.
+    ///
+    /// Important: the runtime classify check is atty-side, NOT
+    /// daemon-side. atty proxy maintains its own in-memory
+    /// session trust set and short-circuits banners on hit BEFORE
+    /// any UDS round-trip. The daemon-side mirror exists for
+    /// operator visibility (`atty-guard session list` shows
+    /// pending trust hashes) and as the substrate for PR #143's
+    /// `session write` persistence into a per-UID
+    /// `commands.trusted.txt`. No sudo: in-memory only, daemon
+    /// owns it, and the worst damage from a malicious user-process
+    /// spamming this RPC is bloating the visibility log — no
+    /// persistent file is touched.
+    SessionAddTrust {
+        /// 64-character lowercase hex (SHA-256 of "category:matched").
+        hash: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+
+    /// In-banner `[B]lock host forever` taps. atty proxy
+    /// extracts the host from the matched URL substring and mirrors
+    /// it here. Same enforcement model as SessionAddTrust: atty
+    /// enforces locally (REFUSED on subsequent commands containing
+    /// the host), daemon stores for visibility + persistence. No
+    /// sudo: in-memory only.
+    SessionAddUrlBlock {
+        host: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
 }
 
 /// Scope selector for `AtomsList`. The matcher serves the union of
@@ -230,11 +266,16 @@ pub enum ResponseBody {
     /// `"session-block"` for entries that are session-only.
     UrlsList { entries: Vec<UrlDecisionEntry> },
     /// Reply to SessionList. Lists pending atoms/url-decisions held
-    /// in the caller's in-memory session.
+    /// in the caller's in-memory session. `trust` holds the
+    /// SHA-256 hashes of (category, matched) pairs that the
+    /// banner's `[a]llow always` keystroke tagged for the rest
+    /// of the session.
     SessionList {
         atoms: Vec<String>,
         urls_allow: Vec<String>,
         urls_block: Vec<String>,
+        #[serde(default)]
+        trust: Vec<String>,
     },
 }
 
