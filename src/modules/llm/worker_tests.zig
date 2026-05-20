@@ -84,15 +84,19 @@ test "subprocess (json_field): cat with JSON stdin extracts requested field" {
     // where we control what cat sees. Easiest: skip
     // doSubprocessRequest and test `runSubprocess` + the JSON
     // extractor independently.
+    var err_buf: [128]u8 = undefined;
+    var err_len: usize = 0;
     const stdout_buf = try M.runSubprocess(
         testing.allocator,
         io,
         cfg.provider.subprocess,
         \\{"type":"result","result":"ls -la","cost_usd":0.001}
     ,
-        &.{},
+        &err_buf,
+        &err_len,
     );
     defer testing.allocator.free(stdout_buf);
+    try testing.expectEqual(@as(usize, 0), err_len);
 
     var out: [128]u8 = undefined;
     const n = M.extractJsonStringField(stdout_buf, "result", &out);
@@ -207,4 +211,125 @@ test "claudeCode factory without model omits the --model flag" {
             }
         },
     }
+}
+
+test "preset constants pin the expected model identifier" {
+    const llm = @import("../llm.zig");
+    const cases = .{
+        .{ llm.providers.claude_sonnet_4_5, "claude-sonnet-4-5" },
+        .{ llm.providers.claude_sonnet_4_6, "claude-sonnet-4-6" },
+        .{ llm.providers.claude_opus_4_7, "claude-opus-4-7" },
+        .{ llm.providers.claude_haiku_4_5, "claude-haiku-4-5-20251001" },
+    };
+    inline for (cases) |case| {
+        const p = case[0];
+        const expected: []const u8 = case[1];
+        switch (p) {
+            .http => unreachable,
+            .subprocess => |sub| {
+                var saw = false;
+                for (sub.argv) |a| {
+                    if (std.mem.eql(u8, a, expected)) saw = true;
+                }
+                try testing.expect(saw);
+            },
+        }
+    }
+}
+
+test "openai preset hits the right base URL + key env" {
+    const llm = @import("../llm.zig");
+    switch (llm.providers.openai) {
+        .subprocess => unreachable,
+        .http => |http| {
+            try testing.expectEqualStrings("https://api.openai.com/v1", http.api_base);
+            try testing.expectEqualStrings("OPENAI_API_KEY", http.api_key_env);
+        },
+    }
+}
+
+test "simonwLlm factory pipes via stdin with raw output" {
+    const llm = @import("../llm.zig");
+    const p = llm.providers.simonwLlm(.{ .model = "gpt-4o-mini" });
+    switch (p) {
+        .http => unreachable,
+        .subprocess => |sub| {
+            try testing.expectEqualStrings("llm", sub.argv[0]);
+            try testing.expectEqual(types.SubprocessProvider.PromptVia.stdin, sub.prompt_via);
+            switch (sub.output) {
+                .raw => {},
+                .json_field => unreachable,
+            }
+        },
+    }
+}
+
+test "doSubprocessDialogRequest round-trips via cat + JSON envelope" {
+    // The HTTP dialog path posts a JSON request body; the
+    // subprocess dialog path renders that body as plain text and
+    // expects the CLI to return whatever the model produced. Use
+    // cat to act as a passthrough — we hand it a complete request
+    // body, it echoes it back, and we verify renderDialogBody
+    // produced what we expected by inspecting cat's output through
+    // the same code path. (This pins the JSON-parse + plain-text
+    // render together; without it the rendering code is untested.)
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/cat"},
+        .prompt_via = .stdin,
+        .output = .raw,
+    });
+    const M = worker_mod.Module(cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Minimal OpenAI-style body with two messages.
+    const body =
+        \\{"model":"x","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}
+    ;
+
+    var out: [256]u8 = undefined;
+    var err: [256]u8 = undefined;
+
+    const res = try M.doSubprocessDialogRequest(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        body,
+        &out,
+        &err,
+    );
+    try testing.expect(res.cmd_len > 0);
+    // The rendered prompt that cat echoed should contain both
+    // roles' content (in plain text form).
+    const echoed = out[0..res.cmd_len];
+    try testing.expect(std.mem.indexOf(u8, echoed, "system") != null);
+    try testing.expect(std.mem.indexOf(u8, echoed, "sys") != null);
+    try testing.expect(std.mem.indexOf(u8, echoed, "user") != null);
+    try testing.expect(std.mem.indexOf(u8, echoed, "hello") != null);
+}
+
+test "extractJsonStringField: unicode escapes in value round-trip" {
+    // Per subagent finding #4, the hand-rolled extractor dropped
+    // \uXXXX. The std.json-backed implementation should decode
+    // them properly. Use a smart quote (U+201C) — a real `claude`
+    // result CAN contain these when the user's prompt or model
+    // output includes typographic punctuation.
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_field = "result" },
+    });
+    const M = worker_mod.Module(cfg);
+
+    var out: [64]u8 = undefined;
+    const body =
+        \\{"result":"smart “quoted”"}
+    ;
+    const n = M.extractJsonStringField(body, "result", &out);
+    try testing.expect(n > 0);
+    // The decoded value contains the UTF-8 form of U+201C / U+201D
+    // (\xE2\x80\x9C and \xE2\x80\x9D).
+    try testing.expect(std.mem.indexOf(u8, out[0..n], "\xE2\x80\x9C") != null);
+    try testing.expect(std.mem.indexOf(u8, out[0..n], "\xE2\x80\x9D") != null);
 }

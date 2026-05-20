@@ -54,32 +54,33 @@ pub const Provider = types.Provider;
 pub const HttpProvider = types.HttpProvider;
 pub const SubprocessProvider = types.SubprocessProvider;
 
-/// Convenience factories for common provider shapes. Users assemble
-/// these into `Config.provider`:
+/// Convenience factories + preset constants for common provider
+/// shapes. Users either grab a constant —
 ///
 /// ```zig
-/// .provider = atty.modules.llm.providers.claudeCode(.{ .model = "claude-sonnet-4-6" }),
+/// .provider = atty.modules.llm.providers.claude_sonnet_4_6,
+/// ```
+///
+/// — or build a tailored one via the factories:
+///
+/// ```zig
+/// .provider = atty.modules.llm.providers.claudeCode(.{
+///     .model = "claude-opus-4-7",
+///     .extra_argv = &.{ "--permission-mode", "acceptEdits" },
+/// }),
 /// ```
 pub const providers = struct {
     /// Build a subprocess provider for the Claude Code CLI's
     /// non-interactive mode (`claude -p --output-format json`).
-    /// The CLI handles its own auth (the user's `claude` login
-    /// state); atty doesn't see or manage tokens.
-    ///
-    /// `model` is optional — pass an empty string to let the CLI
-    /// use its configured default. The JSON-field extractor pulls
-    /// `result` (Claude Code's stdout shape with `--output-format
-    /// json`).
+    /// The CLI handles its own auth out of the user's `claude`
+    /// login state; atty doesn't see or manage tokens. `model`
+    /// empty → CLI default. `extra_argv` is appended after the
+    /// `--model X` slot for `--permission-mode`, `--mcp-config`,
+    /// etc.
     pub fn claudeCode(comptime options: struct {
-        /// Claude model identifier. Empty = CLI default.
         model: []const u8 = "",
-        /// Extra argv flags forwarded after `--model X`. Use for
-        /// `--permission-mode`, `--mcp-config`, etc.
         extra_argv: []const []const u8 = &.{},
     }) Provider {
-        // Compose argv at comptime — `options` is comptime so the
-        // whole construction is comptime-known and the resulting
-        // slice has static lifetime.
         const argv = comptime blk: {
             const has_model = options.model.len > 0;
             const base_len: usize = if (has_model) 6 else 4;
@@ -100,6 +101,76 @@ pub const providers = struct {
             .argv = argv,
             .prompt_via = .final_arg,
             .output = .{ .json_field = "result" },
+            .timeout_ms = 60_000,
+        } };
+    }
+
+    // ── Claude Code preset constants ─────────────────────────────
+    //
+    // Frozen Provider values for the current Claude family. New
+    // model releases land as new constants — old ones stay so
+    // users can pin a working config without chasing whatever
+    // happens to be latest. Model IDs match Anthropic's published
+    // identifiers as of the PR landing.
+
+    /// Claude Sonnet 4.5 — fast, default for shell-command work.
+    pub const claude_sonnet_4_5: Provider = claudeCode(.{ .model = "claude-sonnet-4-5" });
+    /// Claude Sonnet 4.6 — the current Sonnet recommended for
+    /// most agent flows.
+    pub const claude_sonnet_4_6: Provider = claudeCode(.{ .model = "claude-sonnet-4-6" });
+    /// Claude Opus 4.7 — biggest model. Slower + pricier but the
+    /// best at hairy `#:` prompts (multi-step transformations,
+    /// gnarly command pipelines).
+    pub const claude_opus_4_7: Provider = claudeCode(.{ .model = "claude-opus-4-7" });
+    /// Claude Haiku 4.5 — small + cheap. Good fit for the
+    /// single-line `#: <intent>` flow when latency matters more
+    /// than nuance.
+    pub const claude_haiku_4_5: Provider = claudeCode(.{ .model = "claude-haiku-4-5-20251001" });
+    /// CLI default — let `claude` pick whichever model the user
+    /// last selected via `claude config`. Most "I don't care,
+    /// just work" shape.
+    pub const claude_default: Provider = claudeCode(.{});
+
+    // ── HTTP preset constants ────────────────────────────────────
+
+    /// Hosted OpenAI. Pair with `Config.model = "gpt-4o-mini"`
+    /// (or any other OpenAI model id). Reads
+    /// `$OPENAI_API_KEY` for auth.
+    pub const openai: Provider = .{ .http = .{
+        .api_base = "https://api.openai.com/v1",
+        .api_key_env = "OPENAI_API_KEY",
+    } };
+
+    /// Local Ollama on the default port. Equivalent to the
+    /// out-of-the-box HTTP defaults — included for symmetry so
+    /// users can write `.provider = providers.ollama` without
+    /// thinking about whether the defaults match.
+    pub const ollama: Provider = .{ .http = .{
+        .api_base = "http://localhost:11434/v1",
+    } };
+
+    // ── Other CLI presets ────────────────────────────────────────
+
+    /// Simon Willison's `llm` CLI (https://llm.datasette.io).
+    /// Pipes the prompt via stdin; expects raw stdout. Pass the
+    /// model id and any extra argv (e.g. `&.{ "-s", "system…" }`).
+    pub fn simonwLlm(comptime options: struct {
+        model: []const u8,
+        extra_argv: []const []const u8 = &.{},
+    }) Provider {
+        const argv = comptime blk: {
+            var buf: [3 + options.extra_argv.len][]const u8 = undefined;
+            buf[0] = "llm";
+            buf[1] = "-m";
+            buf[2] = options.model;
+            for (options.extra_argv, 0..) |a, i| buf[3 + i] = a;
+            const fixed = buf;
+            break :blk &fixed;
+        };
+        return .{ .subprocess = .{
+            .argv = argv,
+            .prompt_via = .stdin,
+            .output = .raw,
             .timeout_ms = 60_000,
         } };
     }
@@ -217,7 +288,6 @@ pub fn configure(comptime cfg: Config) type {
         const env_mod = env_mod_ns.Module(cfg);
         const resolveApiBase = env_mod.resolveApiBase;
         const resolveApiKey = env_mod.resolveApiKey;
-        const resolveEnv = env_mod.resolveEnv;
         const resolveContextEnv = env_mod.resolveContextEnv;
         const resolveShell = env_mod.resolveShell;
 

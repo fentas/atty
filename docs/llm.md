@@ -58,9 +58,30 @@ the HTTP provider for a subprocess provider — atty shells out per
 request, the CLI handles auth out of its own login state, no env
 vars to wire.
 
+The fastest path is a preset:
+
+```zig
+.provider = atty.modules.llm.providers.claude_sonnet_4_6,
+```
+
+Available preset constants (all under `atty.modules.llm.providers`):
+
+| Preset                 | Notes                                                            |
+|------------------------|------------------------------------------------------------------|
+| `claude_sonnet_4_5`    | Sonnet 4.5 — solid default for shell-command work.               |
+| `claude_sonnet_4_6`    | Sonnet 4.6 — the current Sonnet recommended for most agent flows.|
+| `claude_opus_4_7`      | Opus 4.7 — biggest model. Slower + pricier, best for hairy prompts. |
+| `claude_haiku_4_5`     | Haiku 4.5 — small + cheap. Fast single-line `#:` flow.           |
+| `claude_default`       | Let the CLI pick whichever model your `claude config` selected. |
+| `openai`               | Hosted OpenAI (`https://api.openai.com/v1`, reads `$OPENAI_API_KEY`). Pair with `Config.model = "gpt-4o-mini"` or similar. |
+| `ollama`               | Local Ollama on `localhost:11434` — same as the default HTTP behavior, exposed as a constant for symmetry. |
+
+For something the presets don't cover, drop down to the factory:
+
 ```zig
 .provider = atty.modules.llm.providers.claudeCode(.{
     .model = "claude-sonnet-4-6",
+    .extra_argv = &.{ "--permission-mode", "acceptEdits" },
 }),
 ```
 

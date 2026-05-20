@@ -102,17 +102,32 @@ const atty = @import("atty");
 //         //     .api_base = "http://localhost:11434/v1",
 //         // }},
 //         //
-//         // …or shell out to a CLI tool that handles its own auth.
-//         // Use the `claudeCode` factory for Claude Code:
+//         // …or grab a preset constant — Claude Code variants
+//         // ship with model id, JSON output, and the right argv:
+//         //
+//         // .provider = atty.modules.llm.providers.claude_sonnet_4_6,
+//         // .provider = atty.modules.llm.providers.claude_opus_4_7,
+//         // .provider = atty.modules.llm.providers.claude_haiku_4_5,
+//         // .provider = atty.modules.llm.providers.claude_default,   // CLI picks
+//         //
+//         // …or hosted OpenAI + an OPENAI_API_KEY in env:
+//         //
+//         // .provider = atty.modules.llm.providers.openai,
+//         //
+//         // …or roll your own via the factories:
 //         //
 //         // .provider = atty.modules.llm.providers.claudeCode(.{
 //         //     .model = "claude-sonnet-4-6",
+//         //     .extra_argv = &.{ "--permission-mode", "acceptEdits" },
+//         // }),
+//         // .provider = atty.modules.llm.providers.simonwLlm(.{
+//         //     .model = "gpt-4o-mini",
 //         // }),
 //         //
-//         // …or hand-roll any prompt-in / text-out CLI:
+//         // …or any prompt-in / text-out CLI by hand:
 //         //
 //         // .provider = .{ .subprocess = .{
-//         //     .argv = &.{ "llm", "-m", "gpt-4o-mini" },
+//         //     .argv = &.{ "your-cli", "--flag" },
 //         //     .prompt_via = .stdin,
 //         //     .output = .raw,
 //         // }},
