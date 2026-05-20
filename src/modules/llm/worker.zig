@@ -589,6 +589,46 @@ pub fn Module(comptime cfg: Config) type {
                 return error.SubprocessFailed;
             };
 
+            // Watchdog state — shared atomic flags between the main
+            // thread and the timeout watchdog thread. `completed`
+            // is set by main once stdout EOF; the watchdog returns
+            // immediately if it sees that. `timed_out` is set by
+            // the watchdog on expiry so main can report the right
+            // error after `wait()` reaps the SIGKILL'd child.
+            var completed = std.atomic.Value(bool).init(false);
+            var timed_out = std.atomic.Value(bool).init(false);
+            const Watchdog = struct {
+                fn run(deadline_ms: u64, pid: std.posix.pid_t, done: *std.atomic.Value(bool), expired: *std.atomic.Value(bool)) void {
+                    // Poll the `done` flag in small slices instead
+                    // of sleeping the full budget — there's no
+                    // thread cancellation primitive in std, so the
+                    // only way to bail early is to wake up and
+                    // check. 50 ms is small enough to keep cleanup
+                    // latency imperceptible without spinning the
+                    // CPU.
+                    const slice_ms: u64 = 50;
+                    var elapsed_ms: u64 = 0;
+                    var req: std.c.timespec = .{ .sec = 0, .nsec = @intCast(slice_ms * std.time.ns_per_ms) };
+                    while (elapsed_ms < deadline_ms) {
+                        _ = std.c.nanosleep(&req, null);
+                        if (done.load(.acquire)) return;
+                        elapsed_ms += slice_ms;
+                    }
+                    // Timeout. SIGKILL via posix.kill bypasses
+                    // std.process.Child.kill's bookkeeping (which
+                    // races with the main thread's read/wait by
+                    // null-ing `child.id`). The child dying unblocks
+                    // the main thread's stdout read, and its
+                    // subsequent `wait()` reaps the corpse cleanly.
+                    expired.store(true, .release);
+                    std.posix.kill(pid, .KILL) catch {};
+                }
+            };
+            const watchdog_thread: ?std.Thread = if (sub.timeout_ms > 0 and child.id != null)
+                std.Thread.spawn(.{}, Watchdog.run, .{ sub.timeout_ms, child.id.?, &completed, &timed_out }) catch null
+            else
+                null;
+
             if (want_stdin) {
                 if (child.stdin) |stdin_file| {
                     var write_buf: [4096]u8 = undefined;
@@ -613,6 +653,8 @@ pub fn Module(comptime cfg: Config) type {
             const read_cap = cfg.max_response_bytes * 16;
             const stdout_file = child.stdout orelse {
                 child.kill(io);
+                completed.store(true, .release);
+                if (watchdog_thread) |t| t.join();
                 _ = child.wait(io) catch {};
                 err_len_out.* = writeStatic(error_out, "subprocess produced no stdout pipe");
                 return error.SubprocessFailed;
@@ -641,19 +683,38 @@ pub fn Module(comptime cfg: Config) type {
             var reader = stdout_file.reader(io, &read_buf);
             const stdout_bytes = reader.interface.allocRemaining(gpa, .limited(read_cap)) catch {
                 child.kill(io);
+                completed.store(true, .release);
                 if (stderr_thread) |t| t.join();
+                if (watchdog_thread) |t| t.join();
                 _ = child.wait(io) catch {};
                 err_len_out.* = writeStatic(error_out, "subprocess stdout read failed");
                 return error.SubprocessFailed;
             };
             errdefer gpa.free(stdout_bytes);
 
+            // Main work done — signal the watchdog to stand down
+            // BEFORE the wait() so the watchdog can exit promptly
+            // even if wait() blocks momentarily.
+            completed.store(true, .release);
             if (stderr_thread) |t| t.join();
+            if (watchdog_thread) |t| t.join();
 
             const term = child.wait(io) catch {
                 err_len_out.* = writeStatic(error_out, "subprocess wait failed");
                 return error.SubprocessFailed;
             };
+
+            // If the watchdog fired, the child was SIGKILL'd —
+            // report the timeout regardless of how `wait` framed
+            // the death. This needs to come BEFORE the generic
+            // signal-killed branch below so the user sees the
+            // actionable error.
+            if (timed_out.load(.acquire)) {
+                const formatted = std.fmt.bufPrint(error_out, "subprocess timed out ({d}ms)", .{sub.timeout_ms}) catch null;
+                err_len_out.* = if (formatted) |s| s.len else writeStatic(error_out, "subprocess timed out");
+                return error.SubprocessFailed;
+            }
+
             switch (term) {
                 .exited => |code| if (code != 0) {
                     const formatted = std.fmt.bufPrint(error_out, "subprocess exit {d}", .{code}) catch null;

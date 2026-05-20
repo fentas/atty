@@ -7,6 +7,7 @@ const testing = std.testing;
 
 const types = @import("types.zig");
 const worker_mod = @import("worker.zig");
+const nowMs = @import("../_lib.zig").nowMs;
 
 // Comptime config with a no-op subprocess provider — the actual
 // `.argv` gets supplied per-test via a constructed Config so the
@@ -308,6 +309,77 @@ test "doSubprocessDialogRequest round-trips via cat + JSON envelope" {
     try testing.expect(std.mem.indexOf(u8, echoed, "sys") != null);
     try testing.expect(std.mem.indexOf(u8, echoed, "user") != null);
     try testing.expect(std.mem.indexOf(u8, echoed, "hello") != null);
+}
+
+test "subprocess timeout: /bin/sleep 5 with 200ms budget gets SIGKILL'd" {
+    // The watchdog should fire well before the sleep completes.
+    // Allow a generous test margin (3 s) for slow CI runners — the
+    // 200 ms timeout is the LOWER bound; we only care that the
+    // call returns at all and reports the timeout error.
+    // Use .stdin so the prompt isn't appended as argv (sleep would
+    // reject the extra arg and exit non-zero before timeout fires).
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{ "/bin/sleep", "5" },
+        .prompt_via = .stdin,
+        .timeout_ms = 200,
+    });
+    const M = worker_mod.Module(cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var err: [128]u8 = undefined;
+    var err_len: usize = 0;
+
+    const start = nowMs();
+    const result = M.runSubprocess(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        "ignored",
+        &err,
+        &err_len,
+    );
+    const elapsed = nowMs() - start;
+
+    // Must fail with timeout error.
+    try testing.expectError(error.SubprocessFailed, result);
+    try testing.expect(err_len > 0);
+    try testing.expect(std.mem.indexOf(u8, err[0..err_len], "timed out") != null);
+    try testing.expect(std.mem.indexOf(u8, err[0..err_len], "200ms") != null);
+    // Must fire well before the 5 s sleep would have finished.
+    try testing.expect(elapsed < 3000);
+    // And not before the budget elapsed (give 30 ms of grace for
+    // poll-slice jitter on the watchdog's 50 ms cadence).
+    try testing.expect(elapsed >= 170);
+}
+
+test "subprocess timeout = 0 disables watchdog (echo still works)" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/echo"},
+        .prompt_via = .final_arg,
+        .timeout_ms = 0,
+    });
+    const M = worker_mod.Module(cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var err: [128]u8 = undefined;
+    var err_len: usize = 0;
+    const stdout = try M.runSubprocess(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        "hello",
+        &err,
+        &err_len,
+    );
+    defer testing.allocator.free(stdout);
+    try testing.expectEqual(@as(usize, 0), err_len);
+    try testing.expect(stdout.len > 0);
 }
 
 test "extractJsonStringField: unicode escapes in value round-trip" {
