@@ -302,39 +302,36 @@ session), a Block-verdict-marked PID tree can't `execve()`. Without
 eBPF you still get atty-side refusal (red REFUSED line + Ctrl+U
 readline clear) but the kernel doesn't know about it.
 
-Build with the feature:
+Build + install with eBPF in one step:
 
 ```sh
-make build-guard GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf
+sudo make install-guard GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf
 ```
 
-Requires `libbpf-dev` on the build host. The daemon also needs
-`CAP_BPF` at runtime — edit the system unit:
+Requires `libbpf-dev` on the build host. The `install-guard` target
+detects `ebpf` in `GUARD_FEATURES` and passes `--with-ebpf` to
+`contrib/install.sh`, which:
+
+1. Verifies the binary actually has the feature compiled in (via
+   `atty-guard --print-features`).
+2. Drops in `/etc/systemd/system/atty-guard.service.d/ebpf.conf`
+   with `AmbientCapabilities=CAP_BPF CAP_PERFMON`,
+   `SystemCallFilter=bpf perf_event_open` (widens the baseline
+   `@system-service` filter — both syscalls live in `@privileged`),
+   `RestrictNamespaces=` (clears the namespace lockout that blocks
+   some BPF map types), and `ExecStart=/usr/local/bin/atty-guard
+   --enable-ebpf`.
+3. Reloads + restarts the daemon.
+
+To disable eBPF later without rebuilding, remove the drop-in:
 
 ```sh
-sudo mkdir -p /etc/systemd/system/atty-guard.service.d
-sudo tee /etc/systemd/system/atty-guard.service.d/ebpf.conf <<EOF >/dev/null
-[Service]
-AmbientCapabilities=CAP_BPF CAP_PERFMON
-# Also need to lift one of the MAC restrictions — eBPF program
-# loading is blocked by the default systemd hardening profile.
-RestrictNamespaces=
-# The baseline unit ships SystemCallFilter=@system-service which
-# does NOT include bpf() or perf_event_open() — both live in the
-# @privileged set. Without widening, the daemon hits EPERM on
-# BPF_PROG_LOAD even with CAP_BPF granted (the message
-# `eBPF unavailable — Permission denied` in journalctl is the
-# tell). Widen the filter to @privileged for these two syscalls.
-SystemCallFilter=bpf perf_event_open
-# Pass --enable-ebpf to the daemon.
-ExecStart=
-ExecStart=/usr/local/bin/atty-guard --enable-ebpf
-EOF
+sudo rm -f /etc/systemd/system/atty-guard.service.d/ebpf.conf
 sudo systemctl daemon-reload
 sudo systemctl restart atty-guard
 ```
 
-Check that the kernel programs attached:
+Verify the kernel programs attached:
 
 ```sh
 sudo journalctl -u atty-guard -n 50 | grep eBPF
@@ -342,6 +339,13 @@ sudo journalctl -u atty-guard -n 50 | grep eBPF
 # If you see "atty-guard: eBPF unavailable — <reason>" the daemon
 # fell back to V2-A in-memory threat-map mode.
 ```
+
+Or run `atty doctor` — its eBPF check now reads `--print-features`
++ inspects the unit's `ExecStart` (via `systemctl show -p
+ExecStart`) and reports one of: feature missing / compiled but not
+configured / compiled + configured + journald confirms "attached" /
+compiled + configured but journald shows no attach (look for
+the actual error in the operator's preferred journalctl form).
 
 Common failure: kernel doesn't ship LSM BPF hooks. Most distros do
 since 5.7; check `cat /sys/kernel/security/lsm` for `bpf` in the
