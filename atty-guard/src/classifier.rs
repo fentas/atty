@@ -181,6 +181,13 @@ impl Classifier {
             matched: String::new(),
         })
     }
+
+    /// Snapshot of the always-on bundled atom corpus. Reaches
+    /// through to the Tier-1 AtomMatcher. Used by `atty-guard atoms
+    /// list --system` for operator visibility. Allocates.
+    pub fn system_atoms_snapshot(&self) -> Vec<String> {
+        self.tier1.atom_matcher.atoms_snapshot()
+    }
 }
 
 /// V2-J accumulator thresholds.

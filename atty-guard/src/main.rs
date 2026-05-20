@@ -29,6 +29,7 @@
 mod atom_fetcher;
 mod atom_matcher;
 mod classifier;
+mod cli_client;
 mod config;
 mod ebpf;
 mod onnx_backend;
@@ -37,6 +38,7 @@ mod protocol;
 mod sanitize;
 mod server;
 mod threat_map;
+mod trust_store;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -121,6 +123,79 @@ struct Cli {
     /// Valid: `gtfobins`, `sigma`. Empty = all enabled.
     #[arg(long, default_value = "")]
     atoms_sources: String,
+
+    /// Optional subcommand for the mediated trust-state interface
+    /// (PR #141). When absent, atty-guard runs as the daemon. When
+    /// present, atty-guard runs as a CLI client: it connects to the
+    /// running daemon via `--socket`, sends one request, prints the
+    /// reply, exits. Mutating subcommands require sudo so the
+    /// daemon's SO_PEERCRED check passes; read-only ones don't.
+    #[command(subcommand)]
+    command: Option<Subcommand>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Subcommand {
+    /// Manage per-user atom additions.
+    Atoms {
+        #[command(subcommand)]
+        op: AtomsOp,
+    },
+    /// Manage per-user URL allow/block decisions.
+    Urls {
+        #[command(subcommand)]
+        op: UrlsOp,
+    },
+    /// Inspect or persist the in-memory session trust state.
+    Session {
+        #[command(subcommand)]
+        op: SessionOp,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum AtomsOp {
+    /// Add `<pattern>` to the per-user atom list. Requires sudo.
+    Add {
+        pattern: String,
+    },
+    /// Remove `<pattern>` from the per-user atom list. Requires sudo.
+    Remove {
+        pattern: String,
+    },
+    /// List atoms. Defaults to `--user`; pass `--system` for the
+    /// bundled corpus or `--session` for the in-memory overlay.
+    List {
+        #[arg(long, conflicts_with_all = &["user", "session"])]
+        system: bool,
+        #[arg(long, conflicts_with_all = &["system", "session"])]
+        user: bool,
+        #[arg(long, conflicts_with_all = &["system", "user"])]
+        session: bool,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum UrlsOp {
+    /// Allow `<host>`. Requires sudo.
+    Allow { host: String },
+    /// Block `<host>`. Requires sudo.
+    Block { host: String },
+    /// List recorded URL decisions (persistent + session overlay).
+    List,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum SessionOp {
+    /// Show pending in-memory session decisions (no sudo).
+    List,
+    /// Discard the in-memory session (no sudo). Does NOT touch
+    /// persistent files.
+    Clear,
+    /// Persist the in-memory session into the per-UID atom + URL
+    /// files. Requires sudo because the target files live under
+    /// /var/lib/atty-guard/ owned `atty:atty`.
+    Write,
 }
 
 /// Parse the `--atoms-update-interval` value into a Duration.
@@ -209,7 +284,7 @@ fn default_socket_path() -> PathBuf {
 }
 
 fn main() -> std::io::Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let sources = parse_atom_sources(&cli.atoms_sources);
     let interval = parse_interval(&cli.atoms_update_interval)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
@@ -243,6 +318,16 @@ fn main() -> std::io::Result<()> {
                 ))
             }
         };
+    }
+
+    // If a subcommand was specified, run CLI-client mode instead of
+    // starting the daemon. Subcommand handlers do their own argument
+    // parsing + socket round-trip; daemon flags like --tier2 are
+    // silently ignored. Connect to the daemon at --socket (or the
+    // system-daemon default at /run/atty-guard/atty-guard.sock).
+    if let Some(cmd) = cli.command.take() {
+        let socket = cli.socket.unwrap_or_else(default_socket_path);
+        return cli_client::dispatch(&socket, cmd);
     }
 
     let socket = cli.socket.unwrap_or_else(default_socket_path);
@@ -352,6 +437,22 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // Per-UID atom + URL trust state lives under
+    // `/var/lib/atty-guard/users/<uid>/`. The StateDirectory= unit
+    // directive creates the parent (`/var/lib/atty-guard/`) as
+    // atty:atty 0750. The `users/` subdir is created lazily on
+    // first write — the directory layout is per-UID isolated so
+    // an empty directory is a fine starting state.
+    //
+    // Dev runs as a regular user get a STATE_DIRECTORY-less default
+    // which resolves to /var/lib/atty-guard/ (not writable) and
+    // gracefully no-ops on persistent ops. Tests pass an explicit
+    // tempdir to TrustStore::new.
+    let trust_root = std::env::var_os("STATE_DIRECTORY")
+        .map(|s| std::path::PathBuf::from(s).join("users"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/atty-guard/users"));
+    let trust_store = std::sync::Arc::new(trust_store::TrustStore::new(trust_root));
+
     server::serve(
         &socket,
         cli.verbosity,
@@ -360,5 +461,6 @@ fn main() -> std::io::Result<()> {
         file_cfg.accumulator.block_threshold,
         ebpf_state,
         osv_client,
+        trust_store,
     )
 }

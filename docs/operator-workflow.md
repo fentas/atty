@@ -130,35 +130,81 @@ systemctl --user daemon-reload
 
 Then `sudo make install-guard` for the new system daemon.
 
-## 3. Atom corpus (bundled today, refresh roadmap)
+## 3. Atom corpus + user trust state
 
-atty-guard ships with a hand-curated atom corpus baked into the
-binary at compile time (`include_str!` of
-`src/modules/security_guard/data/flagged_atoms.txt`). That's the ONLY
-corpus the running daemon uses today — no runtime file is read for
-atoms. Update flow today:
+**System corpus** — atty-guard ships with a hand-curated atom set
+baked into the binary at compile time (`include_str!` of
+`src/modules/security_guard/data/flagged_atoms.txt`). This is the
+always-on baseline; updates ride atty's release cadence.
+`atty-guard atoms list --system` prints it.
 
-1. The bundled corpus is refreshed pre-release by maintainers running
-   `atty-guard --update-atoms-now`, reviewing the diff, and committing
-   the refresh into the source tree.
-2. Users get the refreshed corpus via `git pull && make install-guard`
-   on release-please cadence.
+**User overlay** (post-#141) — operators can add per-user atoms via
+the mediated CLI. The user overlay is stored under
+`/var/lib/atty-guard/users/<uid>/atoms.user.txt` (`atty:atty` mode
+0640) and is applied as a substring scan on top of the system
+corpus at classify time. A hit upgrades a Safe verdict to Warn at
+0.6 confidence (same shape as a bundled-atom hit).
+
+Mutate the overlay through the daemon:
+
+```sh
+# Add an atom (sudo required — daemon enforces via SO_PEERCRED).
+sudo atty-guard atoms add 'my-internal-tool --insecure-flag'
+
+# Remove an atom.
+sudo atty-guard atoms remove 'my-internal-tool --insecure-flag'
+
+# List atoms by scope (defaults to --user).
+atty-guard atoms list                # user overlay (no sudo)
+atty-guard atoms list --system       # bundled corpus
+atty-guard atoms list --session      # ephemeral in-memory overlay
+```
+
+**URL decisions** — same pattern, separate file
+(`urls.decisions.txt`). Records `allow <host>` / `block <host>`
+entries. The runtime trust flow that promotes prompt taps into the
+session (`[A]llow always` / `[B]lock host forever`) lands in
+PR #142; the CLI surface here works today:
+
+```sh
+sudo atty-guard urls allow brew.sh
+sudo atty-guard urls block evil.io
+atty-guard urls list
+```
+
+**Session** — in-memory state that builds up through the lifetime
+of a daemon process (later via inline prompts; today the surface is
+empty until you opt in).
+
+```sh
+atty-guard session list      # show pending in-memory decisions
+atty-guard session clear     # discard them
+sudo atty-guard session write # persist them to the user files
+```
+
+`session write` is the ONLY session op that needs sudo — the others
+only touch ephemeral daemon state.
+
+**WHY sudo for mutations:** a process running as `$USER` could
+otherwise poison the user overlay with common-command atoms (`ls`,
+`cd`, ` `) — every keystroke fires Warn/Block, user disables
+atty-guard to regain a usable shell, detection gone. Requiring sudo
+keeps mutations behind admin intent, even when the entry is a
+"user's personal preference" addition.
+
+### Pre-release corpus refresh (maintainer-side)
+
+The bundled corpus is refreshed pre-release by maintainers running
+`atty-guard --update-atoms-now`, reviewing the diff, and committing
+the refresh into the source tree. Users get it via
+`git pull && sudo make install-guard` on release-please cadence.
 
 The `--update-atoms-now` CLI flag DOES exist on the shipped binary
-(behind `--features atoms-fetch`) and it does write to
-`$XDG_DATA_HOME/atty-guard/flagged_atoms.txt`. But that file is
-currently informational only — atty-guard does NOT load it at
-runtime. Running the fetch as an unprivileged user is harmless but
-doesn't change detection behaviour.
-
-Why not runtime-load: a user-writable atoms file is a DOS vector. A
-process running as the user could append `ls`, `cd`, ` ` etc. to the
-file; on daemon reload every keystroke would fire Block; the user
-would disable atty-guard to regain a usable shell; detection gone.
-The fix (planned, post-#139): atty-guard runs under a dedicated
-`atty` user/group, atom files live at `/var/lib/atty-guard/`
-mode-0640 atty:atty, mutations go through `sudo atty-guard atoms
-add/remove`, daemon refuses to load on permission drift.
+(behind `--features atoms-fetch`) and writes to
+`$XDG_DATA_HOME/atty-guard/flagged_atoms.txt`. But the daemon does
+NOT load that file at runtime — it's a maintainer convenience for
+preparing a candidate diff against the bundled corpus, NOT a
+runtime hot-reload path.
 
 Sources fetched: `gtfobins` (~357 atoms after filter) and `sigma`
 (`/rules/linux/**` only, ~369 atoms). LOLBAS was dropped because it's
