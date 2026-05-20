@@ -320,8 +320,17 @@ const shell_doctor_snippet =
     \\__atty_doctor_guard_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service"
     \\if [ -n "$__atty_doctor_guard_bin" ] || [ -f "$__atty_doctor_guard_unit" ]; then
     \\    printf '\n\033[1matty doctor\033[0m — atty-guard sidecar\n\n'
+    \\    # Bare label when the binary isn't found — otherwise the
+    \\    # check renders "binary present ()" with empty parens on
+    \\    # the failure path, which reads like "we know where it is,
+    \\    # we just won't tell you" rather than "couldn't find it".
+    \\    if [ -n "$__atty_doctor_guard_bin" ]; then
+    \\        __atty_doctor_guard_bin_label="atty-guard binary present ($__atty_doctor_guard_bin)"
+    \\    else
+    \\        __atty_doctor_guard_bin_label="atty-guard binary present"
+    \\    fi
     \\    __atty_doctor_check '[ -n "'"$__atty_doctor_guard_bin"'" ]' \
-    \\        "atty-guard binary present ($__atty_doctor_guard_bin)" \
+    \\        "$__atty_doctor_guard_bin_label" \
     \\        'install with `make install-guard` (from the atty source tree) or download the binary from https://github.com/fentas/atty/releases'
     \\    __atty_doctor_check '[ -f "'"$__atty_doctor_guard_unit"'" ]' \
     \\        'atty-guard.service systemd-user unit installed' \
@@ -369,7 +378,8 @@ const shell_doctor_snippet =
     \\fi
     \\unset -f __atty_doctor_ok __atty_doctor_fail __atty_doctor_warn __atty_doctor_check 2>/dev/null
     \\unset __atty_doctor_pass __atty_doctor_fail_count \
-    \\      __atty_doctor_guard_bin __atty_doctor_guard_unit \
+    \\      __atty_doctor_guard_bin __atty_doctor_guard_bin_label \
+    \\      __atty_doctor_guard_unit \
     \\      __atty_doctor_guard_sock __atty_doctor_guard_atoms 2>/dev/null
     \\
 ;

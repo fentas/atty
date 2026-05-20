@@ -173,6 +173,13 @@ AmbientCapabilities=CAP_BPF CAP_PERFMON
 # Also need to lift one of the MAC restrictions — eBPF program
 # loading is blocked by the default systemd hardening profile.
 RestrictNamespaces=
+# The baseline unit ships SystemCallFilter=@system-service which
+# does NOT include bpf() or perf_event_open() — both live in the
+# @privileged set. Without widening, the daemon hits EPERM on
+# BPF_PROG_LOAD even with CAP_BPF granted (the message
+# `eBPF unavailable — Permission denied` in journalctl is the
+# tell). Widen the filter to @privileged for these two syscalls.
+SystemCallFilter=bpf perf_event_open
 # Pass --enable-ebpf to the daemon.
 ExecStart=
 ExecStart=%h/.local/bin/atty-guard --enable-ebpf
