@@ -171,10 +171,11 @@ fn session_write_persists_and_clears() {
     assert_eq!(report.urls_block_added, 1);
 
     // Session cleared (all entries were valid).
-    let (atoms, allow, block) = store.session_summary(1000);
+    let (atoms, allow, block, trust) = store.session_summary(1000);
     assert!(atoms.is_empty());
     assert!(allow.is_empty());
     assert!(block.is_empty());
+    assert!(trust.is_empty());
 
     // Persistent contains everything.
     assert_eq!(
@@ -265,6 +266,47 @@ fn file_parser_skips_unknown_url_verbs_forward_compat() {
     assert_eq!(block.len(), 1);
     assert!(allow.contains("good.io"));
     assert!(block.contains("bad.io"));
+}
+
+#[test]
+fn session_add_trust_validates_hash_shape() {
+    let (store, _tmp) = fresh_store();
+    // Good SHA-256 hex.
+    store
+        .session_add_trust(
+            1000,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+    assert!(store.is_session_trusted(
+        1000,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ));
+    // Wrong length.
+    let err = store.session_add_trust(1000, "short").unwrap_err();
+    assert!(err.contains("length"));
+    // Non-hex / uppercase.
+    let err = store
+        .session_add_trust(
+            1000,
+            "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap_err();
+    assert!(err.contains("lowercase"));
+}
+
+#[test]
+fn session_clear_drops_trust_set() {
+    let (store, _tmp) = fresh_store();
+    store
+        .session_add_trust(
+            1000,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+    store.session_clear(1000);
+    let (_, _, _, trust) = store.session_summary(1000);
+    assert!(trust.is_empty());
 }
 
 #[test]

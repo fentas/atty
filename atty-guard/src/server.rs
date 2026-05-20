@@ -509,11 +509,13 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 Ok(u) => u,
                 Err(msg) => return ResponseBody::Error { message: msg },
             };
-            let (atoms, urls_allow, urls_block) = state.trust_store.session_summary(uid);
+            let (atoms, urls_allow, urls_block, trust) =
+                state.trust_store.session_summary(uid);
             ResponseBody::SessionList {
                 atoms,
                 urls_allow,
                 urls_block,
+                trust,
             }
         }
         Request::SessionClear { target_uid } => {
@@ -523,6 +525,26 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             };
             state.trust_store.session_clear(uid);
             ResponseBody::Ok
+        }
+        Request::SessionAddTrust { hash, target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.session_add_trust(uid, &hash) {
+                Ok(()) => ResponseBody::Ok,
+                Err(e) => ResponseBody::Error { message: e },
+            }
+        }
+        Request::SessionAddUrlBlock { host, target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.session_add_url_block(uid, &host) {
+                Ok(()) => ResponseBody::Ok,
+                Err(e) => ResponseBody::Error { message: e },
+            }
         }
         Request::SessionWrite { target_uid } => {
             if !peer.is_root {

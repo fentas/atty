@@ -202,6 +202,55 @@ pub const Client = struct {
 
     pub const ThreatLevel = enum { low, high, critical };
 
+    /// PR #142 — best-effort mirror of an `[a]llow always` keystroke
+    /// to the daemon. atty's session_trust set is authoritative for
+    /// the runtime check; this RPC just lets `atty-guard session
+    /// list` show the operator what they trusted in this session.
+    /// Errors are silently dropped: the local trust takes effect
+    /// regardless of daemon reachability.
+    pub fn sessionAddTrust(self: *Client, hash: []const u8) Error!void {
+        try self.ensureConnected();
+        var w: std.Io.Writer = .fixed(&self.write_buf);
+        const id = self.next_id;
+        self.next_id +%= 1;
+        (w.print(
+            "{{\"id\":{d},\"method\":\"session_add_trust\",\"hash\":\"{s}\"}}\n",
+            .{ id, hash },
+        )) catch return Error.OutOfMemory;
+        self.writeAll(self.write_buf[0..w.end]) catch {
+            self.close();
+            return Error.Unavailable;
+        };
+        _ = self.readLine() catch {
+            self.close();
+            return Error.Unavailable;
+        };
+    }
+
+    /// PR #142 — best-effort mirror of a `[B]lock host forever`
+    /// keystroke to the daemon. Same trade-off as
+    /// `sessionAddTrust`: local block is authoritative, daemon
+    /// receives a copy for `atty-guard session list` visibility +
+    /// future `sudo atty-guard session write` persistence.
+    pub fn sessionAddUrlBlock(self: *Client, host: []const u8) Error!void {
+        try self.ensureConnected();
+        var w: std.Io.Writer = .fixed(&self.write_buf);
+        const id = self.next_id;
+        self.next_id +%= 1;
+        (w.print(
+            "{{\"id\":{d},\"method\":\"session_add_url_block\",\"host\":\"{s}\"}}\n",
+            .{ id, host },
+        )) catch return Error.OutOfMemory;
+        self.writeAll(self.write_buf[0..w.end]) catch {
+            self.close();
+            return Error.Unavailable;
+        };
+        _ = self.readLine() catch {
+            self.close();
+            return Error.Unavailable;
+        };
+    }
+
     // --- internals -----------------------------------------------------
 
     fn ensureConnected(self: *Client) Error!void {

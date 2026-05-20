@@ -173,8 +173,27 @@ atty-guard urls list
 ```
 
 **Session** — in-memory state that builds up through the lifetime
-of a daemon process (later via inline prompts; today the surface is
-empty until you opt in).
+of an atty session. Populated either via the daemon CLI (`sudo
+atty-guard atoms add ...`) or, post-#142, via inline keystrokes on
+the security_guard banner:
+
+```
+atty security_guard: <reason>
+        match: <substring>
+        [y]es once · [a]llow always · [t]rust permanently · [B]lock host forever · any other key cancels.
+```
+
+| Key | Effect |
+|---|---|
+| `[y]` | run this one command, nothing remembered |
+| `[a]llow always` | session-trust the (category, matched) hash — won't re-prompt until atty exits. Mirrored to daemon for `atty-guard session list` visibility. |
+| `[t]rust permanently` | unchanged — atty proxy writes to `~/.cache/atty/security_trust.txt` |
+| `[B]lock host forever` | extract host from the matched URL, add to session-block list. Future commands containing that host get REFUSED outright (red line + readline cleared). Mirrored to daemon. Cancels the current command too. Falls through to `[cancel]` when the match has no URL host. |
+| any other | cancel — Ctrl+U clears readline, nothing remembered |
+
+`[a]` / `[B]` decisions are SESSION-only — they live in atty's
+runtime memory + the daemon's per-UID session state. They evaporate
+when atty exits. To persist them across atty restarts:
 
 ```sh
 atty-guard session list      # show pending in-memory decisions

@@ -160,8 +160,13 @@ fn handle_session_list(socket: &Path, target_uid: Option<u32>) -> std::io::Resul
             atoms,
             urls_allow,
             urls_block,
+            trust,
         } => {
-            if atoms.is_empty() && urls_allow.is_empty() && urls_block.is_empty() {
+            if atoms.is_empty()
+                && urls_allow.is_empty()
+                && urls_block.is_empty()
+                && trust.is_empty()
+            {
                 println!("(session is empty)");
                 return Ok(());
             }
@@ -180,6 +185,12 @@ fn handle_session_list(socket: &Path, target_uid: Option<u32>) -> std::io::Resul
             if !urls_block.is_empty() {
                 println!("urls block ({}):", urls_block.len());
                 for h in urls_block {
+                    println!("  {h}");
+                }
+            }
+            if !trust.is_empty() {
+                println!("trust ({}):", trust.len());
+                for h in trust {
                     println!("  {h}");
                 }
             }

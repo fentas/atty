@@ -52,6 +52,13 @@ pub struct PerUserState {
     pub session_urls_allow: HashSet<String>,
     /// Session-only URL block decisions.
     pub session_urls_block: HashSet<String>,
+    /// PR #142: session trust hashes — `[a]llow always` taps from
+    /// the security_guard banner. Each entry is the lowercase hex
+    /// SHA-256 of `<category>:<matched>` as computed atty-side in
+    /// `security_guard/trust_cache.zig::hashCategoryMatch`. Classify
+    /// dispatch consults this set BEFORE the overlay scan; a hit
+    /// short-circuits to Safe and the command flows through.
+    pub session_trust: HashSet<String>,
 }
 
 /// Daemon-wide trust store. Keyed by UID. Persistent data dir is
@@ -168,16 +175,20 @@ impl TrustStore {
         out
     }
 
-    pub fn session_summary(&self, uid: u32) -> (Vec<String>, Vec<String>, Vec<String>) {
+    pub fn session_summary(
+        &self,
+        uid: u32,
+    ) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
         let state = self.state.lock().expect("trust_store poisoned");
         let entry = match state.get(&uid) {
             Some(e) => e,
-            None => return (Vec::new(), Vec::new(), Vec::new()),
+            None => return (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
         (
             sorted_vec(&entry.session_atoms),
             sorted_vec(&entry.session_urls_allow),
             sorted_vec(&entry.session_urls_block),
+            sorted_vec(&entry.session_trust),
         )
     }
 
@@ -187,7 +198,50 @@ impl TrustStore {
             entry.session_atoms.clear();
             entry.session_urls_allow.clear();
             entry.session_urls_block.clear();
+            entry.session_trust.clear();
         }
+    }
+
+    /// PR #142 — add a SHA-256 trust hash to the session set.
+    /// Validates the hash shape (64 lowercase hex chars) to keep
+    /// the set from filling with malformed strings.
+    pub fn session_add_trust(&self, uid: u32, hash: &str) -> Result<(), String> {
+        validate_trust_hash(hash)?;
+        let mut state = self.state.lock().expect("trust_store poisoned");
+        state
+            .entry(uid)
+            .or_default()
+            .session_trust
+            .insert(hash.to_owned());
+        Ok(())
+    }
+
+    /// PR #142 — mirror an atty-side `[B]lock host forever`
+    /// keystroke into the per-UID session_urls_block set. atty
+    /// proxy enforces locally; this is the visibility log.
+    pub fn session_add_url_block(&self, uid: u32, host: &str) -> Result<(), String> {
+        validate_host(host)?;
+        let mut state = self.state.lock().expect("trust_store poisoned");
+        state
+            .entry(uid)
+            .or_default()
+            .session_urls_block
+            .insert(host.to_owned());
+        Ok(())
+    }
+
+    /// Daemon-side hot-path predicate: is `hash` in the caller's
+    /// session trust set? Today no daemon code path calls this —
+    /// the runtime check is atty-side. Kept as a hook for a future
+    /// daemon-side defense-in-depth check, OR for PR #143's
+    /// `commands.trusted.txt` persistence path.
+    #[allow(dead_code)]
+    pub fn is_session_trusted(&self, uid: u32, hash: &str) -> bool {
+        let state = self.state.lock().expect("trust_store poisoned");
+        state
+            .get(&uid)
+            .map(|e| e.session_trust.contains(hash))
+            .unwrap_or(false)
     }
 
     /// Append a session-only atom add. Called from a daemon-side hook
@@ -451,6 +505,21 @@ fn validate_atom(atom: &str) -> Result<(), String> {
              these match no real input"
                 .into(),
         );
+    }
+    Ok(())
+}
+
+fn validate_trust_hash(hash: &str) -> Result<(), String> {
+    // SHA-256 in lowercase hex = exactly 64 chars `[0-9a-f]`. Keeps
+    // the session_trust set from collecting bogus uppercase /
+    // truncated values that would never match a real hash on
+    // dispatch. The shape is fixed atty-side in
+    // security_guard/trust_cache.zig::hashCategoryMatch.
+    if hash.len() != 64 {
+        return Err(format!("trust hash length {} (expected 64)", hash.len()));
+    }
+    if !hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err("trust hash contains non-lowercase-hex chars".into());
     }
     Ok(())
 }

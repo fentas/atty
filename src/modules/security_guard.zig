@@ -92,6 +92,24 @@ pub fn configure(comptime cfg: Config) type {
             armed_match: [256]u8 = undefined,
             armed_match_len: usize = 0,
             trust: TrustCache = .{},
+            /// PR #142 — session-only trust set, populated by the
+            /// banner's `[a]llow always` keystroke. Identical shape
+            /// to `trust` (hex SHA-256 hashes of "category:matched")
+            /// but never persisted to disk — cleared on atty exit.
+            /// `queryDaemon` + the in-proc pattern walk consult this
+            /// set in addition to `trust`, so an `[a]` tap silently
+            /// short-circuits the banner for the rest of the session.
+            session_trust: TrustCache = .{},
+            /// PR #142 — session-only blocked hosts, populated by
+            /// the banner's `[B]lock host forever` keystroke.
+            /// Each entry is a literal host (e.g. `evil.io`); a
+            /// future command whose committed line contains any
+            /// blocked host gets a REFUSED line + readline cleared,
+            /// no banner. Storage is `[256]u8` slots inline so
+            /// detach doesn't need an allocator to drop them.
+            session_blocked_hosts: [16][64]u8 = undefined,
+            session_blocked_hosts_lens: [16]u8 = std.mem.zeroes([16]u8),
+            session_blocked_hosts_count: u8 = 0,
             /// `attach` records the allocator so per-Runtime
             /// helpers don't need to plumb it through every call
             /// path. atty modules already share `ctx.allocator`,
@@ -176,7 +194,10 @@ pub fn configure(comptime cfg: Config) type {
 
         pub fn detach(rt: *Runtime, io: std.Io) void {
             _ = io;
-            if (rt.allocator) |a| rt.trust.deinit(a);
+            if (rt.allocator) |a| {
+                rt.trust.deinit(a);
+                rt.session_trust.deinit(a);
+            }
             if (rt.daemon) |*d| d.deinit();
         }
 
@@ -207,6 +228,16 @@ pub fn configure(comptime cfg: Config) type {
             const committed = ctx.line.lastCommitted();
             const line = committed orelse ctx.line.current();
 
+            // PR #142 — short-circuit on `[B]lock host forever`
+            // entries from earlier in the session. The user has
+            // already declared "I never want this host again",
+            // so we don't even need to consult the daemon /
+            // in-proc patterns. REFUSED line + readline clear.
+            if (lineIsSessionBlocked(rt, line)) {
+                writeRefused(rt, "session-blocked host", line);
+                return .{ .replace = "\x15" };
+            }
+
             // Sidecar first when configured. The daemon's verdict is
             // authoritative when present — it sees BOTH Tier-1 (a
             // superset of our in-proc patterns) AND Tier-2 (encoder
@@ -236,6 +267,8 @@ pub fn configure(comptime cfg: Config) type {
                 var hash_buf: [trust_mod.hex_len]u8 = undefined;
                 const hash = trust_mod.hashCategoryMatch(pat.category, matched, &hash_buf);
                 if (rt.trust.contains(hash)) return .forward;
+
+                if (rt.session_trust.contains(hash)) return .forward;
 
                 rt.armed = true;
                 rt.armed_pattern_idx = idx;
@@ -300,6 +333,7 @@ pub fn configure(comptime cfg: Config) type {
                 var hash_buf: [trust_mod.hex_len]u8 = undefined;
                 const hash = trust_mod.hashCategoryMatch(lc, result.matched, &hash_buf);
                 if (rt.trust.contains(hash)) return .{ .armed = false, .refused = false };
+                if (rt.session_trust.contains(hash)) return .{ .armed = false, .refused = false };
             }
 
             if (result.verdict == .block) {
@@ -336,6 +370,27 @@ pub fn configure(comptime cfg: Config) type {
                     markShellThreat(rt, ctx, pending);
                     return .{ .replace = "\r" };
                 },
+                'a', 'A' => {
+                    // [a]llow always (this session). Compute the
+                    // same hash as [t] but store in session_trust
+                    // instead of the persistent cache. No daemon
+                    // round-trip required — the next classify
+                    // (in-proc or daemon-side) consults
+                    // session_trust BEFORE arming the banner, so
+                    // the user won't see this match again until
+                    // atty exits.
+                    addSessionTrust(rt, armed_daemon_cat);
+                    markShellThreat(rt, ctx, pending);
+                    return .{ .replace = "\r" };
+                },
+                'b', 'B' => {
+                    // [B]lock host forever — extract host from the
+                    // matched substring + send to daemon as a
+                    // persistent block decision. Only applies to
+                    // URL-shaped categories (curl_pipe_sh); other
+                    // hits silently fall through to cancel.
+                    return blockHostThenCancel(rt, armed_daemon_cat);
+                },
                 't', 'T' => {
                     // Compute the local category — either from the
                     // armed in-proc pattern index, or from the
@@ -370,6 +425,103 @@ pub fn configure(comptime cfg: Config) type {
                     return .{ .replace = "\x15" };
                 },
             }
+        }
+
+        /// PR #142 — `[a]llow always` handler. Computes the same
+        /// (category, matched) hash as `[t]rust permanently` and
+        /// adds it to the session-only trust set. Best-effort
+        /// daemon mirror via SessionAddTrust so `atty-guard session
+        /// list` surfaces the operator's choices.
+        fn addSessionTrust(
+            rt: *Runtime,
+            armed_daemon_cat: ?uds_client_mod.Category,
+        ) void {
+            const local_cat: ?patterns_mod.Category = blk: {
+                if (armed_daemon_cat) |dc| break :blk dc.toLocal();
+                if (rt.armed_pattern_idx < cfg.patterns.len) {
+                    break :blk cfg.patterns[rt.armed_pattern_idx].category;
+                }
+                break :blk null;
+            };
+            const lc = local_cat orelse return;
+            var hash_buf: [trust_mod.hex_len]u8 = undefined;
+            const hash = trust_mod.hashCategoryMatch(
+                lc,
+                rt.armed_match[0..rt.armed_match_len],
+                &hash_buf,
+            );
+            if (rt.allocator) |a| {
+                _ = rt.session_trust.add(a, hash) catch {};
+            }
+            if (rt.daemon) |*client| {
+                client.sessionAddTrust(hash) catch {};
+            }
+        }
+
+        /// PR #142 — `[B]lock host forever` handler. Extracts the
+        /// host substring from the armed match (best-effort: looks
+        /// for `://` then takes the next host-shaped token) and
+        /// adds it to the session-only blocked-hosts list. Daemon
+        /// mirror via SessionAddUrlBlock. Falls through to cancel
+        /// when no host can be extracted (atom-only matches like
+        /// `chmod +s` have no host concept).
+        fn blockHostThenCancel(
+            rt: *Runtime,
+            armed_daemon_cat: ?uds_client_mod.Category,
+        ) m.Action {
+            _ = armed_daemon_cat; // daemon category isn't needed; host is the key.
+            const matched = rt.armed_match[0..rt.armed_match_len];
+            const host = extractHost(matched) orelse {
+                // No URL in the matched substring — [B] degrades to
+                // [cancel]. Readline cleared, no persistent change.
+                return .{ .replace = "\x15" };
+            };
+            if (rt.session_blocked_hosts_count < rt.session_blocked_hosts.len) {
+                const slot = rt.session_blocked_hosts_count;
+                const copy_len = @min(host.len, rt.session_blocked_hosts[slot].len);
+                @memcpy(rt.session_blocked_hosts[slot][0..copy_len], host[0..copy_len]);
+                rt.session_blocked_hosts_lens[slot] = @intCast(copy_len);
+                rt.session_blocked_hosts_count += 1;
+            }
+            if (rt.daemon) |*client| {
+                client.sessionAddUrlBlock(host) catch {};
+            }
+            // Cancel the current command too — `[B]lock` implies
+            // "don't run this one either."
+            return .{ .replace = "\x15" };
+        }
+
+        /// Best-effort URL-host extractor. Returns the slice of `s`
+        /// representing the host of the first `scheme://host[:port]/`
+        /// occurrence, or null if no URL shape is found. Used by
+        /// the `[B]lock host forever` keystroke handler.
+        fn extractHost(s: []const u8) ?[]const u8 {
+            const scheme_at = std.mem.indexOf(u8, s, "://") orelse return null;
+            const after = s[scheme_at + 3 ..];
+            // Host ends at `/`, `:`, `?`, `#`, whitespace, or EOL.
+            var end: usize = 0;
+            while (end < after.len) : (end += 1) {
+                const c = after[end];
+                if (c == '/' or c == ':' or c == '?' or c == '#' or c == ' ' or c == '\t') break;
+            }
+            if (end == 0) return null;
+            return after[0..end];
+        }
+
+        /// PR #142 — short-circuit predicate for the in-proc + daemon
+        /// classify paths. Returns true when the committed line
+        /// contains any host the operator added via `[B]lock host
+        /// forever`. Caller refuses outright (readline clear, no
+        /// banner) when this returns true.
+        fn lineIsSessionBlocked(rt: *Runtime, line: []const u8) bool {
+            var i: usize = 0;
+            while (i < rt.session_blocked_hosts_count) : (i += 1) {
+                const len = rt.session_blocked_hosts_lens[i];
+                if (len == 0) continue;
+                const host = rt.session_blocked_hosts[i][0..len];
+                if (std.mem.indexOf(u8, line, host) != null) return true;
+            }
+            return false;
         }
 
         /// Push `level` to atty-guard for the shell's PID tree
@@ -458,7 +610,7 @@ pub fn configure(comptime cfg: Config) type {
             var buf: [1024]u8 = undefined;
             const msg = std.fmt.bufPrint(
                 &buf,
-                "\r\n{f}atty security_guard: {s}{s}\r\n        match: {s}{s}\r\n        [y]es once · [t]rust permanently · any other key cancels.\r\n",
+                "\r\n{f}atty security_guard: {s}{s}\r\n        match: {s}{s}\r\n        [y]es once · [a]llow always · [t]rust permanently · [B]lock host forever · any other key cancels.\r\n",
                 .{ cfg.warning_style, description, style_mod.reset, trunc_match, ellipsis },
             ) catch {
                 var fb: [128]u8 = undefined;
