@@ -99,7 +99,12 @@ pub struct TrustStore {
     /// journald warning and the in-memory copy stays at whatever
     /// it was. classify hot path scans this alongside the
     /// per-UID overlays.
-    system_fetched_atoms: Mutex<HashSet<String>>,
+    ///
+    /// Wrapped in `Arc<Vec<String>>` so the classify hot path can
+    /// clone JUST the Arc (one refcount bump, no per-atom string
+    /// clone) instead of allocating a Vec per request. The mutex
+    /// is held only briefly during the swap-on-reload.
+    system_fetched_atoms: Mutex<std::sync::Arc<Vec<String>>>,
     /// Path of `atoms.system.txt`. Cached at construction so the
     /// classify path doesn't re-derive it per request. Lives at
     /// `<state_root>/../atoms.system.txt` because `data_root` is
@@ -128,7 +133,7 @@ impl TrustStore {
             data_root,
             state: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashSet::new()),
-            system_fetched_atoms: Mutex::new(HashSet::new()),
+            system_fetched_atoms: Mutex::new(std::sync::Arc::new(Vec::new())),
             system_fetched_path,
             system_fetched_loaded: Mutex::new(false),
         }
@@ -142,11 +147,17 @@ impl TrustStore {
     pub fn reload_system_fetched(&self) -> std::io::Result<usize> {
         let parsed = read_system_atoms_file_checked(&self.system_fetched_path)?;
         let count = parsed.len();
+        // Materialize into a sorted Vec for stable scan order on
+        // the hot path (deterministic `reason` text when multiple
+        // atoms could match).
+        let mut sorted: Vec<String> = parsed.into_iter().collect();
+        sorted.sort();
+        let snapshot = std::sync::Arc::new(sorted);
         let mut atoms = self
             .system_fetched_atoms
             .lock()
             .expect("system_fetched_atoms poisoned");
-        *atoms = parsed;
+        *atoms = snapshot;
         let mut loaded = self
             .system_fetched_loaded
             .lock()
@@ -183,14 +194,14 @@ impl TrustStore {
     }
 
     /// Snapshot of the system-fetched corpus for classify-time
-    /// substring scan. Allocates; the hot path takes the lock
-    /// briefly and clones the strings.
-    pub fn list_system_fetched(&self) -> Vec<String> {
-        let atoms = self
-            .system_fetched_atoms
+    /// substring scan. Cheap: bumps the Arc refcount, no atom
+    /// strings get cloned. The classify hot path iterates the
+    /// returned slice — keeps per-Enter allocation bounded.
+    pub fn list_system_fetched(&self) -> std::sync::Arc<Vec<String>> {
+        self.system_fetched_atoms
             .lock()
-            .expect("system_fetched_atoms poisoned");
-        atoms.iter().cloned().collect()
+            .expect("system_fetched_atoms poisoned")
+            .clone()
     }
 
     /// Load `atoms.user.txt` + `urls.decisions.txt` for `uid` from

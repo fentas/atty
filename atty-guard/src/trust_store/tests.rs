@@ -422,9 +422,9 @@ fn system_fetched_loads_when_perms_ok() {
     let n = store.reload_system_fetched().unwrap();
     assert_eq!(n, 2);
     let listed = store.list_system_fetched();
-    let mut s: Vec<String> = listed.into_iter().collect();
-    s.sort();
-    assert_eq!(s, vec!["bash -i >&".to_string(), "nc -e".to_string()]);
+    // reload_system_fetched stores a pre-sorted snapshot; iterate
+    // the Arc'd Vec directly without resorting.
+    assert_eq!(listed.as_ref(), &vec!["bash -i >&".to_string(), "nc -e".to_string()]);
 }
 
 #[test]

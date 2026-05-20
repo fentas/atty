@@ -321,27 +321,41 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 );
                 // Scan order: system-fetched (shared, daemon-managed)
                 // → user persistent (per-UID, sudo-mediated) → user
-                // session (per-UID, banner-driven). First-match-wins
-                // since all three produce identical Safe→Warn upgrades;
-                // ordering is for the `reason` text only.
-                for atom in system_fetched
-                    .iter()
-                    .chain(overlay_persistent.iter())
-                    .chain(overlay_session.iter())
-                {
+                // session (per-UID, banner-driven). First-match-wins;
+                // each branch labels its own `reason` so the operator
+                // sees which scope fired (helps debug "why is this
+                // command being flagged?").
+                let mut hit: Option<(&'static str, String)> = None;
+                for atom in system_fetched.iter() {
                     if command.contains(atom.as_str()) {
-                        result = ClassifyResult {
-                            verdict: Verdict::Warn,
-                            category: Category::None,
-                            confidence: 0.6,
-                            reason: format!(
-                                "user-overlay atom matched: `{}`",
-                                atom
-                            ),
-                            matched: atom.clone(),
-                        };
+                        hit = Some(("system-fetched", atom.clone()));
                         break;
                     }
+                }
+                if hit.is_none() {
+                    for atom in overlay_persistent.iter() {
+                        if command.contains(atom.as_str()) {
+                            hit = Some(("user-persistent", atom.clone()));
+                            break;
+                        }
+                    }
+                }
+                if hit.is_none() {
+                    for atom in overlay_session.iter() {
+                        if command.contains(atom.as_str()) {
+                            hit = Some(("user-session", atom.clone()));
+                            break;
+                        }
+                    }
+                }
+                if let Some((scope, atom)) = hit {
+                    result = ClassifyResult {
+                        verdict: Verdict::Warn,
+                        category: Category::None,
+                        confidence: 0.6,
+                        reason: format!("{scope} atom matched: `{atom}`"),
+                        matched: atom,
+                    };
                 }
             }
 

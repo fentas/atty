@@ -141,9 +141,12 @@ const atty = @import("atty");
 //
 // On match: Enter is swallowed, a banner explains what was matched, and
 // the next keystroke decides: `y` allow once, `a` allow always (this
-// session), `t` trust permanently (SHA-256 of category+match persisted
-// to the daemon's per-UID `commands.trusted.txt`), `B` block host
-// forever (session), anything else cancels (Ctrl+U clears readline).
+// session, in-memory only), `t` trust permanently (SHA-256 of
+// category+match added to atty's in-memory cache + mirrored to the
+// daemon's per-UID `commands.trusted.txt` if the daemon is reachable
+// — best-effort: a daemon-less install loses the trust on atty exit),
+// `B` block host forever (session, in-memory only), anything else
+// cancels (Ctrl+U clears readline).
 //
 // Off by default — opt in by adding `atty.modules.security_guard` to
 // `modules` AND setting `.enabled = true`. See

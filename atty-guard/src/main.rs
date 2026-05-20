@@ -486,8 +486,17 @@ fn main() -> std::io::Result<()> {
     // which resolves to /var/lib/atty-guard/ (not writable) and
     // gracefully no-ops on persistent ops. Tests pass an explicit
     // tempdir to TrustStore::new.
-    let trust_root = std::env::var_os("STATE_DIRECTORY")
-        .map(|s| std::path::PathBuf::from(s).join("users"))
+    // STATE_DIRECTORY can be a ':'-separated list when the unit
+    // sets multiple StateDirectory= entries; mirror what
+    // `atom_fetcher::default_atoms_path` does and use the first.
+    let trust_root = std::env::var("STATE_DIRECTORY")
+        .ok()
+        .and_then(|s| {
+            s.split(':')
+                .next()
+                .filter(|p| !p.is_empty())
+                .map(|p| std::path::PathBuf::from(p).join("users"))
+        })
         .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/atty-guard/users"));
     let trust_store = std::sync::Arc::new(trust_store::TrustStore::new(trust_root));
 

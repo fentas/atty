@@ -35,9 +35,10 @@ pub const Config = struct {
     /// (the `onInput` hook short-circuits to `.forward` at the top).
     enabled: bool = false,
     /// Patterns to apply on each Enter. Defaults to the shipped
-    /// `default_patterns`. Empty slice disables matching while
-    /// keeping the module attached (handy for the trust-cache
-    /// path alone, though probably you'd just set `enabled=false`).
+    /// `default_patterns`. Empty slice disables in-proc matching
+    /// while keeping the module attached, so a daemon-only setup
+    /// (every classify goes through the UDS, no in-proc Tier-1)
+    /// is still reachable from the same config.
     patterns: []const Pattern = &default_patterns,
     /// Banner style — dim italic by default, same vocabulary as
     /// the guardrail module.
