@@ -293,7 +293,7 @@ the page cache is host-shared). Disclosed April 2026.
 
 | Layer | Signal |
 |---|---|
-| Tier-1 AtomMatcher | `socket.AF_ALG`, `af_alg_set`, `algif_aead`, `splice(` — atoms in `flagged_atoms.txt`. Catches the C/Python PoC's command lines: anyone running a compiled exploit usually types something like `gcc poc.c -o exploit && ./exploit`. |
+| Tier-1 AtomMatcher | `socket.AF_ALG`, `af_alg_set`, `algif_aead` — atoms in `flagged_atoms.txt`. Catches the C/Python PoC's command lines: anyone running a compiled exploit usually types something like `gcc poc.c -o exploit && ./exploit`. (`splice(` is intentionally omitted — it has too many legit uses in zero-copy I/O; the eBPF correlator below catches AF_ALG + splice at the syscall layer where the FP rate is near zero.) |
 | eBPF AF_ALG tracepoint (V2-G, opt-in) | Kernel-side `sys_enter_socket` filter; flags ANY process that opens an AF_ALG socket — even if the user runs an opaque binary that never mentions the algorithm by name. Requires `--features ebpf` + CAP_BPF. |
 
 ### Shai-Hulud worm — npm/PyPI supply-chain malware
