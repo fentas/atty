@@ -151,6 +151,13 @@ enum Subcommand {
         #[command(subcommand)]
         op: SessionOp,
     },
+    /// Inspect per-user persistent trust hashes (the daemon-side
+    /// `commands.trusted.txt`). Populated by `[t]rust permanently`
+    /// keystrokes mirrored from atty.
+    Trust {
+        #[command(subcommand)]
+        op: TrustOp,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -183,6 +190,15 @@ enum UrlsOp {
     Block { host: String },
     /// List recorded URL decisions (persistent + session overlay).
     List,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum TrustOp {
+    /// List the caller's persistent trust hashes.
+    List,
+    /// Add a hash directly (mostly for testing / scripting; the
+    /// typical path is the banner's `[t]rust permanently`).
+    Add { hash: String },
 }
 
 #[derive(clap::Subcommand, Debug)]
