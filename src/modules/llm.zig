@@ -1235,8 +1235,26 @@ pub fn configure(comptime cfg: Config) type {
                 // provider shorthand falls through to the static
                 // hint — no name to interpolate.
                 if (cfg.providers.len > 0) {
-                    const entry = cfg.providers[rt.current_provider_idx];
-                    const pick: []const u8 = if (entry.name.len > 0) entry.name else switch (entry.config) {
+                    // Route through resolveProviderForMode so we
+                    // surface the provider that WILL actually
+                    // serve the next request — not just whatever
+                    // sits at `current_provider_idx`. Without
+                    // this, a `current_idx` pointing at a
+                    // single-only entry while in chat mode would
+                    // misadvertise.
+                    const mode: types.Mode = mblk: {
+                        if (rt.chat_inline_open or rt.chat_overlay_open) break :mblk .chat;
+                        if (rt.auto_mode_active or rt.dialog_persistent_mode == .auto) break :mblk .auto;
+                        if (rt.dialog_persistent_mode == .dialog or rt.dialog_state != .idle) break :mblk .dialog;
+                        break :mblk .single;
+                    };
+                    const resolved = worker_mod_ns.resolveProviderForMode(
+                        mode,
+                        cfg.providers,
+                        cfg.provider,
+                        rt.current_provider_idx,
+                    );
+                    const pick: []const u8 = if (resolved.name.len > 0) resolved.name else switch (resolved.provider) {
                         .http => |h| if (h.model.len > 0) h.model else "(http)",
                         .subprocess => |s| if (s.argv.len > 0) s.argv[0] else "(subprocess)",
                     };

@@ -694,14 +694,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                     // Cycle forward, skipping non-cycleable entries
                     // and entries whose `for_modes` doesn't cover
-                    // the user's current dispatch mode. If no
-                    // entry can serve as a cycle target, latch a
-                    // hint and stop.
+                    // the user's current dispatch mode. Self-select
+                    // (the loop landing back on `current_provider_idx`)
+                    // counts as "no other entry matches" — latch
+                    // the no-op hint instead of advertising the
+                    // same provider with a `(N/N)` indicator.
                     const mode = currentDispatchMode(rt);
-                    var next = rt.current_provider_idx;
+                    const start_idx = rt.current_provider_idx;
+                    var next = start_idx;
                     var tried: usize = 0;
                     while (tried < cfg.providers.len) : (tried += 1) {
                         next = (next + 1) % cfg.providers.len;
+                        if (next == start_idx) break;
                         const entry = cfg.providers[next];
                         if (entry.cycleable and entry.for_modes.matches(mode)) {
                             rt.current_provider_idx = next;
