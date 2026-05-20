@@ -6,6 +6,27 @@ that point are merged into the relevant release on the next run.
 
 [release-please]: https://github.com/googleapis/release-please
 
+## [0.6.0](https://github.com/fentas/atty/compare/v0.5.0...v0.6.0) (2026-05-20)
+
+
+### Features
+
+* **operator-ux:** doctor sidecar checks + workflow doc + named-threat scenarios ([#139](https://github.com/fentas/atty/issues/139)) ([b67b9fd](https://github.com/fentas/atty/commit/b67b9fddac262f4ba460d4c3b9e77b882fec4110))
+* **security_guard:** atty-guard --print-features probe ([#149](https://github.com/fentas/atty/issues/149)) ([9b4f6fe](https://github.com/fentas/atty/commit/9b4f6feba8f4c62f715fb064c286a04bebe08390))
+* **security_guard:** atty-guard as system daemon under atty user ([#140](https://github.com/fentas/atty/issues/140)) ([02405c9](https://github.com/fentas/atty/commit/02405c93427f7e2424ae5929fe76b52577678715))
+* **security_guard:** first-class eBPF install path ([#151](https://github.com/fentas/atty/issues/151)) ([6f54726](https://github.com/fentas/atty/commit/6f54726180f6d5b6b572b042f830a9090bd74173))
+* **security_guard:** inline [a]/[B] prompt + session trust/block ([#142](https://github.com/fentas/atty/issues/142)) ([d8fa4ca](https://github.com/fentas/atty/commit/d8fa4ca5d90a6a0eaec677ef7a509e2018fb2b9a))
+* **security_guard:** mediated CLI + per-user trust store ([#141](https://github.com/fentas/atty/issues/141)) ([4b0f69e](https://github.com/fentas/atty/commit/4b0f69ef2e96f5ae04f3b1ca6fe4fe3a6d71400a))
+* **security_guard:** migrate trust cache to daemon-side ([#147](https://github.com/fentas/atty/issues/147)) ([e41080b](https://github.com/fentas/atty/commit/e41080b74d99ae0c92a33fbce3cec2e8b356cb66))
+* **security_guard:** system-fetched atom corpus with permission gate ([#150](https://github.com/fentas/atty/issues/150)) ([300f36a](https://github.com/fentas/atty/commit/300f36af0f09437b391b1294cc00b14148b70af2))
+
+
+### Documentation
+
+* post-architecture-rewrite cleanup for CLAUDE and atty-guard README ([#152](https://github.com/fentas/atty/issues/152)) ([6ab578b](https://github.com/fentas/atty/commit/6ab578bf538081fe77ec4defaafab5d1c9a44f1a))
+* **site:** adopt starship-style layout ([#154](https://github.com/fentas/atty/issues/154)) ([ce43146](https://github.com/fentas/atty/commit/ce431460ee36b587532fc62bd36cf3ed11905980))
+* **site:** user-facing refactor + interactive playback demo ([#153](https://github.com/fentas/atty/issues/153)) ([cd8b128](https://github.com/fentas/atty/commit/cd8b12857d74efe0fe7f4774bd296ee3eb22253d))
+
 ## [0.5.0](https://github.com/fentas/atty/compare/v0.4.0...v0.5.0) (2026-05-19)
 
 
