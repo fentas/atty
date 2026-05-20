@@ -557,8 +557,7 @@ pub fn configure(comptime cfg: Config) type {
             while (end < after.len) : (end += 1) {
                 const c = after[end];
                 switch (c) {
-                    '/', ':', '?', '#', ' ', '\t', '\r', '\n',
-                    ')', '(', '"', '\'', '|', ';', '>', '<', ',', '`' => break,
+                    '/', ':', '?', '#', ' ', '\t', '\r', '\n', ')', '(', '"', '\'', '|', ';', '>', '<', ',', '`' => break,
                     else => {},
                 }
             }
@@ -604,11 +603,7 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         fn isHostChar(c: u8) bool {
-            return (c >= 'a' and c <= 'z')
-                or (c >= 'A' and c <= 'Z')
-                or (c >= '0' and c <= '9')
-                or c == '.'
-                or c == '-';
+            return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '.' or c == '-';
         }
 
         /// Push `level` to atty-guard for the shell's PID tree

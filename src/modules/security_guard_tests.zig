@@ -237,8 +237,7 @@ fn extractHostShim(s: []const u8) ?[]const u8 {
     while (end < after.len) : (end += 1) {
         const c = after[end];
         switch (c) {
-            '/', ':', '?', '#', ' ', '\t', '\r', '\n',
-            ')', '(', '"', '\'', '|', ';', '>', '<', ',', '`' => break,
+            '/', ':', '?', '#', ' ', '\t', '\r', '\n', ')', '(', '"', '\'', '|', ';', '>', '<', ',', '`' => break,
             else => {},
         }
     }
