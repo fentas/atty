@@ -118,7 +118,7 @@ struct Cli {
     atoms_update_interval: String,
 
     /// Comma-separated source list for the V2-I fetcher.
-    /// Valid: `gtfobins`, `sigma`, `lolbas`. Empty = all enabled.
+    /// Valid: `gtfobins`, `sigma`. Empty = all enabled.
     #[arg(long, default_value = "")]
     atoms_sources: String,
 }

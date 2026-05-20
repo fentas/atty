@@ -38,7 +38,13 @@ if [[ $EUID -ne 0 ]]; then
         echo "error: this installer requires root. install sudo or run as root." >&2
         exit 1
     fi
-    exec sudo -E bash "$0" "$@"
+    # Drop the caller's env (no `-E`). The default sudo `env_reset`
+    # behavior is what we want — passing `-E` would leak LD_PRELOAD /
+    # LD_LIBRARY_PATH / similar from the unprivileged caller into the
+    # root-EUID re-exec, an obvious privesc surface. This installer
+    # reads no caller env (REPO_ROOT is derived from $0 and all other
+    # paths are hardcoded), so env_reset is safe.
+    exec sudo -- bash "$0" "$@"
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

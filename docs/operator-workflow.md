@@ -236,10 +236,11 @@ atty doctor — OSC 133 integration
   ...
 
 atty doctor — atty-guard sidecar
-  ✓  atty-guard binary present (/home/.../atty-guard)
-  ✓  atty-guard.service systemd-user unit installed
+  ✓  atty-guard binary present (/usr/local/bin/atty-guard)
+  ✓  atty-guard.service unit installed
   ✓  atty-guard.service is active
-  ✓  UDS socket reachable (/run/user/1000/atty-guard.sock)
+  ✓  UDS socket reachable (/run/atty-guard/atty-guard.sock)
+  ✓  user is in `atty` group (can connect to the daemon socket)
   !  eBPF status is runtime-only — `sudo journalctl -u atty-guard | grep -i ebpf` will show ...
 ```
 
