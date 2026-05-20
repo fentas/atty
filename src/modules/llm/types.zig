@@ -495,6 +495,17 @@ pub const Config = struct {
     /// shorten if you trust the model more, lengthen if you want
     /// more hesitation.
     auto_delay_ms: u32 = 800,
+    /// Auto-defocus the Alt+C inline chat panel when an
+    /// `action=exec` command lands at the shell prompt during a
+    /// dialog. The next keystroke (Enter) runs the command
+    /// directly without a manual Alt+C toggle. Focus returns to
+    /// chat when the shell returns to a new prompt (OSC 133 ;A).
+    /// Off → user toggles focus manually.
+    ///
+    /// Skipped entirely in auto-mode (Alt+Shift+S) which already
+    /// auto-confirms after `auto_delay_ms`, and in single-mode
+    /// (Alt+A) which doesn't run with the chat panel open.
+    inline_chat_autofocus_on_exec: bool = true,
     /// Fixture-driven LLM responses for e2e tests. When non-empty,
     /// the worker bypasses HTTP entirely and returns the next slice
     /// from this list (wrapping around if requests exceed the list

@@ -785,6 +785,16 @@ pub fn configure(comptime cfg: Config) type {
             /// keystrokes. `Ctrl+Down` flips it back.
             /// Meaningless when `chat_inline_open = false`.
             chat_focus_in_panel: bool = true,
+            /// Latch armed by `handleDialogResponse`'s `.exec` arm
+            /// when `cfg.inline_chat_autofocus_on_exec` AND the
+            /// chat panel is open AND we're not in auto-mode.
+            /// `onOutput`'s OSC 133 `;A`/`;D` edge handler clears
+            /// it AND flips `chat_focus_in_panel` back to true, so
+            /// the user lands back in the chat input after their
+            /// command runs. `dialogReset` clears the latch on
+            /// cancel paths so an aborted dialog doesn't ambush
+            /// the user with a focus jump.
+            chat_refocus_pending: bool = false,
             /// Flag the proxy reads via `extraReserveRows` — the
             /// proxy compares it to the live reserve baseline and
             /// emits `setReserveRows + activate` on the open/close

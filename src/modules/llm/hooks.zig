@@ -857,6 +857,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                     rt.chat_inline_open = !rt.chat_inline_open;
                     rt.chat_inline_paint_pending = true;
+                    // #167 — any manual Alt+C toggle (open OR close)
+                    // clears the refocus latch so a pending `.exec`-
+                    // armed snap doesn't override a fresh user
+                    // focus choice on the next `;D`.
+                    rt.chat_refocus_pending = false;
                     if (rt.chat_inline_open) {
                         // Disarm the conclusion auto-emit latch so the
                         // banner doesn't fire while inline chat is
@@ -1127,6 +1132,25 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // ~50ms latency is fine for a dialog
                             // loop where the LLM round-trip is the
                             // dominant cost anyway.
+                        }
+                        // #167 — command finished, shell is back at
+                        // a prompt. Refocus the chat panel if the
+                        // exec arm armed the latch AND the panel
+                        // is still open (user may have toggled
+                        // Alt+C shut while the command was
+                        // running). Arm `chat_inline_paint_pending`
+                        // so paintInlineChat re-renders the cursor
+                        // visibility (?25h/?25l) and panel dim
+                        // state on the next tick — without it the
+                        // UI mutates focus silently and the user
+                        // sees a stale dimmed panel + invisible
+                        // cursor location.
+                        if (rt.chat_refocus_pending) {
+                            if (rt.chat_inline_open) {
+                                rt.chat_focus_in_panel = true;
+                                rt.chat_inline_paint_pending = true;
+                            }
+                            rt.chat_refocus_pending = false;
                         }
                         cursor = advancePastMarker(output, offset);
                     },
@@ -1532,6 +1556,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (rt.auto_mode_active) {
                         rt.auto_exec_armed = true;
                         rt.auto_exec_t0_ms = nowMs();
+                    } else if (rt.chat_inline_open and cfg.inline_chat_autofocus_on_exec) {
+                        // #167 — defocus the inline chat panel so
+                        // the next keystroke (Enter) runs the
+                        // injected command without an Alt+C toggle
+                        // dance. Refocus latches on the next
+                        // OSC 133 `;A`/`;D` edge. Skipped in
+                        // auto-mode (auto-mode runs the Enter
+                        // itself). Arm `chat_inline_paint_pending`
+                        // so paintInlineChat re-renders the
+                        // dimmed/undimmed panel + cursor
+                        // visibility on the next tick.
+                        rt.chat_focus_in_panel = false;
+                        rt.chat_refocus_pending = true;
+                        rt.chat_inline_paint_pending = true;
                     }
                     // Return the command bytes for injection at
                     // the shell prompt — directly from
@@ -1889,6 +1927,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const switching = current != .off;
             rt.dialog_persistent_mode = target;
             rt.auto_mode_active = (target == .auto);
+            // #167 — if user flips into auto AFTER `.exec` armed
+            // the refocus latch, disarm: auto-mode will run the
+            // Enter itself, focus state is moot, and a stale
+            // latch firing on the next `;D` would steal focus
+            // from a panel the user might already be back in.
+            if (target == .auto) rt.chat_refocus_pending = false;
             if (switching) {
                 latchHint(rt, switch (target) {
                     .off => unreachable,

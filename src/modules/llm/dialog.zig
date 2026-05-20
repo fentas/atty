@@ -760,6 +760,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.in_flight = false;
             rt.auto_mode_active = false;
             rt.auto_exec_armed = false;
+            // Cancel / done shouldn't snap focus back to chat —
+            // #167's refocus latch is only valid on the
+            // command-runs-cleanly path. Clearing keeps focus
+            // wherever the user last had it.
+            rt.chat_refocus_pending = false;
         }
 
         /// Abort the dialog with an error notification. Surfaces in
