@@ -226,9 +226,20 @@ fmt-guard:
 # /etc/systemd/system/, creates the atty user/group, enables + starts
 # the service. Delegates to contrib/install.sh (which re-execs under
 # sudo) so the systemd policy stays in one place.
+#
+# When GUARD_FEATURES contains `ebpf`, also passes --with-ebpf so the
+# installer drops in /etc/systemd/system/atty-guard.service.d/ebpf.conf
+# with CAP_BPF + SystemCallFilter widening + --enable-ebpf on
+# ExecStart. The installer verifies the binary actually supports the
+# feature via --print-features before writing the drop-in.
 install-guard: build-guard
 	@printf "→ %s will install + enable atty-guard.service (system daemon — requires sudo)\n" "$@"
-	atty-guard/contrib/install.sh
+	@if echo "$(GUARD_FEATURES)" | tr ',' '\n' | grep -qx ebpf; then \
+	    printf "→ GUARD_FEATURES contains 'ebpf' — installing eBPF drop-in\n"; \
+	    atty-guard/contrib/install.sh --with-ebpf; \
+	else \
+	    atty-guard/contrib/install.sh; \
+	fi
 
 # Symlink the daemon binary the same way `make link` does for atty:
 # source-of-truth is the cargo target dir, $(PREFIX)/bin is just a
