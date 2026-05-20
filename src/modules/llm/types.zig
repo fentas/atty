@@ -69,6 +69,93 @@ pub const SystemContext = struct {
     git: bool = true,
 };
 
+/// LLM transport choice. The HTTP variant calls an OpenAI-compatible
+/// `/chat/completions` endpoint (Ollama, llama.cpp, OpenAI, anything
+/// that speaks the OpenAI wire format). The subprocess variant
+/// spawns a CLI tool (`claude -p`, `llm`, `mods`, …) — the prompt
+/// goes in via stdin or as the final argv slot, the response comes
+/// back on stdout.
+///
+/// Default is `.{ .http = .{} }` so existing configs that don't
+/// touch `.provider` keep the original behavior.
+pub const Provider = union(enum) {
+    http: HttpProvider,
+    subprocess: SubprocessProvider,
+};
+
+/// OpenAI-compatible chat-completions transport. Holds the
+/// endpoint-discovery knobs that used to live directly on `Config`.
+pub const HttpProvider = struct {
+    /// Hardcoded API base URL — wins over both env vars when
+    /// non-empty. Use this when you want a stable endpoint baked
+    /// into your config and don't want to depend on shell env
+    /// state (atty inherits env at fork time, so a misconfigured
+    /// `.bashrc` can leave the module inert even though the
+    /// endpoint is reachable). The string is used verbatim except
+    /// for the trailing-slash normalisation `doRequest` applies
+    /// before appending `/chat/completions`. Empty default = "use
+    /// env vars below".
+    api_base: []const u8 = "",
+    /// Env-var name holding the API base URL. Read at attach,
+    /// consulted only when `api_base` is empty.
+    api_base_env: []const u8 = "LLM_API_BASE",
+    /// Fallback env-var (typical Ollama setup). When this is read
+    /// AND it doesn't already end in `/v1`, we append it. Only
+    /// consulted when both `api_base` and `$api_base_env` are
+    /// empty.
+    api_base_fallback_env: []const u8 = "OLLAMA_HOST",
+    /// Env-var holding the API key. Optional — when unset we send
+    /// no `Authorization` header (local servers usually accept
+    /// unauthenticated requests).
+    api_key_env: []const u8 = "LLM_API_KEY",
+};
+
+/// CLI-tool transport. The prompt is delivered to the named
+/// program either as the final argv slot or piped via stdin
+/// (`.prompt_via`). The program's stdout is parsed either as
+/// raw text (`.output = .raw`) or as JSON with a named field
+/// extracted (`.output = .{ .json_field = "result" }`).
+///
+/// **Example — `claude -p --output-format json`** (Claude Code CLI):
+/// ```zig
+/// .provider = .{ .subprocess = .{
+///     .argv = &.{ "claude", "-p", "--output-format", "json" },
+///     .output = .{ .json_field = "result" },
+/// }},
+/// ```
+/// (Or use the `providers.claudeCode(...)` factory for the same
+/// shape with a model arg.)
+pub const SubprocessProvider = struct {
+    /// Program + leading args. atty appends the rendered prompt as
+    /// the final argv slot (default) or pipes it via stdin
+    /// — see `prompt_via`. `argv[0]` is resolved against `$PATH`
+    /// the usual way (libc `execvp`).
+    argv: []const []const u8,
+    /// How to deliver the prompt to the subprocess. `.final_arg`
+    /// works for CLIs that accept the prompt positionally; `.stdin`
+    /// for tools that read from a pipe. Default `.final_arg`
+    /// because that's what `claude -p` wants.
+    prompt_via: PromptVia = .final_arg,
+    /// Stdout parsing. `.raw` = the response is the stdout text,
+    /// trimmed of trailing newlines. `.json_field` = parse stdout
+    /// as JSON, extract the named top-level string field. Claude
+    /// Code's `--output-format json` emits
+    /// `{"type":"result","result":"…"}`, so use
+    /// `.{ .json_field = "result" }`.
+    output: Output = .raw,
+    /// Wall-clock timeout in ms. SIGKILL on expiry. Generous
+    /// default because Claude can take 5–15 s for non-trivial
+    /// prompts; tighten for faster local CLIs.
+    timeout_ms: u64 = 30_000,
+
+    pub const PromptVia = enum { final_arg, stdin };
+
+    pub const Output = union(enum) {
+        raw,
+        json_field: []const u8,
+    };
+};
+
 /// One entry in `Config.models`. `name` is required (it's what the
 /// HTTP request body sends as `"model":"…"`); everything else is
 /// optional with `null` = "fall back to the matching `Config.*`
@@ -149,28 +236,13 @@ pub const Config = struct {
     /// Shell name for the user-prompt template. `null` → derive
     /// from `$SHELL` basename at attach time.
     shell: ?[]const u8 = null,
-    /// Hardcoded API base URL — wins over both env vars when
-    /// non-empty. Use this when you want a stable endpoint baked
-    /// into your config and don't want to depend on shell env
-    /// state (atty inherits env at fork time, so a misconfigured
-    /// `.bashrc` can leave the module inert even though the
-    /// endpoint is reachable). The string is used verbatim except
-    /// for the trailing-slash normalisation `doRequest` applies
-    /// before appending `/chat/completions`. Empty default = "use
-    /// env vars below".
-    api_base: []const u8 = "",
-    /// Env-var name holding the API base URL. Read at attach,
-    /// consulted only when `api_base` is empty.
-    api_base_env: []const u8 = "LLM_API_BASE",
-    /// Fallback env-var (typical Ollama setup). When this is read
-    /// AND it doesn't already end in `/v1`, we append it. Only
-    /// consulted when both `api_base` and `$api_base_env` are
-    /// empty.
-    api_base_fallback_env: []const u8 = "OLLAMA_HOST",
-    /// Env-var holding the API key. Optional — when unset we send
-    /// no `Authorization` header (local servers usually accept
-    /// unauthenticated requests).
-    api_key_env: []const u8 = "LLM_API_KEY",
+    /// Transport: HTTP (OpenAI-compatible endpoint) or subprocess
+    /// (CLI tool like `claude -p`). Default is HTTP with the
+    /// existing env-driven endpoint discovery (`LLM_API_BASE` →
+    /// `OLLAMA_HOST` → empty/inert). See `Provider` /
+    /// `HttpProvider` / `SubprocessProvider` for the per-variant
+    /// knobs.
+    provider: Provider = .{ .http = .{} },
     /// When true, ask the model for a one-line explanation followed
     /// by the command in a fenced block. atty surfaces the
     /// explanation in the statusbar's hint row while the command

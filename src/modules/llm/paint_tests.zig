@@ -18,10 +18,12 @@ const test_io: std.Io = std.Io.failing;
 
 test "chat overlay (Alt+Shift+C): toggle emits alt-screen enter then exit" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -95,10 +97,12 @@ test "chat overlay (Alt+Shift+C): toggle emits alt-screen enter then exit" {
 
 test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -190,10 +194,12 @@ test "inline chat (Alt+C): open paint CUP-restores to the cursor_row snapshot ca
     // `ctx.cursor_row` to the post-scroll prompt position before
     // we capture.)
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -246,10 +252,12 @@ test "inline chat: cursor_row snapshot clamps to shell_bottom when it overshoots
     // statusbar/panel zone (cursor_tracker drift, SIGWINCH races)
     // must clamp to shell_bottom — never CUP into the reservation.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -291,10 +299,12 @@ test "inline chat: re-open with null ctx.cursor_row clears the previous snapshot
     // this tick) must NOT reuse the previous open's row — paint
     // writes 0 and the helper falls back to shell_bottom.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -350,10 +360,12 @@ test "inline chat: re-open with a different non-null cursor_row overwrites the p
     // value MUST overwrite the previous open's snapshot — paint
     // CUPs to the new row, not the old one.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -405,10 +417,12 @@ test "inline chat: paint ignores live ctx.cursor_row drift while panel is open" 
     // swaps the snapshot for the live value, the panel would
     // chase the cursor around instead of restoring to the prompt.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -458,10 +472,12 @@ test "inline chat: paint ignores live ctx.cursor_row drift while panel is open" 
 
 test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
         .prefix_signal_cursor_color = "cyan",
     });
 
@@ -512,10 +528,12 @@ test "overlay: assistant_exec turn renders structured (description + `$ command`
     // envelope into description + indented cyan command and never
     // leak the raw `{"action":"exec",...}` JSON to the user.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -557,10 +575,12 @@ test "overlay: assistant_exec turn renders structured (description + `$ command`
 
 test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -596,10 +616,12 @@ test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON
 
 test "overlay: malformed assistant envelope falls back to raw render so nothing vanishes" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -635,10 +657,12 @@ test "overlay: malformed assistant envelope falls back to raw render so nothing 
 
 test "overlay: assistant_exec with action=question + choices renders italic prompt + numbered list" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -687,10 +711,12 @@ test "overlay input: cursor-split rendering puts reverse-video on the cursor byt
     // not duplicated in the tail. At end-of-buffer the cursor
     // collapses to a reverse-video space.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -746,10 +772,12 @@ test "inline input: parked render renders cursor byte once (no duplication)" {
     // glyph AND the literal byte. Regression guard for the
     // "draft shifted one column right when parked" bug.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -800,10 +828,12 @@ test "overlay scroll: nonzero view offset hides tail turns AND emits indicator" 
     // suppress the most-recent N turns, and (b) emit the
     // dim `[↑ N below]` indicator in the footer row.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -865,10 +895,12 @@ test "inline scroll: nonzero inline offset windows the visible turns + emits ind
     // scrollback row must carry the dim "↑ N more turn(s) below"
     // header.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -934,10 +966,12 @@ test "inline chat: open paint CUP-restores to (row, col) snapshot — not col 1"
     // `;B`, the restore CUP includes the col so the cursor parks
     // where bash's input region begins.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -992,10 +1026,12 @@ test "inline chat: col snapshot 0 → falls back to col 1" {
     // CUP uses col 1 as a defensive default. Existing tests that
     // don't set cursor_col rely on this fallback.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});

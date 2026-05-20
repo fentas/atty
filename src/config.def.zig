@@ -92,6 +92,31 @@ const atty = @import("atty");
 //     atty.modules.atuin.configure(.{}),
 //     atty.modules.history.configure(.{}),
 //     atty.modules.llm.configure(.{
+//         // ── Transport ──────────────────────────────────────────────
+//         //
+//         // HTTP (OpenAI-compatible /chat/completions) is the default.
+//         // The endpoint is discovered via $LLM_API_BASE, then
+//         // $OLLAMA_HOST + "/v1". Override per-config with .api_base:
+//         //
+//         // .provider = .{ .http = .{
+//         //     .api_base = "http://localhost:11434/v1",
+//         // }},
+//         //
+//         // …or shell out to a CLI tool that handles its own auth.
+//         // Use the `claudeCode` factory for Claude Code:
+//         //
+//         // .provider = atty.modules.llm.providers.claudeCode(.{
+//         //     .model = "claude-sonnet-4-6",
+//         // }),
+//         //
+//         // …or hand-roll any prompt-in / text-out CLI:
+//         //
+//         // .provider = .{ .subprocess = .{
+//         //     .argv = &.{ "llm", "-m", "gpt-4o-mini" },
+//         //     .prompt_via = .stdin,
+//         //     .output = .raw,
+//         // }},
+//         //
 //         // .prefix = "#: ",          // trigger; default
 //         // .model = "llama3:8b",     // model name
 //         // .shell = null,            // null → derive from $SHELL

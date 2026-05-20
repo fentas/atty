@@ -50,6 +50,60 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
 pub const Config = types.Config;
 pub const Model = types.Model;
+pub const Provider = types.Provider;
+pub const HttpProvider = types.HttpProvider;
+pub const SubprocessProvider = types.SubprocessProvider;
+
+/// Convenience factories for common provider shapes. Users assemble
+/// these into `Config.provider`:
+///
+/// ```zig
+/// .provider = atty.modules.llm.providers.claudeCode(.{ .model = "claude-sonnet-4-6" }),
+/// ```
+pub const providers = struct {
+    /// Build a subprocess provider for the Claude Code CLI's
+    /// non-interactive mode (`claude -p --output-format json`).
+    /// The CLI handles its own auth (the user's `claude` login
+    /// state); atty doesn't see or manage tokens.
+    ///
+    /// `model` is optional — pass an empty string to let the CLI
+    /// use its configured default. The JSON-field extractor pulls
+    /// `result` (Claude Code's stdout shape with `--output-format
+    /// json`).
+    pub fn claudeCode(comptime options: struct {
+        /// Claude model identifier. Empty = CLI default.
+        model: []const u8 = "",
+        /// Extra argv flags forwarded after `--model X`. Use for
+        /// `--permission-mode`, `--mcp-config`, etc.
+        extra_argv: []const []const u8 = &.{},
+    }) Provider {
+        // Compose argv at comptime — `options` is comptime so the
+        // whole construction is comptime-known and the resulting
+        // slice has static lifetime.
+        const argv = comptime blk: {
+            const has_model = options.model.len > 0;
+            const base_len: usize = if (has_model) 6 else 4;
+            var buf: [base_len + options.extra_argv.len][]const u8 = undefined;
+            buf[0] = "claude";
+            buf[1] = "-p";
+            buf[2] = "--output-format";
+            buf[3] = "json";
+            if (has_model) {
+                buf[4] = "--model";
+                buf[5] = options.model;
+            }
+            for (options.extra_argv, 0..) |a, i| buf[base_len + i] = a;
+            const fixed = buf;
+            break :blk &fixed;
+        };
+        return .{ .subprocess = .{
+            .argv = argv,
+            .prompt_via = .final_arg,
+            .output = .{ .json_field = "result" },
+            .timeout_ms = 60_000,
+        } };
+    }
+};
 
 /// Submodule re-exports for tests + advanced users that want to
 /// drive the HTTP worker or dialog envelope outside of `configure`.
@@ -162,6 +216,7 @@ pub fn configure(comptime cfg: Config) type {
         // the `attach` site keeps using the unqualified names.
         const env_mod = env_mod_ns.Module(cfg);
         const resolveApiBase = env_mod.resolveApiBase;
+        const resolveApiKey = env_mod.resolveApiKey;
         const resolveEnv = env_mod.resolveEnv;
         const resolveContextEnv = env_mod.resolveContextEnv;
         const resolveShell = env_mod.resolveShell;
@@ -240,14 +295,24 @@ pub fn configure(comptime cfg: Config) type {
             allocator: std.mem.Allocator,
             io: std.Io,
             shared: *Shared,
-            /// Worker thread. `null` when the module is inert (no
-            /// `$LLM_API_BASE` / `$OLLAMA_HOST` set) — saves the
-            /// thread spawn for the common "module configured but
-            /// no endpoint" case.
+            /// Worker thread. `null` when the module is inert. For
+            /// HTTP transport that means no `$LLM_API_BASE` /
+            /// `$OLLAMA_HOST` set; for subprocess transport this is
+            /// always non-null (CLI availability is a per-request
+            /// concern, not an attach-time gate).
             thread: ?std.Thread,
-            /// Resolved at attach. Empty = inert (no env var set).
+            /// True when the module won't try to fire requests. Set
+            /// once at attach and consulted by every key-binding /
+            /// trigger site. Check this (not `api_base.len`) — the
+            /// subprocess transport always has an empty `api_base`
+            /// but is not inert.
+            inert: bool = true,
+            /// Resolved at attach. Empty when transport is
+            /// subprocess (CLI handles its own endpoint) or HTTP
+            /// with no `$LLM_API_BASE` / `$OLLAMA_HOST` set.
             api_base: []u8 = &.{},
-            /// Resolved at attach. Empty = no Authorization header.
+            /// Resolved at attach. Empty = no Authorization header
+            /// (or transport is subprocess — CLI does its own auth).
             api_key: []u8 = &.{},
             /// Resolved shell name (basename of $SHELL or cfg.shell).
             shell: []u8 = &.{},
@@ -615,10 +680,13 @@ pub fn configure(comptime cfg: Config) type {
             errdefer allocator.destroy(last_assistant_json);
 
             // Resolve env vars at attach time so the worker doesn't
-            // have to re-read them per request.
+            // have to re-read them per request. For subprocess
+            // transport these come back empty (the CLI handles its
+            // own auth + endpoint discovery); the worker's
+            // comptime-switch on `cfg.provider` ignores them.
             const api_base = try resolveApiBase(allocator);
             errdefer allocator.free(api_base);
-            const api_key = try resolveEnv(allocator, cfg.api_key_env);
+            const api_key = try resolveApiKey(allocator);
             errdefer allocator.free(api_key);
             const shell_name = try resolveShell(allocator);
             errdefer allocator.free(shell_name);
@@ -634,11 +702,19 @@ pub fn configure(comptime cfg: Config) type {
             };
             errdefer allocator.free(os_info);
 
-            // Skip the worker thread entirely in inert mode. With
-            // no endpoint we'll never call the worker, and onInput
-            // / pollShellInput already short-circuit on
-            // `api_base.len == 0`.
-            const thread: ?std.Thread = if (api_base.len == 0)
+            // Spawn-or-skip decision. For HTTP transport, skip the
+            // worker when no endpoint is configured — onInput /
+            // pollShellInput already short-circuit on
+            // `api_base.len == 0` so the inert state stays cheap.
+            // For subprocess transport always spawn — CLI
+            // availability is a runtime concern (subprocess spawn
+            // errors surface as the next request's error_out), not
+            // an attach-time gate.
+            const should_spawn = switch (cfg.provider) {
+                .http => api_base.len > 0,
+                .subprocess => true,
+            };
+            const thread: ?std.Thread = if (!should_spawn)
                 null
             else
                 try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name, context_blob });
@@ -648,6 +724,7 @@ pub fn configure(comptime cfg: Config) type {
                 .io = io,
                 .shared = shared,
                 .thread = thread,
+                .inert = !should_spawn,
                 .api_base = api_base,
                 .api_key = api_key,
                 .shell = shell_name,

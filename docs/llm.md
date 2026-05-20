@@ -40,7 +40,7 @@ pub const modules = .{
     atty.modules.atuin.configure(.{}),
     atty.modules.history.configure(.{}),
     atty.modules.llm.configure(.{
-        .api_base = "http://localhost:11434/v1",
+        .provider = .{ .http = .{ .api_base = "http://localhost:11434/v1" } },
         .model = "qwen3-coder",
     }),
 };
@@ -50,6 +50,41 @@ That's enough for a local Ollama install — the module short-
 circuits to inert mode (no worker thread spawned) when no
 endpoint is configured, so the rest of your shell experience is
 untouched.
+
+### Or use Claude Code (`claude -p`)
+
+If you have the Claude Code CLI installed and authenticated, swap
+the HTTP provider for a subprocess provider — atty shells out per
+request, the CLI handles auth out of its own login state, no env
+vars to wire.
+
+```zig
+.provider = atty.modules.llm.providers.claudeCode(.{
+    .model = "claude-sonnet-4-6",
+}),
+```
+
+The factory is shorthand for:
+
+```zig
+.provider = .{ .subprocess = .{
+    .argv = &.{ "claude", "-p", "--output-format", "json", "--model", "claude-sonnet-4-6" },
+    .prompt_via = .final_arg,
+    .output = .{ .json_field = "result" },
+    .timeout_ms = 60_000,
+}},
+```
+
+Any prompt-in / text-out CLI follows the same pattern. For
+[simonw/llm](https://github.com/simonw/llm):
+
+```zig
+.provider = .{ .subprocess = .{
+    .argv = &.{ "llm", "-m", "gpt-4o-mini" },
+    .prompt_via = .stdin,
+    .output = .raw,
+}},
+```
 
 ## OSC 133 — required for dialog / auto modes
 
@@ -114,26 +149,31 @@ emits a one-sentence summary of what the command does; atty
 parses it out of the response and shows it in the statusbar's
 hint row above the prompt.
 
-## Endpoint resolution
+## Endpoint resolution (HTTP provider)
 
-Priority order — first non-empty wins:
+When `Config.provider` is `.{ .http = ... }` (the default), the
+endpoint is discovered in this priority order — first non-empty wins:
 
-1. `Config.api_base` (static, baked into your `config.zig`)
+1. `Config.provider.http.api_base` (static, baked into your `config.zig`)
 2. `$LLM_API_BASE` (env var; name configurable via
-   `Config.api_base_env`)
+   `Config.provider.http.api_base_env`)
 3. `$OLLAMA_HOST` (Ollama-native fallback; `/v1` is suffixed
    automatically if absent — Ollama's `/v1/*` mirror is
    OpenAI-compatible while its native API isn't)
 
-`Config.api_base` is the most robust because it doesn't depend
-on shell-env state at fork time — a misconfigured `.bashrc` or a
+The static form is the most robust because it doesn't depend on
+shell-env state at fork time — a misconfigured `.bashrc` or a
 launcher that strips env can leave the env-var paths silently
 inert. With the static form, the endpoint is whatever your
 compiled binary says it is.
 
 Authentication: `$LLM_API_KEY` (name configurable via
-`Config.api_key_env`) becomes a `Bearer <key>` header when set.
-Empty / unset → no `Authorization` header sent.
+`Config.provider.http.api_key_env`) becomes a `Bearer <key>`
+header when set. Empty / unset → no `Authorization` header sent.
+
+When `Config.provider` is `.{ .subprocess = ... }`, none of the
+above applies — the CLI tool handles its own endpoint and auth.
+atty just spawns it per request.
 
 Trailing slashes are normalised on all three paths so
 `http://localhost:11434/v1/` and `http://localhost:11434/v1` both
@@ -254,10 +294,7 @@ Override any of these by listing a different `bytes` for the same `action` in `K
 | `model`                       | `"llama3:8b"`                            | Single-model fallback. Used when `models` is empty.                                   |
 | `models`                      | `&.{}`                                   | List of `Model` structs (see below). `Alt+M` cycles through them.                     |
 | `shell`                       | `null`                                   | Shell name for the user-prompt template. `null` → basename of `$SHELL`.               |
-| `api_base`                    | `""`                                     | Static endpoint URL. Wins over env vars when non-empty.                               |
-| `api_base_env`                | `"LLM_API_BASE"`                         | Env-var name for the primary endpoint.                                                |
-| `api_base_fallback_env`       | `"OLLAMA_HOST"`                          | Env-var name for the Ollama-native fallback (`/v1` auto-suffixed).                    |
-| `api_key_env`                 | `"LLM_API_KEY"`                          | Env-var name for the optional `Authorization: Bearer …` token.                        |
+| `provider`                    | `.{ .http = .{} }`                       | Transport: `.http` (OpenAI-compatible) or `.subprocess` (CLI tool). See below.        |
 | `with_explanation`            | `true`                                   | Ask model for an explanation + fenced command; show explanation in the hint row.      |
 | `system_prompt`               | `""`                                     | Override the canned system prompt. Empty → canned prompt for the `with_explanation` mode. |
 | `dialog_system_prompt`        | `""`                                     | Override the dialog-mode JSON-envelope system prompt. Empty → canned.                  |
@@ -266,6 +303,32 @@ Override any of these by listing a different `bytes` for the same `action` in `K
 | `auto_delay_ms`               | `800`                                    | Auto-exec confirm delay (ms) for `Alt+Shift+S`. Any keystroke aborts.                 |
 | `history_turns_max`           | `8`                                      | Ring capacity. The model sees at most this many recent turns per request.             |
 | `dialog_parse_retry_max`      | `2`                                      | How many times atty re-prompts the model when a JSON envelope fails to parse.         |
+
+### Provider — HTTP variant fields
+
+Available as `Config.provider.http.<field>`:
+
+| Field                         | Default            | What it does                                                                          |
+|-------------------------------|--------------------|---------------------------------------------------------------------------------------|
+| `api_base`                    | `""`               | Static endpoint URL. Wins over env vars when non-empty.                               |
+| `api_base_env`                | `"LLM_API_BASE"`   | Env-var name for the primary endpoint.                                                |
+| `api_base_fallback_env`       | `"OLLAMA_HOST"`    | Env-var name for the Ollama-native fallback (`/v1` auto-suffixed).                    |
+| `api_key_env`                 | `"LLM_API_KEY"`    | Env-var name for the optional `Authorization: Bearer …` token.                        |
+
+### Provider — subprocess variant fields
+
+Available as `Config.provider.subprocess.<field>`:
+
+| Field          | Default        | What it does                                                                                   |
+|----------------|----------------|------------------------------------------------------------------------------------------------|
+| `argv`         | (required)     | Program + leading args. atty appends the rendered prompt as the final argv slot (default).     |
+| `prompt_via`   | `.final_arg`   | `.final_arg` = append prompt to argv; `.stdin` = pipe prompt via stdin (close stdin = EOF).    |
+| `output`       | `.raw`         | `.raw` = stdout text IS the response; `.{ .json_field = "name" }` = parse stdout as JSON, take the named top-level string field. |
+| `timeout_ms`   | `30_000`       | Wall-clock timeout (currently advisory — enforcement lands in a follow-up).                    |
+
+The `atty.modules.llm.providers.claudeCode(...)` factory returns a
+pre-shaped subprocess provider for `claude -p --output-format
+json`.
 
 ### Chat surfaces
 

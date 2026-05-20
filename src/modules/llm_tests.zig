@@ -290,10 +290,12 @@ test "resolveApiBase priority — static cfg.api_base beats both env vars" {
     const real_io = threaded.io();
 
     const L = configure(.{
-        .api_base = "http://static-config:9999/v1",
-        .api_base_env = "ATTY_TEST_BASE_PRIMARY",
-        .api_base_fallback_env = "ATTY_TEST_BASE_FALLBACK",
-        .api_key_env = "ATTY_TEST_BASE_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://static-config:9999/v1",
+            .api_base_env = "ATTY_TEST_BASE_PRIMARY",
+            .api_base_fallback_env = "ATTY_TEST_BASE_FALLBACK",
+            .api_key_env = "ATTY_TEST_BASE_NEVER",
+        } },
     });
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
@@ -311,9 +313,11 @@ test "resolveApiBase priority — env wins when cfg.api_base is empty" {
 
     const L = configure(.{
         // .api_base default = ""
-        .api_base_env = "ATTY_TEST_BASE_PRIMARY2",
-        .api_base_fallback_env = "ATTY_TEST_BASE_NEVER",
-        .api_key_env = "ATTY_TEST_BASE_NEVER",
+        .provider = .{ .http = .{
+            .api_base_env = "ATTY_TEST_BASE_PRIMARY2",
+            .api_base_fallback_env = "ATTY_TEST_BASE_NEVER",
+            .api_key_env = "ATTY_TEST_BASE_NEVER",
+        } },
     });
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
@@ -323,10 +327,12 @@ test "resolveApiBase priority — env wins when cfg.api_base is empty" {
 
 test "statusText: idle hint shows Alt+C/Alt+S/Alt+H when no AI mode (discoverability)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
         // Default `.show_idle_keys_hint = true` so a fresh shell
         // surfaces the LLM bindings without the user having to
         // type `#: ` first to discover them exist.
@@ -366,10 +372,12 @@ test "statusText: DIALOG mode hint covers state-engaged-but-mode-already-reset w
     // they were idle when they were actually waiting for the next
     // turn. Surface DIALOG mode for any non-.idle state too.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -406,10 +414,12 @@ test "statusText: single-shot in_flight returns thinking_hint, not DIALOG" {
     // Must show the transient brain glyph — claiming "DIALOG mode"
     // when the user didn't enter a dialog would be misleading.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -450,10 +460,12 @@ test "statusText: mode=.dialog keeps DIALOG label even if auto_mode_active leaks
     // statusbar should still render DIALOG — the persistent mode
     // is the source of truth.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -487,10 +499,12 @@ test "statusText: AUTO mode hint covers state-engaged-with-auto-flag window" {
     // Same as the dialog regression, but for auto-exec mode where
     // `auto_mode_active` is the engaged flag.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -526,10 +540,12 @@ test "statusText: AUTO mode hint covers state-engaged-with-auto-flag window" {
 
 test "statusText flips to prefix_signal_status_text while prefix matches" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
         .prefix_signal_status_text = "TEST_SIGNAL",
         // Disable the discoverability hint so the idle path still
         // returns null (the original contract this test pins).
@@ -573,10 +589,12 @@ test "statusText flips to prefix_signal_status_text while prefix matches" {
 
 test "statusText: AI hint embeds SGR escapes for icon + shortcuts (default colors)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -614,10 +632,12 @@ test "statusText: AI hint embeds SGR escapes for icon + shortcuts (default color
 
 test "statusText: null icon/shortcut colors produce no SGR escapes (legacy look)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
         .statusbar_icon_color = null,
         .statusbar_shortcut_color = null,
     });
@@ -658,10 +678,12 @@ test "resolveApiBase trims a single trailing slash on cfg.api_base" {
     const real_io = threaded.io();
 
     const L = configure(.{
-        .api_base = "http://static:9999/v1/",
-        .api_base_env = "ATTY_TEST_BASE_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_BASE_NEVER",
-        .api_key_env = "ATTY_TEST_BASE_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://static:9999/v1/",
+            .api_base_env = "ATTY_TEST_BASE_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_BASE_NEVER",
+            .api_key_env = "ATTY_TEST_BASE_NEVER",
+        } },
     });
     var rt = try L.attach(testing.allocator, real_io);
     defer shutdownAndFree(L, &rt, real_io);
@@ -797,11 +819,14 @@ test "LLM worker round-trips a mock ollama response into the latch + hint surfac
     defer _ = libc.unsetenv("ATTY_TEST_LLM_API_BASE");
 
     const L = configure(.{
-        .api_base_env = "ATTY_TEST_LLM_API_BASE",
-        // Use a name that's never set so the fallback doesn't fire and
-        // accidentally produce a non-empty api_base from $OLLAMA_HOST.
-        .api_base_fallback_env = "ATTY_TEST_LLM_NEVER",
-        .api_key_env = "ATTY_TEST_LLM_NEVER",
+        // Use a fallback name that's never set so the fallback doesn't
+        // fire and accidentally produce a non-empty api_base from
+        // $OLLAMA_HOST.
+        .provider = .{ .http = .{
+            .api_base_env = "ATTY_TEST_LLM_API_BASE",
+            .api_base_fallback_env = "ATTY_TEST_LLM_NEVER",
+            .api_key_env = "ATTY_TEST_LLM_NEVER",
+        } },
         .model = "test-model",
         // This test exercises the legacy `#:<Enter>` trigger path —
         // opt back into it via `enter_action = .single` (default is
@@ -860,9 +885,11 @@ test "inert mode (no endpoint env) surfaces a 'no endpoint' hint" {
     _ = libc.unsetenv("ATTY_TEST_INERT_FALLBACK");
 
     const L = configure(.{
-        .api_base_env = "ATTY_TEST_INERT_BASE",
-        .api_base_fallback_env = "ATTY_TEST_INERT_FALLBACK",
-        .api_key_env = "ATTY_TEST_INERT_KEY_NEVER",
+        .provider = .{ .http = .{
+            .api_base_env = "ATTY_TEST_INERT_BASE",
+            .api_base_fallback_env = "ATTY_TEST_INERT_FALLBACK",
+            .api_key_env = "ATTY_TEST_INERT_KEY_NEVER",
+        } },
         // Inert-mode assertions rely on the Enter trigger reaching
         // `triggerSinglePrompt` (which latches the "no endpoint"
         // error). The default `.none` skips that path, so this
@@ -907,10 +934,10 @@ test "inert mode (no endpoint env) surfaces a 'no endpoint' hint" {
     try testing.expect(std.mem.indexOf(u8, err.?, "no endpoint") != null);
     // Message must mention the configured env-var names, not the
     // upstream defaults — pin that the comptime-built string respects
-    // `Config.api_base_env` / `Config.api_base_fallback_env`.
+    // `Config.provider.http.api_base_env` / `api_base_fallback_env`.
     try testing.expect(std.mem.indexOf(u8, err.?, "ATTY_TEST_INERT_BASE") != null);
     try testing.expect(std.mem.indexOf(u8, err.?, "ATTY_TEST_INERT_FALLBACK") != null);
-    try testing.expect(std.mem.indexOf(u8, err.?, "Config.api_base") != null);
+    try testing.expect(std.mem.indexOf(u8, err.?, "Config.provider.http.api_base") != null);
 
     // One-shot — second call returns null.
     try testing.expectEqual(@as(?[]const u8, null), try L.provideErrorText(&rt, &ctx));
@@ -968,9 +995,11 @@ test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
     defer _ = libc.unsetenv("ATTY_TEST_LLM_500_BASE");
 
     const L = configure(.{
-        .api_base_env = "ATTY_TEST_LLM_500_BASE",
-        .api_base_fallback_env = "ATTY_TEST_LLM_500_NEVER",
-        .api_key_env = "ATTY_TEST_LLM_500_NEVER",
+        .provider = .{ .http = .{
+            .api_base_env = "ATTY_TEST_LLM_500_BASE",
+            .api_base_fallback_env = "ATTY_TEST_LLM_500_NEVER",
+            .api_key_env = "ATTY_TEST_LLM_500_NEVER",
+        } },
         .model = "test-model",
         // Opt into the legacy `#:<Enter>` path — this test types
         // Enter to fire the request against the 500 mock.

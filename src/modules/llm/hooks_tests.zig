@@ -17,10 +17,12 @@ const test_io: std.Io = std.Io.failing;
 
 test "chat overlay (Alt+Shift+C): refuses to open when no conversation exists" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -51,10 +53,12 @@ test "chat overlay (Alt+Shift+C): refuses to open when no conversation exists" {
 
 test "chat overlay: onInput swallows all keystrokes while open" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -105,10 +109,12 @@ test "chat overlay: onInput swallows all keystrokes while open" {
 
 test "chat overlay: Ctrl+D closes the overlay (mirrors Alt+Shift+C)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -136,10 +142,12 @@ test "chat overlay: Ctrl+D closes the overlay (mirrors Alt+Shift+C)" {
 
 test "inline chat: Ctrl+D closes the panel (mirrors Alt+C)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -171,10 +179,12 @@ test "Ctrl+D falls through to .forward when no chat panel is open (bash gets EOF
     // it owns focus. With both panel + overlay closed, Ctrl+D must
     // reach bash so the user's normal shell-exit semantics work.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -203,10 +213,12 @@ test "inline chat: Ctrl+D inside a multi-byte chunk closes the panel and drops t
     // 0x04 and the trailing bytes must NOT be appended to the
     // (now-closed) input buffer.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -243,10 +255,12 @@ test "inline chat: Ctrl+D falls through to .forward when focus is parked on the 
     // moves focus to bash while the panel stays painted. In that
     // state, Ctrl+D should reach bash, not close the panel.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -275,10 +289,12 @@ test "inline chat: Ctrl+D falls through to .forward when focus is parked on the 
 
 test "inline chat: Alt+C refuses to open when there's no statusbar" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -309,10 +325,12 @@ test "inline chat: Alt+C refuses to open when there's no statusbar" {
 
 test "inline chat: Ctrl+Up parks focus; Ctrl+Down brings it back; passthrough while parked" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -367,10 +385,12 @@ test "inline chat: Ctrl+Up parks focus; Ctrl+Down brings it back; passthrough wh
 
 test "inline chat: closing panel via Alt+C resets focus to in-panel for next open" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -407,10 +427,12 @@ test "inline chat: closing panel via Alt+C resets focus to in-panel for next ope
 
 test "inline chat: pushTurn arms paint latch when inline open (response auto-repaints)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -442,10 +464,12 @@ test "inline chat: pushTurn arms paint latch when inline open (response auto-rep
 
 test "inline chat: Alt+Shift+C closes inline panel first if it was open (mutually exclusive — reverse direction)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -481,10 +505,12 @@ test "inline chat: Alt+Shift+C closes inline panel first if it was open (mutuall
 
 test "inline chat: Alt+C closes overlay first if it was open (mutually exclusive)" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -521,10 +547,12 @@ test "inline chat: Alt+C closes overlay first if it was open (mutually exclusive
 
 test "inline chat: onInput swallows keystrokes into chat_inline_input_buf when open" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -561,10 +589,12 @@ test "inline chat: onInput swallows keystrokes into chat_inline_input_buf when o
 
 test "inline chat: Left/Right arrow + Home/End move the cursor; Ctrl+A/E mirror them" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -627,10 +657,12 @@ test "inline chat: Left/Right arrow + Home/End move the cursor; Ctrl+A/E mirror 
 
 test "inline chat: insert at mid-cursor shifts trailing bytes right" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -669,10 +701,12 @@ test "inline chat: insert at mid-cursor shifts trailing bytes right" {
 
 test "inline chat: Ctrl+W kills the previous word" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -708,10 +742,12 @@ test "inline chat: Ctrl+W kills the previous word" {
 
 test "inline chat: Ctrl+U kills to start; Ctrl+K kills to end" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -750,10 +786,12 @@ test "inline chat: Ctrl+U kills to start; Ctrl+K kills to end" {
 
 test "inline chat: CSI 3~ (Delete) removes the byte AFTER cursor" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -790,10 +828,12 @@ test "inline chat: CSI 3~ (Delete) removes the byte AFTER cursor" {
 
 test "inline chat: insert short-circuits when the buffer is full" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -838,10 +878,12 @@ test "inline chat: insert short-circuits when the buffer is full" {
 
 test "overlay chat: cursor movement + mid-line insert + Ctrl+W mirror the inline path" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -891,10 +933,12 @@ test "inline chat: Enter with refused-fire clamps cursor when trailing whitespac
     // out-of-range cursor would index past EOL on the next paint or
     // edit.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -936,10 +980,12 @@ test "inline chat: chunk ending mid-CSI doesn't spin AND doesn't insert literal 
     // Sibling: a chunk ending with `ESC [` would fall through to
     // the single-byte path and insert a literal `[` next.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -987,10 +1033,12 @@ test "inline chat: modified CSI (`ESC [ 1 ; 5 D`) doesn't leak its tail as print
     // remaining bytes (digits + params) to be reparsed as
     // printables on the next loop iteration.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -1038,10 +1086,12 @@ test "inline chat: SS3 cursor keys (`ESC O D/C/H/F`) move the cursor and don't l
     // not leak into the buffer as a printable when the variant
     // is unrecognised.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -1088,10 +1138,12 @@ test "inline chat: CSI with intermediate params (`ESC [ ? 2 5 l`, `ESC [ ; 5 D`)
     // cursor) would have only `ESC [ ?` consumed and `25l` would
     // reparse as printables.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -1146,10 +1198,12 @@ fn seedTurns(rt: anytype, helpers: anytype, count: usize) !void {
 
 test "chat scroll: no chat surface open → action declines and PageUp passes through" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -1177,10 +1231,12 @@ test "chat scroll: no chat surface open → action declines and PageUp passes th
 
 test "chat scroll: overlay PageUp / PageDown adjusts chat_view_offset and clamps at edges" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -1237,10 +1293,12 @@ test "chat scroll: overlay PageUp / PageDown adjusts chat_view_offset and clamps
 
 test "chat scroll: inline panel scrolls only when focus is in the panel" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -1279,10 +1337,12 @@ test "chat scroll: inline panel scrolls only when focus is in the panel" {
 
 test "chat scroll: pushTurn re-pins both view offsets to 0" {
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -1311,10 +1371,12 @@ test "chat scroll: freeTurns resets both view offsets" {
     // the offsets dangle stale until the first new pushTurn rescues
     // them.
     const L = configure(.{
-        .api_base = "http://test/v1",
-        .api_base_env = "ATTY_TEST_NEVER",
-        .api_base_fallback_env = "ATTY_TEST_NEVER",
-        .api_key_env = "ATTY_TEST_NEVER",
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
