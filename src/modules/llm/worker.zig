@@ -48,6 +48,7 @@ const dialog = @import("dialog.zig");
 const types = @import("types.zig");
 const Config = types.Config;
 const SubprocessProvider = types.SubprocessProvider;
+const nowMs = @import("../_lib.zig").nowMs;
 
 pub fn Module(comptime cfg: Config) type {
     return struct {
@@ -593,22 +594,37 @@ pub fn Module(comptime cfg: Config) type {
             var timed_out = std.atomic.Value(bool).init(false);
             const Watchdog = struct {
                 fn run(deadline_ms: u64, pid: std.posix.pid_t, done: *std.atomic.Value(bool), expired: *std.atomic.Value(bool)) void {
-                    // Poll in 50ms slices because std.Thread has
-                    // no cancellation primitive — the only way to
-                    // bail early on a fast-completing request is
-                    // to wake up and check.
-                    const slice_ms: u64 = 50;
-                    var elapsed_ms: u64 = 0;
-                    var req: std.c.timespec = .{ .sec = 0, .nsec = @intCast(slice_ms * std.time.ns_per_ms) };
-                    while (elapsed_ms < deadline_ms) {
-                        _ = std.c.nanosleep(&req, null);
+                    // Wall-clock deadline (not slice-counted) — an
+                    // EINTR-shortened `nanosleep` doesn't advance
+                    // elapsed time, so the watchdog can't fire
+                    // ahead of the configured budget.
+                    const start_ms = nowMs();
+                    const deadline_signed: i64 = @intCast(deadline_ms);
+                    var slice: std.c.timespec = .{ .sec = 0, .nsec = @intCast(50 * std.time.ns_per_ms) };
+                    while ((nowMs() - start_ms) < deadline_signed) {
+                        _ = std.c.nanosleep(&slice, null);
                         if (done.load(.acquire)) return;
-                        elapsed_ms += slice_ms;
                     }
-                    // `std.posix.kill` instead of `child.kill` —
-                    // the latter mutates `child.id` and would race
-                    // with the main thread's read/wait.
+                    // Re-check `done` immediately before the kill
+                    // closes the race window where the main thread
+                    // completes between our last poll and the
+                    // SIGTERM (the kill would otherwise target a
+                    // zombie or — if pid reuse won — an unrelated
+                    // process; pid reuse is impossible while the
+                    // main thread holds off `wait` until our join,
+                    // but belt-and-suspenders).
+                    if (done.load(.acquire)) return;
                     expired.store(true, .release);
+                    // SIGTERM first — gives well-behaved CLIs a
+                    // chance to flush stderr / close files. SIGKILL
+                    // 200 ms later catches anything that didn't
+                    // exit. `std.posix.kill` instead of
+                    // `child.kill` because the latter mutates
+                    // `child.id` and races with the main thread's
+                    // read/wait.
+                    std.posix.kill(pid, .TERM) catch {};
+                    var grace: std.c.timespec = .{ .sec = 0, .nsec = @intCast(200 * std.time.ns_per_ms) };
+                    _ = std.c.nanosleep(&grace, null);
                     std.posix.kill(pid, .KILL) catch {};
                 }
             };
