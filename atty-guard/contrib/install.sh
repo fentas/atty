@@ -9,7 +9,10 @@
 # influences detection. A user-writable trust file is a DOS vector
 # (process running as $USER could poison atoms with common commands
 # and force atty-guard to be disabled). atty:atty-owned state under
-# /var/lib/atty-guard/ + mediated CLI keeps mutations behind sudo.
+# /var/lib/atty-guard/ keeps mutations outside the user's write
+# reach. The mutation API (planned: `sudo atty-guard atoms add/...`
+# CLI subcommands) lands in PR #141; PR #140 only sets up the
+# foundation — daemon under the dedicated user, state dirs in place.
 #
 # Build first:
 #   cd atty-guard && cargo build --release

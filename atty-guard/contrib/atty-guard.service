@@ -16,8 +16,10 @@ After=network.target
 # malicious process running as $USER could poison atoms with common
 # commands and force the user to disable atty-guard. Putting the
 # daemon under a dedicated user keeps detection state outside the
-# user's write reach; mutations go through `sudo atty-guard atoms
-# add/remove` etc. so admin intent is required.
+# user's write reach. PR #140 (this unit) builds the foundation;
+# the mutation API — sudo-mediated `atty-guard atoms add/remove`
+# subcommands + session-based runtime trust — lands in PR #141. Until
+# then, /var/lib/atty-guard/ is read-only from outside the daemon.
 User=atty
 Group=atty
 
