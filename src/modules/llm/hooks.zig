@@ -857,6 +857,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                     rt.chat_inline_open = !rt.chat_inline_open;
                     rt.chat_inline_paint_pending = true;
+                    // #167 — any manual Alt+C toggle (open OR close)
+                    // clears the refocus latch so a pending `.exec`-
+                    // armed snap doesn't override a fresh user
+                    // focus choice on the next `;D`.
+                    rt.chat_refocus_pending = false;
                     if (rt.chat_inline_open) {
                         // Disarm the conclusion auto-emit latch so the
                         // banner doesn't fire while inline chat is
@@ -1130,9 +1135,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         }
                         // #167 — command finished, shell is back at
                         // a prompt. Refocus the chat panel if the
-                        // exec arm armed the latch.
+                        // exec arm armed the latch AND the panel
+                        // is still open (user may have toggled
+                        // Alt+C shut while the command was
+                        // running; flipping a closed panel's
+                        // focus would be a no-op today but locks
+                        // out a future "open-defocused" UX).
                         if (rt.chat_refocus_pending) {
-                            rt.chat_focus_in_panel = true;
+                            if (rt.chat_inline_open) rt.chat_focus_in_panel = true;
                             rt.chat_refocus_pending = false;
                         }
                         cursor = advancePastMarker(output, offset);
@@ -1909,6 +1919,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const switching = current != .off;
             rt.dialog_persistent_mode = target;
             rt.auto_mode_active = (target == .auto);
+            // #167 — if user flips into auto AFTER `.exec` armed
+            // the refocus latch, disarm: auto-mode will run the
+            // Enter itself, focus state is moot, and a stale
+            // latch firing on the next `;D` would steal focus
+            // from a panel the user might already be back in.
+            if (target == .auto) rt.chat_refocus_pending = false;
             if (switching) {
                 latchHint(rt, switch (target) {
                     .off => unreachable,
