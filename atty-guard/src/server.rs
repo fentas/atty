@@ -939,11 +939,11 @@ mod tests {
 
     #[test]
     fn session_add_trust_then_session_list_round_trip() {
-        // Test gap from #141 / #142 review: there was no real-UDS
-        // integration test that sent SessionAddTrust + asserted the
-        // next SessionList Response carries the hash. Closes that
-        // gap so a future refactor of the SessionList serialization
-        // can't silently drop the trust field.
+        // Pin the SessionAddTrust → SessionList wire path end-to-end
+        // over a real UDS pair. Guards against a future refactor of
+        // the SessionList serialization silently dropping the trust
+        // field — the trust_store unit tests cover the storage layer
+        // but not the JSON shape that crosses the socket.
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
         let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -969,10 +969,9 @@ mod tests {
 
     #[test]
     fn session_add_url_block_then_session_list_round_trip() {
-        // Sibling test for the urls_block kind, same threat model
-        // (no-sudo session adds via the banner's [B]lock host
-        // forever keystroke). Pins the SessionList urls_block
-        // wire-format symmetrically with the trust test above.
+        // Pins the SessionList urls_block wire-format. Same shape
+        // as the trust pin above — guards the no-sudo session adds
+        // against a JSON-shape regression.
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
         let add = round_trip(
