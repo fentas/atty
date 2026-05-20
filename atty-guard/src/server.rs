@@ -988,6 +988,12 @@ mod tests {
         let block = v["urls_block"].as_array().expect("urls_block array");
         assert_eq!(block.len(), 1);
         assert_eq!(block[0], "evil.example");
+        // Symmetric negative pinning with the trust test above —
+        // future regression that copied the host into a wrong
+        // field would surface here.
+        assert!(v["atoms"].as_array().unwrap().is_empty());
+        assert!(v["urls_allow"].as_array().unwrap().is_empty());
+        assert!(v["trust"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_file(socket);
     }
 
