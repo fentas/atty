@@ -311,17 +311,16 @@ test "doSubprocessDialogRequest round-trips via cat + JSON envelope" {
     try testing.expect(std.mem.indexOf(u8, echoed, "hello") != null);
 }
 
-test "subprocess timeout: /bin/sleep 5 with 200ms budget gets SIGKILL'd" {
-    // The watchdog should fire well before the sleep completes.
-    // Allow a generous test margin (3 s) for slow CI runners — the
-    // 200 ms timeout is the LOWER bound; we only care that the
-    // call returns at all and reports the timeout error.
-    // Use .stdin so the prompt isn't appended as argv (sleep would
-    // reject the extra arg and exit non-zero before timeout fires).
+test "subprocess timeout: /bin/sleep 5 with 500ms budget gets SIGKILL'd" {
+    // 500 ms budget with a 400 ms lower bound — gives the
+    // watchdog's 50 ms polling slice plenty of jitter room on a
+    // thrashed CI runner without making the test slow.
+    // `.stdin` keeps the prompt off argv so `sleep` doesn't
+    // reject extra args and exit early.
     const cfg = comptime makeTestCfg(.{
         .argv = &.{ "/bin/sleep", "5" },
         .prompt_via = .stdin,
-        .timeout_ms = 200,
+        .timeout_ms = 500,
     });
     const M = worker_mod.Module(cfg);
 
@@ -343,16 +342,12 @@ test "subprocess timeout: /bin/sleep 5 with 200ms budget gets SIGKILL'd" {
     );
     const elapsed = nowMs() - start;
 
-    // Must fail with timeout error.
     try testing.expectError(error.SubprocessFailed, result);
     try testing.expect(err_len > 0);
     try testing.expect(std.mem.indexOf(u8, err[0..err_len], "timed out") != null);
-    try testing.expect(std.mem.indexOf(u8, err[0..err_len], "200ms") != null);
-    // Must fire well before the 5 s sleep would have finished.
+    try testing.expect(std.mem.indexOf(u8, err[0..err_len], "500ms") != null);
     try testing.expect(elapsed < 3000);
-    // And not before the budget elapsed (give 30 ms of grace for
-    // poll-slice jitter on the watchdog's 50 ms cadence).
-    try testing.expect(elapsed >= 170);
+    try testing.expect(elapsed >= 400);
 }
 
 test "subprocess timeout = 0 disables watchdog (echo still works)" {
