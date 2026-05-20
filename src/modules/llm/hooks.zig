@@ -610,7 +610,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///   (`cfg.auto_delay_ms`) so each suggested command runs
         ///   without manual Enter; any keystroke aborts the timer.
         /// - `llm_exec_cycle_model`: rotates `current_model_idx`
-        ///   through `cfg.models[]`; no-op + hint when there's
+        ///   through `cfg.providers[]`; no-op + hint when there's
         ///   only the single-model fallback.
         /// - `llm_exec_toggle_help`: latches a one-line help hint
         ///   summarising the active model / endpoint / cancel key.
@@ -734,8 +734,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // bufPrint calls into disjoint subslices.
                     var buf: [256]u8 = undefined;
                     const mode = currentDispatchMode(rt);
-                    const resolved = worker_mod_ns.resolveProvider(
-                        if (mode == .single) worker_mod_ns.Module(cfg).RequestKind.single else worker_mod_ns.Module(cfg).RequestKind.dialog,
+                    const resolved = worker_mod_ns.resolveProviderForMode(
+                        mode,
                         cfg.providers,
                         cfg.provider,
                         rt.current_provider_idx,
@@ -751,8 +751,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         "";
                     const endpoint: []const u8 = if (rt.inert)
                         "(inert — no endpoint)"
-                    else
-                        providerLabel(resolved.provider);
+                    else switch (resolved.provider) {
+                        // For HTTP, surface the actual endpoint URL —
+                        // env-resolved per request. Fall back to
+                        // `rt.api_base` (resolved at attach for the
+                        // single-shorthand path) when the entry's
+                        // env vars haven't been read yet here.
+                        .http => |h| if (h.api_base.len > 0) h.api_base else rt.api_base,
+                        .subprocess => |sub| if (sub.argv.len > 0) sub.argv[0] else "(subprocess)",
+                    };
                     // Message goes into the remaining bytes. cycle_info
                     // is referenced before its underlying storage is
                     // overwritten — bufPrint copies the formatted
@@ -1004,6 +1011,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             @memcpy(rt.shared.req_buf[0..body.len], body);
             rt.shared.req_len = body.len;
             rt.shared.current_provider_idx = idx_to_send;
+            rt.shared.dispatch_mode = .single;
             rt.shared.req_kind = .single;
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
@@ -1954,12 +1962,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         fn fireDialogRequest(rt: *Runtime, ctx: *m.Context) !void {
             // Resolve which provider will serve this dialog turn so
             // we can pull the model name (HTTP) AND the per-entry
-            // history-turns override into the request body.
-            // Subprocess providers get an empty model_for_request
-            // (the model is baked into argv); the worker ignores
-            // it for the subprocess arm.
-            const resolved_for_body = worker_mod_ns.resolveProvider(
-                worker_mod_ns.Module(cfg).RequestKind.dialog,
+            // history-turns override into the request body. Use the
+            // precise dispatch mode so chat/auto-only entries get
+            // picked up — `resolveProvider` would otherwise collapse
+            // them to plain `.dialog`.
+            const resolved_for_body = worker_mod_ns.resolveProviderForMode(
+                currentDispatchMode(rt),
                 cfg.providers,
                 cfg.provider,
                 rt.current_provider_idx,
@@ -2050,6 +2058,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.shared.body_len = 0;
             }
             rt.shared.current_provider_idx = idx_to_send;
+            rt.shared.dispatch_mode = currentDispatchMode(rt);
             rt.shared.req_kind = .dialog;
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;

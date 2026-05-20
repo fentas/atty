@@ -64,20 +64,19 @@ pub const ResolvedProvider = struct {
     name: []const u8,
 };
 
-/// Pick the provider that serves `req_kind` from `providers[]`,
+/// Pick the provider that serves `mode` from `providers[]`,
 /// preferring the entry at `current_idx` when its `for_modes`
-/// covers the request mode. Falls back to the first matching
-/// entry, then to `fallback` (the single-provider shorthand)
-/// when nothing matches. Empty `providers[]` always returns
+/// covers the mode. Falls back to the first matching entry,
+/// then to `fallback` (the single-provider shorthand) when
+/// nothing matches. Empty `providers[]` always returns
 /// `fallback`.
-pub fn resolveProvider(
-    req_kind: anytype,
+pub fn resolveProviderForMode(
+    mode: Mode,
     providers: []const ProviderEntry,
     fallback: Provider,
     current_idx: usize,
 ) ResolvedProvider {
     if (providers.len == 0) return .{ .provider = fallback, .name = "" };
-    const mode = Mode.fromRequestKind(req_kind);
     if (current_idx < providers.len) {
         const entry = providers[current_idx];
         if (entry.for_modes.matches(mode)) {
@@ -90,6 +89,21 @@ pub fn resolveProvider(
         }
     }
     return .{ .provider = fallback, .name = "" };
+}
+
+/// Compatibility wrapper — old `resolveProvider(req_kind, …)`
+/// call sites that don't know the precise dispatch mode collapse
+/// the request kind's `.dialog` into a generic dialog mode.
+/// Prefer `resolveProviderForMode` when the trigger site knows
+/// whether we're in `.auto` or `.chat` specifically — those
+/// modes are reachable only through the explicit form.
+pub fn resolveProvider(
+    req_kind: anytype,
+    providers: []const ProviderEntry,
+    fallback: Provider,
+    current_idx: usize,
+) ResolvedProvider {
+    return resolveProviderForMode(Mode.fromRequestKind(req_kind), providers, fallback, current_idx);
 }
 
 pub fn Module(comptime cfg: Config) type {
@@ -181,6 +195,15 @@ pub fn Module(comptime cfg: Config) type {
             /// `usize.max` is the "use cfg.provider shorthand"
             /// sentinel — set when `cfg.providers` is empty.
             current_provider_idx: usize = std.math.maxInt(usize),
+            /// Dispatch mode for the pending request — set by
+            /// trigger sites alongside `req_kind`. Used by the
+            /// worker to call `resolveProviderForMode` with the
+            /// precise mode (`.auto` / `.chat` instead of
+            /// collapsing to `.dialog`) so chat-only or
+            /// auto-only `ProviderEntry.for_modes` masks are
+            /// reachable. Default `.single` is a safe identity
+            /// for the legacy onInput Enter path.
+            dispatch_mode: types.Mode = .single,
             /// Monotonic counter — bumped on every prompt the proxy
             /// hands to the worker. The worker stamps each response
             /// with the generation it was serving; the proxy drops
@@ -1277,6 +1300,7 @@ pub fn Module(comptime cfg: Config) type {
                     @memcpy(body_local[0..body_len], shared.body_buf[0..body_len]);
                 }
                 const provider_idx = shared.current_provider_idx;
+                const dispatch_mode = shared.dispatch_mode;
                 // Snapshot the session id under the same lock so the
                 // worker has a stable view while building argv.
                 var session_id_local: [256]u8 = undefined;
@@ -1291,7 +1315,7 @@ pub fn Module(comptime cfg: Config) type {
                 // subprocess entries, so the worker can't comptime-
                 // DCE either arm. Empty providers[] returns the
                 // single-provider shorthand from cfg.provider.
-                const resolved = resolveProvider(req_kind, cfg.providers, cfg.provider, provider_idx);
+                const resolved = resolveProviderForMode(dispatch_mode, cfg.providers, cfg.provider, provider_idx);
 
                 // Fire the request OUTSIDE the lock — it may block
                 // for many seconds.

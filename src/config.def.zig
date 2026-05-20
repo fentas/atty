@@ -133,7 +133,6 @@ const atty = @import("atty");
 //         // }},
 //         //
 //         // .prefix = "#: ",          // trigger; default
-//         // .model = "llama3:8b",     // model name
 //         // .shell = null,            // null → derive from $SHELL
 //         // .system_prompt = "...",   // override the system message
 //         // .with_explanation = true, // ask for + render one-line summary

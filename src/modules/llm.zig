@@ -270,6 +270,9 @@ pub fn configure(comptime cfg: Config) type {
                     @compileError(std.fmt.comptimePrint("Config.providers[{d}].config.subprocess.argv must have a non-empty argv[0]", .{i}));
                 },
             }
+            if (!entry.for_modes.single and !entry.for_modes.dialog and !entry.for_modes.auto and !entry.for_modes.chat) {
+                @compileError(std.fmt.comptimePrint("Config.providers[{d}].for_modes has every flag false — entry would never be picked", .{i}));
+            }
         }
     }
     return struct {
