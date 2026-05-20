@@ -232,15 +232,21 @@ pub const Client = struct {
     /// `sessionAddTrust`: local block is authoritative, daemon
     /// receives a copy for `atty-guard session list` visibility +
     /// future `sudo atty-guard session write` persistence.
+    /// `host` is escaped per RFC 8259 before interpolation —
+    /// `"` and `\` and control chars are common enough in
+    /// real shell input that JSON injection would otherwise be a
+    /// real corruption path.
     pub fn sessionAddUrlBlock(self: *Client, host: []const u8) Error!void {
         try self.ensureConnected();
         var w: std.Io.Writer = .fixed(&self.write_buf);
         const id = self.next_id;
         self.next_id +%= 1;
         (w.print(
-            "{{\"id\":{d},\"method\":\"session_add_url_block\",\"host\":\"{s}\"}}\n",
-            .{ id, host },
+            "{{\"id\":{d},\"method\":\"session_add_url_block\",\"host\":\"",
+            .{id},
         )) catch return Error.OutOfMemory;
+        writeJsonStringEscaped(&w, host) catch return Error.OutOfMemory;
+        (w.writeAll("\"}\n")) catch return Error.OutOfMemory;
         self.writeAll(self.write_buf[0..w.end]) catch {
             self.close();
             return Error.Unavailable;
@@ -249,6 +255,32 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
+    }
+
+    /// RFC 8259 minimal JSON-string escaper: `"`, `\`, control
+    /// chars (`< 0x20`). Other bytes pass through (we don't
+    /// re-encode non-ASCII; UTF-8 is already valid JSON).
+    fn writeJsonStringEscaped(w: *std.Io.Writer, s: []const u8) !void {
+        for (s) |c| {
+            switch (c) {
+                '"' => try w.writeAll("\\\""),
+                '\\' => try w.writeAll("\\\\"),
+                '\n' => try w.writeAll("\\n"),
+                '\r' => try w.writeAll("\\r"),
+                '\t' => try w.writeAll("\\t"),
+                else => {
+                    if (c < 0x20) {
+                        // \uXXXX escape for any other control char.
+                        const hex_chars = "0123456789abcdef";
+                        try w.writeAll("\\u00");
+                        try w.writeByte(hex_chars[(c >> 4) & 0x0F]);
+                        try w.writeByte(hex_chars[c & 0x0F]);
+                    } else {
+                        try w.writeByte(c);
+                    }
+                },
+            }
+        }
     }
 
     // --- internals -----------------------------------------------------

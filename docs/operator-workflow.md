@@ -172,10 +172,12 @@ sudo atty-guard urls block evil.io
 atty-guard urls list
 ```
 
-**Session** — in-memory state that builds up through the lifetime
-of an atty session. Populated either via the daemon CLI (`sudo
-atty-guard atoms add ...`) or, post-#142, via inline keystrokes on
-the security_guard banner:
+**Session** — in-memory state that builds up over the lifetime of
+the atty-guard daemon process (NOT a single atty proxy session —
+multiple atty proxies under the same UID share one daemon-side
+session). Populated EXCLUSIVELY via inline keystrokes on the
+security_guard banner. `sudo atty-guard atoms add ...` writes to
+the PERSISTENT overlay, not the session.
 
 ```
 atty security_guard: <reason>

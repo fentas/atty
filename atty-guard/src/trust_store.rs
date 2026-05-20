@@ -205,29 +205,44 @@ impl TrustStore {
 
     /// Add a SHA-256 trust hash to the session set. Validates
     /// the hash shape (64 lowercase hex chars) to keep the set
-    /// from filling with malformed strings.
+    /// from filling with malformed strings. Per-UID cap protects
+    /// against an unprivileged process spamming unique hashes to
+    /// grow daemon memory unbounded — `[a]llow always` from a
+    /// real banner is a once-per-prompt event, the cap is many
+    /// thousands of multiples above any realistic operator pace.
     pub fn session_add_trust(&self, uid: u32, hash: &str) -> Result<(), String> {
         validate_trust_hash(hash)?;
         let mut state = self.state.lock().expect("trust_store poisoned");
-        state
-            .entry(uid)
-            .or_default()
-            .session_trust
-            .insert(hash.to_owned());
+        let entry = state.entry(uid).or_default();
+        if entry.session_trust.len() >= SESSION_PER_KIND_CAP
+            && !entry.session_trust.contains(hash)
+        {
+            return Err(format!(
+                "session trust set full ({} entries) — run `sudo atty-guard session write` to persist + clear, or `atty-guard session clear`",
+                SESSION_PER_KIND_CAP
+            ));
+        }
+        entry.session_trust.insert(hash.to_owned());
         Ok(())
     }
 
     /// Mirror an atty-side `[B]lock host forever` keystroke into
     /// the per-UID session_urls_block set. atty proxy enforces
-    /// locally; this is the visibility log.
+    /// locally; this is the visibility log. Per-UID cap (see
+    /// `session_add_trust` for rationale).
     pub fn session_add_url_block(&self, uid: u32, host: &str) -> Result<(), String> {
         validate_host(host)?;
         let mut state = self.state.lock().expect("trust_store poisoned");
-        state
-            .entry(uid)
-            .or_default()
-            .session_urls_block
-            .insert(host.to_owned());
+        let entry = state.entry(uid).or_default();
+        if entry.session_urls_block.len() >= SESSION_PER_KIND_CAP
+            && !entry.session_urls_block.contains(host)
+        {
+            return Err(format!(
+                "session url-block set full ({} entries)",
+                SESSION_PER_KIND_CAP
+            ));
+        }
+        entry.session_urls_block.insert(host.to_owned());
         Ok(())
     }
 
@@ -393,6 +408,12 @@ impl TrustStore {
         // entries that actually got persisted — surviving entries
         // (those that failed validation) stay in the session for
         // the operator to inspect via `session list`.
+        //
+        // session_trust hashes have no persistent target file
+        // today (deferred to the trust_cache.zig migration PR);
+        // session write clears them outright so the operator's
+        // "ok I'm done with this session" intent matches what
+        // they see in `session list` afterwards.
         self.load_persistent(uid)?;
         {
             let mut state = self.state.lock().expect("trust_store poisoned");
@@ -406,6 +427,7 @@ impl TrustStore {
                 entry
                     .session_urls_block
                     .retain(|h| validate_host(h).is_err());
+                entry.session_trust.clear();
             }
         }
         Ok(report)
@@ -466,6 +488,15 @@ impl UrlDecision {
 const ATOM_MAX_LEN: usize = 200;
 const ATOM_MIN_LEN: usize = 3;
 const HOST_MAX_LEN: usize = 253; // RFC 1035
+
+/// Per-UID cap on each kind of session entry (atoms, urls-allow,
+/// urls-block, trust hashes). Defends against an unprivileged
+/// caller spamming the no-sudo session RPCs to grow daemon memory
+/// unbounded. Real banner-driven taps are at most one-per-prompt,
+/// so the cap is many thousands of multiples above any realistic
+/// operator pace; hitting it means something's wrong + the
+/// operator should `session write` or `session clear`.
+const SESSION_PER_KIND_CAP: usize = 4096;
 
 fn validate_atom(atom: &str) -> Result<(), String> {
     if atom.len() < ATOM_MIN_LEN {

@@ -389,10 +389,14 @@ pub fn configure(comptime cfg: Config) type {
                 },
                 'b', 'B' => {
                     // [B]lock host forever — extract host from the
-                    // matched substring + send to daemon as a
-                    // persistent block decision. Only applies to
-                    // URL-shaped categories (curl_pipe_sh); other
-                    // hits silently fall through to cancel.
+                    // matched substring + add to the session-only
+                    // blocked-hosts list. The daemon mirror is also
+                    // session-only (no sudo, in-memory). To make
+                    // the block actually permanent, the operator
+                    // runs `sudo atty-guard session write` later.
+                    // Hits without a URL-shaped match (atom-only
+                    // categories, daemon-only categories) silently
+                    // fall through to cancel.
                     return blockHostThenCancel(rt, armed_daemon_cat);
                 },
                 't', 'T' => {
@@ -480,13 +484,25 @@ pub fn configure(comptime cfg: Config) type {
                 // [cancel]. Readline cleared, no persistent change.
                 return .{ .replace = "\x15" };
             };
-            if (rt.session_blocked_hosts_count < rt.session_blocked_hosts.len) {
-                const slot = rt.session_blocked_hosts_count;
-                const copy_len = @min(host.len, rt.session_blocked_hosts[slot].len);
-                @memcpy(rt.session_blocked_hosts[slot][0..copy_len], host[0..copy_len]);
-                rt.session_blocked_hosts_lens[slot] = @intCast(copy_len);
-                rt.session_blocked_hosts_count += 1;
+            // Two failure modes that BOTH must skip the daemon
+            // mirror to keep atty's view and the daemon's view in
+            // sync (per round-1 review): host won't fit in the
+            // 64-byte slot, OR the session list is full. In either
+            // case, log to the sink, cancel the current command,
+            // and don't pretend we recorded anything.
+            const slot_cap = rt.session_blocked_hosts[0].len;
+            if (host.len > slot_cap) {
+                writeRefused(rt, "host too long for session-block slot — `[B]` ignored, use `sudo atty-guard urls block` for the persistent path", host);
+                return .{ .replace = "\x15" };
             }
+            if (rt.session_blocked_hosts_count >= rt.session_blocked_hosts.len) {
+                writeRefused(rt, "session-block list full (16 entries) — run `sudo atty-guard session write` to persist + restart atty", host);
+                return .{ .replace = "\x15" };
+            }
+            const slot = rt.session_blocked_hosts_count;
+            @memcpy(rt.session_blocked_hosts[slot][0..host.len], host);
+            rt.session_blocked_hosts_lens[slot] = @intCast(host.len);
+            rt.session_blocked_hosts_count += 1;
             if (rt.daemon) |*client| {
                 client.sessionAddUrlBlock(host) catch {};
             }
@@ -531,11 +547,20 @@ pub fn configure(comptime cfg: Config) type {
                 const close = std.mem.indexOfScalar(u8, after, ']') orelse return null;
                 return after[0 .. close + 1];
             }
-            // Regular host — ends at `/`, `:`, `?`, `#`, whitespace, or EOL.
+            // Regular host — ends at `/`, `:`, `?`, `#`, whitespace,
+            // or any of the punctuation chars commonly used to
+            // bracket / quote a URL in shell input (`)`, `"`, `'`,
+            // `|`, `;`, `>`, `<`, `,`). Without these, `curl
+            // "https://evil.io"` would extract `evil.io"` and never
+            // match in future commands.
             var end: usize = 0;
             while (end < after.len) : (end += 1) {
                 const c = after[end];
-                if (c == '/' or c == ':' or c == '?' or c == '#' or c == ' ' or c == '\t') break;
+                switch (c) {
+                    '/', ':', '?', '#', ' ', '\t', '\r', '\n',
+                    ')', '(', '"', '\'', '|', ';', '>', '<', ',', '`' => break,
+                    else => {},
+                }
             }
             if (end == 0) return null;
             return after[0..end];
