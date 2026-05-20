@@ -6,7 +6,6 @@
   <title>{% if page.title %}{{ page.title }} · {{ site.title }}{% else %}{{ site.title }}{% endif %}</title>
   <meta name="description" content="{{ page.description | default: site.description }}">
 
-  <!-- Open Graph -->
   <meta property="og:title" content="{{ page.title | default: site.title }}">
   <meta property="og:description" content="{{ page.description | default: site.description }}">
   <meta property="og:url" content="{{ site.url }}{{ page.url | relative_url }}">
@@ -15,28 +14,32 @@
   <link rel="stylesheet" href="{{ '/assets/style.css' | relative_url }}">
   <link rel="icon" type="image/svg+xml" href="{{ '/assets/favicon.svg' | relative_url }}">
 </head>
-<body>
-  <header>
-    <a class="logo" href="{{ '/' | relative_url }}">
-      <span class="prompt">$</span>&nbsp;atty<span class="cursor"></span>
-    </a>
-    <nav>
-      <a href="{{ '/getting-started/' | relative_url }}">get started</a>
-      <a href="{{ '/faq/' | relative_url }}">faq</a>
-      <a href="{{ '/providers/' | relative_url }}">modules</a>
-      <a href="{{ '/llm/' | relative_url }}">llm</a>
-      <span class="nav-sep" aria-hidden="true">·</span>
-      <a href="{{ '/architecture/' | relative_url }}">architecture</a>
-      <a href="{{ '/operator-workflow/' | relative_url }}">operator</a>
-      <a href="https://github.com/fentas/atty" rel="noopener">github&nbsp;→</a>
-    </nav>
-  </header>
+<body class="doc">
+  {% include topnav.html %}
+  <label class="sidebar-scrim" for="sidebar-toggle" aria-hidden="true"></label>
 
-  <main>
-    {{ content }}
-  </main>
+  <div class="doc-shell">
+    {% include sidebar.html %}
 
-  <footer>
+    <main class="doc-main">
+      <article class="doc-article">
+        {{ content }}
+
+        <nav class="doc-footer-nav">
+          <a class="doc-edit" href="https://github.com/fentas/atty/edit/master/docs/{{ page.path }}" rel="noopener">Edit this page on GitHub&nbsp;↗</a>
+        </nav>
+      </article>
+    </main>
+
+    <aside class="toc-rail" aria-label="On this page">
+      <div class="toc-rail-inner">
+        <p class="toc-rail-title">On this page</p>
+        <div id="toc-rail-slot"></div>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="site-footer">
     <p>
       <span class="prompt">#</span> Suckless-style PTY proxy in Zig 0.16 ·
       <a href="https://github.com/fentas/atty">source</a> ·
@@ -45,66 +48,85 @@
   </footer>
 
   <script>
-    // TOC scroll-spy. Highlights the entry pointing at whichever
-    // heading is closest to the top of the viewport. Pure DOM /
-    // IntersectionObserver — no framework, no jQuery, no dependency.
+    // Move the kramdown-generated `#markdown-toc` (if the page has one)
+    // into the right TOC rail, then run scroll-spy across visible headings.
     (function () {
-      const toc = document.getElementById('markdown-toc');
+      var slot = document.getElementById('toc-rail-slot');
+      var rail = document.querySelector('.toc-rail');
+      var toc = document.getElementById('markdown-toc');
+      if (toc && slot) {
+        slot.appendChild(toc);
+        document.body.classList.add('toc-moved');
+      } else {
+        document.body.classList.add('no-toc');
+      }
       if (!toc) return;
-      const links = Array.from(toc.querySelectorAll('a[href^="#"]'));
+
+      var links = Array.from(toc.querySelectorAll('a[href^="#"]'));
       if (!links.length) return;
-      const map = new Map();
-      for (const a of links) {
-        const id = decodeURIComponent(a.getAttribute('href').slice(1));
-        const el = document.getElementById(id);
+      var map = new Map();
+      for (var i = 0; i < links.length; i++) {
+        var a = links[i];
+        var id = decodeURIComponent(a.getAttribute('href').slice(1));
+        var el = document.getElementById(id);
         if (el) map.set(el, a);
       }
       if (!map.size) return;
-      const visible = new Set();
-      let lastActive = null;
-      const setActive = function (link) {
+      var visible = new Set();
+      var lastActive = null;
+      function setActive(link) {
         if (link === lastActive) return;
         if (lastActive) lastActive.classList.remove('is-active');
         link.classList.add('is-active');
         lastActive = link;
-        // Keep the active item in view inside the sidebar if it overflows.
+        // After the move, the actual scroll container is the rail
+        // (`overflow-y: auto` lives on `.toc-rail` and on the inline
+        // TOC's article location). Find the nearest ancestor with a
+        // scrollable y-overflow and compare against that.
         if (typeof link.scrollIntoView === 'function') {
-          const r = link.getBoundingClientRect();
-          const tr = toc.getBoundingClientRect();
-          if (r.top < tr.top || r.bottom > tr.bottom) {
-            link.scrollIntoView({ block: 'nearest' });
+          var scroller = link.parentElement;
+          while (scroller && scroller !== document.body) {
+            var cs = getComputedStyle(scroller);
+            if (cs.overflowY === 'auto' || cs.overflowY === 'scroll') break;
+            scroller = scroller.parentElement;
+          }
+          if (scroller && scroller !== document.body) {
+            var r = link.getBoundingClientRect();
+            var sr = scroller.getBoundingClientRect();
+            if (r.top < sr.top || r.bottom > sr.bottom) {
+              link.scrollIntoView({ block: 'nearest' });
+            }
           }
         }
-      };
-      const pickActive = function () {
-        let best = null, bestTop = -Infinity;
-        for (const el of visible) {
-          const top = el.getBoundingClientRect().top;
+      }
+      function pickActive() {
+        var best = null, bestTop = -Infinity;
+        visible.forEach(function (el) {
+          var top = el.getBoundingClientRect().top;
           if (top <= 120 && top > bestTop) { bestTop = top; best = el; }
-        }
+        });
         if (!best && visible.size) {
-          let minTop = Infinity;
-          for (const el of visible) {
-            const top = el.getBoundingClientRect().top;
+          var minTop = Infinity;
+          visible.forEach(function (el) {
+            var top = el.getBoundingClientRect().top;
             if (top < minTop) { minTop = top; best = el; }
-          }
+          });
         }
         if (best && map.has(best)) setActive(map.get(best));
-      };
-      const obs = new IntersectionObserver(function (entries) {
-        for (const e of entries) {
+      }
+      var obs = new IntersectionObserver(function (entries) {
+        for (var i = 0; i < entries.length; i++) {
+          var e = entries[i];
           if (e.isIntersecting) visible.add(e.target);
           else visible.delete(e.target);
         }
         pickActive();
       }, { rootMargin: '-80px 0px -60% 0px', threshold: 0 });
-      for (const el of map.keys()) obs.observe(el);
-      // First paint: pick whatever is at the top right now.
+      map.forEach(function (_a, el) { obs.observe(el); });
       pickActive();
-      // Fallback for hash navigation (in case Intersection hasn't fired yet).
       window.addEventListener('hashchange', function () {
-        const id = decodeURIComponent(location.hash.slice(1));
-        const el = document.getElementById(id);
+        var id = decodeURIComponent(location.hash.slice(1));
+        var el = document.getElementById(id);
         if (el && map.has(el)) setActive(map.get(el));
       });
     })();

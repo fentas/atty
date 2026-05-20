@@ -6,7 +6,8 @@
  *   • Limited palette. Phosphor green for the prompt; dim gray for
  *     anything that mimics ghost text.
  *   • Generous line-height so dense code reads cleanly.
- *   • No JS. Animations are pure CSS keyframes.
+ *   • Layout follows VuePress / starship.rs: sticky topnav, left
+ *     sidebar, centered prose, right-rail TOC.
  * ────────────────────────────────────────────────────────────── */
 
 :root {
@@ -22,10 +23,16 @@
   --danger:    #f38ba8;
   --border:    #232830;
   --rule:      #1c2026;
+
+  --topnav-h:  56px;
+  --sidebar-w: 260px;
+  --toc-w:     220px;
+  --content-w: 78ch;
+  --gutter:    2.5rem;
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+html { scroll-behavior: smooth; scroll-padding-top: calc(var(--topnav-h) + 1rem); }
 
 body {
   margin: 0;
@@ -39,8 +46,6 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* Scanline tint — barely perceptible vertical gradient that gives the
- * page just a hint of CRT phosphor warmth. */
 body::before {
   content: "";
   position: fixed;
@@ -60,169 +65,300 @@ a {
 }
 a:hover { border-color: currentColor; }
 
-/* ── Header ─────────────────────────────────────────────────────── */
+::selection { background: rgba(126,231,135,0.25); color: var(--fg); }
 
-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1.1rem 2rem;
-  border-bottom: 1px solid var(--border);
-  background: rgba(14, 17, 22, 0.85);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+/* ── Top nav ─────────────────────────────────────────────────────── */
+
+.topnav {
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 30;
+  height: var(--topnav-h);
+  background: rgba(14, 17, 22, 0.88);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.topnav-inner {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  padding: 0 1.5rem;
+  max-width: 1440px;
+  margin: 0 auto;
 }
 .logo {
   font-weight: 700;
-  font-size: 1.05rem;
+  font-size: 1.02rem;
   color: var(--fg);
   border-bottom: none !important;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .logo:hover { color: var(--accent); }
 .logo .prompt { color: var(--accent); margin-right: 0.2em; }
-
-nav { display: flex; gap: 1.5rem; font-size: 0.92rem; }
-nav a { color: var(--fg-dim); }
-nav a:hover { color: var(--accent-2); }
-
-@media (max-width: 640px) {
-  header { flex-direction: column; gap: 0.8rem; padding: 1rem; }
-  nav { gap: 1rem; font-size: 0.85rem; }
-}
-
-/* ── Cursor block (blinks) ──────────────────────────────────────── */
-
-.cursor {
+.logo-cursor {
   display: inline-block;
-  width: 0.55em;
-  height: 1.1em;
+  width: 0.45em;
+  height: 1em;
   background: var(--fg);
   vertical-align: text-bottom;
-  margin-left: 3px;
-  animation: blink 1.05s steps(2, start) infinite;
+  margin-left: 2px;
 }
-@keyframes blink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: no-preference) {
+  .logo-cursor { animation: blink 1.05s steps(2, start) infinite; }
+  @keyframes blink { to { visibility: hidden; } }
+}
 
-/* ── Main column + sidebar TOC ──────────────────────────────────── */
-/*
- * Layout rules:
- *   - Content column is always 78ch wide. The TOC must NOT squeeze it.
- *   - Narrow viewports (<1280px): TOC renders inline at the top of the
- *     page (kramdown's default position) as a compact panel.
- *   - Wide viewports (≥1280px): CSS grid pairs the 78ch content with a
- *     17rem sidebar (sticky, scroll-spy-aware). The pair is centered
- *     as a unit, so the content keeps its original column width and
- *     the TOC lives entirely in space that would otherwise be margin.
- */
+.topnav-links {
+  display: flex;
+  gap: 1.4rem;
+  font-size: 0.92rem;
+  margin-left: 1rem;
+}
+.topnav-links a {
+  color: var(--fg-soft);
+  border-bottom: 2px solid transparent;
+  padding: calc((var(--topnav-h) - 1.4em) / 2 - 2px) 0;
+  transition: color 120ms, border-color 120ms;
+}
+.topnav-links a:hover { color: var(--fg); }
+.topnav-links a.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-main {
-  max-width: 78ch;
+.topnav-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+.topnav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  color: var(--fg-soft);
+  border-bottom: none !important;
+  border-radius: 4px;
+  transition: color 120ms, background 120ms;
+}
+.topnav-icon:hover { color: var(--accent); background: var(--bg-soft); }
+
+.hamburger {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 32px;
+  height: 32px;
+  margin-right: 0.4rem;
+  cursor: pointer;
+  padding: 6px 4px;
+  border-radius: 4px;
+}
+.hamburger:hover,
+.hamburger:focus-visible { background: var(--bg-soft); outline: none; }
+.hamburger:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+.hamburger span {
+  display: block;
+  height: 2px;
+  background: var(--fg-soft);
+  border-radius: 1px;
+  transition: background 120ms;
+}
+.hamburger:hover span,
+.hamburger:focus-visible span { background: var(--accent); }
+
+/* Hamburger is meaningless on the home page (no sidebar to toggle). */
+body.home .hamburger { display: none !important; }
+
+.sidebar-toggle { display: none; }
+.sidebar-scrim { display: none; }
+
+/* ── Documentation shell — sidebar + main + TOC ─────────────────── */
+
+/* Default: 2-col (sidebar + main). The right TOC rail only appears
+ * once JS has moved a `#markdown-toc` into its slot — no-JS users
+ * keep the inline TOC styled in the article. */
+.doc-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 3rem 1.5rem 6rem;
   position: relative;
   z-index: 1;
+  align-items: start;
+}
+.toc-rail { display: none; }
+@media (min-width: 1280px) {
+  body.toc-moved .doc-shell {
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--toc-w);
+  }
+  body.toc-moved .toc-rail { display: block; }
 }
 
-/* Inline (narrow-screen) TOC — a compact panel above the content. */
-#markdown-toc {
+/* ── Sidebar ─────────────────────────────────────────────────────── */
+
+.sidebar {
+  position: sticky;
+  top: var(--topnav-h);
+  height: calc(100vh - var(--topnav-h));
+  overflow-y: auto;
+  padding: 1.8rem 1rem 2.5rem 1.5rem;
+  border-right: 1px solid var(--border);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.sidebar::-webkit-scrollbar { width: 6px; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.sidebar-nav {
   font-size: 0.92rem;
   line-height: 1.7;
-  margin: 1.5rem 0 2.5rem;
-  padding: 1rem 1.1rem 1rem 2.1rem;
-  border-left: 2px solid var(--accent);
-  background: rgba(255, 255, 255, 0.02);
+}
+.sidebar-group { margin-bottom: 1.6rem; }
+.sidebar-group h3 {
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin: 0 0 0.4rem 0.4rem;
+  padding: 0;
+  border: 0;
+}
+.sidebar-group h3::before { content: none; }
+.sidebar-group ul {
   list-style: none;
-  counter-reset: toc;
+  padding: 0;
+  margin: 0;
 }
-#markdown-toc ul {
-  list-style: none;
-  padding-left: 1.1rem;
-  margin: 0.15rem 0;
-  border-left: 1px solid var(--rule);
-}
-#markdown-toc li {
-  margin: 0.15rem 0;
-  position: relative;
-  counter-increment: toc;
-}
-#markdown-toc > li::marker { content: none; }
-#markdown-toc a {
+.sidebar-group li { margin: 0; }
+.sidebar-group a {
   display: block;
+  padding: 0.3rem 0.5rem 0.3rem 0.7rem;
   color: var(--fg-soft);
-  text-decoration: none;
-  padding: 0.2rem 0.4rem 0.2rem 0.6rem;
   border-left: 2px solid transparent;
-  margin-left: -0.6rem;
+  border-bottom: none;
   border-radius: 0 3px 3px 0;
-  transition: color 120ms, border-color 120ms, background 120ms;
+  transition: color 120ms, background 120ms, border-color 120ms;
 }
-#markdown-toc a:hover {
+.sidebar-group a:hover {
   color: var(--fg);
   background: rgba(126, 231, 135, 0.04);
 }
-#markdown-toc a.is-active {
+.sidebar-group a.active {
   color: var(--accent);
   border-left-color: var(--accent);
-  background: rgba(126, 231, 135, 0.06);
-}
-#markdown-toc ul a {
-  font-size: 0.88rem;
-  padding-left: 0.5rem;
-  margin-left: -0.5rem;
-  color: var(--fg-dim);
-}
-#markdown-toc ul ul a { padding-left: 0.4rem; opacity: 0.85; }
-#markdown-toc::before {
-  content: "On this page";
-  display: block;
-  margin-left: -1.2rem;
-  margin-bottom: 0.6rem;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--accent);
-  opacity: 0.85;
+  background: rgba(126, 231, 135, 0.07);
 }
 
-/* Wide-screen grid: 78ch content + 17rem sticky sidebar, centered.
- * Only kicks in on pages that have a TOC — pages without one keep
- * the simple centered 78ch column. */
-@media (min-width: 1280px) {
-  main:has(#markdown-toc) {
-    max-width: calc(78ch + 4rem + 17rem);
-    display: grid;
-    grid-template-columns: 78ch 17rem;
-    column-gap: 4rem;
-    align-items: start;
-  }
-  main:has(#markdown-toc) > * {
-    grid-column: 1;
-    min-width: 0;
-  }
-  main > #markdown-toc {
-    grid-column: 2;
-    grid-row: 1 / span 9999;
-    position: sticky;
-    top: 6rem;
-    align-self: start;
-    max-height: calc(100vh - 8rem);
-    overflow-y: auto;
-    margin: 0;
-    background: transparent;
-    border-left: 1px solid var(--border);
-    padding: 0.2rem 0 0.5rem 1.2rem;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
-  }
-  main > #markdown-toc::-webkit-scrollbar { width: 6px; }
-  main > #markdown-toc::-webkit-scrollbar-thumb {
-    background: var(--border); border-radius: 3px;
-  }
+/* ── Main doc column ─────────────────────────────────────────────── */
+
+.doc-main {
+  padding: 2.5rem var(--gutter) 4rem;
+  min-width: 0;
 }
+.doc-article {
+  max-width: var(--content-w);
+  margin: 0 auto;
+}
+.doc-footer-nav {
+  margin-top: 4rem;
+  padding-top: 1.2rem;
+  border-top: 1px dashed var(--border);
+  font-size: 0.85rem;
+}
+.doc-edit {
+  color: var(--fg-dim);
+  border-bottom: none;
+}
+.doc-edit:hover { color: var(--accent); }
+
+/* The kramdown TOC ships inline at the page-top position the markdown
+ * places it. JS moves it into the right rail and tags the body with
+ * `.toc-moved` so the inline location can be hidden. No-JS users keep
+ * the inline TOC — styled below for that case. */
+.doc-article > #markdown-toc {
+  font-size: 0.9rem;
+  list-style: none;
+  padding: 1rem 1.2rem 1rem 2rem;
+  margin: 1.5rem 0 2.5rem;
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+}
+.doc-article > #markdown-toc::before {
+  content: "On this page";
+  display: block;
+  margin-left: -1.1rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.9;
+}
+.doc-article > #markdown-toc ul { list-style: none; padding-left: 1rem; margin: 0.15rem 0; }
+.doc-article > #markdown-toc a { color: var(--fg-soft); }
+.doc-article > #markdown-toc a:hover { color: var(--fg); }
+body.toc-moved .doc-article > #markdown-toc { display: none; }
+
+/* ── Right rail TOC ──────────────────────────────────────────────── */
+
+.toc-rail {
+  position: sticky;
+  top: var(--topnav-h);
+  align-self: start;
+  height: calc(100vh - var(--topnav-h));
+  overflow-y: auto;
+  padding: 2.5rem 1.5rem 2.5rem 0.8rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.toc-rail::-webkit-scrollbar { width: 6px; }
+.toc-rail::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.toc-rail-title {
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin: 0 0 0.6rem 0.8rem;
+}
+
+#toc-rail-slot #markdown-toc {
+  font-size: 0.86rem;
+  line-height: 1.6;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border-left: 1px solid var(--border);
+}
+#toc-rail-slot #markdown-toc ul {
+  list-style: none;
+  padding-left: 0.9rem;
+  margin: 0.15rem 0;
+  border: 0;
+}
+#toc-rail-slot #markdown-toc li { margin: 0; }
+#toc-rail-slot #markdown-toc a {
+  display: block;
+  color: var(--fg-dim);
+  padding: 0.15rem 0.6rem;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  border-bottom: none;
+  transition: color 120ms, border-color 120ms;
+}
+#toc-rail-slot #markdown-toc a:hover { color: var(--fg-soft); }
+#toc-rail-slot #markdown-toc a.is-active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+#toc-rail-slot #markdown-toc ul a { font-size: 0.82rem; opacity: 0.9; }
+
+/* ── Headings ────────────────────────────────────────────────────── */
 
 h1, h2, h3, h4 {
   color: var(--fg);
@@ -252,7 +388,7 @@ p { margin: 1em 0; }
 em { color: var(--fg); font-style: italic; }
 strong { color: var(--accent); font-weight: 600; }
 
-/* ── Code ────────────────────────────────────────────────────────── */
+/* ── Code ─────────────────────────────────────────────────────────── */
 
 code {
   background: var(--bg-code);
@@ -291,7 +427,6 @@ pre code {
   color: var(--fg);
 }
 
-/* Rouge syntax tokens — terminal-ish palette */
 .highlight .c, .highlight .c1, .highlight .cm, .highlight .cp { color: var(--fg-dim); font-style: italic; }
 .highlight .k, .highlight .kd, .highlight .kr, .highlight .kt { color: var(--accent); }
 .highlight .s, .highlight .s1, .highlight .s2, .highlight .sx { color: var(--accent-2); }
@@ -300,7 +435,7 @@ pre code {
 .highlight .nf, .highlight .nb                               { color: var(--accent-2); }
 .highlight .o, .highlight .p                                 { color: var(--fg-soft); }
 
-/* ── Blockquotes ────────────────────────────────────────────────── */
+/* ── Blockquotes, tables, lists, hr ──────────────────────────────── */
 
 blockquote {
   border-left: 2px solid var(--accent);
@@ -310,8 +445,6 @@ blockquote {
   font-style: italic;
 }
 blockquote p { margin: 0.3em 0; }
-
-/* ── Tables ─────────────────────────────────────────────────────── */
 
 table {
   border-collapse: collapse;
@@ -332,20 +465,16 @@ th {
 }
 tr:nth-child(even) td { background: rgba(24, 28, 32, 0.4); }
 
-/* ── Lists ──────────────────────────────────────────────────────── */
-
 ul, ol { padding-left: 1.4em; }
 ul li::marker { color: var(--accent); }
 ol li::marker { color: var(--accent-2); }
 li { margin: 0.35em 0; }
 
-/* ── Horizontal rule ────────────────────────────────────────────── */
-
 hr { border: 0; border-top: 1px dashed var(--border); margin: 2.5em 0; }
 
-/* ── Footer ─────────────────────────────────────────────────────── */
+/* ── Site footer ─────────────────────────────────────────────────── */
 
-footer {
+.site-footer {
   border-top: 1px solid var(--border);
   padding: 1.5rem 2rem;
   text-align: center;
@@ -354,51 +483,68 @@ footer {
   position: relative;
   z-index: 1;
 }
-footer .prompt { color: var(--accent); margin-right: 0.4em; }
-footer a { color: var(--fg-soft); }
+.site-footer .prompt { color: var(--accent); margin-right: 0.4em; }
+.site-footer a { color: var(--fg-soft); }
 
-/* ──────────────────────────────────────────────────────────────────
- * Home page specifics
- * ────────────────────────────────────────────────────────────── */
-
-/* Wider column on the home layout — there's no TOC sidebar to share
- * the page width with, and the index has tables + multi-line code
- * blocks that benefit from the extra horizontal real estate. Match
- * the *combined* width of a doc page's (content + sidebar) so the
- * visual rhythm switching between sections stays consistent. */
-.home main {
-  max-width: calc(78ch + 4rem + 17rem);
-  padding-top: 1.5rem;
-}
+/* ── Home page ───────────────────────────────────────────────────── */
 
 .hero {
-  max-width: calc(78ch + 4rem + 17rem);
-  margin: 0 auto;
-  padding: 4rem 1.5rem 2.5rem;
+  padding: 5rem 1.5rem 3rem;
   position: relative;
   z-index: 1;
 }
-.hero h1 {
-  font-size: 3rem;
-  margin: 0 0 0.5rem;
-  letter-spacing: -0.02em;
+.hero-inner {
+  max-width: 920px;
+  margin: 0 auto;
+  text-align: center;
 }
-.hero h1 .prompt { color: var(--accent); }
-.hero .tagline {
+.hero-title {
+  font-size: clamp(2.5rem, 6vw, 4rem);
+  margin: 0 0 1rem;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+  color: var(--fg);
+}
+.hero-title .prompt { color: var(--accent); }
+.hero-title::before { content: none; }
+.hero-cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 0.9em;
+  background: var(--fg);
+  vertical-align: text-bottom;
+  margin-left: 4px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hero-cursor { animation: blink 1.05s steps(2, start) infinite; }
+}
+.hero-tagline {
   color: var(--fg-soft);
-  font-size: 1.1rem;
-  margin: 0 0 2rem;
+  font-size: 1.15rem;
+  line-height: 1.7;
+  margin: 0 auto 2rem;
+  max-width: 38em;
+}
+.hero-tagline em { color: var(--accent); font-style: normal; }
+.hero-cta {
+  margin: 1.5rem 0 3rem;
+  display: flex;
+  gap: 0.7rem;
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
-/* ── Terminal demo card ─────────────────────────────────────────── */
+/* ── Terminal demo card ──────────────────────────────────────────── */
 
 .demo {
   background: var(--bg-soft);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
-  margin: 2rem 0 2.5rem;
-  box-shadow: 0 10px 40px rgba(0,0,0,0.35),
+  margin: 2rem auto 0;
+  max-width: 820px;
+  text-align: left;
+  box-shadow: 0 14px 50px rgba(0,0,0,0.45),
               0 0 0 1px rgba(126,231,135,0.04);
 }
 .demo-bar {
@@ -492,31 +638,24 @@ footer a { color: var(--fg-soft); }
   opacity: 0.55;
   cursor: not-allowed;
 }
-.nav-sep {
-  color: var(--border);
-  user-select: none;
-  align-self: center;
-}
 
-/* CTA buttons */
-.cta-row { margin-top: 1.5rem; }
+/* ── CTA buttons (shared) ────────────────────────────────────────── */
+
 .cta {
   display: inline-block;
-  padding: 0.6em 1.1em;
+  padding: 0.65em 1.2em;
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--fg-soft);
   background: transparent;
-  margin: 0.25em 0.25em 0.25em 0;
   font-weight: 500;
   font-size: 0.92rem;
-  transition: background 120ms, color 120ms, border-color 120ms;
+  transition: background 120ms, color 120ms, border-color 120ms, transform 120ms;
 }
 .cta:hover {
   background: var(--bg-soft);
   color: var(--fg);
   border-color: var(--fg-dim);
-  border-bottom-color: var(--fg-dim);
 }
 .cta.primary {
   border-color: var(--accent);
@@ -525,8 +664,161 @@ footer a { color: var(--fg-soft); }
 .cta.primary:hover {
   background: var(--accent);
   color: var(--bg);
+  border-color: var(--accent);
 }
 
-/* ── Selection ──────────────────────────────────────────────────── */
+/* ── Feature cards ───────────────────────────────────────────────── */
 
-::selection { background: rgba(126,231,135,0.25); color: var(--fg); }
+.features {
+  padding: 3rem 1.5rem 1rem;
+  position: relative;
+  z-index: 1;
+}
+.features-inner {
+  max-width: 1080px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1.5rem;
+}
+.feature-card {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.8rem 1.6rem 1.6rem;
+  transition: border-color 160ms, transform 160ms, background 160ms;
+}
+.feature-card:hover {
+  border-color: rgba(126, 231, 135, 0.35);
+  background: rgba(126, 231, 135, 0.025);
+}
+.feature-glyph {
+  font-size: 1.8rem;
+  line-height: 1;
+  color: var(--accent);
+  margin-bottom: 1rem;
+}
+.feature-card h2 {
+  font-size: 1.05rem;
+  color: var(--fg);
+  margin: 0 0 0.6rem;
+  padding: 0;
+  border: 0;
+}
+.feature-card h2::before { content: none; }
+.feature-card p {
+  color: var(--fg-soft);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  margin: 0;
+}
+.feature-card code {
+  font-size: 0.84em;
+  background: rgba(126, 231, 135, 0.06);
+  border-color: rgba(126, 231, 135, 0.15);
+}
+
+/* ── Install section ─────────────────────────────────────────────── */
+
+.install {
+  padding: 3rem 1.5rem 4rem;
+  position: relative;
+  z-index: 1;
+}
+.install-inner {
+  max-width: 880px;
+  margin: 0 auto;
+}
+.install-inner h2 {
+  font-size: 1.6rem;
+  text-align: center;
+  border: 0;
+  margin-top: 0;
+  padding: 0;
+}
+.install-inner h2::before { content: none; }
+.install-inner h3 {
+  font-size: 0.95rem;
+  color: var(--accent-2);
+  margin: 0 0 0.6rem;
+}
+.install-inner h3::before { content: none; }
+.install-lede {
+  text-align: center;
+  color: var(--fg-soft);
+  margin: 0.4rem auto 2.5rem;
+  max-width: 36em;
+}
+.install-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+.install-col p {
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+  margin: 0.6rem 0 0;
+}
+.wire-up { margin-top: 2.5rem !important; }
+.install-foot {
+  margin-top: 2.5rem;
+  display: flex;
+  gap: 0.7rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* ── Mobile / responsive ─────────────────────────────────────────── */
+
+/* Under 1280px the TOC rail is gone (the `@media (min-width:1280px)`
+ * gate above handles that automatically — toc-moved only widens to
+ * 3-col on wide viewports). */
+
+/* Hide the left sidebar under 960px, swap in the hamburger drawer. */
+@media (max-width: 959px) {
+  .hamburger { display: flex; }
+  .doc-shell { grid-template-columns: minmax(0, 1fr); }
+
+  .sidebar {
+    position: fixed;
+    top: var(--topnav-h);
+    left: 0;
+    height: calc(100vh - var(--topnav-h));
+    width: min(86vw, 320px);
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    transform: translateX(-100%);
+    transition: transform 220ms ease-out;
+    z-index: 25;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  }
+  .sidebar-toggle:checked ~ .doc-shell .sidebar {
+    transform: translateX(0);
+  }
+  .sidebar-toggle:checked ~ .sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: var(--topnav-h) 0 0 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 20;
+  }
+  .doc-main { padding: 2rem 1.2rem 3rem; }
+  .features-inner { grid-template-columns: 1fr; }
+  .install-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 640px) {
+  .topnav-links { gap: 0.9rem; font-size: 0.85rem; margin-left: 0.4rem; }
+  .topnav-inner { padding: 0 0.9rem; gap: 0.6rem; }
+  .hero { padding: 3rem 1rem 2rem; }
+  .hero-title { font-size: 2.4rem; }
+  .hero-tagline { font-size: 1rem; }
+  h1 { font-size: 1.6rem; }
+  h2 { font-size: 1.2rem; }
+}
+
+/* Hide one of the two "FAQ"/"Guide" duplicates on very narrow */
+@media (max-width: 480px) {
+  .topnav-links a:nth-child(4) { display: none; } /* FAQ — reachable from Guide */
+}

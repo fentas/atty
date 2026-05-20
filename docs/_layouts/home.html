@@ -15,79 +15,134 @@
   <link rel="icon" type="image/svg+xml" href="{{ '/assets/favicon.svg' | relative_url }}">
 </head>
 <body class="home">
-  <header>
-    <a class="logo" href="{{ '/' | relative_url }}">
-      <span class="prompt">$</span>&nbsp;atty<span class="cursor"></span>
-    </a>
-    <nav>
-      <a href="{{ '/getting-started/' | relative_url }}">get started</a>
-      <a href="{{ '/faq/' | relative_url }}">faq</a>
-      <a href="{{ '/providers/' | relative_url }}">modules</a>
-      <a href="{{ '/llm/' | relative_url }}">llm</a>
-      <span class="nav-sep" aria-hidden="true">·</span>
-      <a href="{{ '/architecture/' | relative_url }}">architecture</a>
-      <a href="{{ '/operator-workflow/' | relative_url }}">operator</a>
-      <a href="https://github.com/fentas/atty" rel="noopener">github&nbsp;→</a>
-    </nav>
-  </header>
+  {% include topnav.html %}
 
   <section class="hero">
-    <h1><span class="prompt">$</span>&nbsp;atty<span class="cursor"></span></h1>
-    <p class="tagline">A Suckless-style PTY proxy in Zig.<br>
-       Composed at <em>compile time</em>, not loaded at run time.</p>
+    <div class="hero-inner">
+      <h1 class="hero-title">
+        <span class="prompt">$</span>&nbsp;atty<span class="hero-cursor"></span>
+      </h1>
+      <p class="hero-tagline">
+        A Suckless-style PTY proxy in Zig.<br>
+        Composed at <em>compile time</em>, not loaded at run time.
+      </p>
+      <p class="hero-cta">
+        <a class="cta primary" href="{{ '/getting-started/' | relative_url }}">Get started&nbsp;→</a>
+        <a class="cta" href="{{ '/faq/' | relative_url }}">FAQ</a>
+        <a class="cta" href="https://github.com/fentas/atty" rel="noopener">GitHub&nbsp;↗</a>
+      </p>
 
-    <div class="demo" id="demo">
-      <div class="demo-bar">
-        <span class="bar-dot dot-r"></span>
-        <span class="bar-dot dot-y"></span>
-        <span class="bar-dot dot-g"></span>
-        <span class="bar-title">~/code/atty — atty bash</span>
-      </div>
-      <div class="demo-body" id="demo-screen" aria-hidden="true">
-        <!-- Static fallback for no-JS / crawlers. JS replaces on load. -->
-        <div class="line"><span class="prompt">$ </span><span class="typed">git checkout featu</span><span class="ghost">re/auth-refactor</span></div>
-        <div class="line dim">  → atuin: dim ghost suggests your last matching command — →/End to accept</div>
-        <div class="line">&nbsp;</div>
-        <div class="line"><span class="prompt">$ </span><span class="typed">rm -rf /home/work/</span></div>
-        <div class="line danger"><span class="warn-glyph">!</span>atty guardrail: rm -rf on a root-ish path</div>
-        <div class="line dim">        press Enter again to confirm, any other key to cancel.</div>
-      </div>
-      <div class="demo-controls">
-        <button type="button" class="demo-btn" id="demo-replay" title="restart the demo">▶ replay</button>
+      <div class="demo" id="demo">
+        <div class="demo-bar">
+          <span class="bar-dot dot-r"></span>
+          <span class="bar-dot dot-y"></span>
+          <span class="bar-dot dot-g"></span>
+          <span class="bar-title">~/code/atty — atty bash</span>
+        </div>
+        <div class="demo-body" id="demo-screen" aria-hidden="true">
+          <!-- Static fallback for no-JS / crawlers. JS replaces on load. -->
+          <div class="line"><span class="prompt">$ </span><span class="typed">git checkout featu</span><span class="ghost">re/auth-refactor</span></div>
+          <div class="line dim">  → atuin: dim ghost suggests your last matching command — Right Arrow / End accepts</div>
+          <div class="line">&nbsp;</div>
+          <div class="line"><span class="prompt">$ </span><span class="typed">rm -rf /home/work/</span></div>
+          <div class="line danger"><span class="warn-glyph">!</span>atty guardrail: rm -rf on a root-ish path</div>
+          <div class="line dim">        press Enter again to confirm, any other key to cancel.</div>
+        </div>
+        <div class="demo-controls">
+          <button type="button" class="demo-btn" id="demo-replay" title="restart the demo">▶ replay</button>
+        </div>
       </div>
     </div>
-
-    <p class="cta-row">
-      <a class="cta primary" href="{{ '/getting-started/' | relative_url }}">▸ get started</a>
-      <a class="cta" href="{{ '/faq/' | relative_url }}">faq</a>
-      <a class="cta" href="{{ '/architecture/' | relative_url }}">architecture</a>
-    </p>
   </section>
 
-  <main>
-    {{ content }}
-  </main>
+  <section class="features">
+    <div class="features-inner">
+      <div class="feature-card">
+        <div class="feature-glyph" aria-hidden="true">⌨</div>
+        <h2>Useful keystrokes</h2>
+        <p>
+          Ghost-text suggestions in bash and zsh. Dangerous-command
+          guardrails. <code>#:&nbsp;intent</code> rewritten by an LLM
+          into a real shell command. A status bar that follows you
+          across every terminal.
+        </p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-glyph" aria-hidden="true">∞</div>
+        <h2>Compile-time composed</h2>
+        <p>
+          The dispatch loop is one <code>inline&nbsp;for</code> over
+          your config tuple. Disabled modules don't ship as dead
+          code — they don't ship at all. No plugin loader, no
+          <code>*anyopaque</code>, no runtime branching.
+        </p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-glyph" aria-hidden="true">⌘</div>
+        <h2>Suckless config</h2>
+        <p>
+          Your config is a Zig file. Edit it, recompile, done.
+          <code>git pull</code> won't fight you — defaults come from
+          struct fields, your overrides live in a gitignored sibling.
+          dwm's <code>config.h</code> pattern, but type-checked.
+        </p>
+      </div>
+    </div>
+  </section>
 
-  <footer>
+  <section class="install">
+    <div class="install-inner">
+      <h2>Install</h2>
+      <p class="install-lede">
+        One line gets you a working atty. The full walkthrough lives in
+        <a href="{{ '/getting-started/' | relative_url }}">Getting started</a>.
+      </p>
+
+      <div class="install-grid">
+        <div class="install-col">
+          <h3>Pre-built binary</h3>
+<pre><code class="lang-sh">curl -fsSL https://bin.atty.sh | sh</code></pre>
+          <p>Detects your CPU, verifies the SHA256, drops the binary at <code>~/.local/bin/atty</code>.</p>
+        </div>
+        <div class="install-col">
+          <h3>From source</h3>
+<pre><code class="lang-sh">curl -fsSL https://get.atty.sh | sh</code></pre>
+          <p>Clones the repo, bootstraps Zig 0.16, prompts you to look at <code>src/config.zig</code> before building.</p>
+        </div>
+      </div>
+
+      <h3 class="wire-up">Wire it into your shell</h3>
+<pre><code class="lang-sh"># Either point your terminal emulator at atty …
+command = atty bash       # ~/.config/ghostty/config
+
+# … or eval the init snippet from your .bashrc / .zshrc:
+eval "$(atty init bash)"</code></pre>
+
+      <p class="install-foot">
+        <a class="cta primary" href="{{ '/getting-started/' | relative_url }}">Full walkthrough&nbsp;→</a>
+        <a class="cta" href="{{ '/providers/' | relative_url }}">Browse modules</a>
+      </p>
+    </div>
+  </section>
+
+  <footer class="site-footer">
     <p>
       <span class="prompt">#</span> Suckless-style PTY proxy in Zig 0.16 ·
       <a href="https://github.com/fentas/atty">source</a> ·
-      <a href="https://atty.sh">atty.sh</a>
+      <a href="https://atty.sh">atty.sh</a> ·
+      MIT
     </p>
   </footer>
 
   <script>
-    // Interactive demo playback — types each scene character-by-character
-    // and loops through three vignettes: atuin ghost-text accept, guardrail
-    // confirmation, LLM `#:` exec. Aborts cleanly when the tab is hidden
-    // and on replay.
+    // Interactive demo playback — three scenes (atuin accept, guardrail
+    // confirm, LLM rewrite). Honors prefers-reduced-motion (bails to the
+    // static fallback). Replay button restarts.
     (function () {
       var screen = document.getElementById('demo-screen');
       var replayBtn = document.getElementById('demo-replay');
       if (!screen) return;
       if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        // Honor reduced-motion: leave the static fallback in place,
-        // disable the replay button so it doesn't tease an animation.
         if (replayBtn) {
           replayBtn.disabled = true;
           replayBtn.textContent = '○ static (reduced motion)';
@@ -146,7 +201,6 @@
         while (alive(myRun)) {
           screen.innerHTML = '';
 
-          // Scene 1 — atuin ghost text + → accept
           var line1 = el('line');
           line1.append(span('prompt', '$ '));
           var typed1 = span('typed', '');
@@ -162,7 +216,7 @@
           var ghost = span('ghost', 're/auth-refactor');
           line1.append(ghost);
           line1.append(caret());
-          screen.append(el('line dim', '  → atuin: dim ghost suggests your last matching cmd — →/End to accept'));
+          screen.append(el('line dim', '  → atuin: dim ghost suggests your last matching cmd — Right Arrow/End accepts'));
           await sleep(1800);
           if (!alive(myRun)) return;
           typed1.textContent = 'git checkout feature/auth-refactor';
@@ -170,7 +224,6 @@
           await sleep(1000);
           if (!alive(myRun)) return;
 
-          // Scene 2 — guardrail
           var line2 = el('line');
           line2.append(span('prompt', '$ '));
           var typed2 = span('typed', '');
@@ -189,7 +242,6 @@
           await sleep(2400);
           if (!alive(myRun)) return;
 
-          // Scene 3 — #: prompt → llm rewrites the line
           var line3 = el('line');
           line3.append(span('prompt', '$ '));
           var typed3 = span('typed', '');
@@ -217,11 +269,6 @@
       }
 
       if (replayBtn) replayBtn.addEventListener('click', restart);
-      // Browsers throttle setTimeout in background tabs to ~1Hz already,
-      // so we don't need a hand-rolled pause/resume — and explicitly
-      // restarting on visible would yank a deep scene back to scene 1
-      // every tab focus-flip.
-
       restart();
     })();
   </script>
