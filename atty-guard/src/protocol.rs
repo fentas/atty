@@ -125,7 +125,7 @@ pub enum Request {
         target_uid: Option<u32>,
     },
 
-    /// PR #142: in-banner `[a]llow always` taps. atty proxy
+    /// In-banner `[a]llow always` taps. atty proxy
     /// computes the (category, matched) SHA-256 trust hash the
     /// same way it does for `[t]rust permanently` (see
     /// security_guard/trust_cache.zig::hashCategoryMatch) and
@@ -149,7 +149,7 @@ pub enum Request {
         target_uid: Option<u32>,
     },
 
-    /// PR #142 — in-banner `[B]lock host forever` taps. atty proxy
+    /// In-banner `[B]lock host forever` taps. atty proxy
     /// extracts the host from the matched URL substring and mirrors
     /// it here. Same enforcement model as SessionAddTrust: atty
     /// enforces locally (REFUSED on subsequent commands containing
@@ -266,9 +266,10 @@ pub enum ResponseBody {
     /// `"session-block"` for entries that are session-only.
     UrlsList { entries: Vec<UrlDecisionEntry> },
     /// Reply to SessionList. Lists pending atoms/url-decisions held
-    /// in the caller's in-memory session. PR #142 added `trust`:
-    /// SHA-256 hashes of (category, matched) pairs that the banner's
-    /// `[a]llow always` keystroke tagged for the rest of the session.
+    /// in the caller's in-memory session. `trust` holds the
+    /// SHA-256 hashes of (category, matched) pairs that the
+    /// banner's `[a]llow always` keystroke tagged for the rest
+    /// of the session.
     SessionList {
         atoms: Vec<String>,
         urls_allow: Vec<String>,

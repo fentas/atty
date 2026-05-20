@@ -202,7 +202,7 @@ pub const Client = struct {
 
     pub const ThreatLevel = enum { low, high, critical };
 
-    /// PR #142 — best-effort mirror of an `[a]llow always` keystroke
+    /// Best-effort mirror of an `[a]llow always` keystroke
     /// to the daemon. atty's session_trust set is authoritative for
     /// the runtime check; this RPC just lets `atty-guard session
     /// list` show the operator what they trusted in this session.
@@ -227,7 +227,7 @@ pub const Client = struct {
         };
     }
 
-    /// PR #142 — best-effort mirror of a `[B]lock host forever`
+    /// Best-effort mirror of a `[B]lock host forever`
     /// keystroke to the daemon. Same trade-off as
     /// `sessionAddTrust`: local block is authoritative, daemon
     /// receives a copy for `atty-guard session list` visibility +

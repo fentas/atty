@@ -92,7 +92,7 @@ pub fn configure(comptime cfg: Config) type {
             armed_match: [256]u8 = undefined,
             armed_match_len: usize = 0,
             trust: TrustCache = .{},
-            /// PR #142 — session-only trust set, populated by the
+            /// Session-only trust set, populated by the
             /// banner's `[a]llow always` keystroke. Identical shape
             /// to `trust` (hex SHA-256 hashes of "category:matched")
             /// but never persisted to disk — cleared on atty exit.
@@ -100,13 +100,17 @@ pub fn configure(comptime cfg: Config) type {
             /// set in addition to `trust`, so an `[a]` tap silently
             /// short-circuits the banner for the rest of the session.
             session_trust: TrustCache = .{},
-            /// PR #142 — session-only blocked hosts, populated by
-            /// the banner's `[B]lock host forever` keystroke.
-            /// Each entry is a literal host (e.g. `evil.io`); a
-            /// future command whose committed line contains any
-            /// blocked host gets a REFUSED line + readline cleared,
-            /// no banner. Storage is `[256]u8` slots inline so
-            /// detach doesn't need an allocator to drop them.
+            /// Session-only blocked hosts, populated by the
+            /// banner's `[B]lock host forever` keystroke. Each
+            /// entry is a literal host (e.g. `evil.io`); a future
+            /// command whose committed line contains any blocked
+            /// host (at a HOST BOUNDARY — see `hasHostMatch`) gets
+            /// a REFUSED line + readline cleared, no banner.
+            /// Storage is `[16][64]u8` slots inline so detach
+            /// doesn't need an allocator to drop them. The 17th
+            /// `[B]` tap in one session is silently dropped — at
+            /// that point the operator should `sudo atty-guard
+            /// session write` to persist + restart atty.
             session_blocked_hosts: [16][64]u8 = undefined,
             session_blocked_hosts_lens: [16]u8 = std.mem.zeroes([16]u8),
             session_blocked_hosts_count: u8 = 0,
@@ -228,8 +232,8 @@ pub fn configure(comptime cfg: Config) type {
             const committed = ctx.line.lastCommitted();
             const line = committed orelse ctx.line.current();
 
-            // PR #142 — short-circuit on `[B]lock host forever`
-            // entries from earlier in the session. The user has
+            // Short-circuit on `[B]lock host forever` entries from
+            // earlier in the session. The user has
             // already declared "I never want this host again",
             // so we don't even need to consult the daemon /
             // in-proc patterns. REFUSED line + readline clear.
@@ -427,7 +431,7 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
-        /// PR #142 — `[a]llow always` handler. Computes the same
+        /// `[a]llow always` handler. Computes the same
         /// (category, matched) hash as `[t]rust permanently` and
         /// adds it to the session-only trust set. Best-effort
         /// daemon mirror via SessionAddTrust so `atty-guard session
@@ -458,7 +462,7 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
 
-        /// PR #142 — `[B]lock host forever` handler. Extracts the
+        /// `[B]lock host forever` handler. Extracts the
         /// host substring from the armed match (best-effort: looks
         /// for `://` then takes the next host-shaped token) and
         /// adds it to the session-only blocked-hosts list. Daemon
@@ -491,14 +495,43 @@ pub fn configure(comptime cfg: Config) type {
             return .{ .replace = "\x15" };
         }
 
-        /// Best-effort URL-host extractor. Returns the slice of `s`
-        /// representing the host of the first `scheme://host[:port]/`
-        /// occurrence, or null if no URL shape is found. Used by
-        /// the `[B]lock host forever` keystroke handler.
+        /// URL-host extractor. Returns the slice of `s` representing
+        /// the host of the first `scheme://[userinfo@]host[:port]/`
+        /// occurrence, or null if no URL shape is found. Handles:
+        ///   - `userinfo@` skip (`https://user:pass@host.io/x` → `host.io`)
+        ///   - `[v6-literal]` opaque host (`[2001:db8::1]:8443/x` → `[2001:db8::1]`)
+        ///   - port + path stripping (`example.com:8443/foo` → `example.com`)
         fn extractHost(s: []const u8) ?[]const u8 {
             const scheme_at = std.mem.indexOf(u8, s, "://") orelse return null;
-            const after = s[scheme_at + 3 ..];
-            // Host ends at `/`, `:`, `?`, `#`, whitespace, or EOL.
+            var after = s[scheme_at + 3 ..];
+            // Strip `userinfo@`. The authority is `userinfo@host:port`
+            // per RFC 3986; we want the host. Skip the FIRST `@`
+            // that appears BEFORE the next `/`, `?`, or `#`, so a
+            // path-segment `@` doesn't confuse us.
+            var i: usize = 0;
+            var at_idx: ?usize = null;
+            while (i < after.len) : (i += 1) {
+                const c = after[i];
+                if (c == '/' or c == '?' or c == '#') break;
+                if (c == '@') {
+                    at_idx = i;
+                    break;
+                }
+            }
+            if (at_idx) |idx| {
+                after = after[idx + 1 ..];
+            }
+            if (after.len == 0) return null;
+            // IPv6 literal — `[...]`. The brackets are part of the
+            // host (matches what the browser address bar shows). Find
+            // the closing `]`; everything from the leading `[` up to
+            // and including it is the host. After that we still
+            // tolerate a `:<port>` we'll strip.
+            if (after[0] == '[') {
+                const close = std.mem.indexOfScalar(u8, after, ']') orelse return null;
+                return after[0 .. close + 1];
+            }
+            // Regular host — ends at `/`, `:`, `?`, `#`, whitespace, or EOL.
             var end: usize = 0;
             while (end < after.len) : (end += 1) {
                 const c = after[end];
@@ -508,20 +541,49 @@ pub fn configure(comptime cfg: Config) type {
             return after[0..end];
         }
 
-        /// PR #142 — short-circuit predicate for the in-proc + daemon
-        /// classify paths. Returns true when the committed line
-        /// contains any host the operator added via `[B]lock host
-        /// forever`. Caller refuses outright (readline clear, no
-        /// banner) when this returns true.
+        /// Short-circuit predicate for the in-proc + daemon classify
+        /// paths. Returns true when the committed line contains any
+        /// host the operator added via `[B]lock host forever` AT A
+        /// HOST BOUNDARY. Substring-only matching would false-block
+        /// `notevil.io` for a blocked `evil.io`, AND under-block
+        /// `prefix-evil.io.attacker.com` shapes where an attacker
+        /// owns a sibling host. We require the host substring to be
+        /// preceded AND followed by a non-host-char (anything that
+        /// can't extend a domain label — alnum, `.`, `-`).
         fn lineIsSessionBlocked(rt: *Runtime, line: []const u8) bool {
             var i: usize = 0;
             while (i < rt.session_blocked_hosts_count) : (i += 1) {
                 const len = rt.session_blocked_hosts_lens[i];
                 if (len == 0) continue;
                 const host = rt.session_blocked_hosts[i][0..len];
-                if (std.mem.indexOf(u8, line, host) != null) return true;
+                if (hasHostMatch(line, host)) return true;
             }
             return false;
+        }
+
+        /// True when `needle` appears in `haystack` at a host
+        /// boundary — preceded AND followed by a non-host-char (or
+        /// at the string edge). A host-char is alnum / `.` / `-`.
+        fn hasHostMatch(haystack: []const u8, needle: []const u8) bool {
+            if (needle.len == 0 or haystack.len < needle.len) return false;
+            var search_from: usize = 0;
+            while (search_from + needle.len <= haystack.len) {
+                const found = std.mem.indexOfPos(u8, haystack, search_from, needle) orelse return false;
+                const before_ok = found == 0 or !isHostChar(haystack[found - 1]);
+                const after = found + needle.len;
+                const after_ok = after == haystack.len or !isHostChar(haystack[after]);
+                if (before_ok and after_ok) return true;
+                search_from = found + 1;
+            }
+            return false;
+        }
+
+        fn isHostChar(c: u8) bool {
+            return (c >= 'a' and c <= 'z')
+                or (c >= 'A' and c <= 'Z')
+                or (c >= '0' and c <= '9')
+                or c == '.'
+                or c == '-';
         }
 
         /// Push `level` to atty-guard for the shell's PID tree

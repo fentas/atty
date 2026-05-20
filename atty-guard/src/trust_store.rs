@@ -52,12 +52,13 @@ pub struct PerUserState {
     pub session_urls_allow: HashSet<String>,
     /// Session-only URL block decisions.
     pub session_urls_block: HashSet<String>,
-    /// PR #142: session trust hashes — `[a]llow always` taps from
-    /// the security_guard banner. Each entry is the lowercase hex
+    /// Session trust hashes — `[a]llow always` taps from the
+    /// security_guard banner. Each entry is the lowercase hex
     /// SHA-256 of `<category>:<matched>` as computed atty-side in
-    /// `security_guard/trust_cache.zig::hashCategoryMatch`. Classify
-    /// dispatch consults this set BEFORE the overlay scan; a hit
-    /// short-circuits to Safe and the command flows through.
+    /// `security_guard/trust_cache.zig::hashCategoryMatch`. atty
+    /// proxy enforces the bypass locally; the daemon-side set
+    /// exists for `atty-guard session list` visibility + future
+    /// `session write` persistence.
     pub session_trust: HashSet<String>,
 }
 
@@ -202,9 +203,9 @@ impl TrustStore {
         }
     }
 
-    /// PR #142 — add a SHA-256 trust hash to the session set.
-    /// Validates the hash shape (64 lowercase hex chars) to keep
-    /// the set from filling with malformed strings.
+    /// Add a SHA-256 trust hash to the session set. Validates
+    /// the hash shape (64 lowercase hex chars) to keep the set
+    /// from filling with malformed strings.
     pub fn session_add_trust(&self, uid: u32, hash: &str) -> Result<(), String> {
         validate_trust_hash(hash)?;
         let mut state = self.state.lock().expect("trust_store poisoned");
@@ -216,9 +217,9 @@ impl TrustStore {
         Ok(())
     }
 
-    /// PR #142 — mirror an atty-side `[B]lock host forever`
-    /// keystroke into the per-UID session_urls_block set. atty
-    /// proxy enforces locally; this is the visibility log.
+    /// Mirror an atty-side `[B]lock host forever` keystroke into
+    /// the per-UID session_urls_block set. atty proxy enforces
+    /// locally; this is the visibility log.
     pub fn session_add_url_block(&self, uid: u32, host: &str) -> Result<(), String> {
         validate_host(host)?;
         let mut state = self.state.lock().expect("trust_store poisoned");
