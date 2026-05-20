@@ -1395,3 +1395,139 @@ test "chat scroll: freeTurns resets both view offsets" {
     try testing.expectEqual(@as(usize, 0), rt.chat_view_offset);
     try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
 }
+
+// ── #167 — inline-chat autofocus on dialog action=exec ─────────────────
+
+test "inline-chat autofocus: ;D edge clears refocus latch + restores panel focus" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    // Simulate the post-exec state: chat is open, defocused, latch armed.
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    rt.chat_refocus_pending = true;
+    rt.dialog_state = .executing;
+
+    // Feed a `;C` (cmd_start) then `;D` (cmd_end). The `;D` edge
+    // should fire the refocus latch and flip focus back into the panel.
+    try L.onOutput(&rt, &ctx, "\x1b]133;C\x07cmd output\x1b]133;D\x07");
+    try testing.expect(rt.chat_focus_in_panel);
+    try testing.expect(!rt.chat_refocus_pending);
+}
+
+test "inline-chat autofocus: implicit ;A (prompt_start) also restores focus" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    // Same setup, but the shell skips `;D` and emits the next `;A`
+    // directly — atty's tracker translates that to
+    // `prompt_start_implicit_end`. Same refocus behavior expected.
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    rt.chat_refocus_pending = true;
+    rt.dialog_state = .executing;
+
+    try L.onOutput(&rt, &ctx, "\x1b]133;C\x07cmd output\x1b]133;A\x07");
+    try testing.expect(rt.chat_focus_in_panel);
+    try testing.expect(!rt.chat_refocus_pending);
+}
+
+test "inline-chat autofocus: dialogReset clears the latch" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    rt.chat_refocus_pending = true;
+
+    const dialog_helpers = dialog.Module(L.config, L.Runtime);
+    dialog_helpers.dialogReset(&rt, real_io);
+
+    try testing.expect(!rt.chat_refocus_pending);
+    // dialogReset does NOT touch focus state — it just clears the
+    // pending latch so the next `;A` doesn't ambush the user.
+    try testing.expect(!rt.chat_focus_in_panel);
+}
+
+test "inline-chat autofocus: config knob off — no field-level coverage but pin defaults" {
+    // The arming site reads `cfg.inline_chat_autofocus_on_exec` at
+    // comptime. Constructing two parallel configure() instances —
+    // one with the flag on (default), one off — and checking the
+    // CFG value directly is the cheapest pin against the default
+    // flipping accidentally.
+    const L_on = configure(.{
+        .provider = .{ .http = .{ .model = "x", .api_base = "http://x/v1", .api_base_env = "ATTY_TEST_NEVER", .api_base_fallback_env = "ATTY_TEST_NEVER", .api_key_env = "ATTY_TEST_NEVER" } },
+    });
+    const L_off = configure(.{
+        .provider = .{ .http = .{ .model = "x", .api_base = "http://x/v1", .api_base_env = "ATTY_TEST_NEVER", .api_base_fallback_env = "ATTY_TEST_NEVER", .api_key_env = "ATTY_TEST_NEVER" } },
+        .inline_chat_autofocus_on_exec = false,
+    });
+    try testing.expect(L_on.config.inline_chat_autofocus_on_exec);
+    try testing.expect(!L_off.config.inline_chat_autofocus_on_exec);
+}

@@ -1128,6 +1128,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // loop where the LLM round-trip is the
                             // dominant cost anyway.
                         }
+                        // #167 — command finished, shell is back at
+                        // a prompt. Refocus the chat panel if the
+                        // exec arm armed the latch.
+                        if (rt.chat_refocus_pending) {
+                            rt.chat_focus_in_panel = true;
+                            rt.chat_refocus_pending = false;
+                        }
                         cursor = advancePastMarker(output, offset);
                     },
                 }
@@ -1532,6 +1539,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (rt.auto_mode_active) {
                         rt.auto_exec_armed = true;
                         rt.auto_exec_t0_ms = nowMs();
+                    } else if (rt.chat_inline_open and cfg.inline_chat_autofocus_on_exec) {
+                        // #167 — defocus the inline chat panel so
+                        // the next keystroke (Enter) runs the
+                        // injected command without an Alt+C toggle
+                        // dance. Refocus latches on the next
+                        // OSC 133 `;A`/`;D` edge (command finished
+                        // → shell back at prompt → user can chat
+                        // again). Skipped in auto-mode because
+                        // auto-mode already runs the Enter for the
+                        // user — there's no focus decision to
+                        // make.
+                        rt.chat_focus_in_panel = false;
+                        rt.chat_refocus_pending = true;
                     }
                     // Return the command bytes for injection at
                     // the shell prompt — directly from
