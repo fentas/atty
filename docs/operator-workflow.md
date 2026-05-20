@@ -326,14 +326,19 @@ atty doctor — atty-guard sidecar
   ✓  atty-guard.service is active
   ✓  UDS socket reachable (/run/atty-guard/atty-guard.sock)
   ✓  user is in `atty` group (can connect to the daemon socket)
-  !  eBPF status is runtime-only — `sudo journalctl -u atty-guard | grep -i ebpf` will show ...
+  ✓  eBPF feature: compiled in — `sudo journalctl -u atty-guard | grep -i ebpf` shows "eBPF attached" once the unit has `--enable-ebpf` ExecStart + CAP_BPF + SystemCallFilter widening.
 ```
 
-The eBPF line is always informational (yellow `!`) — doctor doesn't
-try to verify kernel-side attach state (that requires CAP_BPF +
-reading `/sys/fs/bpf`, too noisy for a shell snippet). The atom
-corpus isn't checked here either — atty-guard reads its corpus at
-compile time via `include_str!`, there's no runtime file to verify.
+The eBPF line surfaces whether the running daemon binary was
+COMPILED with the `ebpf` Cargo feature (definitive — uses
+`atty-guard --print-features` introduced in issue #145, which
+emits one feature per line based on `#[cfg(feature = ...)]`).
+Whether the kernel-side hooks are actually ATTACHED is a separate
+question — doctor doesn't probe `/sys/fs/bpf` (too noisy for a
+shell snippet); the hint points at `journalctl -u atty-guard | grep
+ebpf` for that. The atom corpus isn't checked here either —
+atty-guard reads its corpus at compile time via `include_str!`,
+there's no runtime file to verify.
 
 The atty-guard section is **silent** when there's no evidence the
 operator intended to install the sidecar (no binary AND no unit

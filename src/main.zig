@@ -397,14 +397,40 @@ const shell_doctor_snippet =
     \\    # present) but mislead — the file's existence has no effect
     \\    # on detection. Runtime atom loading is on the post-#139
     \\    # roadmap; the doctor check returns when it's wired up.
-    \\    # eBPF — informational. `--enable-ebpf` is in the CLI help
-    \\    # unconditionally (the flag exists even when the binary is
-    \\    # built without the `ebpf` Cargo feature, in which case it
-    \\    # errors at runtime). So we can't reliably tell from --help
-    \\    # whether the feature is COMPILED IN; instead point the
-    \\    # operator at journald, which logs the actual attach state.
+    \\    # eBPF feature detection — uses `atty-guard --print-features`
+    \\    # (post-issue-#145) which emits one Cargo feature per line.
+    \\    # This is the authoritative probe: each feature name comes
+    \\    # from a `#[cfg(feature = ...)]` block at compile time so the
+    \\    # output is exactly the set baked into the running binary.
+    \\    # Falls back to "unknown" for older binaries that don't
+    \\    # support the flag (pre-issue-#145 installs).
     \\    if [ -n "$__atty_doctor_guard_bin" ]; then
-    \\        __atty_doctor_warn 'eBPF status is runtime-only — `journalctl --user -u atty-guard | grep -i ebpf` will show "eBPF attached (LSM + execve tracepoint)" if the binary was built with `--features ebpf` AND the unit has `AmbientCapabilities=CAP_BPF` + `SystemCallFilter=bpf perf_event_open`. See atty-guard/ebpf/README.md.'
+    \\        # Probe atty-guard for its compiled-in Cargo features.
+    \\        # `--print-features` emits one feature per line; we pipe
+    \\        # the output DIRECTLY into grep rather than capturing it
+    \\        # into a variable, because command substitution collapses
+    \\        # internal newlines to spaces — `grep -qx ebpf` against a
+    \\        # space-joined string would never match for multi-feature
+    \\        # builds. Routing the exit status through a separate
+    \\        # invocation distinguishes "binary doesn't support the
+    \\        # flag" (exit non-zero — older build) from "supports it
+    \\        # but no ebpf feature compiled" (exit 0, no `ebpf` line).
+    \\        "$__atty_doctor_guard_bin" --print-features >/dev/null 2>&1
+    \\        __atty_doctor_guard_features_rc=$?
+    \\        if [ $__atty_doctor_guard_features_rc -ne 0 ]; then
+    \\            __atty_doctor_warn 'eBPF feature: cannot detect (atty-guard does not support --print-features — upgrade your atty-guard install for definitive feature reporting)'
+    \\        elif "$__atty_doctor_guard_bin" --print-features 2>/dev/null | grep -qx ebpf; then
+    \\            # journalctl flag differs by install mode (system
+    \\            # daemon vs legacy systemd-user). The hint adapts so
+    \\            # the operator's copy-paste reads its own log.
+    \\            if [ "$__atty_doctor_guard_mode" = "user" ]; then
+    \\                __atty_doctor_ok 'eBPF feature: compiled in — `journalctl --user -u atty-guard | grep -i ebpf` shows "eBPF attached" once the unit has `--enable-ebpf` ExecStart + `AmbientCapabilities=CAP_BPF` + `SystemCallFilter=bpf perf_event_open` (see atty-guard/ebpf/README.md)'
+    \\            else
+    \\                __atty_doctor_ok 'eBPF feature: compiled in — `sudo journalctl -u atty-guard | grep -i ebpf` shows "eBPF attached" once the unit has `--enable-ebpf` ExecStart + `AmbientCapabilities=CAP_BPF` + `SystemCallFilter=bpf perf_event_open` (see atty-guard/ebpf/README.md)'
+    \\            fi
+    \\        else
+    \\            __atty_doctor_warn 'eBPF feature: NOT compiled in. Rebuild atty-guard with `make build-guard GUARD_FEATURES=...,ebpf` to enable kernel-side enforcement (optional; V2-A in-memory threat-map is the fallback).'
+    \\        fi
     \\    fi
     \\fi
     \\printf '\n'
@@ -418,7 +444,7 @@ const shell_doctor_snippet =
     \\      __atty_doctor_guard_bin __atty_doctor_guard_bin_label \
     \\      __atty_doctor_guard_unit __atty_doctor_guard_unit_sys \
     \\      __atty_doctor_guard_unit_user __atty_doctor_guard_mode \
-    \\      __atty_doctor_guard_sock 2>/dev/null
+    \\      __atty_doctor_guard_sock __atty_doctor_guard_features_rc 2>/dev/null
     \\
 ;
 
