@@ -1138,11 +1138,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // exec arm armed the latch AND the panel
                         // is still open (user may have toggled
                         // Alt+C shut while the command was
-                        // running; flipping a closed panel's
-                        // focus would be a no-op today but locks
-                        // out a future "open-defocused" UX).
+                        // running). Arm `chat_inline_paint_pending`
+                        // so paintInlineChat re-renders the cursor
+                        // visibility (?25h/?25l) and panel dim
+                        // state on the next tick — without it the
+                        // UI mutates focus silently and the user
+                        // sees a stale dimmed panel + invisible
+                        // cursor location.
                         if (rt.chat_refocus_pending) {
-                            if (rt.chat_inline_open) rt.chat_focus_in_panel = true;
+                            if (rt.chat_inline_open) {
+                                rt.chat_focus_in_panel = true;
+                                rt.chat_inline_paint_pending = true;
+                            }
                             rt.chat_refocus_pending = false;
                         }
                         cursor = advancePastMarker(output, offset);
@@ -1554,14 +1561,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // the next keystroke (Enter) runs the
                         // injected command without an Alt+C toggle
                         // dance. Refocus latches on the next
-                        // OSC 133 `;A`/`;D` edge (command finished
-                        // → shell back at prompt → user can chat
-                        // again). Skipped in auto-mode because
-                        // auto-mode already runs the Enter for the
-                        // user — there's no focus decision to
-                        // make.
+                        // OSC 133 `;A`/`;D` edge. Skipped in
+                        // auto-mode (auto-mode runs the Enter
+                        // itself). Arm `chat_inline_paint_pending`
+                        // so paintInlineChat re-renders the
+                        // dimmed/undimmed panel + cursor
+                        // visibility on the next tick.
                         rt.chat_focus_in_panel = false;
                         rt.chat_refocus_pending = true;
+                        rt.chat_inline_paint_pending = true;
                     }
                     // Return the command bytes for injection at
                     // the shell prompt — directly from
