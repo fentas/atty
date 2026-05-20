@@ -141,7 +141,11 @@ pub const SubprocessProvider = struct {
     /// as JSON, extract the named top-level string field. Claude
     /// Code's `--output-format json` emits
     /// `{"type":"result","result":"…"}`, so use
-    /// `.{ .json_field = "result" }`.
+    /// `.{ .json_field = "result" }`. `.json_stream` = newline-
+    /// delimited JSON (`claude -p --output-format stream-json`):
+    /// each line is parsed; intermediate events (system / assistant
+    /// partials) are skipped, the value of the named field on the
+    /// `type="result"` line is the final response.
     output: Output = .raw,
     /// Wall-clock timeout in ms. A watchdog thread spawns
     /// alongside the child; on expiry it sends SIGKILL via
@@ -157,6 +161,17 @@ pub const SubprocessProvider = struct {
     pub const Output = union(enum) {
         raw,
         json_field: []const u8,
+        /// Streaming variant — Claude Code's `--output-format
+        /// stream-json` emits one JSON object per line. We skip
+        /// any object whose `type` field isn't `"result"` and
+        /// extract `<field>` (default `"result"`) from the
+        /// terminating result event.
+        json_stream: JsonStream,
+    };
+
+    pub const JsonStream = struct {
+        /// Top-level field on the `type="result"` line to extract.
+        field: []const u8 = "result",
     };
 };
 

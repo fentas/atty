@@ -643,7 +643,6 @@ pub fn Module(comptime cfg: Config) type {
                     // — no other threads to join. Kill + reap the
                     // child so it doesn't run unbounded.
                     child.kill(io);
-                    _ = child.wait(io) catch {};
                     err_len_out.* = writeStatic(error_out, "subprocess watchdog thread spawn failed");
                     return error.SubprocessFailed;
                 };
@@ -676,7 +675,6 @@ pub fn Module(comptime cfg: Config) type {
                 child.kill(io);
                 completed.store(true, .release);
                 if (watchdog_thread) |t| t.join();
-                _ = child.wait(io) catch {};
                 err_len_out.* = writeStatic(error_out, "subprocess produced no stdout pipe");
                 return error.SubprocessFailed;
             };
@@ -702,12 +700,12 @@ pub fn Module(comptime cfg: Config) type {
 
             var read_buf: [4096]u8 = undefined;
             var reader = stdout_file.reader(io, &read_buf);
+
             const stdout_bytes = reader.interface.allocRemaining(gpa, .limited(read_cap)) catch {
                 child.kill(io);
                 completed.store(true, .release);
                 if (stderr_thread) |t| t.join();
                 if (watchdog_thread) |t| t.join();
-                _ = child.wait(io) catch {};
                 err_len_out.* = writeStatic(error_out, "subprocess stdout read failed");
                 return error.SubprocessFailed;
             };
@@ -750,6 +748,34 @@ pub fn Module(comptime cfg: Config) type {
             }
 
             return stdout_bytes;
+        }
+
+        /// Parse a stream-json subprocess output (one JSON object
+        /// per line) and write the value of `<field>` on the
+        /// `type="result"` event into `out`. Returns the byte
+        /// count, or 0 if no result event was found / field was
+        /// missing / shape was wrong. Intermediate events
+        /// (system / assistant partials / etc.) are skipped.
+        pub fn extractJsonStreamResult(body: []const u8, field: []const u8, out: []u8) usize {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            var it = std.mem.splitScalar(u8, body, '\n');
+            while (it.next()) |raw_line| {
+                const line = std.mem.trim(u8, raw_line, " \t\r");
+                if (line.len == 0) continue;
+                _ = arena.reset(.retain_capacity);
+                const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), line, .{}) catch continue;
+                if (parsed != .object) continue;
+                const type_val = parsed.object.get("type") orelse continue;
+                if (type_val != .string) continue;
+                if (!std.mem.eql(u8, type_val.string, "result")) continue;
+                const field_val = parsed.object.get(field) orelse return 0;
+                if (field_val != .string) return 0;
+                const n = @min(field_val.string.len, out.len);
+                @memcpy(out[0..n], field_val.string[0..n]);
+                return n;
+            }
+            return 0;
         }
 
         /// Extract a top-level string field from a JSON object by
@@ -837,6 +863,13 @@ pub fn Module(comptime cfg: Config) type {
                     }
                     break :blk content_buf[0..n];
                 },
+                .json_stream => |js| blk: {
+                    const n = extractJsonStreamResult(stdout, js.field, &content_buf);
+                    if (n == 0) {
+                        return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "stream-json: no result event in subprocess output") };
+                    }
+                    break :blk content_buf[0..n];
+                },
             };
 
             const extracted = extractExplanationAndCommand(content, out, explanation_out);
@@ -880,6 +913,7 @@ pub fn Module(comptime cfg: Config) type {
                     break :blk n;
                 },
                 .json_field => |fname| extractJsonStringField(stdout, fname, out),
+                .json_stream => |js| extractJsonStreamResult(stdout, js.field, out),
             };
             if (content_n == 0) {
                 return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "empty response from subprocess") };

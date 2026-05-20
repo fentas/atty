@@ -105,6 +105,46 @@ pub const providers = struct {
         } };
     }
 
+    /// Variant of `claudeCode` that uses `--output-format
+    /// stream-json` and parses the line-delimited events.
+    /// Functionally equivalent today (the final command IS the
+    /// `result` event's field) but lays the groundwork for paint-
+    /// side partial-token streaming (#160).
+    pub fn claudeCodeStream(comptime options: struct {
+        model: []const u8 = "",
+        extra_argv: []const []const u8 = &.{},
+    }) Provider {
+        const argv = comptime blk: {
+            const has_model = options.model.len > 0;
+            const base_len: usize = if (has_model) 8 else 6;
+            var buf: [base_len + options.extra_argv.len][]const u8 = undefined;
+            buf[0] = "claude";
+            buf[1] = "-p";
+            buf[2] = "--output-format";
+            buf[3] = "stream-json";
+            // `--verbose` is required for `--output-format
+            // stream-json` per claude's CLI (otherwise the CLI
+            // refuses with a usage error). `--include-partial-
+            // messages` ensures we get the assistant deltas in
+            // the stream for future paint-side wiring.
+            buf[4] = "--verbose";
+            buf[5] = "--include-partial-messages";
+            if (has_model) {
+                buf[6] = "--model";
+                buf[7] = options.model;
+            }
+            for (options.extra_argv, 0..) |a, i| buf[base_len + i] = a;
+            const fixed = buf;
+            break :blk &fixed;
+        };
+        return .{ .subprocess = .{
+            .argv = argv,
+            .prompt_via = .final_arg,
+            .output = .{ .json_stream = .{ .field = "result" } },
+            .timeout_ms = 60_000,
+        } };
+    }
+
     // ── Claude Code preset constants ─────────────────────────────
     //
     // Frozen Provider values for the current Claude family. New
