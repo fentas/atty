@@ -769,8 +769,11 @@ pub fn Module(comptime cfg: Config) type {
                 const type_val = parsed.object.get("type") orelse continue;
                 if (type_val != .string) continue;
                 if (!std.mem.eql(u8, type_val.string, "result")) continue;
-                const field_val = parsed.object.get(field) orelse return 0;
-                if (field_val != .string) return 0;
+                // `continue` (not `return 0`) on a malformed result
+                // event so a stray "result with wrong shape" early
+                // in the stream doesn't suppress a later valid one.
+                const field_val = parsed.object.get(field) orelse continue;
+                if (field_val != .string) continue;
                 const n = @min(field_val.string.len, out.len);
                 @memcpy(out[0..n], field_val.string[0..n]);
                 return n;

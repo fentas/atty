@@ -109,7 +109,10 @@ pub const providers = struct {
     /// stream-json` and parses the line-delimited events.
     /// Functionally equivalent today (the final command IS the
     /// `result` event's field) but lays the groundwork for paint-
-    /// side partial-token streaming (#160).
+    /// side partial-token streaming. `--verbose` and
+    /// `--include-partial-messages` are added by atty — don't
+    /// repeat them in `extra_argv` or claude will see duplicate
+    /// flags (it tolerates this but it's noisy).
     pub fn claudeCodeStream(comptime options: struct {
         model: []const u8 = "",
         extra_argv: []const []const u8 = &.{},
