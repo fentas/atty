@@ -100,15 +100,21 @@ crontab -e <<
 @reboot /var/tmp/
 
 # ---------------------------------------------------------------
-# CVE-2026-31431 / copy.fail. AF_ALG socket creation isn't
-# observable from the shell layer (kernel-side eBPF tracepoint
-# does that — #117). But the typed line that BUILDS the PoC is
-# observable.
+# CVE-2026-31431 / copy.fail. AF_ALG socket creation at the kernel
+# layer is the V2-G eBPF tracepoint's job (PR #117) — that's the
+# primary detector. These atoms are a backstop for the rare case
+# where the user runs a published PoC ONE-LINER at the shell that
+# names the AF_ALG family / algif_aead module directly. Most legit
+# AF_ALG use is library-internal (dmcrypt, fscrypt, libgcrypt) —
+# rarely typed verbatim at a shell. `splice(` is NOT included even
+# though splice() is one half of the exploit — splice() has too
+# many legitimate uses (zero-copy file/socket I/O) to flag on its
+# own. The kernel-side eBPF tracepoint correlates AF_ALG + splice
+# at the syscall layer where the FP rate is near zero.
 
 socket.AF_ALG
 af_alg_set
 algif_aead
-splice(
 
 # ---------------------------------------------------------------
 # Common npm postinstall persistence + Shai-Hulud worm artefacts.
