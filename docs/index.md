@@ -19,8 +19,8 @@ Your shell stays your shell. atty is the layer above.
 ## What you get
 
 - **Ghost-text suggestions** in bash, zsh — pulled from your shell
-  history or from Atuin if you have it. fish-style "press → to
-  accept."
+  history or from Atuin if you have it. fish-style "press Right
+  Arrow (or End) to accept."
 - **Guardrail** — `rm -rf /`, `dd if=`, `curl … | sh` shapes get a
   one-key confirmation before they run.
 - **`#: prompt` shortcut (opt-in)** — type `#: list large files`,
