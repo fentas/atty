@@ -124,6 +124,16 @@ struct Cli {
     #[arg(long, default_value = "")]
     atoms_sources: String,
 
+    /// Print one line per compiled-in Cargo feature, then exit.
+    /// Drives `atty doctor`'s feature detection (replaces the
+    /// fragile `--help | grep --enable-ebpf` heuristic which
+    /// matched both feature-on and feature-off builds because the
+    /// CLI flag exists regardless of the cargo feature). Output
+    /// is one feature name per line, suitable for piping through
+    /// `grep` / shell arithmetic.
+    #[arg(long, default_value_t = false)]
+    print_features: bool,
+
     /// Optional subcommand for the mediated trust-state interface
     /// (PR #141). When absent, atty-guard runs as the daemon. When
     /// present, atty-guard runs as a CLI client: it connects to the
@@ -299,8 +309,38 @@ fn default_socket_path() -> PathBuf {
     PathBuf::from("/run/atty-guard/atty-guard.sock")
 }
 
+/// Emit one feature name per stdout line for each Cargo feature
+/// compiled into this binary. Static — relies on `#[cfg(feature)]`
+/// at compile time so the output is exactly the set baked in (no
+/// runtime detection / kernel probing).
+fn print_compiled_features() {
+    let mut features: Vec<&'static str> = Vec::new();
+    #[cfg(feature = "tier2-onnx")]
+    features.push("tier2-onnx");
+    #[cfg(feature = "osv-live")]
+    features.push("osv-live");
+    #[cfg(feature = "atoms-fetch")]
+    features.push("atoms-fetch");
+    #[cfg(feature = "ebpf")]
+    features.push("ebpf");
+    features.sort();
+    for f in &features {
+        println!("{f}");
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let mut cli = Cli::parse();
+
+    // Feature probe (--print-features). Emits one line per
+    // compiled-in Cargo feature, exits. Drives `atty doctor`'s
+    // feature detection. Order: stable + sorted so consumers can
+    // grep / awk / shell-test reliably.
+    if cli.print_features {
+        print_compiled_features();
+        return Ok(());
+    }
+
     let sources = parse_atom_sources(&cli.atoms_sources);
     let interval = parse_interval(&cli.atoms_update_interval)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
