@@ -7,6 +7,7 @@ const testing = std.testing;
 
 const types = @import("types.zig");
 const worker_mod = @import("worker.zig");
+const nowMs = @import("../_lib.zig").nowMs;
 
 // Comptime config with a no-op subprocess provider — the actual
 // `.argv` gets supplied per-test via a constructed Config so the
@@ -308,6 +309,72 @@ test "doSubprocessDialogRequest round-trips via cat + JSON envelope" {
     try testing.expect(std.mem.indexOf(u8, echoed, "sys") != null);
     try testing.expect(std.mem.indexOf(u8, echoed, "user") != null);
     try testing.expect(std.mem.indexOf(u8, echoed, "hello") != null);
+}
+
+test "subprocess timeout: /bin/sleep 5 with 500ms budget gets SIGKILL'd" {
+    // 500 ms budget with a 400 ms lower bound — gives the
+    // watchdog's 50 ms polling slice plenty of jitter room on a
+    // thrashed CI runner without making the test slow.
+    // `.stdin` keeps the prompt off argv so `sleep` doesn't
+    // reject extra args and exit early.
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{ "/bin/sleep", "5" },
+        .prompt_via = .stdin,
+        .timeout_ms = 500,
+    });
+    const M = worker_mod.Module(cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var err: [128]u8 = undefined;
+    var err_len: usize = 0;
+
+    const start = nowMs();
+    const result = M.runSubprocess(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        "ignored",
+        &err,
+        &err_len,
+    );
+    const elapsed = nowMs() - start;
+
+    try testing.expectError(error.SubprocessFailed, result);
+    try testing.expect(err_len > 0);
+    try testing.expect(std.mem.indexOf(u8, err[0..err_len], "timed out") != null);
+    try testing.expect(std.mem.indexOf(u8, err[0..err_len], "500ms") != null);
+    try testing.expect(elapsed < 3000);
+    try testing.expect(elapsed >= 400);
+}
+
+test "subprocess timeout = 0 disables watchdog (echo still works)" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/echo"},
+        .prompt_via = .final_arg,
+        .timeout_ms = 0,
+    });
+    const M = worker_mod.Module(cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var err: [128]u8 = undefined;
+    var err_len: usize = 0;
+    const stdout = try M.runSubprocess(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        "hello",
+        &err,
+        &err_len,
+    );
+    defer testing.allocator.free(stdout);
+    try testing.expectEqual(@as(usize, 0), err_len);
+    try testing.expect(stdout.len > 0);
 }
 
 test "extractJsonStringField: unicode escapes in value round-trip" {

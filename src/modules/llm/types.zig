@@ -143,9 +143,13 @@ pub const SubprocessProvider = struct {
     /// `{"type":"result","result":"…"}`, so use
     /// `.{ .json_field = "result" }`.
     output: Output = .raw,
-    /// Wall-clock timeout in ms. SIGKILL on expiry. Generous
-    /// default because Claude can take 5–15 s for non-trivial
-    /// prompts; tighten for faster local CLIs.
+    /// Wall-clock timeout in ms. A watchdog thread spawns
+    /// alongside the child; on expiry it sends SIGKILL via
+    /// `std.posix.kill` (bypassing `std.process.Child.kill`'s
+    /// state mutation so it's safe to race with the main thread's
+    /// read/wait). Generous default because Claude can take
+    /// 5–15 s for non-trivial prompts; tighten for faster local
+    /// CLIs. Set to 0 to disable the watchdog entirely.
     timeout_ms: u64 = 30_000,
 
     pub const PromptVia = enum { final_arg, stdin };
