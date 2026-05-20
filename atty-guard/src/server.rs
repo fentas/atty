@@ -799,9 +799,17 @@ mod tests {
                 trust_store,
             );
         });
-        // Wait for the bind to land.
-        for _ in 0..50 {
-            if socket.exists() {
+        // Wait for the bind to actually accept connections. The
+        // previous "socket file exists" check was racy on slower
+        // CI runners — `UnixListener::bind` creates the socket
+        // file before `listen()` is fully ready, so a parallel
+        // connect could hit ECONNREFUSED. Probe with a real
+        // connect-then-drop until one succeeds. Total cap: 5s
+        // (much higher than CI's typical bind latency), with a
+        // generous tail so a heavily-loaded GitHub Actions runner
+        // doesn't flake the suite.
+        for _ in 0..500 {
+            if UnixStream::connect(&socket).is_ok() {
                 break;
             }
             thread::sleep(Duration::from_millis(10));
