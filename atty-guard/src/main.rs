@@ -470,6 +470,36 @@ fn main() -> std::io::Result<()> {
     // entering the UDS accept loop. The thread is detached; daemon
     // exit kills it cleanly because `server::serve` returns on
     // signal and we drop straight out of main().
+    // Per-UID atom + URL trust state lives under
+    // `/var/lib/atty-guard/users/<uid>/`. The StateDirectory= unit
+    // directive creates the parent (`/var/lib/atty-guard/`) as
+    // atty:atty 0750. The `users/` subdir is created lazily on
+    // first write — the directory layout is per-UID isolated so
+    // an empty directory is a fine starting state.
+    //
+    // Constructed BEFORE the cron-fetcher spawn so the cron thread
+    // can call `trust_store.reload_system_fetched()` after each
+    // successful fetch (the daemon's hot-path classify reads the
+    // in-memory copy that this reload populates).
+    //
+    // Dev runs as a regular user get a STATE_DIRECTORY-less default
+    // which resolves to /var/lib/atty-guard/ (not writable) and
+    // gracefully no-ops on persistent ops. Tests pass an explicit
+    // tempdir to TrustStore::new.
+    // STATE_DIRECTORY can be a ':'-separated list when the unit
+    // sets multiple StateDirectory= entries; mirror what
+    // `atom_fetcher::default_atoms_path` does and use the first.
+    let trust_root = std::env::var("STATE_DIRECTORY")
+        .ok()
+        .and_then(|s| {
+            s.split(':')
+                .next()
+                .filter(|p| !p.is_empty())
+                .map(|p| std::path::PathBuf::from(p).join("users"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/atty-guard/users"));
+    let trust_store = std::sync::Arc::new(trust_store::TrustStore::new(trust_root));
+
     if let Some(iv) = interval {
         if cfg!(feature = "atoms-fetch") {
             let cfg = atom_fetcher::FetcherConfig::default();
@@ -480,7 +510,7 @@ fn main() -> std::io::Result<()> {
                     sources
                 );
             }
-            atom_fetcher::spawn_periodic_refresh(cfg, sources, iv);
+            atom_fetcher::spawn_periodic_refresh(cfg, sources, iv, trust_store.clone());
         } else {
             // Without the feature, `spawn_periodic_refresh` is a
             // no-op. Loud warn so the operator knows their cron
@@ -493,21 +523,22 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    // Per-UID atom + URL trust state lives under
-    // `/var/lib/atty-guard/users/<uid>/`. The StateDirectory= unit
-    // directive creates the parent (`/var/lib/atty-guard/`) as
-    // atty:atty 0750. The `users/` subdir is created lazily on
-    // first write — the directory layout is per-UID isolated so
-    // an empty directory is a fine starting state.
-    //
-    // Dev runs as a regular user get a STATE_DIRECTORY-less default
-    // which resolves to /var/lib/atty-guard/ (not writable) and
-    // gracefully no-ops on persistent ops. Tests pass an explicit
-    // tempdir to TrustStore::new.
-    let trust_root = std::env::var_os("STATE_DIRECTORY")
-        .map(|s| std::path::PathBuf::from(s).join("users"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/atty-guard/users"));
-    let trust_store = std::sync::Arc::new(trust_store::TrustStore::new(trust_root));
+    // Eagerly load atoms.system.txt at startup so the very first
+    // classify after daemon start sees the fetched corpus (without
+    // this, the first classify lazy-loads + the warning about a
+    // perm-gate refusal happens mid-keystroke instead of in the
+    // operator's view at boot). Errors are non-fatal: missing file
+    // is normal (no fetch run yet), perm-refused is logged with
+    // remediation hints.
+    match trust_store.reload_system_fetched() {
+        Ok(n) if n > 0 && cli.verbosity >= 1 => {
+            eprintln!("atty-guard: atoms.system.txt loaded ({n} atoms)");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("atty-guard: atoms.system.txt not loaded — {e}");
+        }
+    }
 
     server::serve(
         &socket,

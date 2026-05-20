@@ -304,8 +304,13 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             if matches!(result.verdict, Verdict::Safe) {
                 // ensure_loaded is a no-op after first call per UID
                 // per daemon lifetime — keeps the hot path off disk.
-                // Mutations re-load the cache directly.
+                // Mutations re-load the cache directly. System-
+                // fetched is a separate one-shot init that runs
+                // once per daemon lifetime; explicit reload happens
+                // on SIGHUP / after the fetcher thread writes.
                 let _ = state.trust_store.ensure_loaded(peer.uid);
+                state.trust_store.ensure_system_fetched_loaded();
+                let system_fetched = state.trust_store.list_system_fetched();
                 let overlay_persistent = state.trust_store.list_atoms(
                     peer.uid,
                     crate::trust_store::ListScope::Persistent,
@@ -314,20 +319,43 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                     peer.uid,
                     crate::trust_store::ListScope::Session,
                 );
-                for atom in overlay_persistent.iter().chain(overlay_session.iter()) {
+                // Scan order: system-fetched (shared, daemon-managed)
+                // → user persistent (per-UID, sudo-mediated) → user
+                // session (per-UID, banner-driven). First-match-wins;
+                // each branch labels its own `reason` so the operator
+                // sees which scope fired (helps debug "why is this
+                // command being flagged?").
+                let mut hit: Option<(&'static str, String)> = None;
+                for atom in system_fetched.iter() {
                     if command.contains(atom.as_str()) {
-                        result = ClassifyResult {
-                            verdict: Verdict::Warn,
-                            category: Category::None,
-                            confidence: 0.6,
-                            reason: format!(
-                                "user-overlay atom matched: `{}`",
-                                atom
-                            ),
-                            matched: atom.clone(),
-                        };
+                        hit = Some(("system-fetched", atom.clone()));
                         break;
                     }
+                }
+                if hit.is_none() {
+                    for atom in overlay_persistent.iter() {
+                        if command.contains(atom.as_str()) {
+                            hit = Some(("user-persistent", atom.clone()));
+                            break;
+                        }
+                    }
+                }
+                if hit.is_none() {
+                    for atom in overlay_session.iter() {
+                        if command.contains(atom.as_str()) {
+                            hit = Some(("user-session", atom.clone()));
+                            break;
+                        }
+                    }
+                }
+                if let Some((scope, atom)) = hit {
+                    result = ClassifyResult {
+                        verdict: Verdict::Warn,
+                        category: Category::None,
+                        confidence: 0.6,
+                        reason: format!("{scope} atom matched: `{atom}`"),
+                        matched: atom,
+                    };
                 }
             }
 
@@ -771,9 +799,17 @@ mod tests {
                 trust_store,
             );
         });
-        // Wait for the bind to land.
-        for _ in 0..50 {
-            if socket.exists() {
+        // Wait for the bind to actually accept connections. The
+        // previous "socket file exists" check was racy on slower
+        // CI runners — `UnixListener::bind` creates the socket
+        // file before `listen()` is fully ready, so a parallel
+        // connect could hit ECONNREFUSED. Probe with a real
+        // connect-then-drop until one succeeds. Total cap: 5s
+        // (much higher than CI's typical bind latency), with a
+        // generous tail so a heavily-loaded GitHub Actions runner
+        // doesn't flake the suite.
+        for _ in 0..500 {
+            if UnixStream::connect(&socket).is_ok() {
                 break;
             }
             thread::sleep(Duration::from_millis(10));

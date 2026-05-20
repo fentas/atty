@@ -140,9 +140,13 @@ const atty = @import("atty");
 //   - `bash -c "<long base64>"` payloads
 //
 // On match: Enter is swallowed, a banner explains what was matched, and
-// the next keystroke decides: `y` allow once, `t` trust permanently
-// (SHA-256 of category+match persisted to `trust_cache_path`), anything
-// else cancels (Ctrl+U clears readline).
+// the next keystroke decides: `y` allow once, `a` allow always (this
+// session, in-memory only), `t` trust permanently (SHA-256 of
+// category+match added to atty's in-memory cache + mirrored to the
+// daemon's per-UID `commands.trusted.txt` if the daemon is reachable
+// — best-effort: a daemon-less install loses the trust on atty exit),
+// `B` block host forever (session, in-memory only), anything else
+// cancels (Ctrl+U clears readline).
 //
 // Off by default — opt in by adding `atty.modules.security_guard` to
 // `modules` AND setting `.enabled = true`. See
@@ -155,11 +159,10 @@ const atty = @import("atty");
 //     atty.modules.history.configure(.{}),
 // };
 //
-// // Customise the trust cache location, skip the static-pattern check
-// // in incognito mode, or point at an `atty-guard` sidecar daemon:
+// // Skip the static-pattern check in incognito mode, or point at an
+// // `atty-guard` sidecar daemon:
 // // atty.modules.security_guard.configure(.{
 // //     .enabled = true,
-// //     .trust_cache_path = "~/.cache/atty/security_trust.txt",
 // //     .skip_in_incognito = false,  // protect EVERYWHERE; incognito
 // //                                  // only stops *recording*.
 // //     // Opt into the V2 atty-guard sidecar. When set + reachable,

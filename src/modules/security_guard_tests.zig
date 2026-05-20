@@ -48,7 +48,7 @@ test "disabled by default — onInput is a passthrough" {
 }
 
 test "enabled — curl|sh on Enter arms + emits banner" {
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-banner.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};
@@ -69,7 +69,7 @@ test "enabled — curl|sh on Enter arms + emits banner" {
 }
 
 test "enabled — armed + `n` cancels via Ctrl+U" {
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-cancel.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};
@@ -92,7 +92,7 @@ test "enabled — armed + `n` cancels via Ctrl+U" {
 }
 
 test "enabled — armed + `y` allows once via CR" {
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-yes.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};
@@ -111,12 +111,13 @@ test "enabled — armed + `y` allows once via CR" {
     try testing.expectEqualSlices(u8, "\r", action.replace);
 }
 
-test "enabled — armed + `t` trusts permanently + persists" {
-    const path = "/tmp/atty-secguard-test-trust.txt";
-    _ = std.c.unlink(path);
-    defer _ = std.c.unlink(path);
-
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = path });
+test "enabled — armed + `t` adds to in-memory trust cache + suppresses next banner" {
+    // Post-#150: no local trust file write. [t] only adds to
+    // rt.trust (in-memory) and mirrors to the daemon's
+    // commands.trusted.txt via TrustAdd. The daemon mirror isn't
+    // exercised in this unit test (no daemon socket configured),
+    // so we just verify the in-memory side.
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};
@@ -145,7 +146,7 @@ test "enabled — armed + `a` adds to session_trust, future identical match skip
     // session-only (never persisted to ~/.cache/atty/...). A
     // second Enter on an identical command should now bypass the
     // banner.
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-allow-always.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};
@@ -180,7 +181,7 @@ test "enabled — armed + `a` adds to session_trust, future identical match skip
 test "extractHost handles userinfo, IPv6, port, paths" {
     // Direct unit tests for the URL host extractor. Edge cases
     // caught by the round-1 review.
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-eh.txt" });
+    const L = mod.configure(.{ .enabled = true });
     _ = L;
     // The helper lives inside the comptime-generated module struct.
     // We re-create the function under test inline because Zig
@@ -254,7 +255,7 @@ test "session block uses host-boundary match, not substring" {
     //   curl https://evil.io/x
     //   echo "evil.io"
     // The boundary check is on host-chars (alnum / `.` / `-`).
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-boundary.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};
@@ -309,7 +310,7 @@ test "enabled — armed + `B` extracts host + blocks future commands containing 
     // matched URL, stores it in the session-blocked-hosts list.
     // The next command containing that host gets REFUSED outright
     // (no banner, readline cleared).
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-block-host.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};
@@ -351,7 +352,7 @@ test "enabled — `B` on atom-only match (no host) degrades to cancel" {
     // chmod +s is an atom-only match — no URL in the matched
     // substring. [B] has no host to extract, so it should just
     // cancel and not add anything to the blocked-hosts list.
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-block-nohost.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};
@@ -380,7 +381,7 @@ test "enabled — `B` on atom-only match (no host) degrades to cancel" {
 }
 
 test "enabled — non-Enter while not armed is passthrough" {
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-noenter.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
 
@@ -395,7 +396,7 @@ test "enabled — non-Enter while not armed is passthrough" {
 }
 
 test "enabled — clean line passes through" {
-    const L = mod.configure(.{ .enabled = true, .trust_cache_path = "/tmp/atty-secguard-test-clean.txt" });
+    const L = mod.configure(.{ .enabled = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
 
@@ -416,7 +417,6 @@ test "daemon path set but socket missing → falls back to in-proc patterns" {
     // in-proc patterns arm the banner.
     const L = mod.configure(.{
         .enabled = true,
-        .trust_cache_path = "/tmp/atty-secguard-test-daemon-missing.txt",
         .daemon_socket_path = "/tmp/atty-guard-nonexistent-XYZ.sock",
     });
     var rt = try L.attach(testing.allocator, undefined);
@@ -442,7 +442,6 @@ test "daemon path set but socket missing → falls back to in-proc patterns" {
 test "y accept on curl|sh sets active_threat=high" {
     const L = mod.configure(.{
         .enabled = true,
-        .trust_cache_path = "/tmp/atty-secguard-test-threat-y.txt",
     });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
@@ -468,7 +467,6 @@ test "y accept on curl|sh sets active_threat=high" {
 test "y accept on bash -c base64 escalates to critical" {
     const L = mod.configure(.{
         .enabled = true,
-        .trust_cache_path = "/tmp/atty-secguard-test-threat-b64.txt",
     });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
@@ -492,7 +490,6 @@ test "y accept on bash -c base64 escalates to critical" {
 test "n cancel does NOT set active_threat" {
     const L = mod.configure(.{
         .enabled = true,
-        .trust_cache_path = "/tmp/atty-secguard-test-threat-n.txt",
     });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
@@ -516,7 +513,6 @@ test "n cancel does NOT set active_threat" {
 test "clean Enter after y-accept clears active_threat" {
     const L = mod.configure(.{
         .enabled = true,
-        .trust_cache_path = "/tmp/atty-secguard-test-threat-clear.txt",
     });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
@@ -548,7 +544,6 @@ test "clean Enter after y-accept clears active_threat" {
 test "statusText returns shield emoji when active_threat is set" {
     const L = mod.configure(.{
         .enabled = true,
-        .trust_cache_path = "/tmp/atty-secguard-test-status.txt",
     });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
@@ -576,7 +571,6 @@ test "statusText returns shield emoji when active_threat is set" {
 test "markShellThreat is a no-op when shell_pid is null" {
     const L = mod.configure(.{
         .enabled = true,
-        .trust_cache_path = "/tmp/atty-secguard-test-pid-null.txt",
     });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
@@ -600,7 +594,7 @@ test "markShellThreat is a no-op when shell_pid is null" {
 }
 
 test "skip_in_incognito = true bypasses matching" {
-    const L = mod.configure(.{ .enabled = true, .skip_in_incognito = true, .trust_cache_path = "/tmp/atty-secguard-test-incog.txt" });
+    const L = mod.configure(.{ .enabled = true, .skip_in_incognito = true });
     var rt = try L.attach(testing.allocator, undefined);
     defer L.detach(&rt, undefined);
     var sink: Sink = .{};

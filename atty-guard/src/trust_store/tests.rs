@@ -410,6 +410,92 @@ fn session_clear_drops_trust_set() {
 }
 
 #[test]
+fn system_fetched_loads_when_perms_ok() {
+    let tmp = tempfile::tempdir().unwrap();
+    let users_dir = tmp.path().join("users");
+    std::fs::create_dir_all(&users_dir).unwrap();
+    let system_path = tmp.path().join("atoms.system.txt");
+    std::fs::write(&system_path, "# header\nnc -e\nbash -i >&\n").unwrap();
+    // Match our EUID so the perm check passes (test runs as the
+    // cargo user, same UID for the file we just wrote).
+    let store = TrustStore::new(users_dir);
+    let n = store.reload_system_fetched().unwrap();
+    assert_eq!(n, 2);
+    let listed = store.list_system_fetched();
+    // reload_system_fetched stores a pre-sorted snapshot; iterate
+    // the Arc'd Vec directly without resorting.
+    assert_eq!(listed.as_ref(), &vec!["bash -i >&".to_string(), "nc -e".to_string()]);
+}
+
+#[test]
+fn system_fetched_refuses_world_writable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let users_dir = tmp.path().join("users");
+    std::fs::create_dir_all(&users_dir).unwrap();
+    let system_path = tmp.path().join("atoms.system.txt");
+    std::fs::write(&system_path, "nc -e\n").unwrap();
+    // Set world-write — perm gate should refuse.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&system_path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let store = TrustStore::new(users_dir);
+    let err = store.reload_system_fetched().unwrap_err();
+    assert!(
+        err.to_string().contains("group/world-write"),
+        "expected perm error, got: {err}"
+    );
+    // In-memory list stays empty.
+    assert!(store.list_system_fetched().is_empty());
+}
+
+#[test]
+fn system_fetched_refuses_group_writable() {
+    // Same perm-gate path as world-writable, but pinned separately
+    // so a future change to the mask catches both cases.
+    let tmp = tempfile::tempdir().unwrap();
+    let users_dir = tmp.path().join("users");
+    std::fs::create_dir_all(&users_dir).unwrap();
+    let system_path = tmp.path().join("atoms.system.txt");
+    std::fs::write(&system_path, "nc -e\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&system_path, std::fs::Permissions::from_mode(0o620)).unwrap();
+    let store = TrustStore::new(users_dir);
+    let err = store.reload_system_fetched().unwrap_err();
+    assert!(err.to_string().contains("group/world-write"));
+    assert!(store.list_system_fetched().is_empty());
+}
+
+#[test]
+fn system_fetched_empty_file_loads_zero_atoms() {
+    // Empty / comment-only file should load cleanly with zero
+    // atoms. Used as the "fresh install, fetch hasn't run yet"
+    // shape — the file might exist (e.g. systemd's
+    // StateDirectory= pre-creates it) but contain only the
+    // generated header.
+    let tmp = tempfile::tempdir().unwrap();
+    let users_dir = tmp.path().join("users");
+    std::fs::create_dir_all(&users_dir).unwrap();
+    let system_path = tmp.path().join("atoms.system.txt");
+    std::fs::write(&system_path, "# header only\n# more comment\n\n").unwrap();
+    let store = TrustStore::new(users_dir);
+    let n = store.reload_system_fetched().unwrap();
+    assert_eq!(n, 0);
+    assert!(store.list_system_fetched().is_empty());
+}
+
+#[test]
+fn system_fetched_missing_file_is_ok() {
+    // No atoms.system.txt yet — reload returns 0, no error. Matches
+    // the "fresh install before any fetcher run" state.
+    let tmp = tempfile::tempdir().unwrap();
+    let users_dir = tmp.path().join("users");
+    std::fs::create_dir_all(&users_dir).unwrap();
+    let store = TrustStore::new(users_dir);
+    let n = store.reload_system_fetched().unwrap();
+    assert_eq!(n, 0);
+    assert!(store.list_system_fetched().is_empty());
+}
+
+#[test]
 fn civil_from_days_known_values() {
     // 1970-01-01 → epoch day 0.
     assert_eq!(civil_from_days(0), (1970, 1, 1));

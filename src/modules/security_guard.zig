@@ -35,14 +35,11 @@ pub const Config = struct {
     /// (the `onInput` hook short-circuits to `.forward` at the top).
     enabled: bool = false,
     /// Patterns to apply on each Enter. Defaults to the shipped
-    /// `default_patterns`. Empty slice disables matching while
-    /// keeping the module attached (handy for the trust-cache
-    /// path alone, though probably you'd just set `enabled=false`).
+    /// `default_patterns`. Empty slice disables in-proc matching
+    /// while keeping the module attached, so a daemon-only setup
+    /// (every classify goes through the UDS, no in-proc Tier-1)
+    /// is still reachable from the same config.
     patterns: []const Pattern = &default_patterns,
-    /// Trust cache file. Tilde-expanded at attach time. Created
-    /// on first `[t]rust` action. Format: one 64-char SHA-256 hex
-    /// per line; everything else skipped.
-    trust_cache_path: []const u8 = "~/.cache/atty/security_trust.txt",
     /// Banner style — dim italic by default, same vocabulary as
     /// the guardrail module.
     warning_style: style_mod.Style = .{ .dim = true, .italic = true },
@@ -198,11 +195,12 @@ pub fn configure(comptime cfg: Config) type {
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
             _ = io;
-            var rt: Runtime = .{ .allocator = allocator };
-            if (cfg.enabled) {
-                rt.trust.load(allocator, cfg.trust_cache_path) catch {};
-            }
-            return rt;
+            // Trust state seeded lazily from the daemon's
+            // commands.trusted.txt — see `queryDaemon` for the
+            // `daemon_trust_seeded` flag. No local file is read or
+            // written; the daemon is the single source of truth for
+            // persisted trust hashes (post-#147 + post-#150).
+            return .{ .allocator = allocator };
         }
 
         pub fn detach(rt: *Runtime, io: std.Io) void {
@@ -338,11 +336,12 @@ pub fn configure(comptime cfg: Config) type {
             // commands.trusted.txt. Runs once per atty session after
             // the FIRST successful daemon classify — by then the
             // daemon is proven reachable + the connect cost is
-            // already amortized. Errors are swallowed: the local
-            // trust file from `~/.cache/atty/security_trust.txt`
-            // is already loaded at attach, so the seed only ADDS
-            // (specifically, picks up trust hashes the user set on
-            // a different atty session under the same UID).
+            // already amortized. Errors are swallowed: the daemon is
+            // the only persistent trust store, so a failed seed just
+            // means cross-shell trust hashes are unavailable this
+            // session. Banner [t] still adds to rt.trust locally +
+            // mirrors via TrustAdd, so trust state set in THIS
+            // session works regardless of the daemon mirror outcome.
             if (!rt.daemon_trust_seeded) {
                 if (rt.allocator) |a| {
                     rt.daemon.?.trustList(a, &rt.trust) catch {};
@@ -442,16 +441,17 @@ pub fn configure(comptime cfg: Config) type {
                             rt.armed_match[0..rt.armed_match_len],
                             &hash_buf,
                         );
+                        // In-memory cache for the runtime check (no
+                        // local file write — daemon is the only
+                        // persistent store). The daemon mirror via
+                        // trustAdd is the canonical persistence path;
+                        // we add to the in-memory cache too so the
+                        // SAME atty session's next Enter skips the
+                        // banner without waiting for a daemon
+                        // round-trip.
                         if (rt.allocator) |a| {
                             _ = rt.trust.add(a, hash) catch {};
-                            rt.trust.persist(cfg.trust_cache_path) catch {};
                         }
-                        // Mirror to daemon-side commands.trusted.txt
-                        // (post-trust-cache-migration). Best-effort —
-                        // the local-file write above is authoritative
-                        // for the runtime check; the daemon mirror
-                        // is for cross-shell consistency + visibility
-                        // via `atty-guard trust list`.
                         if (rt.daemon) |*client| {
                             client.trustAdd(hash) catch {};
                         }

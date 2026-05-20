@@ -90,17 +90,118 @@ pub struct TrustStore {
     /// `load_persistent` or first mutation. classify hot-path
     /// short-circuits the file read when the flag is set.
     loaded: Mutex<HashSet<u32>>,
+    /// System-wide fetched atom corpus loaded from
+    /// `<state_root>/atoms.system.txt`. Refreshed by the daemon's
+    /// own `--atoms-update-interval` thread + `sudo atty-guard
+    /// --update-atoms-now`. Loaded with a permission gate: the
+    /// file must be `atty:atty` owned (daemon's own UID) and NOT
+    /// group/world-writable, otherwise the load is refused with a
+    /// journald warning and the in-memory copy stays at whatever
+    /// it was. classify hot path scans this alongside the
+    /// per-UID overlays.
+    ///
+    /// Wrapped in `Arc<Vec<String>>` so the classify hot path can
+    /// clone JUST the Arc (one refcount bump, no per-atom string
+    /// clone) instead of allocating a Vec per request. The mutex
+    /// is held only briefly during the swap-on-reload.
+    system_fetched_atoms: Mutex<std::sync::Arc<Vec<String>>>,
+    /// Path of `atoms.system.txt`. Cached at construction so the
+    /// classify path doesn't re-derive it per request. Lives at
+    /// `<state_root>/../atoms.system.txt` because `data_root` is
+    /// the `users/` subdir.
+    system_fetched_path: PathBuf,
+    /// `false` until first successful load. Caps off the lazy load
+    /// path on classify hot-call so repeated empty-file reads
+    /// don't burn syscalls; explicit reload via `reload_system_fetched`
+    /// is the only way to re-stat after a refresh.
+    system_fetched_loaded: Mutex<bool>,
 }
 
 impl TrustStore {
     /// `data_root` is `/var/lib/atty-guard/users/` in production
     /// (parent of per-UID dirs). Test code passes a tempdir.
     pub fn new(data_root: PathBuf) -> Self {
+        // `atoms.system.txt` lives at the state-root level (sibling
+        // of the `users/` subdir that `data_root` points at). The
+        // systemd unit's StateDirectory=atty-guard makes that
+        // `/var/lib/atty-guard/atoms.system.txt`.
+        let system_fetched_path = data_root
+            .parent()
+            .map(|p| p.join("atoms.system.txt"))
+            .unwrap_or_else(|| data_root.join("atoms.system.txt"));
         Self {
             data_root,
             state: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashSet::new()),
+            system_fetched_atoms: Mutex::new(std::sync::Arc::new(Vec::new())),
+            system_fetched_path,
+            system_fetched_loaded: Mutex::new(false),
         }
+    }
+
+    /// Read `atoms.system.txt` from disk + replace the in-memory
+    /// copy. Used by daemon startup, SIGHUP, and the `--atoms-update-
+    /// interval` thread after a successful fetch. Enforces the
+    /// permission gate: returns Err WITHOUT touching the in-memory
+    /// copy if the file isn't `atty:atty` owned or has unsafe perms.
+    pub fn reload_system_fetched(&self) -> std::io::Result<usize> {
+        let parsed = read_system_atoms_file_checked(&self.system_fetched_path)?;
+        let count = parsed.len();
+        // Materialize into a sorted Vec for stable scan order on
+        // the hot path (deterministic `reason` text when multiple
+        // atoms could match).
+        let mut sorted: Vec<String> = parsed.into_iter().collect();
+        sorted.sort();
+        let snapshot = std::sync::Arc::new(sorted);
+        let mut atoms = self
+            .system_fetched_atoms
+            .lock()
+            .expect("system_fetched_atoms poisoned");
+        *atoms = snapshot;
+        let mut loaded = self
+            .system_fetched_loaded
+            .lock()
+            .expect("system_fetched_loaded poisoned");
+        *loaded = true;
+        Ok(count)
+    }
+
+    /// Ensure the in-memory copy is loaded at least once (lazy
+    /// init from the classify hot path). Idempotent — subsequent
+    /// calls are O(1) flag-check.
+    ///
+    /// Flag-on-error semantics: even if `reload_system_fetched`
+    /// fails (file missing, perm-gate refused), the loaded flag
+    /// flips true so the classify hot path doesn't re-stat every
+    /// keystroke. Means a `sudo chown atty:atty atoms.system.txt`
+    /// fix-up doesn't take effect until the daemon's cron thread
+    /// fires the next refresh OR the daemon is restarted. The
+    /// cron path is the normal "I changed something, atoms refresh"
+    /// flow; manual refreshes need a daemon restart.
+    pub fn ensure_system_fetched_loaded(&self) {
+        if *self
+            .system_fetched_loaded
+            .lock()
+            .expect("system_fetched_loaded poisoned")
+        {
+            return;
+        }
+        let _ = self.reload_system_fetched();
+        *self
+            .system_fetched_loaded
+            .lock()
+            .expect("system_fetched_loaded poisoned") = true;
+    }
+
+    /// Snapshot of the system-fetched corpus for classify-time
+    /// substring scan. Cheap: bumps the Arc refcount, no atom
+    /// strings get cloned. The classify hot path iterates the
+    /// returned slice — keeps per-Enter allocation bounded.
+    pub fn list_system_fetched(&self) -> std::sync::Arc<Vec<String>> {
+        self.system_fetched_atoms
+            .lock()
+            .expect("system_fetched_atoms poisoned")
+            .clone()
     }
 
     /// Load `atoms.user.txt` + `urls.decisions.txt` for `uid` from
@@ -689,6 +790,79 @@ fn validate_host(host: &str) -> Result<(), String> {
         return Err("host contains `#` (reserved character)".into());
     }
     Ok(())
+}
+
+/// Read `atoms.system.txt` from disk with a permission gate. The
+/// daemon writes this file as the `atty` user, so on load we
+/// require: (a) owner == our own EUID (i.e. atty's UID), and (b)
+/// no group-write or world-write bit set. Drift in either fails
+/// the load and the caller keeps whatever in-memory state it had.
+///
+/// Why this gate: the system corpus feeds the V2-J accumulator,
+/// which can escalate Safe → Block, which the daemon writes to
+/// the eBPF threat-map. A poisoned corpus is a kernel-level DOS
+/// vector — bytes in this file affect every user's classify
+/// outcome. Refusing-on-drift is the conservative choice.
+fn read_system_atoms_file_checked(path: &Path) -> std::io::Result<HashSet<String>> {
+    let mut out = HashSet::new();
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::PermissionsExt;
+        // Owner must be our own EUID — the daemon is supposed to
+        // be the sole writer, and "owner == self" is the
+        // strongest precondition for that. Using `geteuid()` from
+        // libc avoids a dependency on the `users` crate just for
+        // this one syscall.
+        let our_uid = unsafe {
+            extern "C" {
+                fn geteuid() -> u32;
+            }
+            geteuid()
+        };
+        if meta.uid() != our_uid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to load {}: owner uid {} != daemon uid {} \
+                     (daemon-managed corpus must stay daemon-owned; \
+                     `sudo chown atty:atty {}` if you trust the current contents)",
+                    path.display(),
+                    meta.uid(),
+                    our_uid,
+                    path.display(),
+                ),
+            ));
+        }
+        let mode = meta.permissions().mode() & 0o777;
+        // Reject group-write OR world-write. Read bits are OK
+        // (group=atty needs to stat the file for `atty doctor`).
+        if mode & 0o022 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to load {}: mode 0{:o} has group/world-write \
+                     (chmod g-w,o-w {})",
+                    path.display(),
+                    mode,
+                    path.display(),
+                ),
+            ));
+        }
+    }
+    let content = std::fs::read_to_string(path)?;
+    for line in content.lines() {
+        let body = strip_inline_comment(line).trim();
+        if !body.is_empty() {
+            out.insert(body.to_owned());
+        }
+    }
+    Ok(out)
 }
 
 fn read_trust_file(path: &Path) -> std::io::Result<HashSet<String>> {
