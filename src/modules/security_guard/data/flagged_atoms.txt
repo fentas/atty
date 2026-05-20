@@ -121,3 +121,38 @@ postinstall.js
 NPM_TOKEN
 shai-hulud
 bundle.js?shai
+
+# ---------------------------------------------------------------
+# Shai-Hulud dead-man switch + credential harvest. The Sep-2025 →
+# May-2026 wave installs a systemd-user daemon that polls GitHub
+# every 60s; if it sees the stolen tokens get revoked it fires
+# `rm -rf ~/` to scorch the user's home. We catch the destruction
+# command shape — the most damaging step — verbatim, so a banner
+# fires before bash splits the line. The `/proc/<pid>/mem`
+# enumeration is the credential-extraction step (reads live worker
+# memory for plaintext tokens).
+
+rm -rf ~/
+rm -rf $HOME
+rm -rf ${HOME}
+rm -rf /home/
+rm -rf "$HOME
+/.aws/credentials
+/.npmrc
+/.ssh/id_rsa
+/.ssh/id_ed25519
+/.ssh/id_ecdsa
+/proc/self/mem
+/proc/*/mem
+
+# ---------------------------------------------------------------
+# Background-daemon persistence — Shai-Hulud's 60s-poller is a
+# systemd-user service. The user-typed shape that installs it is
+# usually written by an install script but occasionally shows up
+# at the shell. Catches the daemon-install command.
+
+systemctl --user enable
+systemctl --user daemon-reload
+loginctl enable-linger
+# crontab-based persistence already covered above (`crontab -e <<`,
+# `@reboot`); duplicate atoms would just bloat the AC automaton.

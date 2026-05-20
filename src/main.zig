@@ -233,7 +233,7 @@ const shell_doctor_snippet =
     \\    if eval "$1"; then __atty_doctor_ok "$2"; __atty_doctor_pass=$((__atty_doctor_pass+1));
     \\    else __atty_doctor_fail "$2 — $3"; __atty_doctor_fail_count=$((__atty_doctor_fail_count+1)); fi
     \\}
-    \\printf '\033[1matty doctor\033[0m — OSC 133 integration check\n\n'
+    \\printf '\033[1matty doctor\033[0m — OSC 133 integration\n\n'
     \\__atty_doctor_check '[ -n "${ATTY:-}" ]' \
     \\    'inside atty session ($ATTY set)' \
     \\    'not running under atty — start a new shell with `atty bash`'
@@ -304,6 +304,63 @@ const shell_doctor_snippet =
     \\else
     \\    __atty_doctor_warn 'unknown shell — only bash and zsh are first-class. Press `Alt+A` for single-shot LLM, dialog/auto modes need OSC 133.'
     \\fi
+    \\
+    \\# atty-guard sidecar — security_guard's optional V2-* backend.
+    \\# Each check is non-fatal: a fresh atty install runs fine with
+    \\# the in-proc Tier-1 only (no daemon). The checks fire only
+    \\# when there's evidence the operator INTENDED to install the
+    \\# sidecar (`atty-guard` binary on PATH OR the unit file in
+    \\# place); otherwise the section is silent.
+    \\__atty_doctor_guard_bin=""
+    \\if command -v atty-guard >/dev/null 2>&1; then
+    \\    __atty_doctor_guard_bin="$(command -v atty-guard)"
+    \\elif [ -x "$HOME/.local/bin/atty-guard" ]; then
+    \\    __atty_doctor_guard_bin="$HOME/.local/bin/atty-guard"
+    \\fi
+    \\__atty_doctor_guard_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service"
+    \\if [ -n "$__atty_doctor_guard_bin" ] || [ -f "$__atty_doctor_guard_unit" ]; then
+    \\    printf '\n\033[1matty doctor\033[0m — atty-guard sidecar\n\n'
+    \\    __atty_doctor_check '[ -n "'"$__atty_doctor_guard_bin"'" ]' \
+    \\        "atty-guard binary present ($__atty_doctor_guard_bin)" \
+    \\        'install with `make install-guard` (from the atty source tree) or download the binary from https://github.com/fentas/atty/releases'
+    \\    __atty_doctor_check '[ -f "'"$__atty_doctor_guard_unit"'" ]' \
+    \\        'atty-guard.service systemd-user unit installed' \
+    \\        '`make install-guard` writes the unit + enables it; do that to get auto-start on login'
+    \\    if command -v systemctl >/dev/null 2>&1; then
+    \\        __atty_doctor_check 'systemctl --user is-active --quiet atty-guard.service' \
+    \\            'atty-guard.service is active' \
+    \\            'systemctl --user start atty-guard.service (check `systemctl --user status atty-guard` for the actual reason if it refuses)'
+    \\    fi
+    \\    __atty_doctor_guard_sock="${XDG_RUNTIME_DIR:-/tmp}/atty-guard.sock"
+    \\    __atty_doctor_check '[ -S "'"$__atty_doctor_guard_sock"'" ]' \
+    \\        "UDS socket reachable ($__atty_doctor_guard_sock)" \
+    \\        'service started but socket missing — likely a permission or path mismatch; the daemon prints the bind error to journald on startup'
+    \\    __atty_doctor_guard_atoms="${XDG_DATA_HOME:-$HOME/.local/share}/atty-guard/flagged_atoms.txt"
+    \\    __atty_doctor_check '[ -f "'"$__atty_doctor_guard_atoms"'" ]' \
+    \\        "atom corpus present ($__atty_doctor_guard_atoms)" \
+    \\        'run `atty-guard --update-atoms-now` (needs `--features atoms-fetch`) to pull GTFOBins / Sigma / LOLBAS into a flagged_atoms.txt'
+    \\    # Freshness — non-fatal, surfaced as a warn so an old install
+    \\    # doesn't fail the check entirely.
+    \\    if [ -f "$__atty_doctor_guard_atoms" ]; then
+    \\        if find "$__atty_doctor_guard_atoms" -mtime +30 2>/dev/null | grep -q .; then
+    \\            __atty_doctor_warn 'atom corpus is >30 days old — schedule refresh with `atty-guard --atoms-update-interval 1d` or re-run `--update-atoms-now`'
+    \\        else
+    \\            __atty_doctor_ok 'atom corpus is fresh (<30 days)'
+    \\        fi
+    \\    fi
+    \\    # eBPF — informational. Detect by the --help mentioning the
+    \\    # flag. Tells the operator whether kernel-side enforcement
+    \\    # is even in their binary; doesn't try to verify attach state
+    \\    # (that requires CAP_BPF + reading /sys/fs/bpf which is
+    \\    # noisy and root-only).
+    \\    if [ -n "$__atty_doctor_guard_bin" ]; then
+    \\        if "$__atty_doctor_guard_bin" --help 2>&1 | grep -q -- --enable-ebpf; then
+    \\            __atty_doctor_warn 'binary built WITH `ebpf` feature — run with `--enable-ebpf` + `AmbientCapabilities=CAP_BPF` in the systemd-user unit to attach LSM hooks (see atty-guard/ebpf/README.md)'
+    \\        else
+    \\            __atty_doctor_warn 'binary built WITHOUT `ebpf` feature — rebuild with `cargo build --release --features ebpf` for kernel-side enforcement (V2-B). Optional; V2-A in-mem threat-map runs without it.'
+    \\        fi
+    \\    fi
+    \\fi
     \\printf '\n'
     \\if [ "$__atty_doctor_fail_count" -eq 0 ]; then
     \\    printf '\033[32mall checks passed.\033[0m if `Alt+S` still fails, the OSC 133 gate error includes a \033[1mbytes=N dispatches=M\033[0m diagnostic — `dispatches>0` means atty IS seeing markers; `dispatches=0` means the shell never emitted any (even though the hooks look wired — try `set | grep PROMPT`)\n'
@@ -311,7 +368,9 @@ const shell_doctor_snippet =
     \\    printf '\033[31m%d check(s) failed.\033[0m fix the items above (most often: re-run the init eval AFTER your .bashrc / prompt manager has finished setting up PROMPT_COMMAND)\n' "$__atty_doctor_fail_count"
     \\fi
     \\unset -f __atty_doctor_ok __atty_doctor_fail __atty_doctor_warn __atty_doctor_check 2>/dev/null
-    \\unset __atty_doctor_pass __atty_doctor_fail_count
+    \\unset __atty_doctor_pass __atty_doctor_fail_count \
+    \\      __atty_doctor_guard_bin __atty_doctor_guard_unit \
+    \\      __atty_doctor_guard_sock __atty_doctor_guard_atoms 2>/dev/null
     \\
 ;
 

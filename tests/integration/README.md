@@ -74,6 +74,8 @@ Each scenario is a self-contained bash script under `scenarios/`.
 | V2-J-2 auto-Block escalation | `v2j2_autoblock_threshold` | none |
 | V2-J-2 single-hit guard | `v2j2_single_hit_stays_warn` | none |
 | V2-J-2 range guard | `v2j2_range_guard` | none |
+| **copy.fail (CVE-2026-31431) PoC shapes** | `exploit_copy_fail_shapes` | none |
+| **Shai-Hulud worm attack-stage shapes** | `exploit_shai_hulud_shapes` | none |
 | atty side honors `Block` | `atty_block_refuses_outright` | atty + atty-guard run together |
 | atty side honors `Warn` | `atty_warn_arms_banner` | atty + atty-guard run together |
 | atom-fetcher GTFOBins source | `atom_fetcher_gtfobins` | outbound HTTPS |

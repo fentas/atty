@@ -31,6 +31,8 @@ QUICK_SCENARIOS=(
     v2j2_autoblock_threshold
     v2j2_single_hit_stays_warn
     v2j2_range_guard
+    exploit_copy_fail_shapes
+    exploit_shai_hulud_shapes
 )
 
 FULL_EXTRA_SCENARIOS=(
