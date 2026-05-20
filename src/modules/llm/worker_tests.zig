@@ -488,6 +488,99 @@ test "stream-json: doSubprocessRequest round-trips a stream-json producer" {
     try testing.expect(std.mem.indexOf(u8, out[0..res.cmd_len], "ls -la") != null);
 }
 
+test "renderLatestUserTurn: picks the last role=user message" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+        .session = .{ .continuation = .{} },
+    });
+    // Access the private helper indirectly through the dialog-mode
+    // path. doSubprocessDialogRequest in session-active mode calls
+    // renderLatestUserTurn; we use cat as the subprocess to echo
+    // the rendered prompt straight back so we can assert on it.
+    const echo_cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/cat"},
+        .prompt_via = .stdin,
+        .output = .raw,
+        .session = .{ .continuation = .{} },
+    });
+    const M = worker_mod.Module(echo_cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Body with several turns: system, user-1, assistant, user-2.
+    // `renderLatestUserTurn` must pick "user-2".
+    const body =
+        \\{"model":"x","messages":[{"role":"system","content":"sys"},{"role":"user","content":"first user turn"},{"role":"assistant","content":"a reply"},{"role":"user","content":"final user turn"}]}
+    ;
+
+    var out: [256]u8 = undefined;
+    var err: [128]u8 = undefined;
+    var _sid_buf: [256]u8 = undefined;
+    var _sid_len: usize = 0;
+    const res = try M.doSubprocessDialogRequest(
+        testing.allocator,
+        io,
+        echo_cfg.provider.subprocess,
+        body,
+        &.{},
+        true, // session_active = true → renderLatestUserTurn path
+        &_sid_buf,
+        &_sid_len,
+        &out,
+        &err,
+    );
+    try testing.expect(res.cmd_len > 0);
+    const echoed = std.mem.trim(u8, out[0..res.cmd_len], " \t\r\n");
+    try testing.expectEqualStrings("final user turn", echoed);
+    _ = cfg;
+}
+
+test "renderLatestUserTurn: falls back to full body when no user role" {
+    // No user turn → falls through to renderDialogBodyAsPrompt
+    // which emits "ROLE:\ncontent\n\n" for every message.
+    const echo_cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/cat"},
+        .prompt_via = .stdin,
+        .output = .raw,
+        .session = .{ .continuation = .{} },
+    });
+    const M = worker_mod.Module(echo_cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const body =
+        \\{"model":"x","messages":[{"role":"system","content":"only system"},{"role":"assistant","content":"only assistant"}]}
+    ;
+
+    var out: [256]u8 = undefined;
+    var err: [128]u8 = undefined;
+    var _sid_buf: [256]u8 = undefined;
+    var _sid_len: usize = 0;
+    const res = try M.doSubprocessDialogRequest(
+        testing.allocator,
+        io,
+        echo_cfg.provider.subprocess,
+        body,
+        &.{},
+        true,
+        &_sid_buf,
+        &_sid_len,
+        &out,
+        &err,
+    );
+    try testing.expect(res.cmd_len > 0);
+    const echoed = out[0..res.cmd_len];
+    // Both role labels should appear because we fell through to
+    // the full-body renderer.
+    try testing.expect(std.mem.indexOf(u8, echoed, "system") != null);
+    try testing.expect(std.mem.indexOf(u8, echoed, "assistant") != null);
+}
+
 test "extractStreamSessionId: pulls session_id from system/init event" {
     const cfg = comptime makeTestCfg(.{
         .argv = &.{"/bin/true"},
