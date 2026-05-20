@@ -346,6 +346,7 @@ Available as `Config.provider.subprocess.<field>`:
 | `prompt_via`   | `.final_arg`   | `.final_arg` = append prompt to argv; `.stdin` = pipe prompt via stdin (close stdin = EOF).    |
 | `output`       | `.raw`         | `.raw` = stdout text IS the response; `.{ .json_field = "name" }` = parse stdout as JSON, take the named top-level string field; `.{ .json_stream = .{ .field = "result" } }` = newline-delimited JSON (claude's `--output-format stream-json`), skips intermediate `system` / `assistant` events and takes the named field from the `type="result"` line. |
 | `timeout_ms`   | `30_000`       | Wall-clock timeout in ms. A watchdog thread sends SIGTERM (then SIGKILL after 200 ms grace) when the budget expires. Set to `0` to disable. |
+| `session`      | `.none`        | CLI-side session continuation. `.none` sends the full rendered conversation each request (works for any CLI). `.{ .continuation = .{ .flag = "--resume", .id_field = "session_id" } }` captures the session id from the CLI's stream-json `type=system,subtype=init` event and reuses it via the named argv flag on subsequent turns. Only meaningful with `output = .json_stream`. Use `providers.claudeCodeStream(.{ .continuation = true })` for the canned claude shape. |
 
 The `atty.modules.llm.providers.claudeCode(...)` factory returns a
 pre-shaped subprocess provider for `claude -p --output-format

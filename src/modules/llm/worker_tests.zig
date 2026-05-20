@@ -43,6 +43,8 @@ test "subprocess (raw): echo returns its arg as the command" {
     var err: [256]u8 = undefined;
     @memset(&err, 0);
 
+    var _sid_buf: [256]u8 = undefined;
+    var _sid_len: usize = 0;
     const res = try M.doSubprocessRequest(
         testing.allocator,
         io,
@@ -51,6 +53,9 @@ test "subprocess (raw): echo returns its arg as the command" {
         "",
         "ls -la",
         "",
+        &.{},
+        &_sid_buf,
+        &_sid_len,
         &out,
         &exp,
         &err,
@@ -93,6 +98,7 @@ test "subprocess (json_field): cat with JSON stdin extracts requested field" {
         cfg.provider.subprocess,
         \\{"type":"result","result":"ls -la","cost_usd":0.001}
     ,
+        &.{},
         &err_buf,
         &err_len,
     );
@@ -152,6 +158,8 @@ test "subprocess: spawn failure populates error_out, returns 0" {
     var err: [256]u8 = undefined;
     @memset(&err, 0);
 
+    var _sid_buf: [256]u8 = undefined;
+    var _sid_len: usize = 0;
     const res = try M.doSubprocessRequest(
         testing.allocator,
         io,
@@ -160,6 +168,9 @@ test "subprocess: spawn failure populates error_out, returns 0" {
         "",
         "irrelevant",
         "",
+        &.{},
+        &_sid_buf,
+        &_sid_len,
         &out,
         &exp,
         &err,
@@ -293,11 +304,17 @@ test "doSubprocessDialogRequest round-trips via cat + JSON envelope" {
     var out: [256]u8 = undefined;
     var err: [256]u8 = undefined;
 
+    var _sid_buf: [256]u8 = undefined;
+    var _sid_len: usize = 0;
     const res = try M.doSubprocessDialogRequest(
         testing.allocator,
         io,
         cfg.provider.subprocess,
         body,
+        &.{},
+        false,
+        &_sid_buf,
+        &_sid_len,
         &out,
         &err,
     );
@@ -337,6 +354,7 @@ test "subprocess timeout: /bin/sleep 5 with 500ms budget gets SIGKILL'd" {
         io,
         cfg.provider.subprocess,
         "ignored",
+        &.{},
         &err,
         &err_len,
     );
@@ -369,6 +387,7 @@ test "subprocess timeout = 0 disables watchdog (echo still works)" {
         io,
         cfg.provider.subprocess,
         "hello",
+        &.{},
         &err,
         &err_len,
     );
@@ -448,6 +467,8 @@ test "stream-json: doSubprocessRequest round-trips a stream-json producer" {
     var out: [128]u8 = undefined;
     var exp: [128]u8 = undefined;
     var err: [256]u8 = undefined;
+    var _sid_buf: [256]u8 = undefined;
+    var _sid_len: usize = 0;
     const res = try M.doSubprocessRequest(
         testing.allocator,
         io,
@@ -456,12 +477,147 @@ test "stream-json: doSubprocessRequest round-trips a stream-json producer" {
         "",
         "list files",
         "",
+        &.{},
+        &_sid_buf,
+        &_sid_len,
         &out,
         &exp,
         &err,
     );
     try testing.expect(res.cmd_len > 0);
     try testing.expect(std.mem.indexOf(u8, out[0..res.cmd_len], "ls -la") != null);
+}
+
+test "extractStreamSessionId: pulls session_id from system/init event" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"sess-abc-123"}
+        \\{"type":"result","result":"ok"}
+    ;
+    var out: [64]u8 = undefined;
+    const n = M.extractStreamSessionId(body, "session_id", &out);
+    try testing.expectEqualStrings("sess-abc-123", out[0..n]);
+}
+
+test "extractStreamSessionId: ignores non-init system events" {
+    // A `type=system,subtype=info` event mid-stream must NOT match;
+    // only the init event carries the session id.
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"info","session_id":"WRONG"}
+        \\{"type":"system","subtype":"init","session_id":"RIGHT"}
+    ;
+    var out: [64]u8 = undefined;
+    const n = M.extractStreamSessionId(body, "session_id", &out);
+    try testing.expectEqualStrings("RIGHT", out[0..n]);
+}
+
+test "session continuation: second turn argv prepends --resume <id>" {
+    // Drive doSubprocessRequest twice. Turn 1: subprocess emits a
+    // stream-json init event with session_id, plus a result. Turn
+    // 2: call with the captured id as prepend_argv — verify the
+    // subprocess actually saw `--resume <id>` by having it
+    // print its own argv via /bin/sh.
+    const cfg = comptime makeTestCfg(.{
+        // The script just prints back its own positional argv so we
+        // can assert against it. The first arg ($0 in -c usage) is
+        // skipped by sh; positional starts at $1.
+        .argv = &.{
+            "/bin/sh",
+            "-c",
+            // Emit a fake stream-json init+result, then echo a
+            // marker line containing our extra args so the test
+            // can grep them. The marker stays inside the result
+            // event's string for simplicity.
+            "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"S-1\"}' '{\"type\":\"result\",\"result\":\"argv-was: '\"$1 $2\"'\"}'",
+            "sh-arg0",
+        },
+        .prompt_via = .stdin,
+        .output = .{ .json_stream = .{ .field = "result" } },
+        .session = .{ .continuation = .{} },
+    });
+    const M = worker_mod.Module(cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Turn 1 — no session id yet.
+    var out1: [256]u8 = undefined;
+    var exp1: [128]u8 = undefined;
+    var err1: [128]u8 = undefined;
+    var sid1: [64]u8 = undefined;
+    var sid1_len: usize = 0;
+    const r1 = try M.doSubprocessRequest(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        "bash",
+        "",
+        "first prompt",
+        "",
+        &.{},
+        &sid1,
+        &sid1_len,
+        &out1,
+        &exp1,
+        &err1,
+    );
+    try testing.expect(r1.cmd_len > 0);
+    try testing.expectEqualStrings("S-1", sid1[0..sid1_len]);
+
+    // Turn 2 — pass the captured id back as the resume flag.
+    var out2: [256]u8 = undefined;
+    var exp2: [128]u8 = undefined;
+    var err2: [128]u8 = undefined;
+    var sid2: [64]u8 = undefined;
+    var sid2_len: usize = 0;
+    const prepend = [_][]const u8{ "--resume", sid1[0..sid1_len] };
+    const r2 = try M.doSubprocessRequest(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        "bash",
+        "",
+        "second prompt",
+        "",
+        &prepend,
+        &sid2,
+        &sid2_len,
+        &out2,
+        &exp2,
+        &err2,
+    );
+    try testing.expect(r2.cmd_len > 0);
+    // The subprocess printed its own $1 $2 into the result text;
+    // verify "--resume S-1" appears in the response we got back.
+    try testing.expect(std.mem.indexOf(u8, out2[0..r2.cmd_len], "--resume") != null);
+    try testing.expect(std.mem.indexOf(u8, out2[0..r2.cmd_len], "S-1") != null);
+}
+
+test "claudeCodeStream(.continuation = true) wires Session.continuation" {
+    const llm = @import("../llm.zig");
+    const p = llm.providers.claudeCodeStream(.{ .continuation = true });
+    switch (p) {
+        .http => unreachable,
+        .subprocess => |sub| switch (sub.session) {
+            .none => unreachable,
+            .continuation => |c| {
+                try testing.expectEqualStrings("--resume", c.flag);
+                try testing.expectEqualStrings("session_id", c.id_field);
+            },
+        },
+    }
 }
 
 test "claudeCodeStream factory uses stream-json + json_stream output" {

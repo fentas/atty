@@ -116,6 +116,15 @@ pub const providers = struct {
     pub fn claudeCodeStream(comptime options: struct {
         model: []const u8 = "",
         extra_argv: []const []const u8 = &.{},
+        /// When true, atty captures the CLI's `session_id` from the
+        /// first response's `type=system,subtype=init` event and
+        /// passes it back as `--resume <id>` on subsequent dialog
+        /// turns. Lets claude maintain its own conversation history
+        /// — atty sends only the latest user turn each request
+        /// rather than re-rendering the whole transcript. Off by
+        /// default because it delegates conversation memory to the
+        /// CLI; opt in deliberately.
+        continuation: bool = false,
     }) Provider {
         const argv = comptime blk: {
             const has_model = options.model.len > 0;
@@ -144,6 +153,7 @@ pub const providers = struct {
             .argv = argv,
             .prompt_via = .final_arg,
             .output = .{ .json_stream = .{ .field = "result" } },
+            .session = if (options.continuation) .{ .continuation = .{} } else .none,
             .timeout_ms = 60_000,
         } };
     }
@@ -420,6 +430,13 @@ pub fn configure(comptime cfg: Config) type {
             /// subprocess transport always has an empty `api_base`
             /// but is not inert.
             inert: bool = true,
+            /// Live session id captured from the subprocess CLI's
+            /// response stream (`cfg.provider.subprocess.session
+            /// = .continuation`). Cleared on dialog reset
+            /// (`Alt+Shift+R`). Owned by the runtime; freed in
+            /// `detach`. Empty when no session is active or the
+            /// transport doesn't support continuation.
+            session_id: []u8 = &.{},
             /// Resolved at attach. Empty when transport is
             /// subprocess (CLI handles its own endpoint) or HTTP
             /// with no `$LLM_API_BASE` / `$OLLAMA_HOST` set.
@@ -927,6 +944,7 @@ pub fn configure(comptime cfg: Config) type {
             rt.allocator.free(rt.shell);
             rt.allocator.free(rt.context_blob);
             rt.allocator.free(rt.os_info);
+            if (rt.session_id.len > 0) rt.allocator.free(rt.session_id);
         }
 
         // ---- hooks --------------------------------------------------------

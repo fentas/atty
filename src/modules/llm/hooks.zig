@@ -998,6 +998,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
+            publishSessionId(rt);
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
 
@@ -1261,6 +1262,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 n = rt.shared.res_len;
                 @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
                 rt.inject_len = n;
+
+                // Capture the CLI's session id (if the worker stashed
+                // a fresh one) before we drop the lock. Subsequent
+                // requests will inject it via the configured
+                // `--resume <id>`-shaped argv slot.
+                captureSessionId(rt);
 
                 // Latch the explanation (single mode only). Dialog
                 // responses never populate `explanation_buf` — the
@@ -1668,6 +1675,34 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     by construction (dispatchOsc sets active before
         ///     incrementing the counter); kept defensively in case
         ///     the parser ever changes shape.
+        /// Copy `rt.session_id` into the worker's `request_session_id`
+        /// slot under the assumed-held `rt.shared.mutex`. Caller
+        /// must already hold the lock; this just does the buffer
+        /// copy + length write.
+        fn publishSessionId(rt: *Runtime) void {
+            if (rt.session_id.len == 0) {
+                rt.shared.request_session_id_len = 0;
+                return;
+            }
+            const n = @min(rt.session_id.len, rt.shared.request_session_id_buf.len);
+            @memcpy(rt.shared.request_session_id_buf[0..n], rt.session_id[0..n]);
+            rt.shared.request_session_id_len = n;
+        }
+
+        /// Read the worker's `response_session_id` slot under the
+        /// assumed-held `rt.shared.mutex` and copy a fresh id into
+        /// `rt.session_id`. Caller holds the lock. Owned allocation
+        /// — frees any previous id before replacing.
+        fn captureSessionId(rt: *Runtime) void {
+            const len = rt.shared.response_session_id_len;
+            if (len == 0) return;
+            // Same id → no churn.
+            if (rt.session_id.len == len and std.mem.eql(u8, rt.session_id, rt.shared.response_session_id_buf[0..len])) return;
+            const owned = rt.allocator.dupe(u8, rt.shared.response_session_id_buf[0..len]) catch return;
+            if (rt.session_id.len > 0) rt.allocator.free(rt.session_id);
+            rt.session_id = owned;
+        }
+
         fn latchOsc133Diag(rt: *Runtime) void {
             const fed = rt.osc133_capture.total_bytes_fed;
             const dispatches = rt.osc133_capture.total_dispatches;
@@ -1955,6 +1990,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
+            publishSessionId(rt);
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
             rt.dialog_state = .generating;
