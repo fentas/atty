@@ -1,3 +1,9 @@
+---
+layout: default
+title: Operator workflow
+permalink: /operator-workflow/
+---
+
 # Operator workflow — getting atty + atty-guard fully wired
 
 End-to-end setup for the security stack: install the sidecar daemon →
