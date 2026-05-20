@@ -91,7 +91,12 @@ To wire atty's `security_guard` module to the daemon socket, edit
 pub const modules = .{
     atty.modules.security_guard.configure(.{
         .enabled = true,
-        .daemon_socket_path = "${XDG_RUNTIME_DIR}/atty-guard.sock",
+        // Literal path — no `${VAR}` expansion happens at runtime.
+        // Default daemon socket lives at $XDG_RUNTIME_DIR/atty-guard.sock
+        // (typically /run/user/<uid>/) and falls back to
+        // /tmp/atty-guard-<uid>.sock when XDG_RUNTIME_DIR is unset.
+        // Swap in your actual uid; `id -u` prints it.
+        .daemon_socket_path = "/run/user/1000/atty-guard.sock",
     }),
 };
 ```
@@ -134,8 +139,8 @@ the background while serving the UDS):
 
 ```sh
 # Edit the systemd unit drop-in:
-mkdir -p $XDG_CONFIG_HOME/systemd/user/atty-guard.service.d
-cat > $XDG_CONFIG_HOME/systemd/user/atty-guard.service.d/override.conf <<EOF
+mkdir -p ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d
+cat > ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d/override.conf <<EOF
 [Service]
 ExecStart=
 ExecStart=%h/.local/bin/atty-guard --atoms-update-interval 1d
@@ -166,8 +171,8 @@ Requires `libbpf-dev` on the build host. The daemon also needs
 `CAP_BPF` at runtime — edit the systemd-user unit:
 
 ```sh
-mkdir -p $XDG_CONFIG_HOME/systemd/user/atty-guard.service.d
-cat > $XDG_CONFIG_HOME/systemd/user/atty-guard.service.d/ebpf.conf <<EOF
+mkdir -p ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d
+cat > ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d/ebpf.conf <<EOF
 [Service]
 AmbientCapabilities=CAP_BPF CAP_PERFMON
 # Also need to lift one of the MAC restrictions — eBPF program
@@ -275,16 +280,26 @@ refuses the `execve` if the user shells out without atty.
 
 ## Removing it
 
+`make install-guard` writes a REAL binary (not a symlink) via
+`atty-guard/contrib/install.sh`, so `make unlink-guard` (which
+only unlinks dev-mode symlinks from `make link-guard`) refuses to
+touch it. Remove the installed paths directly:
+
 ```sh
 systemctl --user disable --now atty-guard.service
-make unlink-guard
+rm -f ~/.local/bin/atty-guard
+rm -f ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service
+rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atty-guard.service.d
+systemctl --user daemon-reload
 rm -f ~/.local/share/atty-guard/flagged_atoms.txt
 rm -rf ~/.cache/atty
 ```
 
-`make unlink` removes both atty and atty-guard symlinks. The trust
-cache (`~/.cache/atty/security_trust.txt`) survives — clear it
-explicitly if you want a fresh start.
+(If you used `make link-guard` for dev-mode, `make unlink-guard`
+DOES handle that — it only refuses on real-file installs.)
+
+The trust cache (`~/.cache/atty/security_trust.txt`) survives — clear
+it explicitly if you want a fresh start.
 
 ## Named threats — what this stack catches
 

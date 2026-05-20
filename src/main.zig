@@ -336,11 +336,27 @@ const shell_doctor_snippet =
     \\        'atty-guard.service systemd-user unit installed' \
     \\        '`make install-guard` writes the unit + enables it; do that to get auto-start on login'
     \\    if command -v systemctl >/dev/null 2>&1; then
-    \\        __atty_doctor_check 'systemctl --user is-active --quiet atty-guard.service' \
+    \\        # `--quiet` swallows the exit code path noise but
+    \\        # `systemctl --user` still emits to stderr when there's
+    \\        # no user bus (containers without `--user`, SSH without
+    \\        # `loginctl enable-linger`, etc.). Redirect to keep the
+    \\        # doctor output clean — the check's remediation already
+    \\        # tells the operator what to do.
+    \\        __atty_doctor_check 'systemctl --user is-active --quiet atty-guard.service 2>/dev/null' \
     \\            'atty-guard.service is active' \
     \\            'systemctl --user start atty-guard.service (check `systemctl --user status atty-guard` for the actual reason if it refuses)'
     \\    fi
-    \\    __atty_doctor_guard_sock="${XDG_RUNTIME_DIR:-/tmp}/atty-guard.sock"
+    \\    # Mirror the daemon's actual fallback (atty-guard/src/main.rs:
+    \\    # XDG_RUNTIME_DIR/atty-guard.sock → /tmp/atty-guard-<uid>.sock).
+    \\    # A bare `/tmp/atty-guard.sock` fallback would miss the daemon
+    \\    # on systems without XDG_RUNTIME_DIR (no logind session, some
+    \\    # containers) where the daemon DOES bind under /tmp with the
+    \\    # uid suffix.
+    \\    if [ -n "${XDG_RUNTIME_DIR-}" ]; then
+    \\        __atty_doctor_guard_sock="$XDG_RUNTIME_DIR/atty-guard.sock"
+    \\    else
+    \\        __atty_doctor_guard_sock="/tmp/atty-guard-$(id -u).sock"
+    \\    fi
     \\    __atty_doctor_check '[ -S "'"$__atty_doctor_guard_sock"'" ]' \
     \\        "UDS socket reachable ($__atty_doctor_guard_sock)" \
     \\        'service started but socket missing — likely a permission or path mismatch; the daemon prints the bind error to journald on startup'
@@ -357,17 +373,14 @@ const shell_doctor_snippet =
     \\            __atty_doctor_ok 'atom corpus is fresh (<30 days)'
     \\        fi
     \\    fi
-    \\    # eBPF — informational. Detect by the --help mentioning the
-    \\    # flag. Tells the operator whether kernel-side enforcement
-    \\    # is even in their binary; doesn't try to verify attach state
-    \\    # (that requires CAP_BPF + reading /sys/fs/bpf which is
-    \\    # noisy and root-only).
+    \\    # eBPF — informational. `--enable-ebpf` is in the CLI help
+    \\    # unconditionally (the flag exists even when the binary is
+    \\    # built without the `ebpf` Cargo feature, in which case it
+    \\    # errors at runtime). So we can't reliably tell from --help
+    \\    # whether the feature is COMPILED IN; instead point the
+    \\    # operator at journald, which logs the actual attach state.
     \\    if [ -n "$__atty_doctor_guard_bin" ]; then
-    \\        if "$__atty_doctor_guard_bin" --help 2>&1 | grep -q -- --enable-ebpf; then
-    \\            __atty_doctor_warn 'binary built WITH `ebpf` feature — run with `--enable-ebpf` + `AmbientCapabilities=CAP_BPF` in the systemd-user unit to attach LSM hooks (see atty-guard/ebpf/README.md)'
-    \\        else
-    \\            __atty_doctor_warn 'binary built WITHOUT `ebpf` feature — rebuild with `cargo build --release --features ebpf` for kernel-side enforcement (V2-B). Optional; V2-A in-mem threat-map runs without it.'
-    \\        fi
+    \\        __atty_doctor_warn 'eBPF status is runtime-only — `journalctl --user -u atty-guard | grep -i ebpf` will show "eBPF attached (LSM + execve tracepoint)" if the binary was built with `--features ebpf` AND the unit has `AmbientCapabilities=CAP_BPF` + `SystemCallFilter=bpf perf_event_open`. See atty-guard/ebpf/README.md.'
     \\    fi
     \\fi
     \\printf '\n'

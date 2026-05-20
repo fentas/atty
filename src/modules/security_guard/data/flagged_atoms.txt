@@ -134,22 +134,26 @@ bundle.js?shai
 # every 60s; if it sees the stolen tokens get revoked it fires
 # `rm -rf ~/` to scorch the user's home. We catch the destruction
 # command shape — the most damaging step — verbatim, so a banner
-# fires before bash splits the line. The `/proc/<pid>/mem`
-# enumeration is the credential-extraction step (reads live worker
-# memory for plaintext tokens).
+# fires before bash splits the line. `/proc/self/mem` catches the
+# self-scrape variant of the credential-extraction step. The
+# `/proc/<pid>/mem` cross-process variant is intentionally NOT an
+# atom — Aho-Corasick treats `*` as a literal character, so a
+# glob-shaped pattern wouldn't match `/proc/1234/mem` anyway, and
+# enumerating every plausible PID would bloat the automaton. eBPF
+# (V2-G) tracks `openat()` on `/proc/<pid>/mem` at the kernel
+# layer, which is the correct detection point for that variant.
 
 rm -rf ~/
 rm -rf $HOME
 rm -rf ${HOME}
 rm -rf /home/
-rm -rf "$HOME
+rm -rf "$HOME"
 /.aws/credentials
 /.npmrc
 /.ssh/id_rsa
 /.ssh/id_ed25519
 /.ssh/id_ecdsa
 /proc/self/mem
-/proc/*/mem
 
 # ---------------------------------------------------------------
 # Background-daemon persistence — Shai-Hulud's 60s-poller is a
