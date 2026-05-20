@@ -189,7 +189,7 @@ atty security_guard: <reason>
 |---|---|
 | `[y]` | run this one command, nothing remembered |
 | `[a]llow always` | session-trust the (category, matched) hash — won't re-prompt until atty exits. Mirrored to daemon for `atty-guard session list` visibility. |
-| `[t]rust permanently` | unchanged — atty proxy writes to `~/.cache/atty/security_trust.txt` |
+| `[t]rust permanently` | atty proxy writes to `~/.cache/atty/security_trust.txt` (back-compat) AND mirrors to the daemon's per-UID `commands.trusted.txt`. Either path satisfies the runtime check; the daemon copy is what `atty-guard trust list` returns and what cross-shell sharing reads at attach. |
 | `[B]lock host forever` | extract host from the matched URL, add to session-block list. Future commands containing that host get REFUSED outright (red line + readline cleared). Mirrored to daemon. Cancels the current command too. Falls through to `[cancel]` when the match has no URL host. |
 | any other | cancel — Ctrl+U clears readline, nothing remembered |
 
@@ -356,9 +356,12 @@ atty security_guard: 1 signal fired: curl_pipe_sh — remote-fetch-and-execute
         [y]es once · [t]rust permanently · any other key cancels.
 ```
 
-Press `y` (allow once), `t` (trust permanently — adds to
-`~/.cache/atty/security_trust.txt`), or any other key (Ctrl+U,
-readline cleared).
+Press `y` (allow once), `t` (trust permanently — writes to
+`~/.cache/atty/security_trust.txt` AND mirrors to the daemon's
+per-UID `/var/lib/atty-guard/users/<uid>/commands.trusted.txt`),
+or any other key (Ctrl+U, readline cleared). Banner also shows
+`[a]llow always` (session-only trust) and `[B]lock host forever`
+(session-only host block) — see the Session section above.
 
 With `[accumulator] block_threshold` set in
 `~/.config/atty-guard/config.toml` (or wherever `--config` points

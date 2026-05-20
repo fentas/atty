@@ -227,6 +227,32 @@ pub const Client = struct {
         };
     }
 
+    /// Mirror of a `[t]rust permanently` keystroke. The atty-side
+    /// `~/.cache/atty/security_trust.txt` write is authoritative
+    /// for backward compat (pre-migration installs); this RPC
+    /// promotes the same hash into the daemon's per-UID
+    /// `commands.trusted.txt`, so a fresh atty session (or another
+    /// atty proxy under the same UID) can pick it up via the
+    /// daemon's trust list.
+    pub fn trustAdd(self: *Client, hash: []const u8) Error!void {
+        try self.ensureConnected();
+        var w: std.Io.Writer = .fixed(&self.write_buf);
+        const id = self.next_id;
+        self.next_id +%= 1;
+        (w.print(
+            "{{\"id\":{d},\"method\":\"trust_add\",\"hash\":\"{s}\"}}\n",
+            .{ id, hash },
+        )) catch return Error.OutOfMemory;
+        self.writeAll(self.write_buf[0..w.end]) catch {
+            self.close();
+            return Error.Unavailable;
+        };
+        _ = self.readLine() catch {
+            self.close();
+            return Error.Unavailable;
+        };
+    }
+
     /// Best-effort mirror of a `[B]lock host forever`
     /// keystroke to the daemon. Same trade-off as
     /// `sessionAddTrust`: local block is authoritative, daemon

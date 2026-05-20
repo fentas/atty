@@ -422,6 +422,15 @@ pub fn configure(comptime cfg: Config) type {
                             _ = rt.trust.add(a, hash) catch {};
                             rt.trust.persist(cfg.trust_cache_path) catch {};
                         }
+                        // Mirror to daemon-side commands.trusted.txt
+                        // (post-trust-cache-migration). Best-effort —
+                        // the local-file write above is authoritative
+                        // for the runtime check; the daemon mirror
+                        // is for cross-shell consistency + visibility
+                        // via `atty-guard trust list`.
+                        if (rt.daemon) |*client| {
+                            client.trustAdd(hash) catch {};
+                        }
                     }
                     markShellThreat(rt, ctx, pending);
                     return .{ .replace = "\r" };

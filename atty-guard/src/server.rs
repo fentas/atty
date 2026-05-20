@@ -546,6 +546,28 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 Err(e) => ResponseBody::Error { message: e },
             }
         }
+        Request::TrustAdd { hash, target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.persistent_add_trust(uid, &hash) {
+                Ok(()) => ResponseBody::Ok,
+                Err(e) => ResponseBody::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::TrustList { target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            let _ = state.trust_store.ensure_loaded(uid);
+            ResponseBody::TrustList {
+                trust: state.trust_store.list_persistent_trust(uid),
+            }
+        }
         Request::SessionWrite { target_uid } => {
             if !peer.is_root {
                 return require_root_error("session write");
@@ -953,6 +975,44 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "urls_list");
         assert!(v["entries"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn trust_add_then_list_roundtrip() {
+        // PR #143: no sudo on trust_add (banner [t] is non-sudo).
+        // Verify the daemon accepts the add, persists, and the
+        // subsequent trust_list returns the hash.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let add = round_trip(
+            &mut stream,
+            &format!(r#"{{"id":1,"method":"trust_add","hash":"{hash}"}}"#),
+        );
+        let v: serde_json::Value = serde_json::from_str(&add).unwrap();
+        assert_eq!(v["type"], "ok", "add reply: {add}");
+
+        let list = round_trip(&mut stream, r#"{"id":2,"method":"trust_list"}"#);
+        let v: serde_json::Value = serde_json::from_str(&list).unwrap();
+        assert_eq!(v["type"], "trust_list");
+        let trust = v["trust"].as_array().expect("trust array");
+        assert_eq!(trust.len(), 1);
+        assert_eq!(trust[0], hash);
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn trust_add_rejects_invalid_hash_shape() {
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"trust_add","hash":"too-short"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        assert!(v["message"].as_str().unwrap().contains("length"));
         let _ = std::fs::remove_file(socket);
     }
 

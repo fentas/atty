@@ -160,6 +160,34 @@ pub enum Request {
         #[serde(default)]
         target_uid: Option<u32>,
     },
+
+    /// In-banner `[t]rust permanently` taps. atty proxy mirrors the
+    /// keystroke to the daemon so the trust hash lands in the
+    /// per-UID `commands.trusted.txt` AND survives across daemon
+    /// restarts. Daemon's classify hot-path checks this set before
+    /// the overlay scan; a hit short-circuits to Safe so subsequent
+    /// identical commands flow through without a banner.
+    ///
+    /// No sudo gate — banner `[t]` has always been a non-sudo
+    /// action (pre-migration the atty proxy wrote the user's own
+    /// `~/.cache/atty/security_trust.txt` directly). The
+    /// `PERSISTENT_TRUST_CAP` (16384) protects against unbounded
+    /// growth from a hostile process spamming this RPC.
+    TrustAdd {
+        /// 64-character lowercase hex (SHA-256 of "category:matched").
+        hash: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+
+    /// Snapshot of the caller's `commands.trusted.txt` for atty
+    /// proxy to seed its runtime trust set. atty calls this once
+    /// at module attach (and on daemon-reconnect after a transient
+    /// failure). No sudo — read-only.
+    TrustList {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
 }
 
 /// Scope selector for `AtomsList`. The matcher serves the union of
@@ -277,6 +305,9 @@ pub enum ResponseBody {
         #[serde(default)]
         trust: Vec<String>,
     },
+    /// Reply to TrustList. Sorted list of hex SHA-256 hashes
+    /// from the caller's persistent `commands.trusted.txt`.
+    TrustList { trust: Vec<String> },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
