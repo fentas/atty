@@ -23,12 +23,23 @@ use std::path::Path;
 
 pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
     use crate::{AtomsOp, SessionOp, Subcommand, UrlsOp};
-    let result = match sub {
+    let target_uid = sudo_target_uid();
+    match sub {
         Subcommand::Atoms { op } => match op {
-            AtomsOp::Add { pattern } => send_and_check(socket, Request::AtomsAdd { pattern }),
-            AtomsOp::Remove { pattern } => {
-                send_and_check(socket, Request::AtomsRemove { pattern })
-            }
+            AtomsOp::Add { pattern } => send_and_check(
+                socket,
+                Request::AtomsAdd {
+                    pattern,
+                    target_uid,
+                },
+            ),
+            AtomsOp::Remove { pattern } => send_and_check(
+                socket,
+                Request::AtomsRemove {
+                    pattern,
+                    target_uid,
+                },
+            ),
             AtomsOp::List {
                 system,
                 user,
@@ -45,21 +56,39 @@ pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
                     let _ = user;
                     AtomScope::User
                 };
-                handle_atoms_list(socket, scope)
+                handle_atoms_list(socket, scope, target_uid)
             }
         },
         Subcommand::Urls { op } => match op {
-            UrlsOp::Allow { host } => send_and_check(socket, Request::UrlsAllow { host }),
-            UrlsOp::Block { host } => send_and_check(socket, Request::UrlsBlock { host }),
-            UrlsOp::List => handle_urls_list(socket),
+            UrlsOp::Allow { host } => send_and_check(
+                socket,
+                Request::UrlsAllow { host, target_uid },
+            ),
+            UrlsOp::Block { host } => send_and_check(
+                socket,
+                Request::UrlsBlock { host, target_uid },
+            ),
+            UrlsOp::List => handle_urls_list(socket, target_uid),
         },
         Subcommand::Session { op } => match op {
-            SessionOp::List => handle_session_list(socket),
-            SessionOp::Clear => send_and_check(socket, Request::SessionClear),
-            SessionOp::Write => send_and_check(socket, Request::SessionWrite),
+            SessionOp::List => handle_session_list(socket, target_uid),
+            SessionOp::Clear => send_and_check(socket, Request::SessionClear { target_uid }),
+            SessionOp::Write => send_and_check(socket, Request::SessionWrite { target_uid }),
         },
-    };
-    result
+    }
+}
+
+/// Resolve the user the operation should target. When the CLI runs
+/// under sudo, `SUDO_UID` is set to the invoking user's UID — we
+/// forward that as `target_uid` so the daemon writes into THAT
+/// user's `/var/lib/atty-guard/users/<uid>/` directory rather than
+/// root's. Without sudo (or running directly as root with no
+/// SUDO_UID), returns None — the daemon falls back to the connecting
+/// peer's own UID, which is the normal read-only / single-user case.
+fn sudo_target_uid() -> Option<u32> {
+    std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
 }
 
 fn send_and_check(socket: &Path, request: Request) -> std::io::Result<()> {
@@ -77,8 +106,12 @@ fn send_and_check(socket: &Path, request: Request) -> std::io::Result<()> {
     }
 }
 
-fn handle_atoms_list(socket: &Path, scope: AtomScope) -> std::io::Result<()> {
-    let response = send_request(socket, Request::AtomsList { scope })?;
+fn handle_atoms_list(
+    socket: &Path,
+    scope: AtomScope,
+    target_uid: Option<u32>,
+) -> std::io::Result<()> {
+    let response = send_request(socket, Request::AtomsList { scope, target_uid })?;
     match response {
         ResponseBody::AtomsList { atoms } => {
             for atom in atoms {
@@ -97,8 +130,8 @@ fn handle_atoms_list(socket: &Path, scope: AtomScope) -> std::io::Result<()> {
     }
 }
 
-fn handle_urls_list(socket: &Path) -> std::io::Result<()> {
-    let response = send_request(socket, Request::UrlsList)?;
+fn handle_urls_list(socket: &Path, target_uid: Option<u32>) -> std::io::Result<()> {
+    let response = send_request(socket, Request::UrlsList { target_uid })?;
     match response {
         ResponseBody::UrlsList { entries } => {
             for entry in entries {
@@ -120,8 +153,8 @@ fn handle_urls_list(socket: &Path) -> std::io::Result<()> {
     }
 }
 
-fn handle_session_list(socket: &Path) -> std::io::Result<()> {
-    let response = send_request(socket, Request::SessionList)?;
+fn handle_session_list(socket: &Path, target_uid: Option<u32>) -> std::io::Result<()> {
+    let response = send_request(socket, Request::SessionList { target_uid })?;
     match response {
         ResponseBody::SessionList {
             atoms,

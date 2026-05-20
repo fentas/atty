@@ -192,6 +192,24 @@ atty-guard to regain a usable shell, detection gone. Requiring sudo
 keeps mutations behind admin intent, even when the entry is a
 "user's personal preference" addition.
 
+**Which UID owns the change?** When you invoke `sudo atty-guard
+atoms add ...`, the CLI reads the `SUDO_UID` env var (sudo sets it
+to the invoking user's UID) and forwards it to the daemon. The
+daemon writes into `/var/lib/atty-guard/users/$SUDO_UID/`, NOT
+`users/0/`. Your personal overlay stays under your UID even though
+the write happens as root. To manage another user's overlay
+(operator-on-behalf-of), invoke as that user instead:
+
+```sh
+sudo -u alice atty-guard atoms add 'alice-only atom'
+# alice's session: SUDO_UID=<alice-uid>, write lands under users/<alice-uid>/
+```
+
+Direct root login (no sudo, no SUDO_UID set) writes into
+`users/0/` — atty doesn't run as root in normal use, so this only
+matters for admin scripts. Non-root callers cannot target a UID
+other than their own (the daemon rejects the request).
+
 ### Pre-release corpus refresh (maintainer-side)
 
 The bundled corpus is refreshed pre-release by maintainers running

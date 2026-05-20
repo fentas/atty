@@ -369,33 +369,36 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
         },
 
         // --- PR #141 mediated trust-state ops ---
-        Request::AtomsAdd { pattern } => {
+        Request::AtomsAdd {
+            pattern,
+            target_uid,
+        } => {
             if !peer.is_root {
                 return require_root_error("atoms add");
             }
-            // Daemon writes the per-UID file with the CALLER'S
-            // uid... but the caller is root (EUID 0). The intent is
-            // "operator-on-behalf-of-some-user". We use the SUDO_UID
-            // env var only as an advisory hint via the protocol's
-            // future `target_uid` field; for now the EUID-0 client
-            // is itself the target (root's atom set). The CLI
-            // surfaces this — operators who want to manage another
-            // user's atoms invoke `sudo -u <target> atty-guard ...`.
-            //
-            // Per-UID isolation is by ownership of the on-disk
-            // directory, not by ambient request context.
-            match state.trust_store.persistent_add_atom(peer.uid, &pattern) {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.persistent_add_atom(uid, &pattern) {
                 Ok(()) => ResponseBody::Ok,
                 Err(e) => ResponseBody::Error {
                     message: e.to_string(),
                 },
             }
         }
-        Request::AtomsRemove { pattern } => {
+        Request::AtomsRemove {
+            pattern,
+            target_uid,
+        } => {
             if !peer.is_root {
                 return require_root_error("atoms remove");
             }
-            match state.trust_store.persistent_remove_atom(peer.uid, &pattern) {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.persistent_remove_atom(uid, &pattern) {
                 Ok(true) => ResponseBody::Ok,
                 Ok(false) => ResponseBody::Error {
                     message: format!("atom not present: `{pattern}`"),
@@ -405,29 +408,37 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 },
             }
         }
-        Request::AtomsList { scope } => match scope {
-            AtomScope::System => ResponseBody::AtomsList {
-                atoms: state.classifier.system_atoms_snapshot(),
-            },
-            AtomScope::User => {
-                // Best-effort load — if the file doesn't exist yet,
-                // we return an empty list.
-                let _ = state.trust_store.load_persistent(peer.uid);
-                ResponseBody::AtomsList {
-                    atoms: state.trust_store.list_atoms(peer.uid, ListScope::Persistent),
+        Request::AtomsList { scope, target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match scope {
+                AtomScope::System => ResponseBody::AtomsList {
+                    atoms: state.classifier.system_atoms_snapshot(),
+                },
+                AtomScope::User => {
+                    let _ = state.trust_store.load_persistent(uid);
+                    ResponseBody::AtomsList {
+                        atoms: state.trust_store.list_atoms(uid, ListScope::Persistent),
+                    }
                 }
+                AtomScope::Session => ResponseBody::AtomsList {
+                    atoms: state.trust_store.list_atoms(uid, ListScope::Session),
+                },
             }
-            AtomScope::Session => ResponseBody::AtomsList {
-                atoms: state.trust_store.list_atoms(peer.uid, ListScope::Session),
-            },
-        },
-        Request::UrlsAllow { host } => {
+        }
+        Request::UrlsAllow { host, target_uid } => {
             if !peer.is_root {
                 return require_root_error("urls allow");
             }
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
             match state
                 .trust_store
-                .persistent_add_url(peer.uid, &host, UrlDecision::Allow)
+                .persistent_add_url(uid, &host, UrlDecision::Allow)
             {
                 Ok(()) => ResponseBody::Ok,
                 Err(e) => ResponseBody::Error {
@@ -435,13 +446,17 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 },
             }
         }
-        Request::UrlsBlock { host } => {
+        Request::UrlsBlock { host, target_uid } => {
             if !peer.is_root {
                 return require_root_error("urls block");
             }
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
             match state
                 .trust_store
-                .persistent_add_url(peer.uid, &host, UrlDecision::Block)
+                .persistent_add_url(uid, &host, UrlDecision::Block)
             {
                 Ok(()) => ResponseBody::Ok,
                 Err(e) => ResponseBody::Error {
@@ -449,11 +464,15 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 },
             }
         }
-        Request::UrlsList => {
-            let _ = state.trust_store.load_persistent(peer.uid);
+        Request::UrlsList { target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            let _ = state.trust_store.load_persistent(uid);
             let entries: Vec<UrlDecisionEntry> = state
                 .trust_store
-                .list_urls(peer.uid)
+                .list_urls(uid)
                 .into_iter()
                 .map(|(host, dec)| UrlDecisionEntry {
                     host,
@@ -462,41 +481,92 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 .collect();
             ResponseBody::UrlsList { entries }
         }
-        Request::SessionList => {
-            let (atoms, urls_allow, urls_block) =
-                state.trust_store.session_summary(peer.uid);
+        Request::SessionList { target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            let (atoms, urls_allow, urls_block) = state.trust_store.session_summary(uid);
             ResponseBody::SessionList {
                 atoms,
                 urls_allow,
                 urls_block,
             }
         }
-        Request::SessionClear => {
-            state.trust_store.session_clear(peer.uid);
+        Request::SessionClear { target_uid } => {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            state.trust_store.session_clear(uid);
             ResponseBody::Ok
         }
-        Request::SessionWrite => {
+        Request::SessionWrite { target_uid } => {
             if !peer.is_root {
                 return require_root_error("session write");
             }
-            match state.trust_store.session_write(peer.uid) {
+            let uid = match resolve_target_uid(peer, target_uid) {
+                Ok(u) => u,
+                Err(msg) => return ResponseBody::Error { message: msg },
+            };
+            match state.trust_store.session_write(uid) {
                 Ok(report) => {
                     if state.verbosity >= 1 {
                         eprintln!(
-                            "atty-guard: session write uid={} atoms={} allow={} block={}",
-                            peer.uid,
+                            "atty-guard: session write uid={} atoms={} allow={} block={} invalid={}",
+                            uid,
                             report.atoms_added,
                             report.urls_allow_added,
-                            report.urls_block_added
+                            report.urls_block_added,
+                            report.invalid.len()
                         );
                     }
-                    ResponseBody::Ok
+                    // Surface the invalid list to the CLI via the
+                    // structured response so the operator sees
+                    // exactly which entries stayed in session.
+                    if report.invalid.is_empty() {
+                        ResponseBody::Ok
+                    } else {
+                        let lines: Vec<String> = report
+                            .invalid
+                            .iter()
+                            .map(|(e, r)| format!("  `{e}` — {r}"))
+                            .collect();
+                        ResponseBody::Error {
+                            message: format!(
+                                "session write partial — atoms={} allow={} block={}, kept {} \
+                                 invalid entr{} in session for review:\n{}",
+                                report.atoms_added,
+                                report.urls_allow_added,
+                                report.urls_block_added,
+                                report.invalid.len(),
+                                if report.invalid.len() == 1 { "y" } else { "ies" },
+                                lines.join("\n")
+                            ),
+                        }
+                    }
                 }
                 Err(e) => ResponseBody::Error {
                     message: e.to_string(),
                 },
             }
         }
+    }
+}
+
+/// Resolve the UID to operate on. If `target_uid` is None or
+/// matches the peer's own UID, use peer.uid. Non-root callers can't
+/// target another UID — this prevents a regular user from poking
+/// into root's (or another user's) atom set via a forged request.
+fn resolve_target_uid(peer: PeerCred, target_uid: Option<u32>) -> Result<u32, String> {
+    match target_uid {
+        None => Ok(peer.uid),
+        Some(t) if t == peer.uid => Ok(t),
+        Some(t) if peer.is_root => Ok(t),
+        Some(t) => Err(format!(
+            "non-root caller (uid {}) cannot target a different uid (requested {t})",
+            peer.uid
+        )),
     }
 }
 
@@ -844,6 +914,58 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "urls_list");
         assert!(v["entries"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn non_root_cannot_target_other_uid() {
+        // Non-root caller (test runs as cargo user) requests
+        // target_uid=12345 (some other UID). Daemon must refuse
+        // with the "cannot target a different uid" error to prevent
+        // a regular user from peeking into root's or another user's
+        // atom set via a forged request.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"atoms_list","scope":"user","target_uid":12345}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot target a different uid"),
+            "expected uid-target rejection, got: {}",
+            v["message"]
+        );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn target_uid_matching_own_is_accepted() {
+        // When target_uid == peer.uid, the request goes through
+        // even for non-root callers — this is the documented
+        // semantics so a future shell wrapper can always include
+        // target_uid without changing behaviour.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let own_uid = unsafe {
+            extern "C" {
+                fn geteuid() -> u32;
+            }
+            geteuid()
+        };
+        let reply = round_trip(
+            &mut stream,
+            &format!(
+                r#"{{"id":1,"method":"atoms_list","scope":"session","target_uid":{own_uid}}}"#
+            ),
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "atoms_list");
+        assert!(v["atoms"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_file(socket);
     }
 

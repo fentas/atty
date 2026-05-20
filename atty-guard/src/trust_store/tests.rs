@@ -164,10 +164,18 @@ fn session_write_keeps_invalid_entries_for_review() {
     store.session_add_atom(1000, "xx".into());
     let report = store.session_write(1000).unwrap();
     assert_eq!(report.atoms_added, 1);
+    // The invalid one stays in session AND surfaces in the report's
+    // `invalid` list so the CLI can show the operator what was
+    // rejected and why.
     let session = store.list_atoms(1000, ListScope::Session);
-    // The invalid one stays in session so the operator can see it
-    // via `session list` and fix it.
     assert_eq!(session, vec!["xx"]);
+    assert_eq!(report.invalid.len(), 1);
+    assert_eq!(report.invalid[0].0, "xx");
+    assert!(
+        report.invalid[0].1.contains("too short"),
+        "expected reason to mention 'too short', got: {}",
+        report.invalid[0].1
+    );
 }
 
 #[test]

@@ -22,8 +22,13 @@
 //! File format (both files): one entry per line, `#` lines + blank
 //! lines ignored. Entries support an inline metadata suffix
 //! `<entry> # <metadata>` (e.g. `# added 2026-05-20 via session
-//! write`). Parser strips the suffix at load; writer preserves it on
-//! round-trip and adds a generated metadata stamp for new entries.
+//! write`). Parser strips the suffix at load (the entry itself is
+//! the canonical key in the in-memory set). The writer re-stamps
+//! EVERY entry with the current date on each rewrite — the parser/
+//! writer pair is lossy by design: we don't track per-entry "added
+//! on" history across round-trips. The mtime of the file is the
+//! load-bearing "when was this last touched" signal; inline
+//! metadata is a courtesy for humans reading the file.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -233,8 +238,15 @@ impl TrustStore {
             ensure_parent_dir(&path)?;
             let mut existing = read_atoms_file(&path)?;
             for atom in &sess_atoms {
-                if validate_atom(atom).is_ok() && existing.insert(atom.clone()) {
-                    report.atoms_added += 1;
+                match validate_atom(atom) {
+                    Ok(()) => {
+                        if existing.insert(atom.clone()) {
+                            report.atoms_added += 1;
+                        }
+                    }
+                    Err(reason) => {
+                        report.invalid.push((atom.clone(), reason));
+                    }
                 }
             }
             if report.atoms_added > 0 {
@@ -246,18 +258,28 @@ impl TrustStore {
             ensure_parent_dir(&path)?;
             let (mut allow, mut block) = read_urls_file(&path)?;
             for h in &sess_allow {
-                if validate_host(h).is_ok() {
-                    block.remove(h);
-                    if allow.insert(h.clone()) {
-                        report.urls_allow_added += 1;
+                match validate_host(h) {
+                    Ok(()) => {
+                        block.remove(h);
+                        if allow.insert(h.clone()) {
+                            report.urls_allow_added += 1;
+                        }
+                    }
+                    Err(reason) => {
+                        report.invalid.push((h.clone(), reason));
                     }
                 }
             }
             for h in &sess_block {
-                if validate_host(h).is_ok() {
-                    allow.remove(h);
-                    if block.insert(h.clone()) {
-                        report.urls_block_added += 1;
+                match validate_host(h) {
+                    Ok(()) => {
+                        allow.remove(h);
+                        if block.insert(h.clone()) {
+                            report.urls_block_added += 1;
+                        }
+                    }
+                    Err(reason) => {
+                        report.invalid.push((h.clone(), reason));
                     }
                 }
             }
@@ -300,11 +322,16 @@ impl TrustStore {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct SessionWriteReport {
     pub atoms_added: usize,
     pub urls_allow_added: usize,
     pub urls_block_added: usize,
+    /// Entries that failed validation and stayed in the session
+    /// for the operator to review/correct. Each `(entry, reason)`
+    /// pair surfaces in the CLI's `session write` output and via
+    /// `session list` until the operator deletes or fixes them.
+    pub invalid: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

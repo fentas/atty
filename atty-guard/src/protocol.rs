@@ -42,49 +42,88 @@ pub enum Request {
     // in atty-guard's main.rs (`atoms`, `urls`, `session`) drive
     // these and surface a friendly error when sudo is missing.
     //
-    // Session state is keyed by the connecting client's UID (also via
-    // SO_PEERCRED). The same user's multiple atty proxies share one
-    // session; CLI invocations from the same user see + manipulate
-    // that state. `session write` then persists into per-UID files
-    // under /var/lib/atty-guard/users/<uid>/.
+    // Per-UID isolation: every request below carries an optional
+    // `target_uid`. When the CLI is invoked via `sudo`, it reads the
+    // SUDO_UID env (set by sudo to the invoking user's UID) and
+    // forwards it as target_uid; the daemon writes into that UID's
+    // dir, NOT root's. When target_uid is None, the daemon falls
+    // back to the connecting peer's UID. Non-root callers cannot
+    // request a target_uid different from their own (the daemon
+    // rejects with an error to prevent privilege confusion).
+    //
+    // Session state is similarly keyed by target_uid (or peer.uid if
+    // None). The same user's multiple atty proxies share one
+    // session; sudo'd CLI invocations forwarding SUDO_UID see + mutate
+    // the SAME state as the proxies.
     /// Append `pattern` to the persistent atoms.user.txt for the
-    /// caller's UID. Daemon validates length, rejects placeholder-
+    /// target UID. Daemon validates length, rejects placeholder-
     /// shaped atoms (see atom_fetcher::is_placeholder_atom), and
     /// reloads its matcher. Requires EUID 0 client.
-    AtomsAdd { pattern: String },
-    /// Remove `pattern` from atoms.user.txt for the caller's UID.
+    AtomsAdd {
+        pattern: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// Remove `pattern` from atoms.user.txt for the target UID.
     /// Requires EUID 0 client.
-    AtomsRemove { pattern: String },
+    AtomsRemove {
+        pattern: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
     /// List atoms in scope `system` (always-on bundled set),
     /// `user` (per-UID overlay), or `session` (ephemeral in-memory).
     /// No privilege check.
-    AtomsList { scope: AtomScope },
+    AtomsList {
+        scope: AtomScope,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
 
     /// Append `host` to the persistent urls.decisions.txt for the
-    /// caller's UID as an "allow" decision. EUID 0 required.
-    UrlsAllow { host: String },
+    /// target UID as an "allow" decision. EUID 0 required.
+    UrlsAllow {
+        host: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
     /// Same shape but records "block". EUID 0 required.
-    UrlsBlock { host: String },
-    /// List recorded URL decisions for the caller's UID + the
+    UrlsBlock {
+        host: String,
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// List recorded URL decisions for the target UID + the
     /// in-memory session overlay (combined for the read path).
     /// No privilege check.
-    UrlsList,
+    UrlsList {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
 
-    /// Read the caller's in-memory session-state pending decisions
-    /// (atoms-allow, urls-allow, urls-block) — anything added via
-    /// the atty proxy's `[A]llow always` / `[B]lock host forever`
-    /// inline prompts in this session. Empty for a fresh login.
-    SessionList,
-    /// Drop the caller's in-memory session state (does not touch
-    /// any persistent file). Useful when the operator wants to
-    /// revisit decisions without committing them.
-    SessionClear,
-    /// Persist the caller's in-memory session state into the
+    /// Read the target UID's in-memory session-state pending
+    /// decisions — anything added via the atty proxy's `[A]llow
+    /// always` / `[B]lock host forever` inline prompts in this
+    /// session. Empty for a fresh login.
+    SessionList {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// Drop the target UID's in-memory session state (does not
+    /// touch any persistent file).
+    SessionClear {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
+    /// Persist the target UID's in-memory session state into the
     /// per-UID atoms.user.txt + urls.decisions.txt files. The
     /// session is then cleared. Requires EUID 0 client because
     /// the target files live under /var/lib/atty-guard/ and are
     /// `atty:atty 0640` — only root (or atty itself) can write.
-    SessionWrite,
+    SessionWrite {
+        #[serde(default)]
+        target_uid: Option<u32>,
+    },
 }
 
 /// Scope selector for `AtomsList`. The matcher serves the union of
