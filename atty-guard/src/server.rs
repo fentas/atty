@@ -304,8 +304,13 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             if matches!(result.verdict, Verdict::Safe) {
                 // ensure_loaded is a no-op after first call per UID
                 // per daemon lifetime — keeps the hot path off disk.
-                // Mutations re-load the cache directly.
+                // Mutations re-load the cache directly. System-
+                // fetched is a separate one-shot init that runs
+                // once per daemon lifetime; explicit reload happens
+                // on SIGHUP / after the fetcher thread writes.
                 let _ = state.trust_store.ensure_loaded(peer.uid);
+                state.trust_store.ensure_system_fetched_loaded();
+                let system_fetched = state.trust_store.list_system_fetched();
                 let overlay_persistent = state.trust_store.list_atoms(
                     peer.uid,
                     crate::trust_store::ListScope::Persistent,
@@ -314,7 +319,16 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                     peer.uid,
                     crate::trust_store::ListScope::Session,
                 );
-                for atom in overlay_persistent.iter().chain(overlay_session.iter()) {
+                // Scan order: system-fetched (shared, daemon-managed)
+                // → user persistent (per-UID, sudo-mediated) → user
+                // session (per-UID, banner-driven). First-match-wins
+                // since all three produce identical Safe→Warn upgrades;
+                // ordering is for the `reason` text only.
+                for atom in system_fetched
+                    .iter()
+                    .chain(overlay_persistent.iter())
+                    .chain(overlay_session.iter())
+                {
                     if command.contains(atom.as_str()) {
                         result = ClassifyResult {
                             verdict: Verdict::Warn,

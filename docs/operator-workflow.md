@@ -189,7 +189,7 @@ atty security_guard: <reason>
 |---|---|
 | `[y]` | run this one command, nothing remembered |
 | `[a]llow always` | session-trust the (category, matched) hash — won't re-prompt until atty exits. Mirrored to daemon for `atty-guard session list` visibility. |
-| `[t]rust permanently` | atty proxy writes to `~/.cache/atty/security_trust.txt` (back-compat) AND mirrors to the daemon's per-UID `commands.trusted.txt`. Either path satisfies the runtime check; the daemon copy is what `atty-guard trust list` returns and what cross-shell sharing reads at attach. |
+| `[t]rust permanently` | atty proxy adds to its in-memory trust cache for the current session AND mirrors to the daemon's per-UID `commands.trusted.txt` via `TrustAdd`. The daemon copy is the persistent store; `atty-guard trust list` shows it; subsequent atty sessions seed `rt.trust` from the daemon at first Enter. |
 | `[B]lock host forever` | extract host from the matched URL, add to session-block list. Future commands containing that host get REFUSED outright (red line + readline cleared). Mirrored to daemon. Cancels the current command too. Falls through to `[cancel]` when the match has no URL host. |
 | any other | cancel — Ctrl+U clears readline, nothing remembered |
 
@@ -231,26 +231,62 @@ Direct root login (no sudo, no SUDO_UID set) writes into
 matters for admin scripts. Non-root callers cannot target a UID
 other than their own (the daemon rejects the request).
 
-### Pre-release corpus refresh (maintainer-side)
+### System-fetched corpus refresh (operator-side)
 
-The bundled corpus is refreshed pre-release by maintainers running
-`atty-guard --update-atoms-now`, reviewing the diff, and committing
-the refresh into the source tree. Users get it via
-`git pull && sudo make install-guard` on release-please cadence.
+The daemon can pull fresh IOC atoms from upstream sources
+(GTFOBins, Sigma's `/rules/linux/**`) on a schedule. The output
+lands at `/var/lib/atty-guard/atoms.system.txt` (atty:atty 0640)
+and feeds the classify hot path alongside the bundled corpus +
+the per-UID user overlay.
 
-The `--update-atoms-now` CLI flag DOES exist on the shipped binary
-(behind `--features atoms-fetch`) and writes to
-`$XDG_DATA_HOME/atty-guard/flagged_atoms.txt`. But the daemon does
-NOT load that file at runtime — it's a maintainer convenience for
-preparing a candidate diff against the bundled corpus, NOT a
-runtime hot-reload path.
+**Manual one-shot refresh:**
+
+```sh
+sudo systemctl restart atty-guard.service \
+  --runtime-property=ExecStart=/usr/local/bin/atty-guard --update-atoms-now
+# or simpler:
+sudo -u atty /usr/local/bin/atty-guard --update-atoms-now
+```
+
+**Scheduled refresh via systemd:**
+
+Drop in `/etc/systemd/system/atty-guard.service.d/refresh.conf`:
+
+```
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/atty-guard --atoms-update-interval 7d
+```
+
+Then `sudo systemctl daemon-reload && sudo systemctl restart
+atty-guard`. The daemon spawns a background thread that re-runs
+the fetch every interval; failed fetches log + continue (no fail-
+open). After each successful fetch the daemon's in-memory copy is
+hot-reloaded — no restart needed.
+
+**Permission gate**: at every load (startup + post-fetch), the
+daemon checks that `atoms.system.txt` is owned by the `atty` user
+and is NOT group-writable or world-writable. On drift, the load
+is refused with a journald warning and the previous in-memory
+state is kept (fail-safe). A poisoned corpus could otherwise
+escalate via V2-J to Block-via-eBPF and DOS the user's whole PID
+tree.
 
 Sources fetched: `gtfobins` (~357 atoms after filter) and `sigma`
-(`/rules/linux/**` only, ~369 atoms). LOLBAS was dropped because it's
-Windows-native by definition. Placeholder atoms (Sigma's `/path/to/`,
-`{PATH:.exe}`, angle-bracket `<hostname>` shapes) are filtered at
-extract time because Aho-Corasick has no wildcards — they'd never
-match real input.
+(`/rules/linux/**` only, ~369 atoms). LOLBAS was dropped because
+it's Windows-native by definition. Placeholder atoms (Sigma's
+`/path/to/`, `{PATH:.exe}`, angle-bracket `<hostname>` shapes) are
+filtered at extract time because Aho-Corasick has no wildcards —
+they'd never match real input.
+
+### Pre-release bundled corpus refresh (maintainer-side)
+
+The compile-time bundled corpus
+(`src/modules/security_guard/data/flagged_atoms.txt` in the repo)
+is refreshed by maintainers — run the system fetcher, review the
+diff, commit. Operators receive the new baseline via the next
+atty release; the system-fetched corpus above is the runtime path
+for in-between updates.
 
 ## 4. Enable eBPF (optional, opt-in)
 
@@ -361,12 +397,14 @@ atty security_guard: 1 signal fired: curl_pipe_sh — remote-fetch-and-execute
         [y]es once · [t]rust permanently · any other key cancels.
 ```
 
-Press `y` (allow once), `t` (trust permanently — writes to
-`~/.cache/atty/security_trust.txt` AND mirrors to the daemon's
-per-UID `/var/lib/atty-guard/users/<uid>/commands.trusted.txt`),
-or any other key (Ctrl+U, readline cleared). Banner also shows
-`[a]llow always` (session-only trust) and `[B]lock host forever`
-(session-only host block) — see the Session section above.
+Press `y` (allow once), `t` (trust permanently — mirrors to the
+daemon's per-UID `/var/lib/atty-guard/users/<uid>/commands.trusted.txt`
+via `TrustAdd`; the in-memory cache picks it up immediately for the
+current session and subsequent atty sessions seed from the daemon
+at first Enter), or any other key (Ctrl+U, readline cleared).
+Banner also shows `[a]llow always` (session-only trust) and
+`[B]lock host forever` (session-only host block) — see the Session
+section above.
 
 With `[accumulator] block_threshold` set in
 `~/.config/atty-guard/config.toml` (or wherever `--config` points
@@ -407,15 +445,16 @@ sudo systemctl daemon-reload
 sudo userdel atty 2>/dev/null || true
 sudo groupdel atty 2>/dev/null || true
 
-# Optional: clear user-side trust cache.
+# Optional: clear user-side atty cache (ghost-text history, etc.).
 rm -rf ~/.cache/atty
 ```
 
 (If you used `make link-guard` for dev-mode, `make unlink-guard`
 DOES handle the symlink — it only refuses on real-file installs.)
 
-The trust cache (`~/.cache/atty/security_trust.txt`) survives — clear
-it explicitly if you want a fresh start.
+All trust state lives daemon-side in `/var/lib/atty-guard/` and
+gets removed by `rm -rf /var/lib/atty-guard` above; no separate
+user-side trust file to clean up.
 
 ## Named threats — what this stack catches
 

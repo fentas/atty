@@ -133,32 +133,32 @@ impl Default for FetcherConfig {
     }
 }
 
-/// Resolve the data directory the fetched atoms file lives under.
-/// Priority: `STATE_DIRECTORY` (set by systemd when the unit has
-/// `StateDirectory=atty-guard` — points at `/var/lib/atty-guard/`
-/// owned `atty:atty` mode 0750, the canonical post-#140 location)
-/// > `XDG_DATA_HOME` > `$HOME/.local/share` > literal `/var/lib`.
+/// Resolve where the fetcher writes its output. The daemon's
+/// classify hot path reads this file from
+/// `<state_root>/atoms.system.txt` (see
+/// `TrustStore::reload_system_fetched`), so write order matters:
 ///
-/// Why STATE_DIRECTORY first: the system daemon runs as the `atty`
-/// user with `ProtectHome=yes` + `--home-dir /nonexistent`. Falling
-/// through to `$HOME/.local/share` would land at `/nonexistent/`
-/// (or fail with ENOENT). systemd guarantees STATE_DIRECTORY exists
-/// + is writable before the unit starts, so it's the safest path.
+/// 1. `STATE_DIRECTORY/atoms.system.txt` — set by systemd when the
+///    unit has `StateDirectory=atty-guard`. This is the canonical
+///    post-#140 / post-#150 path: `/var/lib/atty-guard/atoms.system.txt`,
+///    atty:atty owned, daemon-writable, daemon-readable.
+/// 2. `/var/lib/atty-guard/atoms.system.txt` — non-systemd installs
+///    or local dev runs as the atty user.
+///
+/// XDG_DATA_HOME is NOT used anymore: the daemon (running as atty
+/// user with `ProtectHome=yes`) can't see $USER's home, AND the
+/// classify hot path doesn't read from there. The old path was
+/// a write-only dead-drop and led to the "atom-fetcher writes a
+/// file the daemon ignores" bug fixed in #150.
 pub fn default_atoms_path() -> PathBuf {
     if let Ok(state_dir) = std::env::var("STATE_DIRECTORY") {
-        // STATE_DIRECTORY can be a `:`-separated list when the unit
-        // sets multiple StateDirectory= entries; the first wins.
         if let Some(first) = state_dir.split(':').next() {
             if !first.is_empty() {
-                return PathBuf::from(first).join("flagged_atoms.txt");
+                return PathBuf::from(first).join("atoms.system.txt");
             }
         }
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
-        .unwrap_or_else(|| PathBuf::from("/var/lib"));
-    base.join("atty-guard").join("flagged_atoms.txt")
+    PathBuf::from("/var/lib/atty-guard/atoms.system.txt")
 }
 
 /// Public alias for the placeholder-atom check used by both
@@ -245,7 +245,12 @@ pub fn fetch_all(_cfg: &FetcherConfig, _sources: &[SourceId]) -> Result<FetchRep
 }
 
 #[cfg(not(feature = "atoms-fetch"))]
-pub fn spawn_periodic_refresh(_cfg: FetcherConfig, _sources: Vec<SourceId>, _interval: Duration) {
+pub fn spawn_periodic_refresh(
+    _cfg: FetcherConfig,
+    _sources: Vec<SourceId>,
+    _interval: Duration,
+    _trust_store: std::sync::Arc<crate::trust_store::TrustStore>,
+) {
     // No-op in builds without the feature. main.rs logs the
     // FeatureNotBuilt and continues with the bundled atoms.
 }
@@ -629,7 +634,12 @@ mod imp {
     /// gets a fresh corpus on startup, not after one interval), then
     /// sleeps. Failures don't abort the thread — the next interval
     /// gets another shot.
-    pub fn spawn_periodic_refresh(cfg: FetcherConfig, sources: Vec<SourceId>, interval: Duration) {
+    pub fn spawn_periodic_refresh(
+        cfg: FetcherConfig,
+        sources: Vec<SourceId>,
+        interval: Duration,
+        trust_store: std::sync::Arc<crate::trust_store::TrustStore>,
+    ) {
         let builder = std::thread::Builder::new().name("atty-guard-atoms-refresh".into());
         let spawn_result = builder.spawn(move || loop {
             match fetch_all(&cfg, &sources) {
@@ -639,6 +649,20 @@ mod imp {
                         report.atoms_total,
                         report.per_source.len()
                     );
+                    // Reload the in-memory corpus from the file we
+                    // just wrote so classify dispatch picks up the
+                    // new entries without waiting for daemon restart.
+                    // Failure here is non-fatal: the next refresh
+                    // tick gets another shot, and the perm-gate error
+                    // (if any) already went to journald.
+                    match trust_store.reload_system_fetched() {
+                        Ok(n) => eprintln!(
+                            "atty-guard: atoms.system.txt reloaded ({n} atoms in memory)"
+                        ),
+                        Err(e) => {
+                            eprintln!("atty-guard: atoms.system.txt reload failed — {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("atty-guard: atom refresh failed — {e}");
@@ -926,9 +950,11 @@ mod tests {
     }
 
     #[test]
-    fn default_atoms_path_under_xdg_or_home() {
+    fn default_atoms_path_under_state_or_var_lib() {
         let p = default_atoms_path();
-        assert!(p.ends_with("flagged_atoms.txt"));
+        // Post-#150: the fetcher writes to atoms.system.txt at the
+        // state-root (so the daemon's TrustStore reads it).
+        assert!(p.ends_with("atoms.system.txt"));
         assert!(p.to_string_lossy().contains("atty-guard"));
     }
 
