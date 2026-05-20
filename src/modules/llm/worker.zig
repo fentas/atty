@@ -55,10 +55,12 @@ const ProviderEntry = types.ProviderEntry;
 const Mode = types.Mode;
 const nowMs = @import("../_lib.zig").nowMs;
 
-/// Per-request provider pick. `name` is the entry's label (or
-/// transport-derived fallback for the shorthand path). Lifetimes
-/// borrow from `cfg.providers` / `cfg.provider` — both are
-/// comptime-static so the slice outlives the worker.
+/// Per-request provider pick. `name` is the entry's label;
+/// empty string means "no entry name was set — derive a label
+/// at the call site via `providerLabel(provider)` or similar".
+/// The fallback / single-shorthand case always returns an empty
+/// name. Lifetimes borrow from `cfg.providers` / `cfg.provider`
+/// — both are comptime-static so the slice outlives the worker.
 pub const ResolvedProvider = struct {
     provider: Provider,
     name: []const u8,
@@ -1228,9 +1230,13 @@ pub fn Module(comptime cfg: Config) type {
         /// Worker thread function. Owns the lock-and-wait loop:
         /// waits on `shared.cv` until either `shared.shutdown` or
         /// `shared.req_pending` is set, then dispatches based on
-        /// `shared.req_kind`. Comptime-switches on `cfg.provider`
-        /// to pick HTTP (`doRequest` / `doDialogRequest`) or
-        /// subprocess (`doSubprocessRequest` / `doSubprocessDialogRequest`).
+        /// `shared.req_kind` + `shared.dispatch_mode`. Resolves
+        /// the provider RUNTIME via `resolveProviderForMode` so
+        /// `cfg.providers[]` can hold a mix of HTTP and subprocess
+        /// entries (both transport arms ship in the binary —
+        /// ~2 KB cost accepted per #162 design). Picks HTTP
+        /// (`doRequest` / `doDialogRequest`) or subprocess
+        /// (`doSubprocessRequest` / `doSubprocessDialogRequest`).
         /// Fixture-replay (`cfg.fixture_responses` non-empty) is
         /// provider-agnostic — replays canned responses before any
         /// transport dispatch. Always signals completion via

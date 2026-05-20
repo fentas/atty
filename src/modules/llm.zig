@@ -832,11 +832,18 @@ pub fn configure(comptime cfg: Config) type {
             const last_assistant_json = try allocator.create([cfg.max_response_bytes]u8);
             errdefer allocator.destroy(last_assistant_json);
 
-            // Resolve env vars at attach time so the worker doesn't
-            // have to re-read them per request. For subprocess
-            // transport these come back empty (the CLI handles its
-            // own auth + endpoint discovery); the worker's
-            // comptime-switch on `cfg.provider` ignores them.
+            // Attach-time api_base / api_key resolution serves
+            // two purposes only:
+            //   1. The `should_spawn` inert-mode check below
+            //      (skip the worker thread when the HTTP shorthand
+            //      provider has no endpoint configured).
+            //   2. The help-overlay endpoint display for the
+            //      shorthand path (`hooks.zig:llm_exec_toggle_help`).
+            // The worker NO LONGER reads these values directly —
+            // each HTTP request resolves api_base/api_key per-
+            // entry via `env.resolveHttpApiBase` / `resolveHttpApiKey`
+            // so `cfg.providers[]` can hold multiple HTTP entries
+            // with different env-var names.
             const api_base = try resolveApiBase(allocator);
             errdefer allocator.free(api_base);
             const api_key = try resolveApiKey(allocator);

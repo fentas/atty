@@ -749,8 +749,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     else
                         providerLabel(resolved.provider);
                     // Cycle info lives in the first 32 bytes of buf.
+                    // Find the resolved entry's index so the
+                    // `(i/n)` indicator matches the provider name
+                    // we just rendered — important when
+                    // resolveProviderForMode fell through to a
+                    // first-matching entry that isn't at
+                    // current_provider_idx.
+                    const resolved_idx: usize = blk: {
+                        for (cfg.providers, 0..) |entry, i| {
+                            if (std.meta.eql(entry.config, resolved.provider)) break :blk i;
+                        }
+                        break :blk rt.current_provider_idx;
+                    };
                     const cycle_info: []const u8 = if (cfg.providers.len > 1)
-                        std.fmt.bufPrint(buf[0..32], " ({d}/{d})", .{ rt.current_provider_idx + 1, cfg.providers.len }) catch ""
+                        std.fmt.bufPrint(buf[0..32], " ({d}/{d})", .{ resolved_idx + 1, cfg.providers.len }) catch ""
                     else
                         "";
                     const endpoint: []const u8 = if (rt.inert)
