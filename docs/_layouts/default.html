@@ -26,7 +26,7 @@
         {{ content }}
 
         <nav class="doc-footer-nav">
-          <a class="doc-edit" href="https://github.com/fentas/atty/edit/master/docs{{ page.path | replace_first: 'docs/', '/' }}" rel="noopener">Edit this page on GitHub&nbsp;↗</a>
+          <a class="doc-edit" href="https://github.com/fentas/atty/edit/master/docs/{{ page.path }}" rel="noopener">Edit this page on GitHub&nbsp;↗</a>
         </nav>
       </article>
     </main>
@@ -79,11 +79,23 @@
         if (lastActive) lastActive.classList.remove('is-active');
         link.classList.add('is-active');
         lastActive = link;
+        // After the move, the actual scroll container is the rail
+        // (`overflow-y: auto` lives on `.toc-rail` and on the inline
+        // TOC's article location). Find the nearest ancestor with a
+        // scrollable y-overflow and compare against that.
         if (typeof link.scrollIntoView === 'function') {
-          var r = link.getBoundingClientRect();
-          var tr = toc.getBoundingClientRect();
-          if (r.top < tr.top || r.bottom > tr.bottom) {
-            link.scrollIntoView({ block: 'nearest' });
+          var scroller = link.parentElement;
+          while (scroller && scroller !== document.body) {
+            var cs = getComputedStyle(scroller);
+            if (cs.overflowY === 'auto' || cs.overflowY === 'scroll') break;
+            scroller = scroller.parentElement;
+          }
+          if (scroller && scroller !== document.body) {
+            var r = link.getBoundingClientRect();
+            var sr = scroller.getBoundingClientRect();
+            if (r.top < sr.top || r.bottom > sr.bottom) {
+              link.scrollIntoView({ block: 'nearest' });
+            }
           }
         }
       }
