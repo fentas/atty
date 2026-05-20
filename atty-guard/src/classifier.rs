@@ -143,10 +143,6 @@ impl Classifier {
         // combine their confidences via independent-probability
         // math, optionally second-stage with Tier-2 SLM, then map
         // the accumulated score to a verdict.
-        //
-        // The old "first match wins" path is preserved as
-        // `Tier1::classify_with_offset` for tests + any caller
-        // that explicitly wants a single representative hit.
         let mut hits = self.tier1.classify_all(command);
         let tier1_combined = combined_confidence(&hits);
 
