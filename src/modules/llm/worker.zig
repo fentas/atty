@@ -799,9 +799,14 @@ pub fn Module(comptime cfg: Config) type {
                 if (!std.mem.eql(u8, subtype_val.string, "init")) continue;
                 const id_val = parsed.object.get(field) orelse continue;
                 if (id_val != .string) continue;
-                const n = @min(id_val.string.len, out.len);
-                @memcpy(out[0..n], id_val.string[0..n]);
-                return n;
+                // Reject ids that don't fit in `out` outright —
+                // returning a truncated half-id and using it for
+                // `--resume <id>` would silently corrupt the CLI's
+                // resume protocol. Better to act like no init
+                // event was seen than to ship a broken handle.
+                if (id_val.string.len > out.len) return 0;
+                @memcpy(out[0..id_val.string.len], id_val.string);
+                return id_val.string.len;
             }
             return 0;
         }

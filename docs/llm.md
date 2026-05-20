@@ -356,12 +356,17 @@ and lets the CLI's own session state (`claude`'s `--resume <id>`)
 maintain history. Saves tokens and CLI-side compute (no
 re-uploading the transcript every turn) at the cost of:
 
-- **Atty can't introspect mid-dialog state.** If the user inspects
-  the chat overlay (Alt+C / Alt+Shift+C) mid-session they see atty's
-  view of the conversation — which only includes the latest user
-  turn after the first response. Earlier assistant turns are
-  still in atty's `turns[]` ring (they were recorded when they
-  came back), but the CLI knows about turns atty's ring never saw.
+- **Atty still records every turn it sees**, so the chat overlay
+  (Alt+C / Alt+Shift+C) shows the full conversation atty
+  participated in: user turns the user typed + assistant turns
+  the CLI replied with. What changes is only the prompt atty
+  **sends to the CLI on each subsequent request** — instead of
+  re-rendering the whole `turns[]` ring as one big text body,
+  atty sends only the latest user turn and trusts the CLI's
+  session state to remember the rest. If the user inspects mid-
+  session they see atty's full record; the CLI's view may
+  include side-effects atty never recorded (e.g. tool calls
+  invoked by the CLI itself).
 - **Session id is per-dialog.** `Alt+Shift+R` (cancel) and any
   `action: "done"` from the model both reset `rt.session_id` —
   the next dialog starts a fresh CLI session. atty doesn't try
