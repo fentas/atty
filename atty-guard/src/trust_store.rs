@@ -158,6 +158,15 @@ impl TrustStore {
     /// Ensure the in-memory copy is loaded at least once (lazy
     /// init from the classify hot path). Idempotent — subsequent
     /// calls are O(1) flag-check.
+    ///
+    /// Flag-on-error semantics: even if `reload_system_fetched`
+    /// fails (file missing, perm-gate refused), the loaded flag
+    /// flips true so the classify hot path doesn't re-stat every
+    /// keystroke. Means a `sudo chown atty:atty atoms.system.txt`
+    /// fix-up doesn't take effect until the daemon's cron thread
+    /// fires the next refresh OR the daemon is restarted. The
+    /// cron path is the normal "I changed something, atoms refresh"
+    /// flow; manual refreshes need a daemon restart.
     pub fn ensure_system_fetched_loaded(&self) {
         if *self
             .system_fetched_loaded
@@ -166,10 +175,6 @@ impl TrustStore {
         {
             return;
         }
-        // Errors are swallowed — a missing or perm-refused file is
-        // not a daemon-fatal condition. The flag flip + reload log
-        // happen inside `reload_system_fetched`; we just set the
-        // flag here so we don't re-try every classify.
         let _ = self.reload_system_fetched();
         *self
             .system_fetched_loaded

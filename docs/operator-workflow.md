@@ -242,11 +242,17 @@ the per-UID user overlay.
 **Manual one-shot refresh:**
 
 ```sh
-sudo systemctl restart atty-guard.service \
-  --runtime-property=ExecStart=/usr/local/bin/atty-guard --update-atoms-now
-# or simpler:
 sudo -u atty /usr/local/bin/atty-guard --update-atoms-now
+sudo systemctl restart atty-guard.service
 ```
+
+First command runs the fetcher synchronously as the `atty` user
+(so the output file lands atty-owned). Second command restarts
+the daemon so the new file gets re-loaded at startup — the
+running daemon's in-memory copy is a one-shot lazy load and won't
+re-read mid-life. The cron path below avoids the restart because
+the cron thread calls the explicit `reload_system_fetched` after
+each successful fetch.
 
 **Scheduled refresh via systemd:**
 

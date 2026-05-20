@@ -335,11 +335,12 @@ pub fn configure(comptime cfg: Config) type {
             // commands.trusted.txt. Runs once per atty session after
             // the FIRST successful daemon classify — by then the
             // daemon is proven reachable + the connect cost is
-            // already amortized. Errors are swallowed: the local
-            // trust file from `~/.cache/atty/security_trust.txt`
-            // is already loaded at attach, so the seed only ADDS
-            // (specifically, picks up trust hashes the user set on
-            // a different atty session under the same UID).
+            // already amortized. Errors are swallowed: the daemon is
+            // the only persistent trust store, so a failed seed just
+            // means cross-shell trust hashes are unavailable this
+            // session. Banner [t] still adds to rt.trust locally +
+            // mirrors via TrustAdd, so trust state set in THIS
+            // session works regardless of the daemon mirror outcome.
             if (!rt.daemon_trust_seeded) {
                 if (rt.allocator) |a| {
                     rt.daemon.?.trustList(a, &rt.trust) catch {};

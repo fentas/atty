@@ -228,13 +228,13 @@ pub const Client = struct {
         };
     }
 
-    /// Mirror of a `[t]rust permanently` keystroke. The atty-side
-    /// `~/.cache/atty/security_trust.txt` write is authoritative
-    /// for backward compat (pre-migration installs); this RPC
-    /// promotes the same hash into the daemon's per-UID
-    /// `commands.trusted.txt`, so a fresh atty session (or another
-    /// atty proxy under the same UID) can pick it up via the
-    /// daemon's trust list.
+    /// Canonical persistence path for `[t]rust permanently`.
+    /// Writes the hash into the daemon's per-UID
+    /// `commands.trusted.txt`. A fresh atty session (or another
+    /// atty proxy under the same UID) picks it up at first Enter
+    /// via the daemon's trust list. The atty-side `rt.trust`
+    /// HashSet is also populated locally so the SAME atty session's
+    /// next Enter short-circuits the banner without a UDS round-trip.
     ///
     /// `hash` is provably `[0-9a-f]{64}` by construction — see
     /// security_guard/trust_cache.zig::hashCategoryMatch which
@@ -265,10 +265,11 @@ pub const Client = struct {
     /// + merge them into `target`. Called once per atty session
     /// after the first successful daemon classify (lazy seed) so a
     /// SECOND atty proxy under the same UID picks up trust hashes
-    /// set on a different shell. Errors are non-fatal — the local
-    /// `~/.cache/atty/security_trust.txt` is already loaded at
-    /// attach, so the worst case is "cross-shell sharing doesn't
-    /// happen this session," not "trust check fails."
+    /// set on a different shell. Errors are non-fatal — banner [t]
+    /// in THIS session still works (adds to rt.trust locally +
+    /// mirrors via trustAdd), so the worst case is "cross-shell
+    /// trust hashes unavailable this session," not "trust check
+    /// fails."
     pub fn trustList(
         self: *Client,
         allocator: std.mem.Allocator,
