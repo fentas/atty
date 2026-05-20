@@ -164,15 +164,23 @@ pub enum Request {
     /// In-banner `[t]rust permanently` taps. atty proxy mirrors the
     /// keystroke to the daemon so the trust hash lands in the
     /// per-UID `commands.trusted.txt` AND survives across daemon
-    /// restarts. Daemon's classify hot-path checks this set before
-    /// the overlay scan; a hit short-circuits to Safe so subsequent
-    /// identical commands flow through without a banner.
+    /// restarts. atty's own in-proc trust set is authoritative for
+    /// the runtime check; the daemon copy enables cross-shell
+    /// sharing (a SECOND atty session under the same UID picks up
+    /// the trust on attach via TrustList) + operator visibility
+    /// via `atty-guard trust list`.
     ///
     /// No sudo gate — banner `[t]` has always been a non-sudo
     /// action (pre-migration the atty proxy wrote the user's own
     /// `~/.cache/atty/security_trust.txt` directly). The
     /// `PERSISTENT_TRUST_CAP` (16384) protects against unbounded
-    /// growth from a hostile process spamming this RPC.
+    /// growth from a hostile process spamming this RPC. Per-UID
+    /// scope contains the blast radius (a hostile $USER process
+    /// can fill its own cap but no other user's); spamming random
+    /// hashes disables NO detection (hashes won't match real
+    /// commands) but does trigger atomic rewrites of the file —
+    /// at the cap that's ~1.3 MB per call. Tolerable trade-off
+    /// for the convenience of a no-sudo banner keystroke.
     TrustAdd {
         /// 64-character lowercase hex (SHA-256 of "category:matched").
         hash: String,

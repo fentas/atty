@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const patterns = @import("patterns.zig");
+const trust_cache_mod = @import("trust_cache.zig");
 
 pub const Verdict = enum {
     safe,
@@ -234,6 +235,13 @@ pub const Client = struct {
     /// `commands.trusted.txt`, so a fresh atty session (or another
     /// atty proxy under the same UID) can pick it up via the
     /// daemon's trust list.
+    ///
+    /// `hash` is provably `[0-9a-f]{64}` by construction — see
+    /// security_guard/trust_cache.zig::hashCategoryMatch which
+    /// writes from a fixed `"0123456789abcdef"` lookup. Raw
+    /// interpolation into JSON is safe; if the hash format ever
+    /// changes (e.g. to BLAKE3 or base64), the JSON escaper from
+    /// `sessionAddUrlBlock` should be reused here.
     pub fn trustAdd(self: *Client, hash: []const u8) Error!void {
         try self.ensureConnected();
         var w: std.Io.Writer = .fixed(&self.write_buf);
@@ -251,6 +259,52 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
+    }
+
+    /// Fetch the caller's persistent trust hashes from the daemon
+    /// + merge them into `target`. Called once per atty session
+    /// after the first successful daemon classify (lazy seed) so a
+    /// SECOND atty proxy under the same UID picks up trust hashes
+    /// set on a different shell. Errors are non-fatal — the local
+    /// `~/.cache/atty/security_trust.txt` is already loaded at
+    /// attach, so the worst case is "cross-shell sharing doesn't
+    /// happen this session," not "trust check fails."
+    pub fn trustList(
+        self: *Client,
+        allocator: std.mem.Allocator,
+        target: *trust_cache_mod.TrustCache,
+    ) Error!void {
+        try self.ensureConnected();
+        var w: std.Io.Writer = .fixed(&self.write_buf);
+        const id = self.next_id;
+        self.next_id +%= 1;
+        (w.print("{{\"id\":{d},\"method\":\"trust_list\"}}\n", .{id})) catch return Error.OutOfMemory;
+        self.writeAll(self.write_buf[0..w.end]) catch {
+            self.close();
+            return Error.Unavailable;
+        };
+        const line_len = self.readLine() catch {
+            self.close();
+            return Error.Unavailable;
+        };
+        // Parse minimal: scan for "trust":[...] array, extract each
+        // 64-char hex needle, add to target. Avoids pulling in a
+        // full JSON parser for what is a known-shape response.
+        const body = self.read_buf[0..line_len];
+        const trust_at = std.mem.indexOf(u8, body, "\"trust\":[") orelse return;
+        const arr_start = trust_at + "\"trust\":[".len;
+        var cursor: usize = arr_start;
+        while (cursor < body.len) {
+            const open_quote = std.mem.indexOfScalarPos(u8, body, cursor, '"') orelse break;
+            if (open_quote + 1 + trust_cache_mod.hex_len > body.len) break;
+            const close_quote = open_quote + 1 + trust_cache_mod.hex_len;
+            if (body[close_quote] != '"') break;
+            const hex_slice = body[open_quote + 1 .. close_quote];
+            _ = target.add(allocator, hex_slice) catch {};
+            cursor = close_quote + 1;
+            // Stop at closing `]`.
+            if (cursor < body.len and body[cursor] == ']') break;
+        }
     }
 
     /// Best-effort mirror of a `[B]lock host forever`

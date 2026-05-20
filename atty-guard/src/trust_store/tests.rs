@@ -341,6 +341,34 @@ fn persistent_trust_round_trip_via_disk() {
 }
 
 #[test]
+fn persistent_trust_silently_skips_malformed_legacy_lines() {
+    // A hand-edited commands.trusted.txt with one uppercase line
+    // (a legacy entry someone uppercased) + one valid line + one
+    // comment should load only the valid line. Silent skip is the
+    // documented behaviour — surfacing the bad line would
+    // lock the operator out of valid entries.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("1000").join("commands.trusted.txt");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "# header comment\n\
+         ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789  # legacy uppercase\n\
+         0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # good entry\n\
+         truncated # bad shape\n",
+    )
+    .unwrap();
+    let store = TrustStore::new(tmp.path().to_path_buf());
+    store.load_persistent(1000).unwrap();
+    let listed = store.list_persistent_trust(1000);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0],
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
+}
+
+#[test]
 fn persistent_trust_idempotent_re_add() {
     let (store, _tmp) = fresh_store();
     let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

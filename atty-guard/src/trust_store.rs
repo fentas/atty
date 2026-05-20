@@ -49,8 +49,11 @@ pub struct PerUserState {
     /// Persistent trust hashes loaded from `commands.trusted.txt`.
     /// SHA-256 hex of `<category>:<matched>` — the same shape the
     /// atty proxy used to write to `~/.cache/atty/security_trust.txt`
-    /// before the daemon-side migration. classify dispatch consults
-    /// this set BEFORE the overlay scan; a hit short-circuits to Safe.
+    /// before the daemon-side migration. The daemon does NOT consult
+    /// this set at classify time — atty proxy seeds its own in-proc
+    /// trust set from `TrustList` at module attach + on banner `[t]`,
+    /// then short-circuits before any UDS round-trip. This field is
+    /// the source of truth for cross-shell sharing + visibility.
     pub persistent_trust: HashSet<String>,
     /// Session-only atom adds (from `[A]llow always` taps on atoms).
     pub session_atoms: HashSet<String>,
@@ -429,14 +432,19 @@ impl TrustStore {
             for h in &sess_trust {
                 match validate_trust_hash(h) {
                     Ok(()) => {
-                        if existing.len() >= PERSISTENT_TRUST_CAP
-                            && !existing.contains(h)
-                        {
+                        // Duplicate-of-already-persisted is a silent
+                        // no-op (matches persistent_add_trust); we
+                        // only surface "cap full" when adding a NEW
+                        // entry would exceed the cap.
+                        if existing.contains(h) {
+                            // Already persisted; nothing to do.
+                        } else if existing.len() >= PERSISTENT_TRUST_CAP {
                             report.invalid.push((
                                 h.clone(),
                                 format!("trust file full ({PERSISTENT_TRUST_CAP})"),
                             ));
-                        } else if existing.insert(h.clone()) {
+                        } else {
+                            existing.insert(h.clone());
                             report.trust_added += 1;
                         }
                     }
