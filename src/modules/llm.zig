@@ -49,7 +49,9 @@ const nowMs = @import("_lib.zig").nowMs;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
 pub const Config = types.Config;
-pub const Model = types.Model;
+pub const ProviderEntry = types.ProviderEntry;
+pub const Mode = types.Mode;
+pub const ModeMask = types.ModeMask;
 pub const Provider = types.Provider;
 pub const HttpProvider = types.HttpProvider;
 pub const SubprocessProvider = types.SubprocessProvider;
@@ -254,13 +256,19 @@ pub fn configure(comptime cfg: Config) type {
         if (cfg.inline_chat_rows < 3) {
             @compileError("Config.inline_chat_rows must be >= 3 (divider + at least one scrollback row + input row)");
         }
-        // Every entry in `cfg.models` MUST have a non-empty `name`
-        // — an empty model name produces a malformed HTTP request
-        // (`"model":""` either errors at the endpoint or routes to
-        // an unintended default). Catch it at build time.
-        for (cfg.models, 0..) |mdl, i| {
-            if (mdl.name.len == 0) {
-                @compileError(std.fmt.comptimePrint("Config.models[{d}].name is empty — every model entry needs a non-empty name", .{i}));
+        // Validate `cfg.providers[]` entries. HTTP entries need a
+        // non-empty model id (empty would land as `"model":""` in
+        // the request body which routes to an unintended default
+        // or errors at the endpoint). Subprocess entries need a
+        // non-empty argv[0]. Catch both at build time.
+        for (cfg.providers, 0..) |entry, i| {
+            switch (entry.config) {
+                .http => |h| if (h.model.len == 0) {
+                    @compileError(std.fmt.comptimePrint("Config.providers[{d}].config.http.model is empty", .{i}));
+                },
+                .subprocess => |s| if (s.argv.len == 0 or s.argv[0].len == 0) {
+                    @compileError(std.fmt.comptimePrint("Config.providers[{d}].config.subprocess.argv must have a non-empty argv[0]", .{i}));
+                },
             }
         }
     }
@@ -535,16 +543,16 @@ pub fn configure(comptime cfg: Config) type {
             /// to true. `onTick` fires the auto-submit when
             /// `nowMs() - auto_exec_t0_ms >= cfg.auto_delay_ms`.
             auto_exec_t0_ms: i64 = 0,
-            /// Index into `cfg.models[]` for the currently-selected
-            /// model. Wraps around when `Alt+M` (`llm_exec_cycle_model`)
-            /// fires. Initialised to 0 at attach (first entry is
-            /// the default). Stays 0 forever when `cfg.models` is
-            /// empty; in that case the legacy `cfg.model` is used
-            /// instead.
-            current_model_idx: usize = 0,
+            /// Index into `cfg.providers[]` for the currently-
+            /// selected provider entry. Wraps via `Alt+M`
+            /// (`llm_exec_cycle_model`). Initialised to 0 at attach.
+            /// Stays 0 forever when `cfg.providers` is empty; in
+            /// that case `cfg.provider` (single-shorthand) is
+            /// used and this index is irrelevant.
+            current_provider_idx: usize = 0,
             /// Per-call format buffer for `statusText`. Used to
-            /// inject the current model name into the AI hint
-            /// when `cfg.models.len > 0` — `statusText` runs every
+            /// inject the current provider label into the AI hint
+            /// when `cfg.providers.len > 0` — `statusText` runs every
             /// render tick, but the returned slice only needs to
             /// outlive that single call, so a stable Runtime-owned
             /// buffer is the right shape.
@@ -840,14 +848,20 @@ pub fn configure(comptime cfg: Config) type {
             // availability is a runtime concern (subprocess spawn
             // errors surface as the next request's error_out), not
             // an attach-time gate.
-            const should_spawn = switch (cfg.provider) {
+            // Spawn the worker unless the module is statically
+            // inert. Static-inert means: no providers[] AND the
+            // single shorthand is an HTTP provider that resolved
+            // to an empty api_base. Subprocess + any providers[]
+            // entry means request-time dispatch will try at least
+            // one path; we always spawn there.
+            const should_spawn = cfg.providers.len > 0 or switch (cfg.provider) {
                 .http => api_base.len > 0,
                 .subprocess => true,
             };
             const thread: ?std.Thread = if (!should_spawn)
                 null
             else
-                try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, api_base, api_key, shell_name, context_blob });
+                try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, shell_name, context_blob });
 
             var rt: Runtime = .{
                 .allocator = allocator,
@@ -1200,15 +1214,17 @@ pub fn configure(comptime cfg: Config) type {
             // Esc to something else, or who'd rather not have a
             // bare Esc grabbed inside AI mode.
             if (rt.ai_mode_active) {
-                // With a configured `models[]` list, surface the
-                // current pick inline so `Alt+M` cycling has
-                // immediate visible feedback in the statusbar
-                // (not just a transient latched hint). When the
-                // user has only the legacy `cfg.model` (no list),
-                // the static hint is fine — no point baking the
-                // single name into the bar.
-                if (cfg.models.len > 0) {
-                    const pick = cfg.models[rt.current_model_idx].name;
+                // With a `providers[]` list, surface the current
+                // pick inline so `Alt+M` cycling has immediate
+                // visible feedback in the statusbar. Single-
+                // provider shorthand falls through to the static
+                // hint — no name to interpolate.
+                if (cfg.providers.len > 0) {
+                    const entry = cfg.providers[rt.current_provider_idx];
+                    const pick: []const u8 = if (entry.name.len > 0) entry.name else switch (entry.config) {
+                        .http => |h| if (h.model.len > 0) h.model else "(http)",
+                        .subprocess => |s| if (s.argv.len > 0) s.argv[0] else "(subprocess)",
+                    };
                     // Same shape as ai_idle_hint but with the
                     // current model name interpolated after `Alt+M`.
                     // Fallback drops to the static hint if the

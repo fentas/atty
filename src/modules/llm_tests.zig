@@ -39,7 +39,7 @@ test "configure exposes the expected hooks" {
 }
 
 test "buildRequestBody produces well-formed OpenAI chat-completion JSON" {
-    const L = configure(.{ .model = "test-model" });
+    const L = configure(.{ .provider = .{ .http = .{ .model = "test-model" } } });
     const body = try L.buildRequestBody(testing.allocator, "test-model", "be terse", "bash", "", "list zig files");
     defer testing.allocator.free(body);
 
@@ -826,8 +826,8 @@ test "LLM worker round-trips a mock ollama response into the latch + hint surfac
             .api_base_env = "ATTY_TEST_LLM_API_BASE",
             .api_base_fallback_env = "ATTY_TEST_LLM_NEVER",
             .api_key_env = "ATTY_TEST_LLM_NEVER",
+            .model = "test-model",
         } },
-        .model = "test-model",
         // This test exercises the legacy `#:<Enter>` trigger path —
         // opt back into it via `enter_action = .single` (default is
         // `.none` since Alt+A is now the explicit binding).
@@ -999,8 +999,8 @@ test "HTTP 5xx surfaces a 'HTTP <status>' hint, no command injected" {
             .api_base_env = "ATTY_TEST_LLM_500_BASE",
             .api_base_fallback_env = "ATTY_TEST_LLM_500_NEVER",
             .api_key_env = "ATTY_TEST_LLM_500_NEVER",
+            .model = "test-model",
         } },
-        .model = "test-model",
         // Opt into the legacy `#:<Enter>` path — this test types
         // Enter to fire the request against the 500 mock.
         .enter_action = .single,

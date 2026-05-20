@@ -755,3 +755,100 @@ test "extractJsonStringField: unicode escapes in value round-trip" {
     try testing.expect(std.mem.indexOf(u8, out[0..n], "\xE2\x80\x9C") != null);
     try testing.expect(std.mem.indexOf(u8, out[0..n], "\xE2\x80\x9D") != null);
 }
+
+// ── #162 — providers[] dispatch + ModeMask ────────────────────────────────
+
+test "ModeMask: matches() honors per-mode flags" {
+    const mm: types.ModeMask = .{ .single = true, .dialog = false, .auto = true, .chat = false };
+    try testing.expect(mm.matches(.single));
+    try testing.expect(!mm.matches(.dialog));
+    try testing.expect(mm.matches(.auto));
+    try testing.expect(!mm.matches(.chat));
+}
+
+test "ModeMask preset constants are correct" {
+    try testing.expect(types.ModeMask.all.matches(.single));
+    try testing.expect(types.ModeMask.all.matches(.dialog));
+    try testing.expect(types.ModeMask.all.matches(.auto));
+    try testing.expect(types.ModeMask.all.matches(.chat));
+
+    try testing.expect(types.ModeMask.single_only.matches(.single));
+    try testing.expect(!types.ModeMask.single_only.matches(.dialog));
+    try testing.expect(!types.ModeMask.single_only.matches(.auto));
+    try testing.expect(!types.ModeMask.single_only.matches(.chat));
+
+    try testing.expect(!types.ModeMask.dialog_only.matches(.single));
+    try testing.expect(types.ModeMask.dialog_only.matches(.dialog));
+    try testing.expect(types.ModeMask.dialog_only.matches(.auto));
+    try testing.expect(types.ModeMask.dialog_only.matches(.chat));
+
+    try testing.expect(!types.ModeMask.dialog_and_auto.matches(.single));
+    try testing.expect(types.ModeMask.dialog_and_auto.matches(.dialog));
+    try testing.expect(types.ModeMask.dialog_and_auto.matches(.auto));
+    try testing.expect(!types.ModeMask.dialog_and_auto.matches(.chat));
+}
+
+test "resolveProvider: empty providers[] returns fallback" {
+    const RK = struct {
+        pub const single: u1 = 0;
+        pub const dialog: u1 = 1;
+    };
+    _ = RK;
+    const fallback: types.Provider = .{ .http = .{ .api_base = "http://x/v1", .model = "fb" } };
+    const entries: []const types.ProviderEntry = &.{};
+    const r = worker_mod.resolveProvider(@as(enum { single, dialog }, .single), entries, fallback, 0);
+    switch (r.provider) {
+        .http => |h| try testing.expectEqualStrings("fb", h.model),
+        .subprocess => unreachable,
+    }
+    try testing.expectEqualStrings("", r.name);
+}
+
+test "resolveProvider: current_idx wins when its for_modes matches" {
+    const a: types.Provider = .{ .http = .{ .model = "a" } };
+    const b: types.Provider = .{ .http = .{ .model = "b" } };
+    const c: types.Provider = .{ .http = .{ .model = "c" } };
+    const entries: []const types.ProviderEntry = &.{
+        .{ .name = "a", .config = a, .for_modes = .single_only },
+        .{ .name = "b", .config = b, .for_modes = .dialog_only },
+        .{ .name = "c", .config = c, .for_modes = .all },
+    };
+    const fallback: types.Provider = .{ .http = .{ .model = "fb" } };
+    // current_idx = 1 (b), request kind dialog → b matches → b wins
+    const r = worker_mod.resolveProvider(@as(enum { single, dialog }, .dialog), entries, fallback, 1);
+    switch (r.provider) {
+        .http => |h| try testing.expectEqualStrings("b", h.model),
+        .subprocess => unreachable,
+    }
+    try testing.expectEqualStrings("b", r.name);
+}
+
+test "resolveProvider: current_idx doesn't match → first-matching wins" {
+    const haiku: types.Provider = .{ .http = .{ .model = "haiku" } };
+    const sonnet: types.Provider = .{ .http = .{ .model = "sonnet" } };
+    const entries: []const types.ProviderEntry = &.{
+        .{ .name = "haiku", .config = haiku, .for_modes = .single_only },
+        .{ .name = "sonnet", .config = sonnet, .for_modes = .dialog_only },
+    };
+    const fallback: types.Provider = .{ .http = .{ .model = "fb" } };
+    // current_idx = 0 (haiku, single_only), request kind dialog →
+    // haiku doesn't match; fall through to first matching = sonnet.
+    const r = worker_mod.resolveProvider(@as(enum { single, dialog }, .dialog), entries, fallback, 0);
+    try testing.expectEqualStrings("sonnet", r.name);
+}
+
+test "resolveProvider: nothing matches → fallback" {
+    const a: types.Provider = .{ .http = .{ .model = "a" } };
+    const entries: []const types.ProviderEntry = &.{
+        .{ .name = "a", .config = a, .for_modes = .single_only },
+    };
+    const fallback: types.Provider = .{ .http = .{ .model = "fb" } };
+    // current_idx = 0 (single_only), request kind dialog → no match;
+    // first-matching scan also finds none → fallback wins.
+    const r = worker_mod.resolveProvider(@as(enum { single, dialog }, .dialog), entries, fallback, 0);
+    switch (r.provider) {
+        .http => |h| try testing.expectEqualStrings("fb", h.model),
+        .subprocess => unreachable,
+    }
+    try testing.expectEqualStrings("", r.name);
+}

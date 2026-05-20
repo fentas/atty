@@ -83,18 +83,100 @@ pub const Provider = union(enum) {
     subprocess: SubprocessProvider,
 };
 
+/// Dispatch mode — which atty key binding triggered the request.
+/// Used by `ProviderEntry.for_modes` to gate which provider serves
+/// which binding. `Mode` and `RequestKind` (in worker.zig) overlap
+/// but aren't identical: RequestKind distinguishes the worker's
+/// request shape (`.single` vs `.dialog`), Mode distinguishes the
+/// user-facing intent (Alt+A vs Alt+S vs Alt+Shift+S vs Alt+C).
+pub const Mode = enum {
+    single, // Alt+A — one-shot `#: prompt → cmd`
+    dialog, // Alt+S — interactive exec/observe loop
+    auto, // Alt+Shift+S — dialog + auto-confirm
+    chat, // Alt+C / Alt+Shift+C — chat panel/overlay
+
+    /// Map a worker `RequestKind` (single vs dialog) onto a Mode.
+    /// Used by the worker dispatch when it needs to pick a provider
+    /// — at the worker level there's no Alt+Shift+S vs Alt+S
+    /// distinction (both are `.dialog` request kind), so the
+    /// worker conflates `auto` and `chat` with `dialog` here.
+    /// Per-mode resolution happens on the hook side where the
+    /// trigger is known; the worker just needs a coarse "is this
+    /// a dialog-shaped request" signal.
+    pub fn fromRequestKind(kind: anytype) Mode {
+        return switch (kind) {
+            .single => .single,
+            .dialog => .dialog,
+        };
+    }
+};
+
+/// Bitset over `Mode` — `ProviderEntry.for_modes` says which
+/// dispatch modes a provider serves. Default is `.all` (every
+/// mode); use the named constants for the common subsets.
+pub const ModeMask = packed struct(u4) {
+    single: bool = true,
+    dialog: bool = true,
+    auto: bool = true,
+    chat: bool = true,
+
+    /// Every mode (default).
+    pub const all: ModeMask = .{};
+    /// Only Alt+A one-shots.
+    pub const single_only: ModeMask = .{ .single = true, .dialog = false, .auto = false, .chat = false };
+    /// Alt+S, Alt+Shift+S, Alt+C / Alt+Shift+C — anything that
+    /// runs through the dialog state machine.
+    pub const dialog_only: ModeMask = .{ .single = false };
+    /// Dialog + auto-confirm, but NOT the chat surface.
+    pub const dialog_and_auto: ModeMask = .{ .single = false, .chat = false };
+
+    pub fn matches(m: ModeMask, mode: Mode) bool {
+        return switch (mode) {
+            .single => m.single,
+            .dialog => m.dialog,
+            .auto => m.auto,
+            .chat => m.chat,
+        };
+    }
+};
+
+/// One entry in `Config.providers[]`. Carries a `Provider` config
+/// + metadata about which modes the entry serves + whether
+/// `Alt+M` cycles to it.
+pub const ProviderEntry = struct {
+    /// Human-readable label — surfaced in the statusbar's hint
+    /// row and the `Alt+M` cycle indicator. Empty = fall back to
+    /// transport-derived label (HTTP shows model id; subprocess
+    /// shows argv[0]).
+    name: []const u8 = "",
+    /// Transport configuration (HTTP or subprocess).
+    config: Provider,
+    /// Which dispatch modes this entry serves. Worker dispatch
+    /// picks the first entry whose `for_modes.matches(mode)` is
+    /// true, falling back to `Config.provider` if no entry
+    /// matches.
+    for_modes: ModeMask = .all,
+    /// Whether `Alt+M` cycles to this entry. Set `false` for
+    /// "pinned" entries (e.g. a haiku always for one-shots,
+    /// never cycled to in dialog mode).
+    cycleable: bool = true,
+    /// Per-entry history-turns override. `null` = use
+    /// `Config.history_turns_max`. Useful for small-context
+    /// models — set a tighter cap on the entry that uses them.
+    history_turns_max: ?usize = null,
+};
+
 /// OpenAI-compatible chat-completions transport. Holds the
-/// endpoint-discovery knobs that used to live directly on `Config`.
+/// endpoint-discovery knobs that used to live directly on `Config`,
+/// plus the model id (subprocess providers carry the model in
+/// argv; HTTP carries it in the request body).
 pub const HttpProvider = struct {
+    /// Model identifier sent in the request body's `"model"` field.
+    /// Required — empty is treated as the legacy `llama3:8b` default
+    /// only when `Config.provider` is the implicit `.{ .http = .{} }`.
+    model: []const u8 = "llama3:8b",
     /// Hardcoded API base URL — wins over both env vars when
-    /// non-empty. Use this when you want a stable endpoint baked
-    /// into your config and don't want to depend on shell env
-    /// state (atty inherits env at fork time, so a misconfigured
-    /// `.bashrc` can leave the module inert even though the
-    /// endpoint is reachable). The string is used verbatim except
-    /// for the trailing-slash normalisation `doRequest` applies
-    /// before appending `/chat/completions`. Empty default = "use
-    /// env vars below".
+    /// non-empty.
     api_base: []const u8 = "",
     /// Env-var name holding the API base URL. Read at attach,
     /// consulted only when `api_base` is empty.
@@ -105,8 +187,7 @@ pub const HttpProvider = struct {
     /// empty.
     api_base_fallback_env: []const u8 = "OLLAMA_HOST",
     /// Env-var holding the API key. Optional — when unset we send
-    /// no `Authorization` header (local servers usually accept
-    /// unauthenticated requests).
+    /// no `Authorization` header.
     api_key_env: []const u8 = "LLM_API_KEY",
 };
 
@@ -213,41 +294,6 @@ pub const SubprocessProvider = struct {
     };
 };
 
-/// One entry in `Config.models`. `name` is required (it's what the
-/// HTTP request body sends as `"model":"…"`); everything else is
-/// optional with `null` = "fall back to the matching `Config.*`
-/// default." This struct is intentionally extensible — adding a new
-/// optional field stays backwards-compatible with existing user
-/// configs.
-///
-/// Usage in a user config:
-/// ```
-/// const qwen_coder: atty.modules.llm.Model = .{
-///     .name = "qwen3-coder:30b",
-///     // history_turns_max omitted → ring default
-/// };
-/// const gemma: atty.modules.llm.Model = .{
-///     .name = "gemma3:4b",
-///     .history_turns_max = 3,   // small context window
-/// };
-/// // …
-/// .models = &.{ qwen_coder, gemma }
-/// ```
-pub const Model = struct {
-    /// Model identifier sent in the request body's `"model"` field.
-    /// Required; the comptime check in `configure()` errors on empty
-    /// names. Examples: `"llama3:8b"`, `"qwen3-coder:30b"`,
-    /// `"gpt-5-mini"`.
-    name: []const u8,
-    /// Trim the conversation to at most this many turns when
-    /// sending to THIS model. Useful for small-context models that
-    /// can't fit the default ring (`Config.history_turns_max`).
-    /// `null` means use the ring's full population. Hard-capped at
-    /// the ring capacity — values larger than
-    /// `Config.history_turns_max` have no effect.
-    history_turns_max: ?usize = null,
-};
-
 /// Compile-time configuration for the LLM module. Every field has a
 /// reasonable default; override only what your endpoint / model /
 /// shell needs.
@@ -258,48 +304,32 @@ pub const Config = struct {
     /// so a missed dispatch is a silent no-op, not an executed
     /// command.
     prefix: []const u8 = "#: ",
-    /// LLM model identifier passed in the request body.
-    ///
-    /// **Selection precedence** (matches `triggerSinglePrompt`):
-    /// 1. If `cfg.models.len > 0` → use `cfg.models[idx]` where
-    ///    `idx = current_model_idx` when in range, else `0`
-    ///    (defensive fallback — `Alt+M` wraps so out-of-range
-    ///    shouldn't happen; if it does we use the first entry,
-    ///    NOT `cfg.model`).
-    /// 2. If `cfg.models` is empty → use this `cfg.model`.
-    ///
-    /// So this field is the SINGLE-MODEL fallback only — once
-    /// `cfg.models` is set, this value is unreachable. Kept for
-    /// backward compat with configs that pre-date `models[]`.
-    model: []const u8 = "llama3:8b",
-    /// Configured model list — `Alt+M` cycles through this with
-    /// wrap-around. First entry is the default at startup. Empty
-    /// (default) → use the single `model` field above.
-    ///
-    /// Each entry is a `Model` struct so per-model knobs (context
-    /// window, future temperature/top_p, …) travel with the name
-    /// as one unit. Bare strings won't compile; declare each model
-    /// as `.{ .name = "..." }` at minimum.
-    ///
-    /// Example:
-    /// ```
-    /// .models = &.{
-    ///     .{ .name = "qwen3-coder:30b" },
-    ///     .{ .name = "gemma3:4b", .history_turns_max = 3 },
-    ///     .{ .name = "llama3:70b" },
-    /// },
-    /// ```
-    models: []const Model = &.{},
     /// Shell name for the user-prompt template. `null` → derive
     /// from `$SHELL` basename at attach time.
     shell: ?[]const u8 = null,
-    /// Transport: HTTP (OpenAI-compatible endpoint) or subprocess
-    /// (CLI tool like `claude -p`). Default is HTTP with the
-    /// existing env-driven endpoint discovery (`LLM_API_BASE` →
-    /// `OLLAMA_HOST` → empty/inert). See `Provider` /
-    /// `HttpProvider` / `SubprocessProvider` for the per-variant
-    /// knobs.
+    /// Single-provider shorthand. Used when `providers` is empty.
+    /// HTTP variant's `.model` field carries the model id;
+    /// subprocess variants bake the model into argv.
+    ///
+    /// To dispatch different providers per mode (single → haiku,
+    /// dialog → sonnet) populate `providers` instead — when
+    /// non-empty it takes precedence over this field.
     provider: Provider = .{ .http = .{} },
+    /// Per-mode provider array. When non-empty, takes precedence
+    /// over `Config.provider`. First entry whose
+    /// `for_modes.matches(current_mode)` is true serves the
+    /// request. `Alt+M` cycles through entries where `cycleable`
+    /// is true AND the entry's `for_modes` covers the current
+    /// mode. See `ProviderEntry`.
+    ///
+    /// Example — haiku for one-shots, sonnet for dialog:
+    /// ```zig
+    /// .providers = &.{
+    ///     .{ .name = "haiku",  .config = providers.claude_haiku_4_5,  .for_modes = .single_only },
+    ///     .{ .name = "sonnet", .config = providers.claude_sonnet_4_6, .for_modes = .dialog_only },
+    /// },
+    /// ```
+    providers: []const ProviderEntry = &.{},
     /// When true, ask the model for a one-line explanation followed
     /// by the command in a fenced block. atty surfaces the
     /// explanation in the statusbar's hint row while the command

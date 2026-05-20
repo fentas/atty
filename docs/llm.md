@@ -312,10 +312,9 @@ Override any of these by listing a different `bytes` for the same `action` in `K
 | Field                         | Default                                  | What it does                                                                          |
 |-------------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
 | `prefix`                      | `"#: "`                                  | Trigger. `#` is a shell comment so missed dispatches are silent no-ops, not executed. |
-| `model`                       | `"llama3:8b"`                            | Single-model fallback. Used when `models` is empty.                                   |
-| `models`                      | `&.{}`                                   | List of `Model` structs (see below). `Alt+M` cycles through them.                     |
 | `shell`                       | `null`                                   | Shell name for the user-prompt template. `null` → basename of `$SHELL`.               |
-| `provider`                    | `.{ .http = .{} }`                       | Transport: `.http` (OpenAI-compatible) or `.subprocess` (CLI tool). See below.        |
+| `provider`                    | `.{ .http = .{} }`                       | Single-provider shorthand. Used when `providers` is empty. See below for variants.    |
+| `providers`                   | `&.{}`                                   | Per-mode provider array. When non-empty, takes precedence over `provider`. First entry whose `for_modes.matches(current_mode)` wins. `Alt+M` cycles among `cycleable` entries that match the current mode. See "Per-mode dispatch" below. |
 | `with_explanation`            | `true`                                   | Ask model for an explanation + fenced command; show explanation in the hint row.      |
 | `system_prompt`               | `""`                                     | Override the canned system prompt. Empty → canned prompt for the `with_explanation` mode. |
 | `dialog_system_prompt`        | `""`                                     | Override the dialog-mode JSON-envelope system prompt. Empty → canned.                  |
@@ -327,14 +326,43 @@ Override any of these by listing a different `bytes` for the same `action` in `K
 
 ### Provider — HTTP variant fields
 
-Available as `Config.provider.http.<field>`:
+Available as `Config.provider.http.<field>` (or on each
+`ProviderEntry.config.http.<field>` when using the array form):
 
 | Field                         | Default            | What it does                                                                          |
 |-------------------------------|--------------------|---------------------------------------------------------------------------------------|
+| `model`                       | `"llama3:8b"`      | Model identifier sent in the request body's `"model"` field.                          |
 | `api_base`                    | `""`               | Static endpoint URL. Wins over env vars when non-empty.                               |
 | `api_base_env`                | `"LLM_API_BASE"`   | Env-var name for the primary endpoint.                                                |
 | `api_base_fallback_env`       | `"OLLAMA_HOST"`    | Env-var name for the Ollama-native fallback (`/v1` auto-suffixed).                    |
 | `api_key_env`                 | `"LLM_API_KEY"`    | Env-var name for the optional `Authorization: Bearer …` token.                        |
+
+### Per-mode dispatch (`providers[]`)
+
+When `Config.providers` is non-empty it replaces the single-
+shorthand `Config.provider`. Each entry binds a `Provider` to a
+set of dispatch modes (`single` / `dialog` / `auto` / `chat`)
+and a cycle flag. Worker dispatch picks the first entry whose
+`for_modes.matches(current_mode)` is true.
+
+**Motivating case** — haiku for one-shots, sonnet for dialog:
+
+```zig
+.providers = &.{
+    .{ .name = "haiku",  .config = atty.modules.llm.providers.claude_haiku_4_5,  .for_modes = .single_only },
+    .{ .name = "sonnet", .config = atty.modules.llm.providers.claude_sonnet_4_6, .for_modes = .dialog_only },
+},
+```
+
+`ProviderEntry` fields:
+
+| Field                | Default    | What it does                                                                                                  |
+|----------------------|------------|---------------------------------------------------------------------------------------------------------------|
+| `name`               | `""`       | Statusbar label + `Alt+M` cycle indicator. Falls back to model id (HTTP) or argv[0] (subprocess) when empty.   |
+| `config`             | (required) | Transport config — same `Provider` union as `Config.provider`.                                                 |
+| `for_modes`          | `.all`     | Bitset over dispatch modes. Constants: `.all`, `.single_only`, `.dialog_only`, `.dialog_and_auto`.             |
+| `cycleable`          | `true`     | Whether `Alt+M` cycles to this entry. Set `false` for "pinned" entries.                                       |
+| `history_turns_max`  | `null`     | Per-entry override on conversation history depth. `null` = use `Config.history_turns_max`.                    |
 
 ### Provider — subprocess variant fields
 

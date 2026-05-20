@@ -45,7 +45,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
         const Turn = dialog.Turn;
         const DialogResponse = dialog.Response(cfg.max_response_bytes);
-        const Model = types.Model;
 
         // Thin wrappers around `dialog.*` — pin the `DialogResponse`
         // factory + `buildRequestBody` so call sites stay short.
@@ -689,23 +688,31 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 .llm_exec_auto => return toggleDialogMode(rt, ctx, .auto),
                 .llm_exec_cycle_model => {
                     if (!rt.ai_mode_active) return false;
-                    if (cfg.models.len == 0) {
-                        // Single-model config — nothing to cycle.
-                        // Honest feedback so users know why
-                        // Alt+M didn't do anything.
-                        latchHint(rt, "single-model config — set `models = &.{ ... }` to cycle");
+                    if (cfg.providers.len == 0) {
+                        latchHint(rt, "single-provider config — set `providers = &.{ ... }` to cycle");
                         return true;
                     }
-                    rt.current_model_idx = (rt.current_model_idx + 1) % cfg.models.len;
-                    // Latch a one-line hint with the new pick so
-                    // the user sees confirmation. Statusbar AI
-                    // hint will also reflect the new model on the
-                    // next tick (statusText appends the current
-                    // pick when models.len > 0).
-                    const new_model = cfg.models[rt.current_model_idx].name;
-                    var msg_buf: [128]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&msg_buf, "model: {s}", .{new_model}) catch new_model;
-                    latchHint(rt, msg);
+                    // Cycle forward, skipping non-cycleable entries
+                    // and entries whose `for_modes` doesn't cover
+                    // the user's current dispatch mode. If no
+                    // entry can serve as a cycle target, latch a
+                    // hint and stop.
+                    const mode = currentDispatchMode(rt);
+                    var next = rt.current_provider_idx;
+                    var tried: usize = 0;
+                    while (tried < cfg.providers.len) : (tried += 1) {
+                        next = (next + 1) % cfg.providers.len;
+                        const entry = cfg.providers[next];
+                        if (entry.cycleable and entry.for_modes.matches(mode)) {
+                            rt.current_provider_idx = next;
+                            const label: []const u8 = if (entry.name.len > 0) entry.name else providerLabel(entry.config);
+                            var msg_buf: [128]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&msg_buf, "provider: {s} ({d}/{d})", .{ label, next + 1, cfg.providers.len }) catch label;
+                            latchHint(rt, msg);
+                            return true;
+                        }
+                    }
+                    latchHint(rt, "no other providers cycle to this mode");
                     return true;
                 },
                 .llm_exec_toggle_help => {
@@ -726,28 +733,32 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // after-scope hazard). One outer buffer, two
                     // bufPrint calls into disjoint subslices.
                     var buf: [256]u8 = undefined;
-                    const current: []const u8 = if (cfg.models.len > 0)
-                        cfg.models[rt.current_model_idx].name
+                    const mode = currentDispatchMode(rt);
+                    const resolved = worker_mod_ns.resolveProvider(
+                        if (mode == .single) worker_mod_ns.Module(cfg).RequestKind.single else worker_mod_ns.Module(cfg).RequestKind.dialog,
+                        cfg.providers,
+                        cfg.provider,
+                        rt.current_provider_idx,
+                    );
+                    const current: []const u8 = if (resolved.name.len > 0)
+                        resolved.name
                     else
-                        cfg.model;
+                        providerLabel(resolved.provider);
                     // Cycle info lives in the first 32 bytes of buf.
-                    const cycle_info: []const u8 = if (cfg.models.len > 1)
-                        std.fmt.bufPrint(buf[0..32], " ({d}/{d})", .{ rt.current_model_idx + 1, cfg.models.len }) catch ""
+                    const cycle_info: []const u8 = if (cfg.providers.len > 1)
+                        std.fmt.bufPrint(buf[0..32], " ({d}/{d})", .{ rt.current_provider_idx + 1, cfg.providers.len }) catch ""
                     else
                         "";
                     const endpoint: []const u8 = if (rt.inert)
                         "(inert — no endpoint)"
-                    else switch (comptime cfg.provider) {
-                        .http => rt.api_base,
-                        .subprocess => |sub| if (sub.argv.len > 0) sub.argv[0] else "(subprocess)",
-                    };
+                    else
+                        providerLabel(resolved.provider);
                     // Message goes into the remaining bytes. cycle_info
                     // is referenced before its underlying storage is
                     // overwritten — bufPrint copies the formatted
                     // string verbatim, so this read-then-write order
                     // is safe.
-                    const msg = std.fmt.bufPrint(buf[32..], "model: {s}{s} · endpoint: {s} · Esc cancel · Ctrl+Shift+I incognito", .{ current, cycle_info, endpoint }) catch {
-                        // Truncated; render at least the model name.
+                    const msg = std.fmt.bufPrint(buf[32..], "provider: {s}{s} · endpoint: {s} · Esc cancel · Ctrl+Shift+I incognito", .{ current, cycle_info, endpoint }) catch {
                         latchHint(rt, current);
                         return true;
                     };
@@ -973,15 +984,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 return .forward;
             }
 
-            // Resolve the model INDEX to stage. Worker reads
-            // `cfg.models[idx]` directly when idx is in-range, else
-            // falls back to `cfg.model`. Out-of-range
-            // `current_model_idx` (shouldn't happen — Alt+M wraps —
-            // but defensive) clamps to 0.
-            const idx_to_send: usize = if (cfg.models.len == 0)
-                std.math.maxInt(usize) // sentinel: "no list, use cfg.model"
-            else if (rt.current_model_idx < cfg.models.len)
-                rt.current_model_idx
+            // Stage the provider INDEX. Worker resolves the provider
+            // via `resolveProvider(req_kind, cfg.providers, cfg.provider, idx)`.
+            // Empty `cfg.providers` → sentinel; otherwise pass the
+            // current index (defensive clamp on out-of-range —
+            // shouldn't happen because Alt+M wraps).
+            const idx_to_send: usize = if (cfg.providers.len == 0)
+                std.math.maxInt(usize)
+            else if (rt.current_provider_idx < cfg.providers.len)
+                rt.current_provider_idx
             else
                 0;
 
@@ -992,7 +1003,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             defer rt.shared.mutex.unlock(ctx.io);
             @memcpy(rt.shared.req_buf[0..body.len], body);
             rt.shared.req_len = body.len;
-            rt.shared.model_idx = idx_to_send;
+            rt.shared.current_provider_idx = idx_to_send;
             rt.shared.req_kind = .single;
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
@@ -1697,6 +1708,28 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// slot under the assumed-held `rt.shared.mutex`. Caller
         /// must already hold the lock; this just does the buffer
         /// copy + length write.
+        /// Map the user's CURRENT runtime state to a dispatch
+        /// `Mode`. Used by Alt+M cycle + the help overlay to pick
+        /// the right provider entry from `cfg.providers[]`.
+        fn currentDispatchMode(rt: *Runtime) types.Mode {
+            if (rt.chat_inline_open or rt.chat_overlay_open) return .chat;
+            if (rt.auto_mode_active or rt.dialog_persistent_mode == .auto) return .auto;
+            if (rt.dialog_persistent_mode == .dialog or rt.dialog_state != .idle) return .dialog;
+            return .single;
+        }
+
+        /// Best-effort human-readable label for a `Provider` value
+        /// — used when a `ProviderEntry.name` isn't set. HTTP
+        /// uses the model id; subprocess uses argv[0]; empty fallback
+        /// is "(unconfigured)" so the statusbar always has something
+        /// to render.
+        fn providerLabel(p: types.Provider) []const u8 {
+            return switch (p) {
+                .http => |h| if (h.model.len > 0) h.model else "(http)",
+                .subprocess => |s| if (s.argv.len > 0) s.argv[0] else "(subprocess)",
+            };
+        }
+
         fn publishSessionId(rt: *Runtime) void {
             if (rt.session_id.len == 0) {
                 rt.shared.request_session_id_len = 0;
@@ -1919,23 +1952,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         }
 
         fn fireDialogRequest(rt: *Runtime, ctx: *m.Context) !void {
-            // Selected model (entry in `cfg.models`, else the
-            // single-fallback `cfg.model`). `current_model_idx >=
-            // cfg.models.len` is defensive — Alt+M wraps so it
-            // shouldn't happen, but if it does fall back to the
-            // legacy single name rather than indexing OOB.
-            const sel: ?Model = if (rt.current_model_idx < cfg.models.len)
-                cfg.models[rt.current_model_idx]
-            else
-                null;
-            const model_for_request: []const u8 = if (sel) |s| s.name else cfg.model;
+            // Resolve which provider will serve this dialog turn so
+            // we can pull the model name (HTTP) AND the per-entry
+            // history-turns override into the request body.
+            // Subprocess providers get an empty model_for_request
+            // (the model is baked into argv); the worker ignores
+            // it for the subprocess arm.
+            const resolved_for_body = worker_mod_ns.resolveProvider(
+                worker_mod_ns.Module(cfg).RequestKind.dialog,
+                cfg.providers,
+                cfg.provider,
+                rt.current_provider_idx,
+            );
+            const model_for_request: []const u8 = switch (resolved_for_body.provider) {
+                .http => |h| h.model,
+                .subprocess => "",
+            };
 
-            // Per-model context trim. When the selected `Model` sets
-            // `history_turns_max`, send only the LAST N turns —
-            // useful for small-context models that can't fit the
-            // full ring. No-op when null or no models[] configured.
+            // Per-entry history trim. If the active providers[]
+            // entry sets `history_turns_max`, send only the last N
+            // turns. Look up the override on the resolved entry —
+            // not on `cfg.provider` because the resolved provider
+            // may have come from `providers[]`.
+            const entry_turns_cap: ?usize = blk: {
+                if (cfg.providers.len == 0) break :blk null;
+                if (rt.current_provider_idx >= cfg.providers.len) break :blk null;
+                break :blk cfg.providers[rt.current_provider_idx].history_turns_max;
+            };
             const turn_slice: []const dialog.Turn = blk: {
-                const cap = (sel orelse break :blk rt.turns[0..rt.turns_len]).history_turns_max orelse break :blk rt.turns[0..rt.turns_len];
+                const cap = entry_turns_cap orelse break :blk rt.turns[0..rt.turns_len];
                 if (rt.turns_len <= cap) break :blk rt.turns[0..rt.turns_len];
                 break :blk rt.turns[rt.turns_len - cap .. rt.turns_len];
             };
@@ -1984,10 +2029,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             };
             defer if (built_body) |b| rt.allocator.free(b);
 
-            const idx_to_send: usize = if (cfg.models.len == 0)
+            const idx_to_send: usize = if (cfg.providers.len == 0)
                 std.math.maxInt(usize)
-            else if (rt.current_model_idx < cfg.models.len)
-                rt.current_model_idx
+            else if (rt.current_provider_idx < cfg.providers.len)
+                rt.current_provider_idx
             else
                 0;
 
@@ -2004,7 +2049,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             } else {
                 rt.shared.body_len = 0;
             }
-            rt.shared.model_idx = idx_to_send;
+            rt.shared.current_provider_idx = idx_to_send;
             rt.shared.req_kind = .dialog;
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
