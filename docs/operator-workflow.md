@@ -330,7 +330,7 @@ via GitHub Actions cache poisoning).
 |---|---|
 | Initial install | `npm install <flagged>` — V2-F live OSV.dev lookup + `flagged_npm.txt`. Caught at the prompt before bash runs the postinstall. |
 | Dead-man switch | `rm -rf ~/`, `rm -rf $HOME`, `rm -rf ${HOME}`, `rm -rf /home/<user>` — all four canonical forms ship as atoms. |
-| Credential harvest | `~/.aws/credentials`, `~/.npmrc`, `~/.ssh/id_{rsa,ed25519,ecdsa}`, `/proc/<pid>/mem` — atoms cover both file-read shapes and direct memory scraping. |
+| Credential harvest | `~/.aws/credentials`, `~/.npmrc`, `~/.ssh/id_{rsa,ed25519,ecdsa}`, `/proc/self/mem` — atoms cover file-read shapes and the self-scrape memory variant. Cross-process `/proc/<pid>/mem` reads aren't an atom (Aho-Corasick has no wildcards); eBPF V2-G's `openat()` tracepoint catches them at the kernel layer. |
 | systemd persistence | `systemctl --user enable`, `loginctl enable-linger` — atoms catch the daemon-install commands. |
 | V2-J auto-Block (opt-in) | With `[accumulator] block_threshold = 0.95`, multi-hit Shai-Hulud command chains (dead-man + credential read + persistence in one line) escalate from Warn to outright REFUSED. |
 
