@@ -1,16 +1,16 @@
 <header class="topnav">
   <div class="topnav-inner">
-    <label class="hamburger" for="sidebar-toggle" aria-label="Toggle sidebar">
+    <label class="hamburger" for="sidebar-toggle" aria-label="Toggle sidebar navigation" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
       <span></span><span></span><span></span>
     </label>
     <a class="logo" href="{{ '/' | relative_url }}">
       <span class="prompt">$</span>&nbsp;atty<span class="logo-cursor"></span>
     </a>
     <nav class="topnav-links">
-      <a href="{{ '/getting-started/' | relative_url }}"{% if page.url contains '/getting-started/' or page.url contains '/faq/' %} class="active"{% endif %}>Guide</a>
-      <a href="{{ '/providers/' | relative_url }}"{% if page.url contains '/providers/' or page.url contains '/llm/' %} class="active"{% endif %}>Modules</a>
-      <a href="{{ '/architecture/' | relative_url }}"{% if page.url contains '/architecture/' or page.url contains '/modules/' or page.url contains '/operator-workflow/' %} class="active"{% endif %}>Advanced</a>
-      <a href="{{ '/faq/' | relative_url }}">FAQ</a>
+      <a href="{{ '/getting-started/' | relative_url }}"{% if page.url == '/getting-started/' %} class="active"{% endif %}>Guide</a>
+      <a href="{{ '/providers/' | relative_url }}"{% if page.url == '/providers/' or page.url == '/llm/' %} class="active"{% endif %}>Modules</a>
+      <a href="{{ '/architecture/' | relative_url }}"{% if page.url == '/architecture/' or page.url == '/modules/' or page.url == '/operator-workflow/' %} class="active"{% endif %}>Advanced</a>
+      <a href="{{ '/faq/' | relative_url }}"{% if page.url == '/faq/' %} class="active"{% endif %}>FAQ</a>
     </nav>
     <div class="topnav-right">
       <a class="topnav-icon" href="https://github.com/fentas/atty" rel="noopener" aria-label="GitHub repository" title="GitHub">

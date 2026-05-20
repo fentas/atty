@@ -157,7 +157,9 @@ a:hover { border-color: currentColor; }
   padding: 6px 4px;
   border-radius: 4px;
 }
-.hamburger:hover { background: var(--bg-soft); }
+.hamburger:hover,
+.hamburger:focus-visible { background: var(--bg-soft); outline: none; }
+.hamburger:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
 .hamburger span {
   display: block;
   height: 2px;
@@ -165,7 +167,11 @@ a:hover { border-color: currentColor; }
   border-radius: 1px;
   transition: background 120ms;
 }
-.hamburger:hover span { background: var(--accent); }
+.hamburger:hover span,
+.hamburger:focus-visible span { background: var(--accent); }
+
+/* Hamburger is meaningless on the home page (no sidebar to toggle). */
+body.home .hamburger { display: none !important; }
 
 .sidebar-toggle { display: none; }
 .sidebar-scrim { display: none; }
@@ -787,12 +793,10 @@ hr { border: 0; border-top: 1px dashed var(--border); margin: 2.5em 0; }
     z-index: 25;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
   }
-  .sidebar-toggle:checked ~ .doc-shell .sidebar,
-  .sidebar-toggle:checked + .sidebar-scrim + .doc-shell .sidebar {
+  .sidebar-toggle:checked ~ .doc-shell .sidebar {
     transform: translateX(0);
   }
-  .sidebar-toggle:checked ~ .sidebar-scrim,
-  .sidebar-toggle:checked + .sidebar-scrim {
+  .sidebar-toggle:checked ~ .sidebar-scrim {
     display: block;
     position: fixed;
     inset: var(--topnav-h) 0 0 0;
