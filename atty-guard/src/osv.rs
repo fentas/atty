@@ -84,10 +84,9 @@ pub enum LookupError {
     #[allow(dead_code)]
     FeatureNotBuilt,
     NetworkError(String),
-    /// Reserved for future JSON-shape mismatches the OSV API might
-    /// throw at us. Today the stub treats every non-200 as
-    /// NetworkError; the variant exists so a stricter
-    /// schema-validating path can land without breaking callers.
+    /// Constructed by the `osv-live` impl below on JSON deserialise
+    /// failure; dead on the no-feature stub path that returns
+    /// `FeatureNotBuilt` before any parsing happens.
     #[allow(dead_code)]
     ParseError(String),
 }
