@@ -144,3 +144,4 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 - Module API question → `docs/modules.md`
 - Config option question → `src/defaults.zig` (canonical defaults) + `src/config.def.zig` (commented examples)
 - Module-specific question → `src/modules/<name>.zig` (each file is self-contained with its own tests)
+- "How do I install the full security stack?" → `docs/operator-workflow.md` (atty-guard + atom corpus + eBPF + doctor)

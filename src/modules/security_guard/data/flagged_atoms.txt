@@ -100,15 +100,21 @@ crontab -e <<
 @reboot /var/tmp/
 
 # ---------------------------------------------------------------
-# CVE-2026-31431 / copy.fail. AF_ALG socket creation isn't
-# observable from the shell layer (kernel-side eBPF tracepoint
-# does that — #117). But the typed line that BUILDS the PoC is
-# observable.
+# CVE-2026-31431 / copy.fail. AF_ALG socket creation at the kernel
+# layer is the V2-G eBPF tracepoint's job (PR #117) — that's the
+# primary detector. These atoms are a backstop for the rare case
+# where the user runs a published PoC ONE-LINER at the shell that
+# names the AF_ALG family / algif_aead module directly. Most legit
+# AF_ALG use is library-internal (dmcrypt, fscrypt, libgcrypt) —
+# rarely typed verbatim at a shell. `splice(` is NOT included even
+# though splice() is one half of the exploit — splice() has too
+# many legitimate uses (zero-copy file/socket I/O) to flag on its
+# own. The kernel-side eBPF tracepoint correlates AF_ALG + splice
+# at the syscall layer where the FP rate is near zero.
 
 socket.AF_ALG
 af_alg_set
 algif_aead
-splice(
 
 # ---------------------------------------------------------------
 # Common npm postinstall persistence + Shai-Hulud worm artefacts.
@@ -121,3 +127,42 @@ postinstall.js
 NPM_TOKEN
 shai-hulud
 bundle.js?shai
+
+# ---------------------------------------------------------------
+# Shai-Hulud dead-man switch + credential harvest. The Sep-2025 →
+# May-2026 wave installs a systemd-user daemon that polls GitHub
+# every 60s; if it sees the stolen tokens get revoked it fires
+# `rm -rf ~/` to scorch the user's home. We catch the destruction
+# command shape — the most damaging step — verbatim, so a banner
+# fires before bash splits the line. `/proc/self/mem` catches the
+# self-scrape variant of the credential-extraction step. The
+# `/proc/<pid>/mem` cross-process variant is intentionally NOT an
+# atom — Aho-Corasick treats `*` as a literal character, so a
+# glob-shaped pattern wouldn't match `/proc/1234/mem` anyway, and
+# enumerating every plausible PID would bloat the automaton. eBPF
+# (V2-G) tracks `openat()` on `/proc/<pid>/mem` at the kernel
+# layer, which is the correct detection point for that variant.
+
+rm -rf ~/
+rm -rf $HOME
+rm -rf ${HOME}
+rm -rf /home/
+rm -rf "$HOME"
+/.aws/credentials
+/.npmrc
+/.ssh/id_rsa
+/.ssh/id_ed25519
+/.ssh/id_ecdsa
+/proc/self/mem
+
+# ---------------------------------------------------------------
+# Background-daemon persistence — Shai-Hulud's 60s-poller is a
+# systemd-user service. The user-typed shape that installs it is
+# usually written by an install script but occasionally shows up
+# at the shell. Catches the daemon-install command.
+
+systemctl --user enable
+systemctl --user daemon-reload
+loginctl enable-linger
+# crontab-based persistence already covered above (`crontab -e <<`,
+# `@reboot`); duplicate atoms would just bloat the AC automaton.
