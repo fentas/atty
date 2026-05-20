@@ -194,7 +194,7 @@ test "claudeCode factory returns a sane subprocess shape" {
             // Output extraction picks `result`.
             try testing.expectEqual(types.SubprocessProvider.PromptVia.final_arg, sub.prompt_via);
             switch (sub.output) {
-                .raw => unreachable,
+                .raw, .json_stream => unreachable,
                 .json_field => |fname| try testing.expectEqualStrings("result", fname),
             }
         },
@@ -259,7 +259,7 @@ test "simonwLlm factory pipes via stdin with raw output" {
             try testing.expectEqual(types.SubprocessProvider.PromptVia.stdin, sub.prompt_via);
             switch (sub.output) {
                 .raw => {},
-                .json_field => unreachable,
+                .json_field, .json_stream => unreachable,
             }
         },
     }
@@ -375,6 +375,112 @@ test "subprocess timeout = 0 disables watchdog (echo still works)" {
     defer testing.allocator.free(stdout);
     try testing.expectEqual(@as(usize, 0), err_len);
     try testing.expect(stdout.len > 0);
+}
+
+test "extractJsonStreamResult: skips system + assistant events, takes result" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"sess-1"}
+        \\{"type":"assistant","message":{"content":[{"type":"text","text":"du "}]}}
+        \\{"type":"result","subtype":"success","result":"du -sh * | sort -h"}
+    ;
+    var out: [128]u8 = undefined;
+    const n = M.extractJsonStreamResult(body, "result", &out);
+    try testing.expectEqualStrings("du -sh * | sort -h", out[0..n]);
+}
+
+test "extractJsonStreamResult: missing result event returns 0" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+    const body =
+        \\{"type":"system","subtype":"init"}
+        \\{"type":"assistant","message":{"content":[]}}
+    ;
+    var out: [64]u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), M.extractJsonStreamResult(body, "result", &out));
+}
+
+test "extractJsonStreamResult: skips garbage lines + reaches result" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+    const body =
+        \\not json at all
+        \\{"partial":true}
+        \\{"type":"result","result":"ok"}
+    ;
+    var out: [16]u8 = undefined;
+    const n = M.extractJsonStreamResult(body, "result", &out);
+    try testing.expectEqualStrings("ok", out[0..n]);
+}
+
+test "stream-json: doSubprocessRequest round-trips a stream-json producer" {
+    // Spawn a small shell pipeline that emits the three-line
+    // stream-json shape; doSubprocessRequest should extract the
+    // result event's field, sanitize, return the command.
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{
+            "/bin/sh",
+            "-c",
+            "printf '%s\\n' " ++
+                "'{\"type\":\"system\",\"subtype\":\"init\"}' " ++
+                "'{\"type\":\"result\",\"result\":\"ls -la\"}'",
+        },
+        .prompt_via = .stdin,
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var out: [128]u8 = undefined;
+    var exp: [128]u8 = undefined;
+    var err: [256]u8 = undefined;
+    const res = try M.doSubprocessRequest(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        "bash",
+        "",
+        "list files",
+        "",
+        &out,
+        &exp,
+        &err,
+    );
+    try testing.expect(res.cmd_len > 0);
+    try testing.expect(std.mem.indexOf(u8, out[0..res.cmd_len], "ls -la") != null);
+}
+
+test "claudeCodeStream factory uses stream-json + json_stream output" {
+    const llm = @import("../llm.zig");
+    const p = llm.providers.claudeCodeStream(.{ .model = "claude-sonnet-4-6" });
+    switch (p) {
+        .http => unreachable,
+        .subprocess => |sub| {
+            var saw_stream = false;
+            for (sub.argv) |a| if (std.mem.eql(u8, a, "stream-json")) {
+                saw_stream = true;
+            };
+            try testing.expect(saw_stream);
+            switch (sub.output) {
+                .raw, .json_field => unreachable,
+                .json_stream => |js| try testing.expectEqualStrings("result", js.field),
+            }
+        },
+    }
 }
 
 test "extractJsonStringField: unicode escapes in value round-trip" {

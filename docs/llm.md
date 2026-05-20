@@ -344,12 +344,16 @@ Available as `Config.provider.subprocess.<field>`:
 |----------------|----------------|------------------------------------------------------------------------------------------------|
 | `argv`         | (required)     | Program + leading args. atty appends the rendered prompt as the final argv slot (default).     |
 | `prompt_via`   | `.final_arg`   | `.final_arg` = append prompt to argv; `.stdin` = pipe prompt via stdin (close stdin = EOF).    |
-| `output`       | `.raw`         | `.raw` = stdout text IS the response; `.{ .json_field = "name" }` = parse stdout as JSON, take the named top-level string field. |
-| `timeout_ms`   | `30_000`       | Wall-clock timeout (currently advisory — enforcement lands in a follow-up).                    |
+| `output`       | `.raw`         | `.raw` = stdout text IS the response; `.{ .json_field = "name" }` = parse stdout as JSON, take the named top-level string field; `.{ .json_stream = .{ .field = "result" } }` = newline-delimited JSON (claude's `--output-format stream-json`), skips intermediate `system` / `assistant` events and takes the named field from the `type="result"` line. |
+| `timeout_ms`   | `30_000`       | Wall-clock timeout in ms. A watchdog thread sends SIGTERM (then SIGKILL after 200 ms grace) when the budget expires. Set to `0` to disable. |
 
 The `atty.modules.llm.providers.claudeCode(...)` factory returns a
 pre-shaped subprocess provider for `claude -p --output-format
-json`.
+json`. Use `providers.claudeCodeStream(...)` for the
+`--output-format stream-json` variant — functionally equivalent
+today (atty extracts the final result event), but the line-
+delimited shape lays the groundwork for paint-side partial-token
+streaming when wired up.
 
 ### Chat surfaces
 
