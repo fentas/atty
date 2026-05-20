@@ -45,10 +45,68 @@ const std = @import("std");
 
 const parse = @import("parse.zig");
 const dialog = @import("dialog.zig");
+const env_mod_ns = @import("env.zig");
 const types = @import("types.zig");
 const Config = types.Config;
+const Provider = types.Provider;
+const HttpProvider = types.HttpProvider;
 const SubprocessProvider = types.SubprocessProvider;
+const ProviderEntry = types.ProviderEntry;
+const Mode = types.Mode;
 const nowMs = @import("../_lib.zig").nowMs;
+
+/// Per-request provider pick. `name` is the entry's label;
+/// empty string means "no entry name was set — derive a label
+/// at the call site via `providerLabel(provider)` or similar".
+/// The fallback / single-shorthand case always returns an empty
+/// name. Lifetimes borrow from `cfg.providers` / `cfg.provider`
+/// — both are comptime-static so the slice outlives the worker.
+pub const ResolvedProvider = struct {
+    provider: Provider,
+    name: []const u8,
+};
+
+/// Pick the provider that serves `mode` from `providers[]`,
+/// preferring the entry at `current_idx` when its `for_modes`
+/// covers the mode. Falls back to the first matching entry,
+/// then to `fallback` (the single-provider shorthand) when
+/// nothing matches. Empty `providers[]` always returns
+/// `fallback`.
+pub fn resolveProviderForMode(
+    mode: Mode,
+    providers: []const ProviderEntry,
+    fallback: Provider,
+    current_idx: usize,
+) ResolvedProvider {
+    if (providers.len == 0) return .{ .provider = fallback, .name = "" };
+    if (current_idx < providers.len) {
+        const entry = providers[current_idx];
+        if (entry.for_modes.matches(mode)) {
+            return .{ .provider = entry.config, .name = entry.name };
+        }
+    }
+    for (providers) |entry| {
+        if (entry.for_modes.matches(mode)) {
+            return .{ .provider = entry.config, .name = entry.name };
+        }
+    }
+    return .{ .provider = fallback, .name = "" };
+}
+
+/// Compatibility wrapper — old `resolveProvider(req_kind, …)`
+/// call sites that don't know the precise dispatch mode collapse
+/// the request kind's `.dialog` into a generic dialog mode.
+/// Prefer `resolveProviderForMode` when the trigger site knows
+/// whether we're in `.auto` or `.chat` specifically — those
+/// modes are reachable only through the explicit form.
+pub fn resolveProvider(
+    req_kind: anytype,
+    providers: []const ProviderEntry,
+    fallback: Provider,
+    current_idx: usize,
+) ResolvedProvider {
+    return resolveProviderForMode(Mode.fromRequestKind(req_kind), providers, fallback, current_idx);
+}
 
 pub fn Module(comptime cfg: Config) type {
     return struct {
@@ -126,23 +184,28 @@ pub fn Module(comptime cfg: Config) type {
             req_buf: [cfg.max_prompt_bytes]u8 = undefined,
             req_len: usize = 0,
             req_pending: bool = false,
-            /// Selected model INDEX for the pending request.
-            /// Stored as an index (not a copy of the string) so we
-            /// can't truncate long model names AND there's no
-            /// length-zero sentinel confusion with an empty
-            /// `cfg.models[i]` (which would be a user-config bug
-            /// anyway). Filled by request-trigger sites
-            /// (onInput / onAction) under the same mutex that sets
-            /// `req_pending`.
+            /// Selected `cfg.providers[]` INDEX for the pending
+            /// request. Filled by request-trigger sites
+            /// (onInput / onAction) under the same mutex that
+            /// sets `req_pending`. Worker resolves the slice via
+            /// `resolveProvider(req_kind, cfg.providers, cfg.provider, idx)`
+            /// at read time. `cfg.*` strings are comptime/static
+            /// so the resolved slice's backing storage lives
+            /// forever — safe to use across the worker thread
+            /// boundary without a copy.
             ///
-            /// Out-of-range sentinel: `model_idx == usize.max`
-            /// means "no models[] — fall back to cfg.model".
-            /// Worker resolves the slice from `cfg.models` at
-            /// read time. `cfg.*` strings are comptime/static so
-            /// the resolved slice's backing storage lives forever
-            /// — safe to use across the worker thread boundary
-            /// without a copy.
-            model_idx: usize = std.math.maxInt(usize),
+            /// `usize.max` is the "use cfg.provider shorthand"
+            /// sentinel — set when `cfg.providers` is empty.
+            current_provider_idx: usize = std.math.maxInt(usize),
+            /// Dispatch mode for the pending request — set by
+            /// trigger sites alongside `req_kind`. Used by the
+            /// worker to call `resolveProviderForMode` with the
+            /// precise mode (`.auto` / `.chat` instead of
+            /// collapsing to `.dialog`) so chat-only or
+            /// auto-only `ProviderEntry.for_modes` masks are
+            /// reachable. Default `.single` is a safe identity
+            /// for the legacy onInput Enter path.
+            dispatch_mode: types.Mode = .single,
             /// Monotonic counter — bumped on every prompt the proxy
             /// hands to the worker. The worker stamps each response
             /// with the generation it was serving; the proxy drops
@@ -1167,9 +1230,13 @@ pub fn Module(comptime cfg: Config) type {
         /// Worker thread function. Owns the lock-and-wait loop:
         /// waits on `shared.cv` until either `shared.shutdown` or
         /// `shared.req_pending` is set, then dispatches based on
-        /// `shared.req_kind`. Comptime-switches on `cfg.provider`
-        /// to pick HTTP (`doRequest` / `doDialogRequest`) or
-        /// subprocess (`doSubprocessRequest` / `doSubprocessDialogRequest`).
+        /// `shared.req_kind` + `shared.dispatch_mode`. Resolves
+        /// the provider RUNTIME via `resolveProviderForMode` so
+        /// `cfg.providers[]` can hold a mix of HTTP and subprocess
+        /// entries (both transport arms ship in the binary —
+        /// ~2 KB cost accepted per #162 design). Picks HTTP
+        /// (`doRequest` / `doDialogRequest`) or subprocess
+        /// (`doSubprocessRequest` / `doSubprocessDialogRequest`).
         /// Fixture-replay (`cfg.fixture_responses` non-empty) is
         /// provider-agnostic — replays canned responses before any
         /// transport dispatch. Always signals completion via
@@ -1179,8 +1246,6 @@ pub fn Module(comptime cfg: Config) type {
             shared: *Shared,
             io: std.Io,
             gpa: std.mem.Allocator,
-            api_base: []const u8,
-            api_key: []const u8,
             shell_name: []const u8,
             context_blob: []const u8,
         ) void {
@@ -1213,7 +1278,7 @@ pub fn Module(comptime cfg: Config) type {
                 // stamp `res_kind` and `res_gen` exactly like the
                 // HTTP path so `pollShellInput`'s stale-response
                 // guard and dialog/single discriminator work
-                // identically. The `shared.model_idx` read is the
+                // identically. The `shared.current_provider_idx` read is the
                 // ONLY field intentionally skipped here (fixture
                 // responses are model-agnostic).
                 if (cfg.fixture_responses.len > 0) {
@@ -1240,14 +1305,8 @@ pub fn Module(comptime cfg: Config) type {
                     body_len = shared.body_len;
                     @memcpy(body_local[0..body_len], shared.body_buf[0..body_len]);
                 }
-                // Read the request-time model INDEX under the same
-                // lock. Trigger sites set `model_idx` to either a
-                // valid `cfg.models[]` index, or `usize.max` as the
-                // "no list, use cfg.model" sentinel. We resolve the
-                // slice AFTER releasing the lock — `cfg.models` is
-                // comptime-static, the resolved slice's storage
-                // outlives the worker thread.
-                const idx = shared.model_idx;
+                const provider_idx = shared.current_provider_idx;
+                const dispatch_mode = shared.dispatch_mode;
                 // Snapshot the session id under the same lock so the
                 // worker has a stable view while building argv.
                 var session_id_local: [256]u8 = undefined;
@@ -1257,26 +1316,25 @@ pub fn Module(comptime cfg: Config) type {
                 }
                 shared.mutex.unlock(io);
 
-                const model_for_request: []const u8 = if (idx < cfg.models.len)
-                    cfg.models[idx].name
-                else
-                    cfg.model;
+                // Resolve which provider serves THIS request. Runtime
+                // dispatch — providers[] can hold a mix of HTTP and
+                // subprocess entries, so the worker can't comptime-
+                // DCE either arm. Empty providers[] returns the
+                // single-provider shorthand from cfg.provider.
+                const resolved = resolveProviderForMode(dispatch_mode, cfg.providers, cfg.provider, provider_idx);
 
                 // Fire the request OUTSIDE the lock — it may block
-                // for many seconds. Comptime-switch on `cfg.provider`
-                // so the wrong-transport path doesn't compile (and
-                // doesn't ship as dead code).
+                // for many seconds.
                 var response_buf: [cfg.max_response_bytes]u8 = undefined;
                 var explanation_local: [512]u8 = undefined;
                 var error_local: [256]u8 = undefined;
                 var captured_session_id: [256]u8 = undefined;
                 var captured_session_id_len: usize = 0;
-                // Build the resume-flag argv slot ONCE up here so
-                // the comptime switch arms stay readable. Empty
-                // when no session is in flight; the subprocess
-                // helpers treat an empty prepend as a no-op.
+                // Resume-argv slot — only populated when the resolved
+                // provider is subprocess with `.session = .continuation`
+                // AND we have a captured id.
                 var resume_argv_storage: [2][]const u8 = undefined;
-                const resume_argv: []const []const u8 = switch (comptime cfg.provider) {
+                const resume_argv: []const []const u8 = switch (resolved.provider) {
                     .subprocess => |sub| switch (sub.session) {
                         .continuation => |c| if (session_id_len > 0) blk: {
                             resume_argv_storage[0] = c.flag;
@@ -1287,39 +1345,58 @@ pub fn Module(comptime cfg: Config) type {
                     },
                     .http => &.{},
                 };
-                const result = switch (comptime cfg.provider) {
-                    .http => if (req_kind == .single)
-                        doRequest(
-                            gpa,
-                            io,
-                            api_base,
-                            api_key,
-                            shell_name,
-                            context_blob,
-                            prompt_local[0..prompt_len],
-                            model_for_request,
-                            &response_buf,
-                            &explanation_local,
-                            &error_local,
-                        ) catch RequestResult{
+                const result = switch (resolved.provider) {
+                    .http => |http| blk: {
+                        const api_base = env_mod_ns.resolveHttpApiBase(gpa, http) catch break :blk RequestResult{
                             .cmd_len = 0,
                             .exp_len = 0,
-                            .err_len = writeStatic(&error_local, "internal error in worker"),
-                        }
-                    else
-                        doDialogRequest(
-                            gpa,
-                            io,
-                            api_base,
-                            api_key,
-                            body_local[0..body_len],
-                            &response_buf,
-                            &error_local,
-                        ) catch RequestResult{
+                            .err_len = writeStatic(&error_local, "out of memory resolving api_base"),
+                        };
+                        defer gpa.free(api_base);
+                        if (api_base.len == 0) break :blk RequestResult{
                             .cmd_len = 0,
                             .exp_len = 0,
-                            .err_len = writeStatic(&error_local, "internal error in worker"),
-                        },
+                            .err_len = writeStatic(&error_local, "no HTTP endpoint configured for this provider"),
+                        };
+                        const api_key = env_mod_ns.resolveHttpApiKey(gpa, http) catch break :blk RequestResult{
+                            .cmd_len = 0,
+                            .exp_len = 0,
+                            .err_len = writeStatic(&error_local, "out of memory resolving api_key"),
+                        };
+                        defer gpa.free(api_key);
+                        break :blk if (req_kind == .single)
+                            doRequest(
+                                gpa,
+                                io,
+                                api_base,
+                                api_key,
+                                shell_name,
+                                context_blob,
+                                prompt_local[0..prompt_len],
+                                http.model,
+                                &response_buf,
+                                &explanation_local,
+                                &error_local,
+                            ) catch RequestResult{
+                                .cmd_len = 0,
+                                .exp_len = 0,
+                                .err_len = writeStatic(&error_local, "internal error in worker"),
+                            }
+                        else
+                            doDialogRequest(
+                                gpa,
+                                io,
+                                api_base,
+                                api_key,
+                                body_local[0..body_len],
+                                &response_buf,
+                                &error_local,
+                            ) catch RequestResult{
+                                .cmd_len = 0,
+                                .exp_len = 0,
+                                .err_len = writeStatic(&error_local, "internal error in worker"),
+                            };
+                    },
                     .subprocess => |sub| if (req_kind == .single)
                         doSubprocessRequest(
                             gpa,
@@ -1328,7 +1405,7 @@ pub fn Module(comptime cfg: Config) type {
                             shell_name,
                             context_blob,
                             prompt_local[0..prompt_len],
-                            model_for_request,
+                            "", // model: subprocess bakes it into argv
                             resume_argv,
                             &captured_session_id,
                             &captured_session_id_len,

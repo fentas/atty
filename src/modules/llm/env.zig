@@ -35,56 +35,72 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Config = types.Config;
+const HttpProvider = types.HttpProvider;
+
+/// Apply the HTTP api_base resolution priority chain
+/// (`http.api_base` → `http.api_base_env` → `http.api_base_fallback_env`
+/// with `/v1` suffix for the Ollama case) to a free-standing
+/// `HttpProvider`. Used by both the comptime-resolve-once attach
+/// path and the per-request resolution in the worker when
+/// `cfg.providers[]` carries multiple HTTP entries with different
+/// env-var names.
+pub fn resolveHttpApiBase(allocator: std.mem.Allocator, http: HttpProvider) ![]u8 {
+    if (http.api_base.len > 0) {
+        const s = http.api_base;
+        const trimmed = if (s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
+        return allocator.dupe(u8, trimmed);
+    }
+    if (envValueFree(http.api_base_env)) |s| {
+        const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
+        return allocator.dupe(u8, trimmed);
+    }
+    if (envValueFree(http.api_base_fallback_env)) |s| {
+        const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
+        if (std.mem.endsWith(u8, trimmed, "/v1")) return allocator.dupe(u8, trimmed);
+        return std.fmt.allocPrint(allocator, "{s}/v1", .{trimmed});
+    }
+    return allocator.dupe(u8, "");
+}
+
+pub fn resolveHttpApiKey(allocator: std.mem.Allocator, http: HttpProvider) ![]u8 {
+    if (envValueFree(http.api_key_env)) |s| return allocator.dupe(u8, s);
+    return allocator.dupe(u8, "");
+}
+
+/// Module-level env reader (not gated on a comptime `cfg`).
+fn envValueFree(env_name: []const u8) ?[]const u8 {
+    var name_buf: [128]u8 = undefined;
+    if (env_name.len >= name_buf.len) return null;
+    @memcpy(name_buf[0..env_name.len], env_name);
+    name_buf[env_name.len] = 0;
+    const v = getenv(@ptrCast(&name_buf)) orelse return null;
+    const s = std.mem.sliceTo(v, 0);
+    if (s.len == 0) return null;
+    return s;
+}
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
 pub fn Module(comptime cfg: Config) type {
     return struct {
+        /// Attach-time resolution of `cfg.provider`'s api_base (the
+        /// single-provider shorthand path). Returns empty for
+        /// subprocess. Used by `attach` to decide whether to skip
+        /// the worker spawn.
         pub fn resolveApiBase(allocator: std.mem.Allocator) ![]u8 {
-            // Subprocess transport — no URL to resolve. The worker
-            // dispatches purely on `cfg.provider` in this case; the
-            // returned empty slice is what `llm.zig`'s attach
-            // checks to decide whether to skip thread spawn (HTTP
-            // path) or always spawn (subprocess path).
             const http = switch (cfg.provider) {
                 .http => |h| h,
                 .subprocess => return allocator.dupe(u8, ""),
             };
-
-            // Priority order: static cfg → primary env → fallback env
-            // (with /v1 suffixing for the Ollama path). Normalize a
-            // single trailing slash on each — `doRequest` appends
-            // `/chat/completions`, so a base ending in `/` would
-            // produce `…//chat/completions`, which some
-            // proxies/routers reject or normalize inconsistently.
-            // Strip exactly one slash; we don't want to collapse
-            // intentional multi-segment paths.
-            if (http.api_base.len > 0) {
-                const s = http.api_base;
-                const trimmed = if (s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
-                return allocator.dupe(u8, trimmed);
-            }
-            if (envValue(http.api_base_env)) |s| {
-                const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
-                return allocator.dupe(u8, trimmed);
-            }
-            if (envValue(http.api_base_fallback_env)) |s| {
-                const trimmed = if (s.len > 0 and s[s.len - 1] == '/') s[0 .. s.len - 1] else s;
-                if (std.mem.endsWith(u8, trimmed, "/v1")) return allocator.dupe(u8, trimmed);
-                return std.fmt.allocPrint(allocator, "{s}/v1", .{trimmed});
-            }
-            return allocator.dupe(u8, "");
+            return resolveHttpApiBase(allocator, http);
         }
 
-        /// Resolves the API key for HTTP transport. Empty for
-        /// subprocess (CLI tools handle their own auth — `claude`
-        /// uses its login state, not a header).
         pub fn resolveApiKey(allocator: std.mem.Allocator) ![]u8 {
             const http = switch (cfg.provider) {
                 .http => |h| h,
                 .subprocess => return allocator.dupe(u8, ""),
             };
-            return resolveEnv(allocator, http.api_key_env);
+            return resolveHttpApiKey(allocator, http);
         }
 
         pub fn resolveEnv(allocator: std.mem.Allocator, env_name: []const u8) ![]u8 {
