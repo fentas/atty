@@ -202,6 +202,14 @@ pub const SubprocessProvider = struct {
         /// lives on the `type="system",subtype="init"` line in
         /// the `session_id` field.
         id_field: []const u8 = "session_id",
+        // NOTE on resume semantics: atty assumes the CLI re-applies
+        // the original system prompt + conversation history when
+        // invoked with `flag <id>`. claude does. CLIs whose
+        // `--session <id>` carries only the history but not the
+        // framing instructions would see naked user turns
+        // (`renderLatestUserTurn` strips system + assistant content
+        // on resumed turns). Verify your CLI's resume contract
+        // before enabling.
     };
 };
 

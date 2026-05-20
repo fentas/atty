@@ -998,7 +998,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
             rt.shared.res_len = 0;
-            publishSessionId(rt);
+            // Single-mode is one-shot — never resume. Each `Alt+A`
+            // gets a fresh CLI session. Otherwise unrelated
+            // single-shots would thread into the same conversation
+            // forever (no reset path exists for single mode).
+            rt.shared.request_session_id_len = 0;
             rt.shared.cv.signal(ctx.io);
             rt.in_flight = true;
 
@@ -1270,11 +1274,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
                 rt.inject_len = n;
 
-                // Capture the CLI's session id (if the worker stashed
-                // a fresh one) before we drop the lock. Subsequent
-                // requests will inject it via the configured
-                // `--resume <id>`-shaped argv slot.
-                captureSessionId(rt);
+                // Capture the CLI's session id (dialog mode only —
+                // single-mode is one-shot and intentionally
+                // discards any captured id). Subsequent dialog
+                // turns inject it via the configured `--resume
+                // <id>`-shaped argv slot.
+                if (rt.shared.res_kind == .dialog) {
+                    captureSessionId(rt);
+                } else {
+                    // Drain the slot so a future dialog request
+                    // doesn't pick up a stale single-mode id.
+                    rt.shared.response_session_id_len = 0;
+                }
 
                 // Latch the explanation (single mode only). Dialog
                 // responses never populate `explanation_buf` — the
