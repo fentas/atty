@@ -326,7 +326,7 @@ atty doctor — atty-guard sidecar
   ✓  atty-guard.service is active
   ✓  UDS socket reachable (/run/atty-guard/atty-guard.sock)
   ✓  user is in `atty` group (can connect to the daemon socket)
-  ✓  eBPF feature: compiled in — `journalctl -u atty-guard | grep -i ebpf` shows "eBPF attached" once the unit has CAP_BPF + SystemCallFilter widening.
+  ✓  eBPF feature: compiled in — `sudo journalctl -u atty-guard | grep -i ebpf` shows "eBPF attached" once the unit has `--enable-ebpf` ExecStart + CAP_BPF + SystemCallFilter widening.
 ```
 
 The eBPF line surfaces whether the running daemon binary was
