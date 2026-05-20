@@ -4,219 +4,147 @@ title: atty
 permalink: /
 ---
 
-## Why
+## A thin layer on top of your shell
+
+atty sits between your terminal and your shell. It watches what
+you type *before* the shell sees it, so you get useful things —
+ghost-text suggestions, dangerous-command guardrails, an LLM
+`#: prompt → shell command` flow, a status bar that follows you
+everywhere — without changing shells or loading a plugin system.
+
+Your shell stays your shell. atty is the layer above.
+
+[Get started in 5 minutes →](/getting-started/)
+
+## What you get
+
+- **Ghost-text suggestions** in bash, zsh — pulled from your shell
+  history or from Atuin if you have it. fish-style "press → to
+  accept."
+- **Guardrail** — `rm -rf /`, `dd if=`, `curl … | sh` shapes get a
+  one-key confirmation before they run.
+- **`#: prompt` shortcut (opt-in)** — type `#: list large files`,
+  press Enter, atty replaces the line with the actual shell command.
+  Works with Ollama, OpenAI, llama.cpp's server, anything
+  OpenAI-compatible.
+- **Status bar (opt-in)** — DECSTBM-reserved row at the bottom of
+  your terminal, with module-contributed segments + a notification
+  row for hints + errors.
+- **Security guardrails (opt-in, heavy)** — a sidecar daemon with
+  regex + ONNX classifier + optional eBPF kernel-side enforcement,
+  per-user trust state, IOC corpus from GTFOBins / Sigma. See
+  [operator-workflow](/operator-workflow/) if that's your thing.
+  Most people don't need it.
+
+## Quickstart
+
+```sh
+# Pre-built binary, default modules.
+curl -fsSL https://bin.atty.sh | sh
+```
+
+That drops atty at `~/.local/bin/atty`. Now point your terminal at
+it. For Ghostty (`~/.config/ghostty/config`):
+
+```
+command = atty bash
+```
+
+Or drop this in your `.bashrc` / `.zshrc`:
+
+```sh
+eval "$(atty init bash)"
+```
+
+Start a new terminal. Try typing the start of a command you've run
+before — the suggestion shows up as dim ghost text. Right-arrow to
+accept.
+
+For the full walkthrough — build-from-source path, terminal
+emulator tweaks, first config — see
+[Getting started](/getting-started/).
+
+## How it's different
+
+| | atty | starship | atuin | oh-my-zsh |
+|---|---|---|---|---|
+| **Layer** | between terminal and shell | inside shell (prompt only) | inside shell (history) | inside shell (plugin loader) |
+| **Affects what you type** | yes — input goes through atty first | no | no | no |
+| **Works with bash AND zsh** | yes | yes | yes | zsh only |
+| **Compose with the others?** | yes | yes | yes | yes |
+| **Plugin system** | compile-time only, no runtime loader | mostly built-in | one-process tool | runtime |
+
+You can run atty alongside starship + atuin + oh-my-zsh. It doesn't
+replace any of them.
+
+## Configuration in one screenful
+
+atty's config is a Zig file you edit, then recompile. dwm-style:
+ship a sane default template, let users override the bits they care
+about, no runtime config parsing.
+
+```zig
+const atty = @import("atty");
+
+pub const modules = .{
+    atty.modules.guardrail.configure(.{}),
+    atty.modules.atuin.configure(.{}),       // opt-in: needs atuin CLI
+    atty.modules.history.configure(.{}),     // fallback shell-native
+};
+
+pub const statusbar: atty.Statusbar = .{ .enabled = true };
+```
+
+Every subsystem is a struct with per-field defaults — your config
+only contains what you override. `git pull` doesn't fight you for
+this file (it's gitignored). New tunables added upstream flow in
+automatically without you touching anything.
+
+Full config reference is in
+[`src/config.def.zig`](https://github.com/fentas/atty/blob/master/src/config.def.zig)
+(committed template) +
+[`src/defaults.zig`](https://github.com/fentas/atty/blob/master/src/defaults.zig)
+(canonical defaults). See [Built-in modules](/providers/) for the
+per-module knob list.
+
+## Why compile-time composition?
 
 Most extensible terminals load plugins from disk: shared libraries,
 WASM blobs, scripts. That gives you flexibility but burns startup
 latency, smears the type system, and turns config bugs into 2 AM
 mysteries.
 
-**atty does the opposite.** Modules are Zig types composed at compile
-time. The dispatch loop is one `inline for` over your config tuple —
-disabled modules don't ship as dead code, they don't ship at all.
+atty's dispatch loop is one `inline for` over your config tuple.
+Disabled modules don't ship as dead code — they don't ship at all.
+Wrong module name? Compiler error. Missing field? Compiler error.
 
-```zig
-inline for (config.modules) |M| {
-    if (comptime @hasDecl(M, "onInput")) {
-        switch (try M.onInput(rt, ctx, input)) {
-            .forward => {},
-            .swallow => return .swallow,
-            .replace => |b| current = b,
-        }
-    }
-}
-```
+If you want the full design rationale + a walk through the hot
+path, see [Architecture](/architecture/).
 
-That's the entire hot path. No vtable. No `*anyopaque`. No runtime
-branching on the module list. Disable Atuin and every byte of its
-worker-thread plumbing vanishes from the binary.
+## Going further
 
-## What's in the box
+- **[Getting started](/getting-started/)** — the unhurried install
+  + first-config walkthrough.
+- **[FAQ](/faq/)** — common questions: why-recompile-to-configure,
+  does-it-slow-my-shell, can-I-disable-Atuin, what's-the-security_guard.
+- **[Built-in modules](/providers/)** — Atuin, History, Guardrail,
+  LLM, security_guard. Each module's config knobs + what each does.
+- **[Operator workflow](/operator-workflow/)** — the heavyweight
+  security install: atty-guard sidecar daemon, atom corpus, eBPF.
 
-- **PTY proxy** — low-level POSIX (no libutil), termios raw-mode guard,
-  SIGWINCH propagation.
-- **Guardrail module** — substring/prefix rules to swallow Enter on
-  `rm -rf /`, `dd if=…`, `… | sh`, etc. Confirm with a second Enter.
-- **History module** *(default)* — shell-native; reads + writes the
-  same `~/.bash_history` / `~/.zsh_history` your shell uses. No
-  daemon, no shell plugin, no external dependency.
-- **Atuin module** *(opt-in)* — async worker thread, prefix-matched
-  history lookups via the `atuin` CLI, recording on Enter,
-  detached-thread `atuin sync`. Enable in `config.zig` if you have
-  atuin installed.
-- **LLM module** *(opt-in)* — type `#: <prompt>` + Enter and atty
-  replaces your line with a shell command generated by an
-  OpenAI-compatible endpoint (Ollama, llama.cpp's server, vLLM,
-  OpenAI proper). One-sentence explanation flashes above the
-  status bar; failures surface as muted-red ⚠ notifications;
-  prompts land in history for ghost-suggest recall. See
-  [LLM module](/llm/).
-- **Statusbar** *(opt-in)* — DECSTBM-reserved rows at the bottom
-  with a status row, a notification row for hints + errors, and
-  configurable padding above. Modules contribute segments via
-  `statusText` and notifications via `provideHintText` /
-  `provideErrorText`.
-- **Keymap** — dwm-style `bindings[]` of `{ bytes, action }` pairs;
-  ships with right-arrow / End / Ctrl-F bound to `ghost_accept` so
-  fish-style suggestions can be accepted with one keypress.
-- **Module framework** — write your own. Optional hooks:
-  `onInput`, `onOutput`, `onTick`, `onLineCommit`,
-  `deleteHistoryMatch`, `provideGhostText`, `provideGhostList`,
-  `pollShellInput`, `provideHintText`, `provideErrorText`,
-  `provideTermBytes`, `statusText`, plus the `attach`/`detach`
-  lifecycle. See [Writing a module](/modules/).
+Under "Advanced" in the nav:
 
-## Quickstart  {#quickstart}
-
-### One-line install — pick your philosophy
-
-```sh
-# 🛠  Suckless way — clone source, edit config, compile.
-curl -fsSL https://get.atty.sh | sh
-
-# 📦 Pre-built binary, default modules.
-curl -fsSL https://bin.atty.sh | sh
-```
-
-| Path              | What it does                                                                            |
-|-------------------|-----------------------------------------------------------------------------------------|
-| `get.atty.sh`     | Bootstraps Zig if missing → clones to `~/.local/share/atty/src` → prompts to edit `src/config.zig` → builds → installs |
-| `bin.atty.sh`     | Detects arch → downloads release asset → sha256 verify → installs                       |
-
-Both end up at `~/.local/bin/atty` by default; pass `INSTALL_DIR=…`
-to override. The source installer also honors `ATTY_SRC=…`,
-`ATTY_NONINTERACTIVE=1`, and `REPO_URL=…` so you can fork and
-self-host.
-
-### Or via Docker
-
-```sh
-git clone https://github.com/fentas/atty
-cd atty
-./scripts/install.sh        # → ./dist/atty
-```
-
-### With Zig
-
-```sh
-mise use zig@0.16.0          # or any other way to install Zig 0.16
-zig build                    # → ./zig-out/bin/atty
-zig build test               # 33 unit tests
-zig build itest              # PTY integration test
-```
-
-### Make it your shell launcher
-
-Two paths — pick whichever matches how you already invoke shells:
-
-**Terminal-emulator side.** Ghostty (`~/.config/ghostty/config`):
-
-```
-# Ghostty starts atty, which then starts your shell.
-command = atty bash
-```
-
-Prefer the explicit form (`atty bash`/`atty zsh`/…) over relying on
-`$SHELL` — when the terminal emulator spawns atty directly, the
-environment is minimal and `$SHELL` may not yet be set.
-
-**Shell-rc side.** If you can't (or don't want to) touch your
-terminal config — same machine but multiple terminal emulators,
-remote SSH, dotfiles you share across boxes — drop this in your
-`.bashrc` / `.zshrc`:
-
-```sh
-eval "$(atty init bash)"   # or `atty init zsh`
-```
-
-The snippet re-execs the current interactive shell under atty
-once (atty injects `ATTY=1` / `ATTY_PID` / `ATTY_VERSION` into the
-child env so nested invocations short-circuit) and wires the
-shell-side OSC 133 prompt markers so atty can capture the input
-region precisely instead of falling back to keystroke tracking.
-
-**Diagnose if integration misfires.** When inside an atty
-session, `eval "$(atty doctor)"` prints a colour-coded check of
-each step — `$ATTY` set, shell detected, OSC 133 functions
-defined, `PROMPT_COMMAND` wired (handles both bash 5.1+ array
-form and the string form), PS1 wrapped with `;A` / `;B` markers
-— and points at the specific failing step when something's off.
-The common trap is running `atty init bash` from a non-atty
-shell: the `exec atty bash` step replaces the shell process,
-which means any in-memory function defs from the snippet die
-along with it. Either put the eval in `.bashrc` (canonical) or
-run it a second time once you're already inside atty.
-Non-interactive shells (scripts, `bash -c`, ssh without TTY) skip
-the snippet entirely.
-
-Or invoke ad-hoc:
-
-```sh
-atty                         # spawns $SHELL through the proxy
-atty --shell /bin/bash       # different shell
-atty -- -c 'echo hi'         # passthrough args
-```
-
-## Configuration
-
-dwm-style two-file split:
-
-- [`src/config.def.zig`](https://github.com/fentas/atty/blob/master/src/config.def.zig) — committed template with commented examples (atty maintains this).
-- **`src/config.zig`** — your file. Gitignored. `build.zig` copies the template across on first build if it's missing.
-- [`src/defaults.zig`](https://github.com/fentas/atty/blob/master/src/defaults.zig) — atty-shipped value for every knob.
-
-Edit `src/config.zig`. Recompile. Your edits never conflict on `git pull`
-because the file isn't tracked, and your config only contains what you
-override — every other knob falls through to `defaults.zig`, so new
-tunables added upstream just appear without you touching anything.
-
-```zig
-const atty = @import("atty");
-
-// Pick your modules. Default = { guardrail, history } — dependency-free.
-pub const modules = .{
-    atty.modules.guardrail.configure(.{}),
-    atty.modules.atuin.configure(.{
-        .suggestion_ttl_ms  = 0,          // 0 = fish-style (no fade)
-        .sync_after_records = 10,
-    }),
-    atty.modules.history.configure(.{}),  // shell-native fallback
-};
-
-// Override the visual style if you don't want the dim-only default.
-pub const ghost: atty.Ghost = .{ .style = atty.style.presets.muted_italic };
-
-// Override the accept keys if Right / End / Ctrl+F isn't what you want.
-pub const keymap: atty.Keymap = .{
-    .bindings = &.{
-        .{ .bytes = atty.keymap.key("Tab"), .action = .ghost_accept },
-    },
-};
-```
-
-Every subsystem (`proxy`, `ghost`, `terminal`, `keymap`, `statusbar`)
-is a struct with per-field defaults — your `pub const xxx: atty.Xxx = .{ … }`
-only spells out the fields you want different. Anything you don't
-declare picks up `defaults.zig`, and new fields added upstream flow
-through automatically.
-
-Track your config outside the repo: `-Dconfig=/path/to/mine.zig`
-(or `make CONFIG=/path/to/mine.zig build`).
-
-## Read on
-
-- [**Architecture**](/architecture/) — module layout, dispatch model,
-  termios flag-by-flag rationale, signal handling, ghost-text state
-  machine.
-- [**Writing a module**](/modules/) — the five hooks, worked Upper
-  example, hot-path rules, dead-code-elimination check.
-- [**Built-in modules**](/providers/) — Atuin and Guardrail config
-  reference.
+- **[Architecture](/architecture/)** — module dispatch, termios
+  raw-mode handling, signal flow, ghost-text state machine.
+- **[Writing a module](/modules/)** — the lifecycle hooks, a worked
+  example, hot-path rules.
+- **[LLM exec mode](/llm/)** — the `#: prompt` flow + provider config.
 
 ## Status
 
-`v0.1` — unit tests, integration test, e2e scenario harness with
-visual grid diff, all green. PTY core production-ready; Atuin
-subprocess backend records and syncs today; daemon socket stub
-waiting on upstream IPC stabilisation. MIT-licensed. Bugs welcome at
+`v0.1` — unit tests, integration tests, e2e scenario harness, all
+green. PTY core production-ready. Atuin records and syncs today.
+LLM module ships. The security_guard sidecar is daemon-managed +
+permission-gated as of the latest release. MIT-licensed. Bugs and
+PRs welcome at
 [github.com/fentas/atty](https://github.com/fentas/atty).

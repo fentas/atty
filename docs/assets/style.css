@@ -427,8 +427,9 @@ footer a { color: var(--fg-soft); }
   padding: 1.2rem 1.4rem 1.4rem;
   font-size: 0.92rem;
   line-height: 1.7;
+  min-height: 10.2em;
 }
-.demo .line { white-space: pre; }
+.demo .line { white-space: pre-wrap; word-break: break-word; }
 .demo .line.dim { color: var(--fg-dim); }
 .demo .line.danger { color: var(--danger); font-weight: 500; }
 .demo .prompt { color: var(--accent); font-weight: 600; }
@@ -436,12 +437,58 @@ footer a { color: var(--fg-soft); }
 .demo .ghost {
   color: var(--fg-dim);
   font-style: italic;
+  opacity: 0;
+  animation: ghost-fade 220ms ease-out forwards;
 }
+@keyframes ghost-fade { to { opacity: 1; } }
 .demo .comment { color: var(--fg-dim); }
 .demo .warn-glyph {
   color: var(--danger);
   font-weight: 700;
   margin-right: 0.5em;
+}
+.demo .caret {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  margin-left: 1px;
+  animation: caret-blink 1.05s steps(1) infinite;
+}
+@keyframes caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.demo-controls {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.3rem 0.8rem 0.7rem;
+  gap: 0.4rem;
+}
+.demo-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-soft);
+  padding: 0.2rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+.demo-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.demo-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.nav-sep {
+  color: var(--border);
+  user-select: none;
+  align-self: center;
 }
 
 /* CTA buttons */
