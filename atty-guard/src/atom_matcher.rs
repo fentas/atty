@@ -59,9 +59,9 @@ pub struct AtomHit {
     pub byte_offset: usize,
     /// `byte_offset + atom.len()` — kept for the V2-H sliding-context-
     /// window code that slices `command[offset..end]` to feed the SLM
-    /// a localized snippet. The current dispatch passes `byte_offset`
-    /// only and recomputes the end from the atom string, so this
-    /// field is dead at the call site today. Keeping it in the struct
+    /// a localized snippet. Current call sites read `byte_offset`
+    /// only and derive the end inline from `atom.len()`; this field
+    /// is dead at the call site today. Keeping it in the struct
     /// avoids a wider refactor when the SLM slicer learns to span
     /// multiple atom hits.
     #[allow(dead_code)]

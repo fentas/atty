@@ -62,9 +62,11 @@ pub struct Tier2Config {
     /// when both are set so the operator can override the file
     /// without editing it — that override path is the reason main.rs
     /// doesn't consume this field directly. `#[allow(dead_code)]`
-    /// because the file-defaults path (use this when CLI omitted)
-    /// is queued for a follow-up; today every invocation explicitly
-    /// passes `--tier2`.
+    /// because the file-defaults path is queued for a follow-up:
+    /// clap currently supplies a default (`"stub"`) so main.rs
+    /// can't distinguish "CLI omitted, use file" vs "CLI explicitly
+    /// passed stub" without switching to `value_source()`. Until
+    /// that lands, this field stays inert.
     #[allow(dead_code)]
     #[serde(default)]
     pub backend: Option<String>,
