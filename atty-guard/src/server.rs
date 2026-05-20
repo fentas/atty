@@ -141,6 +141,11 @@ impl PeerCred {
             uid: u32,
             gid: u32,
         }
+        // Linux ABI: SOL_SOCKET=1, SO_PEERCRED=17. socklen_t is
+        // typedef'd to `unsigned int` (u32) on all glibc/musl
+        // targets we ship to; aliasing to u32 here matches the
+        // libc crate's definition for our supported triples.
+        type SocklenT = u32;
         const SOL_SOCKET: i32 = 1;
         const SO_PEERCRED: i32 = 17;
 
@@ -150,7 +155,7 @@ impl PeerCred {
                 level: i32,
                 optname: i32,
                 optval: *mut std::ffi::c_void,
-                optlen: *mut u32,
+                optlen: *mut SocklenT,
             ) -> i32;
         }
 
@@ -160,7 +165,7 @@ impl PeerCred {
             uid: u32::MAX,
             gid: u32::MAX,
         };
-        let mut len = std::mem::size_of::<Ucred>() as u32;
+        let mut len = std::mem::size_of::<Ucred>() as SocklenT;
         let rc = unsafe {
             getsockopt(
                 fd,
@@ -170,8 +175,23 @@ impl PeerCred {
                 &mut len,
             )
         };
-        if rc != 0 || len != std::mem::size_of::<Ucred>() as u32 {
+        if rc != 0 {
+            // getsockopt failed; errno is meaningful here.
             return Err(std::io::Error::last_os_error());
+        }
+        if len != std::mem::size_of::<Ucred>() as SocklenT {
+            // Short read — kernel returned success but a smaller
+            // struct than we expect. Treat as a hard error since
+            // we can't trust partial credentials. errno isn't
+            // set in this path, so build a synthetic error.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SO_PEERCRED returned {} bytes, expected {}",
+                    len,
+                    std::mem::size_of::<Ucred>()
+                ),
+            ));
         }
         Ok(Self {
             uid: cred.uid,
@@ -282,7 +302,10 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // the scan savings. Re-evaluate if a user's overlay
             // grows past ~100 atoms (none today).
             if matches!(result.verdict, Verdict::Safe) {
-                let _ = state.trust_store.load_persistent(peer.uid);
+                // ensure_loaded is a no-op after first call per UID
+                // per daemon lifetime — keeps the hot path off disk.
+                // Mutations re-load the cache directly.
+                let _ = state.trust_store.ensure_loaded(peer.uid);
                 let overlay_persistent = state.trust_store.list_atoms(
                     peer.uid,
                     crate::trust_store::ListScope::Persistent,
@@ -418,7 +441,7 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                     atoms: state.classifier.system_atoms_snapshot(),
                 },
                 AtomScope::User => {
-                    let _ = state.trust_store.load_persistent(uid);
+                    let _ = state.trust_store.ensure_loaded(uid);
                     ResponseBody::AtomsList {
                         atoms: state.trust_store.list_atoms(uid, ListScope::Persistent),
                     }
@@ -469,7 +492,7 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 Ok(u) => u,
                 Err(msg) => return ResponseBody::Error { message: msg },
             };
-            let _ = state.trust_store.load_persistent(uid);
+            let _ = state.trust_store.ensure_loaded(uid);
             let entries: Vec<UrlDecisionEntry> = state
                 .trust_store
                 .list_urls(uid)
@@ -684,21 +707,15 @@ mod tests {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
         // Trust store rooted at a tempdir so server tests can
-        // exercise the mutating dispatch arms without ever
-        // touching /var/lib/atty-guard/.
+        // exercise the mutating dispatch arms without ever touching
+        // /var/lib/atty-guard/. The TempDir is moved INTO the
+        // spawned thread so its Drop fires when the thread exits —
+        // proper cleanup, no `std::mem::forget` leak.
         let trust_tmp = tempfile::tempdir().expect("tempdir");
         let trust_root = trust_tmp.path().to_path_buf();
-        // Move the tempdir into a thread-local guard so it lives as
-        // long as the spawned server.
-        let trust_store =
-            Arc::new(crate::trust_store::TrustStore::new(trust_root));
-        let _trust_tmp_keepalive = trust_tmp; // not strictly needed —
-        // tempdir's Drop removes the dir, but we want it alive while
-        // tests run. The handle returned doesn't capture it; tests
-        // are short-lived enough that letting the static drop on
-        // test exit is fine.
-        std::mem::forget(_trust_tmp_keepalive);
+        let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
         let handle = thread::spawn(move || {
+            let _trust_tmp_owned = trust_tmp; // moved-in, Drop on exit
             let _ = serve(
                 &socket_for_thread,
                 0,

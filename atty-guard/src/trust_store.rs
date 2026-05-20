@@ -35,6 +35,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::atom_fetcher::is_placeholder_atom_public;
+
 /// Per-UID trust state held by the running daemon.
 #[derive(Debug, Default)]
 pub struct PerUserState {
@@ -53,11 +55,24 @@ pub struct PerUserState {
 }
 
 /// Daemon-wide trust store. Keyed by UID. Persistent data dir is
-/// `/var/lib/atty-guard/users/<uid>/`; daemon refuses to write if
-/// the dir isn't atty-owned.
+/// `/var/lib/atty-guard/users/<uid>/`. Ownership enforcement is
+/// delegated to systemd's `StateDirectory=atty-guard` directive in
+/// the unit — that creates the parent `atty:atty 0750` and the
+/// daemon writes per-UID subdirs under it. The daemon itself
+/// doesn't stat existing ownership before writing (it can't lower
+/// the perms of a misconfigured dir, and the typical failure mode
+/// of "atty user can't write" surfaces as a plain io::Error on the
+/// first write).
 pub struct TrustStore {
     data_root: PathBuf,
     state: Mutex<HashMap<u32, PerUserState>>,
+    /// UIDs whose persistent layer has been loaded from disk at
+    /// least once. After a mutation the in-memory layer is updated
+    /// in-place (no re-read), so this flag is "have we ever read
+    /// the on-disk file for this UID?" — flipped to true on first
+    /// `load_persistent` or first mutation. classify hot-path
+    /// short-circuits the file read when the flag is set.
+    loaded: Mutex<HashSet<u32>>,
 }
 
 impl TrustStore {
@@ -67,6 +82,7 @@ impl TrustStore {
         Self {
             data_root,
             state: Mutex::new(HashMap::new()),
+            loaded: Mutex::new(HashSet::new()),
         }
     }
 
@@ -76,16 +92,46 @@ impl TrustStore {
     /// fresh disk contents (used by `atoms add/remove` after writing,
     /// to re-sync).
     ///
+    /// File I/O happens OUTSIDE the global state lock so a slow
+    /// disk doesn't block other trust-store operations (classify
+    /// dispatch in particular). After reading + parsing, we take
+    /// the lock just long enough to swap the in-memory layer.
+    ///
     /// Missing files are NOT an error — a UID with no decisions yet
     /// just gets an empty persistent layer.
     pub fn load_persistent(&self, uid: u32) -> std::io::Result<()> {
+        // I/O first, no locks held.
+        let atoms = read_atoms_file(&self.user_atoms_path(uid))?;
+        let (allow, block) = read_urls_file(&self.user_urls_path(uid))?;
+        // Brief locked swap.
         let mut state = self.state.lock().expect("trust_store poisoned");
         let entry = state.entry(uid).or_default();
-        entry.persistent_atoms = read_atoms_file(&self.user_atoms_path(uid))?;
-        let (allow, block) = read_urls_file(&self.user_urls_path(uid))?;
+        entry.persistent_atoms = atoms;
         entry.persistent_urls_allow = allow;
         entry.persistent_urls_block = block;
+        drop(state);
+        self.loaded
+            .lock()
+            .expect("loaded poisoned")
+            .insert(uid);
         Ok(())
+    }
+
+    /// classify hot-path entry point: ensures persistent state is
+    /// loaded ONCE per UID per daemon lifetime, then no-op on
+    /// subsequent calls. Mutating operations call `load_persistent`
+    /// directly after writing — keeps the in-memory layer fresh
+    /// without a per-classify disk read.
+    pub fn ensure_loaded(&self, uid: u32) -> std::io::Result<()> {
+        if self
+            .loaded
+            .lock()
+            .expect("loaded poisoned")
+            .contains(&uid)
+        {
+            return Ok(());
+        }
+        self.load_persistent(uid)
     }
 
     pub fn list_atoms(&self, uid: u32, scope: ListScope) -> Vec<String> {
@@ -384,6 +430,28 @@ fn validate_atom(atom: &str) -> Result<(), String> {
     if atom.contains('\n') || atom.contains('\r') {
         return Err("atom contains newline".into());
     }
+    // ` #` is reserved as the inline-metadata delimiter in the
+    // on-disk format. An atom containing this substring would be
+    // silently truncated on the next file load. Reject upfront so
+    // operators see a clear error at `atoms add` time, not silent
+    // data loss later. (Atoms starting at column 0 with `#` are
+    // also rejected by this check via the leading whitespace
+    // check below — the canonical Sigma/GTFOBins shape never
+    // starts with `#`.)
+    if atom.contains(" #") || atom.starts_with('#') {
+        return Err("atom contains ` #` (reserved as the inline-metadata delimiter)".into());
+    }
+    // The atom-fetcher's placeholder check applies to user atoms
+    // too — adding `/path/to/foo` or `<user>` as an atom would
+    // never match real input (Aho-Corasick has no wildcards).
+    if is_placeholder_atom_public(atom) {
+        return Err(
+            "atom looks like a Sigma/LOLBAS-style placeholder \
+             (`/path/to/...`, `{PATH:...}`, or `<identifier>`) — \
+             these match no real input"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -396,6 +464,11 @@ fn validate_host(host: &str) -> Result<(), String> {
     }
     if host.contains('\n') || host.contains('\r') || host.contains(' ') {
         return Err("host contains whitespace or newline".into());
+    }
+    // Same ` #` reservation as validate_atom — keeps the file
+    // format parser/writer pair lossless on the canonical input.
+    if host.contains('#') {
+        return Err("host contains `#` (reserved character)".into());
     }
     Ok(())
 }

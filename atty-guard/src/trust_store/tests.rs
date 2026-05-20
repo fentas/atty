@@ -49,6 +49,35 @@ fn persistent_add_rejects_newline() {
 }
 
 #[test]
+fn persistent_add_rejects_inline_metadata_delimiter() {
+    // ` #` is reserved for the inline-metadata suffix in the
+    // on-disk format. An atom containing ` #` would silently
+    // truncate on the next file load.
+    let (store, _tmp) = fresh_store();
+    let err = store
+        .persistent_add_atom(1000, "atom with # comment")
+        .unwrap_err();
+    assert!(err.to_string().contains("inline-metadata"));
+}
+
+#[test]
+fn persistent_add_rejects_placeholder_atoms() {
+    let (store, _tmp) = fresh_store();
+    let err = store
+        .persistent_add_atom(1000, "fooserver /path/to/output-file")
+        .unwrap_err();
+    assert!(err.to_string().contains("placeholder"));
+    let err = store
+        .persistent_add_atom(1000, "ssh <hostname>")
+        .unwrap_err();
+    assert!(err.to_string().contains("placeholder"));
+    let err = store
+        .persistent_add_atom(1000, "loader {PATH:.exe}")
+        .unwrap_err();
+    assert!(err.to_string().contains("placeholder"));
+}
+
+#[test]
 fn persistent_remove_only_when_present() {
     let (store, _tmp) = fresh_store();
     store.persistent_add_atom(1000, "test atom").unwrap();
