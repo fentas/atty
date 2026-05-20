@@ -776,9 +776,7 @@ pub fn Module(comptime cfg: Config) type {
         /// subtype="init"` line and extract `<field>` (typically
         /// `session_id`). Returns the byte count written to `out`,
         /// or 0 if no init event was found / the field was missing
-        /// or non-string. Used by the session-continuation path
-        /// to capture the CLI's session id from its first
-        /// response so subsequent requests can resume.
+        /// or non-string.
         pub fn extractStreamSessionId(body: []const u8, field: []const u8, out: []u8) usize {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
@@ -1050,7 +1048,13 @@ pub fn Module(comptime cfg: Config) type {
             var arena = std.heap.ArenaAllocator.init(gpa);
             defer arena.deinit();
             const parsed = std.json.parseFromSliceLeaky(Parsed, arena.allocator(), body, .{ .ignore_unknown_fields = true }) catch {
-                return gpa.dupe(u8, body);
+                // Fall through to the role-rendered fallback rather
+                // than hand raw JSON to the CLI — the parse path is
+                // unreachable today (dialog.buildRequestBody is the
+                // sole producer) but a future producer change would
+                // otherwise silently send bytes the model can't
+                // make sense of.
+                return renderDialogBodyAsPrompt(gpa, body);
             };
             var i: usize = parsed.messages.len;
             while (i > 0) {

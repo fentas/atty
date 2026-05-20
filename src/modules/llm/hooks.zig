@@ -1256,6 +1256,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     rt.shared.res_len = 0;
                     rt.shared.explanation_len = 0;
                     rt.shared.error_len = 0;
+                    // Stale responses must also drop a captured
+                    // session id — otherwise a later non-stale
+                    // response that lacks an init event would leave
+                    // the stale id in `response_session_id_buf` and
+                    // `captureSessionId` would pick it up on the
+                    // next pollShellInput.
+                    rt.shared.response_session_id_len = 0;
                     return null;
                 }
                 res_kind = rt.shared.res_kind;
@@ -1692,11 +1699,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// Read the worker's `response_session_id` slot under the
         /// assumed-held `rt.shared.mutex` and copy a fresh id into
         /// `rt.session_id`. Caller holds the lock. Owned allocation
-        /// — frees any previous id before replacing.
+        /// — frees any previous id before replacing. Zeros the
+        /// shared slot after consuming so subsequent
+        /// no-init-event responses don't re-pull the same id.
         fn captureSessionId(rt: *Runtime) void {
             const len = rt.shared.response_session_id_len;
             if (len == 0) return;
-            // Same id → no churn.
+            defer rt.shared.response_session_id_len = 0;
             if (rt.session_id.len == len and std.mem.eql(u8, rt.session_id, rt.shared.response_session_id_buf[0..len])) return;
             const owned = rt.allocator.dupe(u8, rt.shared.response_session_id_buf[0..len]) catch return;
             if (rt.session_id.len > 0) rt.allocator.free(rt.session_id);

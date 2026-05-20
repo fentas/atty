@@ -348,6 +348,29 @@ Available as `Config.provider.subprocess.<field>`:
 | `timeout_ms`   | `30_000`       | Wall-clock timeout in ms. A watchdog thread sends SIGTERM (then SIGKILL after 200 ms grace) when the budget expires. Set to `0` to disable. |
 | `session`      | `.none`        | CLI-side session continuation. `.none` sends the full rendered conversation each request (works for any CLI). `.{ .continuation = .{ .flag = "--resume", .id_field = "session_id" } }` captures the session id from the CLI's stream-json `type=system,subtype=init` event and reuses it via the named argv flag on subsequent turns. Only meaningful with `output = .json_stream`. Use `providers.claudeCodeStream(.{ .continuation = true })` for the canned claude shape. |
 
+### Session continuation — trade-offs
+
+With `.session = .continuation` the CLI owns the conversation
+transcript: atty sends only the latest user turn each request
+and lets the CLI's own session state (`claude`'s `--resume <id>`)
+maintain history. Saves tokens and CLI-side compute (no
+re-uploading the transcript every turn) at the cost of:
+
+- **Atty can't introspect mid-dialog state.** If the user inspects
+  the chat overlay (Alt+C / Alt+Shift+C) mid-session they see atty's
+  view of the conversation — which only includes the latest user
+  turn after the first response. Earlier assistant turns are
+  still in atty's `turns[]` ring (they were recorded when they
+  came back), but the CLI knows about turns atty's ring never saw.
+- **Session id is per-dialog.** `Alt+Shift+R` (cancel) and any
+  `action: "done"` from the model both reset `rt.session_id` —
+  the next dialog starts a fresh CLI session. atty doesn't try
+  to persist session ids across atty restarts; the
+  `chat_persist` file is atty's own memory.
+
+Without continuation (default) every request rebuilds the full
+prompt from atty's `turns[]` ring — atty is the sole memory.
+
 The `atty.modules.llm.providers.claudeCode(...)` factory returns a
 pre-shaped subprocess provider for `claude -p --output-format
 json`. Use `providers.claudeCodeStream(...)` for the
