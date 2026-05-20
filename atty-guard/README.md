@@ -17,33 +17,48 @@ The release binary lands at `target/release/atty-guard` (~2 MiB; uses libc + ser
 
 ```sh
 ./atty-guard
-# atty-guard: listening on /run/user/1000/atty-guard.sock
+# atty-guard: listening on /run/atty-guard/atty-guard.sock
 ```
 
 CLI flags:
-- `--socket <path>` — override the bind path. Default: `$XDG_RUNTIME_DIR/atty-guard.sock`, falling back to `/tmp/atty-guard-<uid>.sock` if `XDG_RUNTIME_DIR` is unset.
+- `--socket <path>` — override the bind path. Default: `/run/atty-guard/atty-guard.sock` (created with the right `atty:atty` ownership by the systemd unit's `RuntimeDirectory=atty-guard`). For dev runs as a regular user, pass `--socket /tmp/atty-guard-dev.sock`.
 - `-v` / `--verbosity <0|1|2>` — quiet / info (default) / debug.
+- `--print-features` — emits one compiled Cargo feature per line, then exits. Used by `atty doctor` to detect eBPF / ONNX / OSV / atom-fetch support definitively.
+- Subcommands `atoms` / `urls` / `session` / `trust` — sudo-mediated trust-state CLI. See `atty-guard --help`.
 
-The socket file is created with mode `0600` so co-tenant users on the same host can't probe the classifier.
+The socket is mode `0660`, `atty:atty` owned — users in the `atty` group connect; co-tenant users not in the group can't.
 
-### systemd user unit (recommended)
+### system daemon (post-#140)
 
-The repo ships a hardened user unit at `contrib/atty-guard.service` plus an installer that copies it into `~/.config/systemd/user/`. After `cargo build --release`:
+atty-guard runs as a dedicated `atty:atty` system user. `contrib/install.sh` (re-exec's under sudo automatically) creates the user/group, drops `contrib/atty-guard.service` into `/etc/systemd/system/`, populates `/var/lib/atty-guard/`, and `daemon-reload && enable --now`s the unit.
 
 ```sh
-./contrib/install.sh
+sudo ./contrib/install.sh
+# or via the top-level Makefile:
+sudo make install-guard [GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf]
 ```
 
-The installer copies the release binary to `~/.local/bin/atty-guard`, installs the unit, runs `daemon-reload`, and `enable --now`s it. Idempotent — re-running upgrades the binary in place via an atomic tmp+rename so a partially-written binary can't be exec'd.
+When `ebpf` is in `GUARD_FEATURES`, the installer drops in `/etc/systemd/system/atty-guard.service.d/ebpf.conf` (CAP_BPF + SystemCallFilter widening + `ExecStart=...--enable-ebpf`). Pass `--with-ebpf` directly to `install.sh` for the same effect; `--without-ebpf` removes the drop-in on a re-install.
 
-The unit ships full systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `RestrictAddressFamilies=AF_UNIX`, syscall filter, etc.) so a compromised classifier can't escape the sandbox. See `contrib/atty-guard.service` for the full list.
+WHY system daemon (not systemd-user, the original V2-D shape): atom + URL + trust state influences detection. A user-writable trust file is a DOS vector (a process running as `$USER` could poison atoms with common commands and force the operator to disable atty-guard). `atty:atty`-owned state under `/var/lib/atty-guard/` keeps mutations outside the user's reach; mutations go through `sudo atty-guard atoms/urls/...` so admin intent is required.
+
+The unit ships full systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `RestrictAddressFamilies=AF_UNIX`, syscall filter, etc.). See `contrib/atty-guard.service` for the full list.
+
+To talk to the daemon from your user account:
+
+```sh
+sudo usermod -aG atty $USER
+# log out + back in (or `newgrp atty` for a single shell)
+```
 
 To uninstall:
 
 ```sh
-systemctl --user disable --now atty-guard
-rm -f ~/.local/bin/atty-guard \
-      ~/.config/systemd/user/atty-guard.service
+sudo systemctl disable --now atty-guard
+sudo rm -f /usr/local/bin/atty-guard /etc/systemd/system/atty-guard.service
+sudo rm -rf /etc/systemd/system/atty-guard.service.d /var/lib/atty-guard
+sudo userdel atty 2>/dev/null || true
+sudo groupdel atty 2>/dev/null || true
 ```
 
 ### Manual run (for development / debugging)
@@ -172,4 +187,4 @@ Runs the regex matcher unit tests plus 6 integration tests that spin up a server
 | V2-D  | atty-side UDS client — atty queries this daemon.        | ✅ shipped (#106) |
 | V2-B  | `aya-rs` LSM hook + ringbuf consumer + BPF threat map.  | ⏳ next        |
 | V2-C  | ONNX SLM in `classifier::tier2` (SecureBERT-class).     | ⏳ after V2-B  |
-| V2-E  | Auto-launch from atty + systemd-user unit packaging.    | ⏳             |
+| V2-E  | Auto-launch from atty + system unit packaging.          | ✅ shipped (#140) |

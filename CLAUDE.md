@@ -48,22 +48,37 @@ src/
     ├── integration.zig   real-PTY tests (zig build itest)
     └── e2e/              .e2e DSL scenarios + VT-grid diff harness
 
-atty-guard/                  Rust sidecar daemon — UDS server with two-
-│                            tier classifier (Tier-1 regex/atom + Tier-2
-│                            SLM/heuristic), V2-J multi-hit accumulator,
-│                            V2-J-2 opt-in auto-Block (`[accumulator]
-│                            block_threshold`; red `REFUSED` line atty-
-│                            side), eBPF LSM + execve/AF_ALG tracepoints,
-│                            OSV live npm lookup, V2-I atom fetcher
-│                            (GTFOBins / Sigma / LOLBAS). Optional
-│                            install via atty-guard/contrib/install.sh.
+atty-guard/                  Rust sidecar daemon — system service running
+│                            as `atty:atty` user/group (post-#140). UDS
+│                            server with two-tier classifier (Tier-1
+│                            regex/atom + Tier-2 SLM/heuristic), V2-J
+│                            multi-hit accumulator, V2-J-2 opt-in auto-
+│                            Block (`[accumulator] block_threshold`; red
+│                            `REFUSED` line atty-side), eBPF LSM +
+│                            execve/AF_ALG tracepoints, OSV live npm
+│                            lookup, atom fetcher (GTFOBins + sanitized
+│                            Sigma; LOLBAS dropped — Windows-native, see
+│                            git log on atom_fetcher.rs for rationale).
+│                            Mediated CLI: `sudo atty-guard atoms/urls/
+│                            session/trust …` for per-UID mutations
+│                            (SO_PEERCRED-gated). Three-source atom
+│                            overlay scanned per classify: bundled
+│                            (include_str!) → /var/lib/atty-guard/
+│                            atoms.system.txt (daemon-fetched, perm-
+│                            gated atty:atty 0640) → /var/lib/atty-guard/
+│                            users/<uid>/atoms.user.txt (sudo-mediated).
+│                            Install: `sudo make install-guard
+│                            [GUARD_FEATURES=...,ebpf]` — the ebpf flag
+│                            triggers the systemd drop-in auto-install.
 ├── Cargo.toml               feature flags: ebpf, tier2-onnx, osv-live, atoms-fetch
 ├── README.md
-├── contrib/                 systemd-user unit + installer
+├── contrib/                 system unit + install.sh (re-execs sudo;
+│                            --with-ebpf flag drops in the ebpf override).
 ├── ebpf/                    V2-B kernel C (LSM hook + execve + AF_ALG)
 └── src/                     atom_fetcher / atom_matcher / classifier /
-                             ebpf / onnx_backend / osv / protocol /
-                             sanitize / server / threat_map
+                             cli_client / ebpf / onnx_backend / osv /
+                             protocol / sanitize / server / threat_map /
+                             trust_store
 
 tests/e2e/<name>/scenario.e2e + tests/e2e/<name>/golden/{env.toml,cast.json,...}
 ```
@@ -123,7 +138,7 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 - **`atty doctor`** emits a shell snippet (`eval "$(atty doctor)"`) that diagnoses the OSC 133 integration chain — `$ATTY` set, shell detected, functions defined, `PROMPT_COMMAND` wired (array AND string form), PS1 contains `;A` / `;B` markers. Use when `Alt+S` reports "needs OSC 133" after running `atty init bash`. The typical failure is the init's `exec atty bash` step replaces the shell process and discards the in-memory function defs — eval needs to be in `.bashrc` (canonical) or run a SECOND time inside the atty session (`ATTY=1` skips the exec, runs OSC 133 setup in-place).
 - **`Config.enter_action`** (LLM module) controls what bare Enter on `#: …` does. Default `.none` makes Enter a no-op in AI mode — Alt+A / Alt+S / Alt+Shift+S are the explicit triggers. `.single` / `.dialog` / `.auto` re-bind Enter to the corresponding action for muscle-memory users. The default exists to defend against accidental LLM calls when typing `#:` comments at the prompt.
 - **syncFromCapture is length-aware AND cursor-preserving.** The proxy's `line_state.syncFromCapture(osc.input)` call only fires when (a) line_state is `uncertain` (recovery path — Arrow-Up recall, Tab completion) OR (b) `osc.input.len >= line_state.current().len`. Without the gate, bash readline's mid-typing PS1 redraws (which re-emit `;A`/`;B` markers and clear `osc.input`) would wipe the keystroke buffer between characters, observed as "ghost text matches last N-1 chars when typing N chars fast." See `src/proxy.zig` `syncFromCapture` site. **Inside `syncFromCapture` itself**, the early-return clears `uncertain` but preserves `cursor_pos` when the capture's content matches the existing buffer — the OSC 133 stream carries no cursor information, so clamping to EOL would falsely re-engage ghost when the user is mid-line after Arrow-Left × N + Tab (no completion match). Only the rewrite branch (content actually changed) clamps `cursor_pos = new_len`.
-- **security_guard's daemon-`Block` path refuses outright.** `queryDaemon` branches on verdict before arming: Safe → forward, Warn → arm the `[y]/[t]/cancel` banner, **Block → write a red `REFUSED — <reason>` line, mark the shell PID Critical, and clear readline (`{.replace = "\x15"}`) with no follow-up keystroke.** Trust-cache hits short-circuit BOTH paths so prior `[t]rust` choices survive auto-Block enablement; operators who want auto-Block to override trust must clear the trust file. Render style is `Config.refused_style` (bold red 8-color default, distinct from `warning_style`'s dim italic).
+- **security_guard's daemon-`Block` path refuses outright.** `queryDaemon` branches on verdict before arming: Safe → forward, Warn → arm the `[y]/[a]/[t]/[B]/cancel` banner (`[a]llow always` session-trust + `[B]lock host forever` session-block landed in #142), **Block → write a red `REFUSED — <reason>` line, mark the shell PID Critical, and clear readline (`{.replace = "\x15"}`) with no follow-up keystroke.** Trust-cache hits short-circuit BOTH paths so prior `[t]rust` choices survive auto-Block enablement. Post-#147 there's no atty-side trust file — `rt.trust` is in-memory only, seeded lazily from the daemon's `commands.trusted.txt` via TrustList on first Enter, and mirrored on every `[t]` via TrustAdd. Render style is `Config.refused_style` (bold red 8-color default, distinct from `warning_style`'s dim italic).
 - **e2e goldens are config-sensitive.** The e2e harness uses the user's compiled binary. If `src/config.zig` has `statusbar.enabled = true`, snapshots include the bar. CI/release builds use `config.def.zig` defaults (statusbar off) — that's the canonical environment.
 - **First-paint after activate** of the statusbar should clear the reserved rows (old shell content can leak through DECSTBM otherwise).
 
