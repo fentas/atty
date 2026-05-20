@@ -852,3 +852,42 @@ test "resolveProvider: nothing matches → fallback" {
     }
     try testing.expectEqualStrings("", r.name);
 }
+
+test "resolveProviderForMode: auto-only entry is reachable" {
+    const auto_pick: types.Provider = .{ .http = .{ .model = "auto-pick" } };
+    const generic: types.Provider = .{ .http = .{ .model = "default" } };
+    const entries: []const types.ProviderEntry = &.{
+        .{ .name = "auto-pick", .config = auto_pick, .for_modes = .{ .single = false, .dialog = false, .auto = true, .chat = false } },
+        .{ .name = "default", .config = generic, .for_modes = .all },
+    };
+    const fallback: types.Provider = .{ .http = .{ .model = "fb" } };
+    const r = worker_mod.resolveProviderForMode(.auto, entries, fallback, 0);
+    try testing.expectEqualStrings("auto-pick", r.name);
+}
+
+test "resolveProviderForMode: chat-only entry is reachable" {
+    const chat_only: types.Provider = .{ .http = .{ .model = "chat-pick" } };
+    const generic: types.Provider = .{ .http = .{ .model = "default" } };
+    const entries: []const types.ProviderEntry = &.{
+        .{ .name = "default", .config = generic, .for_modes = .all },
+        .{ .name = "chat-pick", .config = chat_only, .for_modes = .{ .single = false, .dialog = false, .auto = false, .chat = true } },
+    };
+    const fallback: types.Provider = .{ .http = .{ .model = "fb" } };
+    // current_idx = 1 points at the chat-only entry directly.
+    const r = worker_mod.resolveProviderForMode(.chat, entries, fallback, 1);
+    try testing.expectEqualStrings("chat-pick", r.name);
+}
+
+test "resolveProviderForMode: dialog mode doesn't pick auto-only entry" {
+    const auto_pick: types.Provider = .{ .http = .{ .model = "auto-pick" } };
+    const dialog_pick: types.Provider = .{ .http = .{ .model = "dialog-pick" } };
+    const entries: []const types.ProviderEntry = &.{
+        .{ .name = "auto-pick", .config = auto_pick, .for_modes = .{ .single = false, .dialog = false, .auto = true, .chat = false } },
+        .{ .name = "dialog-pick", .config = dialog_pick, .for_modes = .{ .single = false, .dialog = true, .auto = false, .chat = false } },
+    };
+    const fallback: types.Provider = .{ .http = .{ .model = "fb" } };
+    // current_idx = 0 (auto-only) but mode is dialog → fall through
+    // to first-matching → dialog-pick.
+    const r = worker_mod.resolveProviderForMode(.dialog, entries, fallback, 0);
+    try testing.expectEqualStrings("dialog-pick", r.name);
+}

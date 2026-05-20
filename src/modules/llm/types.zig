@@ -171,9 +171,13 @@ pub const ProviderEntry = struct {
 /// plus the model id (subprocess providers carry the model in
 /// argv; HTTP carries it in the request body).
 pub const HttpProvider = struct {
-    /// Model identifier sent in the request body's `"model"` field.
-    /// Required — empty is treated as the legacy `llama3:8b` default
-    /// only when `Config.provider` is the implicit `.{ .http = .{} }`.
+    /// Model identifier sent in the request body's `"model"`
+    /// field. Comptime-validated non-empty for `cfg.providers[]`
+    /// entries AND for the single-shorthand `cfg.provider` —
+    /// an empty model would land as `"model":""` and route to an
+    /// unintended default at the endpoint. Default value here
+    /// satisfies the implicit `cfg.provider = .{ .http = .{} }`
+    /// case for users who haven't configured anything.
     model: []const u8 = "llama3:8b",
     /// Hardcoded API base URL — wins over both env vars when
     /// non-empty.

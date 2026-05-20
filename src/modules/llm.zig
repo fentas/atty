@@ -274,6 +274,18 @@ pub fn configure(comptime cfg: Config) type {
                 @compileError(std.fmt.comptimePrint("Config.providers[{d}].for_modes has every flag false — entry would never be picked", .{i}));
             }
         }
+        // Single-provider shorthand also needs validation —
+        // otherwise `.provider = .{ .http = .{ .model = "" } }`
+        // (or subprocess with empty argv) would silently route
+        // to an unintended default at request time.
+        switch (cfg.provider) {
+            .http => |h| if (h.model.len == 0) {
+                @compileError("Config.provider.http.model is empty — set a model id");
+            },
+            .subprocess => |s| if (s.argv.len == 0 or s.argv[0].len == 0) {
+                @compileError("Config.provider.subprocess.argv must have a non-empty argv[0]");
+            },
+        }
     }
     return struct {
         pub const name = "llm";
