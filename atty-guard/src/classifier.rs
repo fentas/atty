@@ -27,6 +27,13 @@ use regex::Regex;
 /// V2-H) use it to slice a context window. Backends that don't
 /// care (StubBackend, HeuristicBackend) ignore the argument.
 pub trait Tier2Backend: Send + Sync {
+    /// Backend label — exposed via `Classifier::tier2_name()` for
+    /// startup logging and the planned `atty doctor` reporter.
+    /// Today the binary doesn't query it directly; trait method
+    /// stays `#[allow(dead_code)]` because it's still part of the
+    /// contract every backend implements (`StubBackend`,
+    /// `HeuristicBackend`, `OnnxBackend`).
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
     fn classify(&self, command: &str, hint_offset: Option<usize>) -> Option<ClassifyResult>;
 }
@@ -65,7 +72,10 @@ pub struct Classifier {
 
 impl Classifier {
     /// Default Tier-2 backend = `Stub`. Kept for tests + callers
-    /// that don't care.
+    /// that don't care. The daemon's `serve()` path goes through
+    /// `new_with_backend` instead — this is the convenience
+    /// constructor reachable from `cargo test`.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::new_with_backend(BackendKind::Stub, &crate::config::OnnxConfig::default())
     }
@@ -118,6 +128,11 @@ impl Classifier {
         self
     }
 
+    /// Backend label getter — surface for the planned `atty doctor`
+    /// reporter ("which Tier-2 backend is the daemon running?").
+    /// Not consumed by the dispatch path today; `#[allow(dead_code)]`
+    /// until that lands.
+    #[allow(dead_code)]
     pub fn tier2_name(&self) -> &'static str {
         self.tier2.name()
     }
@@ -128,10 +143,6 @@ impl Classifier {
         // combine their confidences via independent-probability
         // math, optionally second-stage with Tier-2 SLM, then map
         // the accumulated score to a verdict.
-        //
-        // The old "first match wins" path is preserved as
-        // `Tier1::classify_with_offset` for tests + any caller
-        // that explicitly wants a single representative hit.
         let mut hits = self.tier1.classify_all(command);
         let tier1_combined = combined_confidence(&hits);
 
@@ -350,34 +361,6 @@ impl Tier1 {
             flagged_urls: parse_flagged_urls(),
             atom_matcher: crate::atom_matcher::AtomMatcher::new(),
         }
-    }
-
-    /// Backwards-compat shim — kept for callers that don't care
-    /// about the match offset. Internal dispatch uses
-    /// `classify_with_offset` which carries the offset for V2-H's
-    /// sliding context window.
-    #[cfg(test)]
-    fn classify(&self, line: &str) -> Option<ClassifyResult> {
-        self.classify_with_offset(line).map(|(r, _)| r)
-    }
-
-    fn classify_with_offset(&self, line: &str) -> Option<(ClassifyResult, usize)> {
-        // Convenience wrapper used by tests + callers that want a
-        // single representative hit. Returns the highest-confidence
-        // hit from the full multi-hit walk; the byte-offset comes
-        // from that hit too. Tie-break (Rust stdlib `max_by`
-        // semantics): when two hits share the same confidence, the
-        // LAST one in the layer-emission order wins. Layer order
-        // is curl_pipe_sh → flagged_urls → npm → bash_c → atoms,
-        // so e.g. two 0.9 flagged-URL hits resolve to the second
-        // one. Callers that care about specific offsets should
-        // use `classify_all` directly.
-        let hits = self.classify_all(line);
-        hits.into_iter().max_by(|a, b| {
-            a.0.confidence
-                .partial_cmp(&b.0.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
     }
 
     /// V2-J: collect EVERY Tier-1 signal that fired on `line`.

@@ -80,6 +80,16 @@ impl EbpfState {
     pub fn attach() -> Result<Self, LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
+    /// Stub for builds without the `ebpf` feature. `get_threat` on
+    /// the no-eBPF path would always be Low since there's no kernel
+    /// map to read; the in-memory `ThreatMap` is the only source.
+    /// `#[allow(dead_code)]` because nothing invokes this today —
+    /// `threat_map.rs` stores `Option<Arc<EbpfState>>` but currently
+    /// only writes through `set_threat`. Placeholder for future
+    /// kernel-map reads (e.g. the daemon answering "what's the
+    /// threat level for pid X" via UDS) where the kernel-side BPF
+    /// map would be the source of truth on attach-enabled builds.
+    #[allow(dead_code)]
     pub fn get_threat(&self, _pid: u32) -> ThreatLevel {
         ThreatLevel::Low
     }

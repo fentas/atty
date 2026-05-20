@@ -1,3 +1,11 @@
+// Type definitions (FetcherConfig, FetchError, …) live at the top of
+// the module and are referenced by both the feature-on impl below
+// AND the no-feature stub. With `--features atoms-fetch` they're
+// fully alive; without the feature the daemon still compiles them
+// for API stability but never constructs them — silence the
+// dead-code lint for that build only.
+#![cfg_attr(not(feature = "atoms-fetch"), allow(dead_code, unused_imports))]
+
 //! V2-I daemon-internal atom fetcher.
 //!
 //! Pulls IOC corpora from configurable upstream sources, parses
@@ -131,6 +139,14 @@ pub fn default_atoms_path() -> PathBuf {
 
 #[derive(Debug)]
 pub enum FetchError {
+    /// Only constructed by the `#[cfg(not(feature = "atoms-fetch"))]`
+    /// stub `fetch_all` below — emitted when the daemon was built
+    /// without the feature but the operator still passes
+    /// `--update-atoms-now`. With the feature ON this variant is
+    /// dead code; the `#[allow(dead_code)]` keeps the API surface
+    /// uniform across feature combinations so callers don't have
+    /// to cfg-gate their match arms.
+    #[allow(dead_code)]
     FeatureNotBuilt,
     NetworkError(String),
     DecompressError(String),
