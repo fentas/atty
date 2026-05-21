@@ -145,6 +145,15 @@ impl ThreatMap {
     /// value the caller observed; if a concurrent `set` already
     /// installed a fresh entry (different starttime), we leave
     /// it alone so the new mark survives the race.
+    ///
+    /// BPF clear failure here is the worst-case path: in-mem map
+    /// is consistent (entry gone) but the kernel LSM still sees
+    /// the stale High/Critical and will EPERM the new process's
+    /// execves — and after PID reuse that new process may belong
+    /// to a different UID. We log loudly to stderr so the operator
+    /// sees the divergence; no userspace retry path exists for the
+    /// BPF map today. TODO(observability): wire a metric / persist
+    /// the pending eviction so a later classify can re-attempt.
     fn evict_if_stale(&self, pid: u32, expected_starttime: u64) {
         let removed = {
             let mut g = self.inner.lock().expect("threat_map poisoned");
@@ -156,7 +165,10 @@ impl ThreatMap {
         if removed {
             if let Some(state) = &self.ebpf {
                 if let Err(e) = state.set_threat(pid, ThreatLevel::Low) {
-                    eprintln!("atty-guard: BPF map evict failed (pid {pid}): {e}");
+                    eprintln!(
+                        "atty-guard: BPF stale-entry clear FAILED for pid {pid} ({e}) — \
+                         kernel LSM may still block this (possibly cross-user-reused) PID until daemon restart"
+                    );
                 }
             }
         }
