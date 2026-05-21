@@ -346,10 +346,16 @@ pub fn configure(comptime cfg: Config) type {
             .{ .bytes = keymap.key("PageUp"), .action = .chat_scroll_page_up, .label = "PageUp", .description = "chat: scroll back one page (when chat surface is open)" },
             .{ .bytes = keymap.key("PageDown"), .action = .chat_scroll_page_down, .label = "PageDown", .description = "chat: scroll forward one page (when chat surface is open)" },
             // Jump-to-tail. Reverses PageUp scrolling without a
-            // matching number of PageDowns. Only consumes when focus
-            // is in the panel AND the view is actually scrolled back
-            // — bare End at the tail falls through to the shell.
-            .{ .bytes = keymap.key("End"), .action = .chat_scroll_to_tail, .label = "End", .description = "chat: jump back to the live tail (when scrolled up)" },
+            // matching number of PageDowns. `Ctrl+End` instead of
+            // bare `End` because the latter is already claimed by
+            // `ghost_accept` in `defaults.zig` — atty's user-config
+            // bindings beat module defaults in the match scan, so
+            // a bare-End rebind here would be dead code. Modified
+            // arrow forms (Ctrl+End, Ctrl+Home) aren't bound to
+            // anything else in atty. Dual-encoded for kitty kbd +
+            // legacy.
+            .{ .bytes = keymap.key("Ctrl+End"), .action = .chat_scroll_to_tail, .label = "Ctrl+End", .description = "chat: jump back to the live tail (when scrolled up)" },
+            .{ .bytes = "\x1b[1;5F", .action = .chat_scroll_to_tail },
             // Inline panel resize — grow/shrink the panel one row
             // per press. Dual encoded: `keymap.key("Ctrl+Alt+Up")`
             // resolves to the kitty kbd CSI-u form on terminals

@@ -945,7 +945,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             var scrollback_budget: u16 = scrollback_rows;
             if (inline_offset > 0 and scrollback_budget > 1) {
                 var sb: [80]u8 = undefined;
-                const head = std.fmt.bufPrint(&sb, "  \x1B[2m\u{2191} {d} below \u{00B7} \x1B[22;38;5;14mEnd\x1B[39;2m for tail\x1B[0m", .{inline_offset}) catch "";
+                const head = std.fmt.bufPrint(&sb, "  \x1B[2m\u{2191} {d} below \u{00B7} \x1B[22;38;5;14mCtrl+End\x1B[39;2m for tail\x1B[0m", .{inline_offset}) catch "";
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
                 w.writeAll(head) catch return false;
                 row += 1;

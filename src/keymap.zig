@@ -188,9 +188,10 @@ pub const Action = union(enum) {
     chat_scroll_page_down,
     /// Snap the chat view back to the live tail (newest turn at the
     /// bottom). Reverses any PageUp scrolling without having to
-    /// PageDown the matching amount. Default **End** while focus is
-    /// in a chat surface; otherwise unbound and End passes through
-    /// to the shell.
+    /// PageDown the matching amount. Default **Ctrl+End** while
+    /// focus is in a chat surface; bare End is already taken by
+    /// `ghost_accept` so the modified arrow form is the only
+    /// non-conflicting option.
     chat_scroll_to_tail,
     /// Grow / shrink the inline chat panel by one row. Hardcoded
     /// minimum is 3 rows (divider + ≥1 scrollback + input — same
