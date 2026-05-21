@@ -196,6 +196,13 @@ pub const Action = union(enum) {
     /// encoded: kitty kbd CSI-u + legacy modified-arrow).
     llm_chat_inline_grow,
     llm_chat_inline_shrink,
+    /// Toggle auto-exec while a chat surface is open. Off → the
+    /// user confirms each LLM-suggested command (default dialog
+    /// behaviour). On → atty auto-executes each `exec` action.
+    /// No-op outside chat (Alt+Shift+S enters auto mode globally
+    /// from non-chat contexts). Default **Alt+T** with kitty kbd
+    /// CSI-u sibling.
+    llm_chat_toggle_auto,
     /// Render a one-screen cheat-sheet of every keybinding atty
     /// surfaces — pulled from `config.keymap.bindings`. Scrolls into
     /// shell history (like the LLM conclusion banner) so it stays

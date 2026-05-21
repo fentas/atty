@@ -34,18 +34,12 @@ pub fn Module(comptime cfg: types.Config) type {
         /// Auto-mode system prompt — same shape as dialog but ships
         /// `prompts.prompt_auto` (refusal list for destructive
         /// operations). User's `cfg.dialog_system_prompt` extension
-        /// stacks the same way so auto/dialog/chat share the user's
-        /// domain context.
+        /// stacks the same way so dialog and auto share the user's
+        /// domain context. Chat surfaces dispatch as `.dialog`/
+        /// `.auto` so they don't need a separate effective prompt.
         pub const effective_auto_system_prompt: []const u8 = if (cfg.dialog_system_prompt.len > 0)
             prompts.prompt_auto ++ "\n\n" ++ cfg.dialog_system_prompt
         else
             prompts.prompt_auto;
-
-        /// Chat-mode system prompt — pure-prose default with optional
-        /// `exec`/`question` fences. Same user-extension stacking.
-        pub const effective_chat_system_prompt: []const u8 = if (cfg.dialog_system_prompt.len > 0)
-            prompts.prompt_chat ++ "\n\n" ++ cfg.dialog_system_prompt
-        else
-            prompts.prompt_chat;
     };
 }

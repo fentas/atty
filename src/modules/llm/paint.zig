@@ -96,7 +96,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// the module-overlay close edge and fires `sb.reactivate`
         /// within the same tick (`proxy.zig`'s `prev_overlay_active`
         /// edge handler).
-        fn paintChatOverlay(rt: *Runtime) bool {
+        fn paintChatOverlay(rt: *Runtime, ctx: *m.Context) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
             if (!rt.chat_overlay_open) {
                 // Close: reset scroll region (the alt-screen had its
@@ -142,7 +142,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Title bar — dim chrome so it reads as frame, not content.
             // Coloured icon picks up the same fg=141 used in the
             // statusbar AI hint (consistent visual vocabulary).
-            w.writeAll("\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n") catch return false;
+            // Mirror the inline divider's icon + mode-word logic so
+            // the overlay surface stays visually consistent: glasses
+            // glyph for incognito, parenthetical state flags for
+            // any combination of (auto, incognito).
+            const overlay_icon: []const u8 = if (ctx.incognito) "\u{1F576}" else "\u{2728}";
+            const overlay_mode_word: []const u8 = if (ctx.incognito and rt.auto_mode_active)
+                "atty chat (auto, incognito)"
+            else if (rt.auto_mode_active)
+                "atty chat (auto)"
+            else if (ctx.incognito)
+                "atty chat (incognito)"
+            else
+                "atty chat";
+            w.print("\x1B[2m\x1B[22;38;5;141m{s}\x1B[39;2m {s} \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n", .{ overlay_icon, overlay_mode_word }) catch return false;
 
             // Clamp the offset against FIFO eviction — pushTurn
             // can shrink `turns_len` after the user scrolled, and
@@ -237,7 +250,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 const ind = std.fmt.bufPrint(&sb, "\x1B[2m[\u{2191} {d} below]\x1B[0m ", .{overlay_offset}) catch "";
                 w.writeAll(ind) catch return false;
             }
-            w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send \u{00B7} PgUp/PgDn scroll]\x1B[0m") catch return false;
+            w.writeAll("\x1B[2m[Alt+T auto \u{00B7} Alt+M model \u{00B7} Alt+Shift+C close \u{00B7} Enter send \u{00B7} PgUp/PgDn]\x1B[0m") catch return false;
             rt.chat_overlay_buf_len = w.end;
             return true;
         }
@@ -786,10 +799,30 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // entry that would otherwise show wrong.
             const cols_usize: usize = total_cols;
             w.print("\x1B[{d};1H\x1B[2K", .{top_row}) catch return false;
-            const resolved = types.resolveProviderForMode(.chat, cfg.providers, cfg.provider, rt.current_provider_idx);
+            // Provider resolution uses the LIVE dispatch mode so the
+            // chrome label matches the provider that will actually
+            // serve the next request. Chat surfaces now dispatch as
+            // `.dialog`/`.auto` (per `currentDispatchMode` in
+            // hooks.zig); hardcoding `.chat` here was a relic of the
+            // earlier prose-only chat mode and would mis-advertise
+            // when a user's `providers[]` has a chat-only entry that
+            // no longer matches the live dispatch.
+            const chrome_mode: types.Mode = if (rt.auto_mode_active) .auto else .dialog;
+            const resolved = types.resolveProviderForMode(chrome_mode, cfg.providers, cfg.provider, rt.current_provider_idx);
             const raw_label: []const u8 = if (resolved.name.len > 0) resolved.name else types.providerLabel(resolved.provider);
             const icon: []const u8 = if (ctx.incognito) "\u{1F576}" else "\u{2728}";
-            const mode_word: []const u8 = if (ctx.incognito) "atty chat (incognito)" else "atty chat";
+            // Mode word reflects both incognito (no recording) and
+            // auto (atty auto-executes LLM commands). Both flags can
+            // co-apply — surface them parenthetically so the user
+            // sees the live state at a glance.
+            const mode_word: []const u8 = if (ctx.incognito and rt.auto_mode_active)
+                "atty chat (auto, incognito)"
+            else if (rt.auto_mode_active)
+                "atty chat (auto)"
+            else if (ctx.incognito)
+                "atty chat (incognito)"
+            else
+                "atty chat";
             // Clamp the label to a third of the available cols so a
             // long provider name doesn't squeeze the trailing
             // `Alt+C close · Enter send` shortcut hint off the row.
@@ -823,17 +856,45 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 pw.measureCols(icon) + 1 +
                 pw.measureCols(mode_word) + 3 +
                 pw.measureCols(provider_label) + 2;
-            // " Alt+C close · Enter send" is 25 visible cols.
-            const trail_min_clearance: usize = 25;
-            const trail_target: usize = if (cols_usize > label_visible + trail_min_clearance)
-                cols_usize - label_visible - trail_min_clearance
+            // Trailing shortcut hint — progressively shrinks as
+            // cols tightens so the chrome never overruns into the
+            // panel body. Three sizes:
+            //   full:  " Alt+T auto · Alt+M model · Alt+C close · Enter send" (51 cols)
+            //   med:   " Alt+T auto · Alt+M model · Alt+C close"              (38 cols)
+            //   short: " Alt+T · Alt+M · Alt+C"                                (22 cols)
+            // The mode + provider keys are non-obvious; the short
+            // form drops labels but keeps the keys so users can
+            // still find them. Statusbar suppresses its LLM hint
+            // when the panel is open so this row owns discovery.
+            const hint_full = " \x1B[22;38;5;14mAlt+T\x1B[39;2m auto \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m model \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m";
+            const hint_med = " \x1B[22;38;5;14mAlt+T\x1B[39;2m auto \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m model \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m close\x1B[0m";
+            const hint_short = " \x1B[22;38;5;14mAlt+T\x1B[39;2m \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m\x1B[0m";
+            const min_dashes: usize = 4;
+            const hint: []const u8 = if (cols_usize >= label_visible + 51 + min_dashes)
+                hint_full
+            else if (cols_usize >= label_visible + 38 + min_dashes)
+                hint_med
+            else if (cols_usize >= label_visible + 22 + min_dashes)
+                hint_short
             else
-                4;
+                "\x1B[0m"; // No room for any hint — leave the row blank past the label.
+            const hint_cols: usize = if (hint.ptr == hint_full.ptr)
+                51
+            else if (hint.ptr == hint_med.ptr)
+                38
+            else if (hint.ptr == hint_short.ptr)
+                22
+            else
+                0;
+            const trail_target: usize = if (cols_usize > label_visible + hint_cols + min_dashes)
+                cols_usize - label_visible - hint_cols
+            else
+                min_dashes;
             var i: usize = 0;
             while (i < trail_target) : (i += 1) {
                 w.writeAll("\u{2500}") catch return false;
             }
-            w.writeAll(" \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m") catch return false;
+            w.writeAll(hint) catch return false;
 
             // Scrollback rows — fill from oldest visible turn to
             // most recent, each on its own row, truncated to fit
@@ -1001,7 +1062,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // surfaces.
             if (rt.chat_overlay_paint_pending) {
                 rt.chat_overlay_paint_pending = false;
-                if (paintChatOverlay(rt)) {
+                if (paintChatOverlay(rt, ctx)) {
                     return rt.chat_overlay_buf[0..rt.chat_overlay_buf_len];
                 }
                 // Paint overran the buffer. The close path can't
