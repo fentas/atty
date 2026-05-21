@@ -1010,6 +1010,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                     return true;
                 },
+                .chat_scroll_to_tail => {
+                    const target_overlay = rt.chat_overlay_open;
+                    const target_inline = !target_overlay and rt.chat_inline_open and rt.chat_focus_in_panel;
+                    if (!target_overlay and !target_inline) return false;
+                    const offset_ptr: *usize = if (target_overlay) &rt.chat_view_offset else &rt.chat_inline_view_offset;
+                    if (offset_ptr.* != 0) {
+                        offset_ptr.* = 0;
+                        if (target_overlay) {
+                            rt.chat_overlay_paint_pending = true;
+                        } else {
+                            rt.chat_inline_paint_pending = true;
+                        }
+                    }
+                    return true;
+                },
                 .chat_scroll_up, .chat_scroll_down, .chat_scroll_page_up, .chat_scroll_page_down => {
                     // Pick the target surface — overlay wins when both
                     // are conceptually open (mutual exclusion makes that

@@ -945,7 +945,8 @@ test "inline scroll: nonzero inline offset windows the visible turns + emits ind
     try testing.expect(std.mem.indexOf(u8, bytes.?, "INL-OLDEST") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "INL-MIDDLE") == null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "INL-NEWEST") == null);
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{2191} 2 more turn") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{2191} 2 below") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "End") != null);
 
     // Re-pin to 0 → all three visible, header gone.
     rt.chat_inline_view_offset = 0;

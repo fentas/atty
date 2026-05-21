@@ -2058,3 +2058,58 @@ test "Alt+T chat_toggle_auto flips auto_mode_active when chat surface is open" {
     try testing.expectEqual(false, rt.auto_mode_active);
     try testing.expectEqual(true, rt.chat_inline_paint_pending);
 }
+
+test "chat_scroll_to_tail snaps inline_view_offset to 0 when focus is in panel" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Not in any chat surface → action declines so End passes
+    // through to the shell.
+    rt.chat_inline_view_offset = 5;
+    try testing.expectEqual(false, try L.onAction(&rt, &ctx, .chat_scroll_to_tail));
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_view_offset);
+
+    // Inline open + focus parked on shell → also declines (End
+    // belongs to the shell when the panel doesn't have focus).
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    try testing.expectEqual(false, try L.onAction(&rt, &ctx, .chat_scroll_to_tail));
+    try testing.expectEqual(@as(usize, 5), rt.chat_inline_view_offset);
+
+    // Focus moves into panel → consumes + snaps offset to 0 + arms
+    // paint.
+    rt.chat_focus_in_panel = true;
+    rt.chat_inline_paint_pending = false;
+    try testing.expectEqual(true, try L.onAction(&rt, &ctx, .chat_scroll_to_tail));
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
+    try testing.expectEqual(true, rt.chat_inline_paint_pending);
+
+    // Already at tail → still consumes (key stays inside the
+    // panel) but paint stays unarmed for the no-op case.
+    rt.chat_inline_paint_pending = false;
+    try testing.expectEqual(true, try L.onAction(&rt, &ctx, .chat_scroll_to_tail));
+    try testing.expectEqual(false, rt.chat_inline_paint_pending);
+}
