@@ -153,16 +153,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         else => .none,
                     };
                 }
-                // Param/intermediate byte (0x20-0x3F) — digits,
-                // `;` separator, `?`/`>` private markers. Walk
-                // forward collecting `<p1>[;<p2>]` until the CSI
-                // final (0x40..0x7E). Two finals carry meaning for
-                // chat input:
+                // Per ECMA-48: CSI = ESC `[` P* I* F where
+                //   P = 0x30..0x3F (digits, `;`, `?`, `<`/`>`/`=`)
+                //   I = 0x20..0x2F (intermediates: SP, `!`, `"`, … `/`)
+                //   F = 0x40..0x7E (final byte)
+                // Trigger the scan on any P or I byte (everything
+                // 0x20..0x3F) so a CSI starting with an intermediate
+                // (`ESC [ ! p` etc.) doesn't fall through to the
+                // unrecognized-intermediate arm below and leak its
+                // tail. Two finals carry meaning for chat input:
                 //   ~  → VT-style function keys (Home/End/Delete)
                 //   u  → kitty kbd "CSI-u" (Shift+Enter etc.)
-                // Anything else gets consumed silently so private/
-                // unknown sequences don't leak as printables.
-                if ((c >= '0' and c <= '9') or c == ';' or c == '?' or c == '>') {
+                // Anything else gets consumed silently.
+                if (c >= 0x20 and c <= 0x3F) {
                     var scan: usize = i.* + 2;
                     var p1: usize = 0;
                     var p2: usize = 0;

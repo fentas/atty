@@ -1105,15 +1105,29 @@ test "inline chat scrollback: newest turn stays visible when prior turns wrap mu
 
     const helpers = dialog.Module(L.config, L.Runtime);
 
-    // Seed three multi-row turns. Each long-enough to consume the
-    // full per-turn cap (3 rows) when wrapped at the panel's
-    // ~74-col content width.
-    const long_a = "AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA";
-    const long_b = "BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB";
-    const newest_marker = "CCCC-NEWEST-MARKER-CCCC";
+    // FOUR turns sized to exercise the budget-pressure path:
+    //   • long_a/b/c wrap to MORE than per_turn_max_rows (3) so
+    //     each one's `countTurnRows` returns the cap of 3.
+    //   • long_d wraps to EXACTLY 3 chunks with the marker in the
+    //     3rd. If the render loop incorrectly caps long_d to 2
+    //     rows (the pre-fix behaviour, where the generic
+    //     `min(per_turn_max_rows, remaining_rows)` ate the deficit
+    //     from the NEWEST turn instead of the oldest), `[…]` lands
+    //     on row 2 and the marker never gets emitted.
+    // Default budget at terminal_rows=24 / cfg.inline_chat_rows=10
+    // is 8 scrollback rows; 4 × 3-row turns = 12 demand, so the
+    // back-walk includes 3 of 4 turns with oldest_turn_cap = 2.
+    const long_a = "AAAA " ** 80;
+    const long_b = "BBBB " ** 80;
+    const long_c = "CCCC " ** 80;
+    // 28 × "DDDD " (140 bytes) wraps to two 69-byte chunks; the
+    // marker (15 chars, no spaces) becomes chunk 3 — fits in the
+    // 3-row budget cleanly.
+    const long_d = "DDDD " ** 28 ++ "NEWEST-MARKER-D";
     try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, long_a));
     try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, long_b));
-    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, newest_marker));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, long_c));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, long_d));
     defer helpers.freeTurns(&rt);
 
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
@@ -1121,8 +1135,9 @@ test "inline chat scrollback: newest turn stays visible when prior turns wrap mu
     const painted = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(painted != null);
 
-    // The newest turn's distinctive marker MUST be in the paint
-    // output. Old math would have rendered the oldest turn(s) at
-    // the panel top and clipped the newest off the bottom.
-    try testing.expect(std.mem.indexOf(u8, painted.?, newest_marker) != null);
+    // The newest turn's distinctive marker — placed at the END of
+    // ~3 wrap rows of content — MUST be in the paint output. Both
+    // bug variants (pre-back-walk and post-back-walk render-loop
+    // cap mis-allocation) would have clipped it off.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "NEWEST-MARKER-D") != null);
 }

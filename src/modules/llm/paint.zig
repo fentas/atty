@@ -277,9 +277,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Raw-fallback render: cap by VISIBLE columns, not bytes,
             // so a multi-byte glyph (`•` U+2022, emoji, CJK) never gets
             // sliced mid-sequence into an invalid prefix the terminal
-            // renders as `�`. The 1024-col bound mirrors the previous
-            // 1024-byte heuristic — ample for the "we couldn't parse
-            // the envelope, surface raw bytes" path.
+            // renders as `�`. 1024 cols is generous for "we couldn't
+            // parse the envelope, surface raw bytes" — content of
+            // pathological size hits the buffer/parse path first.
+            // Note: `truncateToCols` returns a byte slice that can be
+            // longer than 1024 bytes when the content carries many
+            // zero-width chars (combining marks, ZWJ); that's the
+            // intent — we cap by what the user SEES.
             if (!looks_like_envelope) {
                 const slice = pw.truncateToCols(c, 1024);
                 try writeSanitized(w, slice);
@@ -473,17 +477,40 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (content.len == 0 or max_rows == 0) return 1;
             var it = pw.wrapIter(content, cols);
             var rows: usize = 0;
-            var overflow = false;
+            // " […]" = 5 visible cols (leading space + bracket +
+            // U+2026 + bracket). Reserve that on the last allowed
+            // row when more content follows so the marker lands
+            // inside the row instead of overflowing into the next
+            // — pre-emits the trimmed-to-`cols-5` last row.
+            const marker_cols: usize = 5;
+            const last_row_budget: usize = if (cols > marker_cols) cols - marker_cols else cols;
+            var pending: ?[]const u8 = null;
+            var overflowed = false;
             while (it.next()) |chunk| {
-                if (rows >= max_rows) {
-                    overflow = true;
-                    break;
+                if (pending) |p| {
+                    if (rows > 0) try w.writeAll("\r\n\x1B[2K");
+                    if (rows + 1 == max_rows) {
+                        // Last allowed row + more chunks pending →
+                        // overflow imminent; trim `p` so the marker
+                        // fits on the same row.
+                        try writeSanitized(w, pw.truncateToCols(p, last_row_budget));
+                        try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                        rows += 1;
+                        overflowed = true;
+                        break;
+                    }
+                    try writeSanitized(w, p);
+                    rows += 1;
                 }
-                if (rows > 0) try w.writeAll("\r\n\x1B[2K");
-                try writeSanitized(w, chunk);
-                rows += 1;
+                pending = chunk;
             }
-            if (overflow) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+            if (!overflowed) {
+                if (pending) |p| {
+                    if (rows > 0) try w.writeAll("\r\n\x1B[2K");
+                    try writeSanitized(w, p);
+                    rows += 1;
+                }
+            }
             return if (rows == 0) 1 else rows;
         }
 
@@ -578,6 +605,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 win_end = if (win_start + visible_max < len) win_start + visible_max else len;
                 if (win_end - win_start < visible_max and win_end >= visible_max) {
                     win_start = win_end - visible_max;
+                }
+                // Snap both window edges to UTF-8 codepoint
+                // boundaries — a continuation byte (0x80..0xBF) at
+                // either edge would let `writeSanitized` slice a
+                // multi-byte sequence and the terminal would render
+                // `�`. Walk forward past any continuation byte.
+                while (win_start < len and (line[win_start] & 0xC0) == 0x80) {
+                    win_start += 1;
+                }
+                while (win_end < len and (line[win_end] & 0xC0) == 0x80) {
+                    win_end += 1;
                 }
             }
 
@@ -909,6 +947,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // `per_turn_max_rows` rows.
             var start_turn: usize = visible_end;
             var rows_remaining: u16 = scrollback_budget;
+            var oldest_turn_cap: u16 = 0;
             while (start_turn > 0 and rows_remaining > 0) {
                 const idx = start_turn - 1;
                 const turn_rows: u16 = @intCast(@min(
@@ -916,15 +955,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     @as(usize, std.math.maxInt(u16)),
                 ));
                 if (turn_rows >= rows_remaining) {
-                    // Include this turn — the inner loop's per-turn
-                    // cap clips its render to `rows_remaining` rows.
+                    // Include this turn as the OLDEST visible — its
+                    // render gets clipped to `rows_remaining` rows
+                    // so the newer turns each keep their full claim.
+                    // Without the per-oldest cap, the render loop's
+                    // generic `min(per_turn_max_rows, remaining)`
+                    // would let the newest turn eat the deficit
+                    // instead.
                     start_turn = idx;
+                    oldest_turn_cap = rows_remaining;
                     rows_remaining = 0;
                     break;
                 }
                 rows_remaining -= turn_rows;
                 start_turn = idx;
             }
+            var first_visible_turn = true;
             for (rt.turns[start_turn..visible_end]) |turn| {
                 if (row >= input_top_row) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
@@ -935,9 +981,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 };
                 w.writeAll(prefix) catch return false;
                 const remaining_rows: usize = @intCast(input_top_row - row);
-                const turn_rows_cap: usize = @min(per_turn_max_rows, remaining_rows);
+                const turn_rows_cap: usize = if (first_visible_turn and oldest_turn_cap > 0)
+                    @min(@as(usize, oldest_turn_cap), remaining_rows)
+                else
+                    @min(per_turn_max_rows, remaining_rows);
                 const rows_used = renderTurnContent(&w, turn, max_inline_visible, turn_rows_cap) catch 1;
                 row += @intCast(rows_used);
+                first_visible_turn = false;
             }
             if (rt.turns_len == 0 and scrollback_rows > 0) {
                 w.print("\x1B[{d};1H\x1B[2K", .{top_row + 1}) catch return false;
