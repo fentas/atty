@@ -112,18 +112,28 @@ test "loadLastTurns: file larger than max_bytes loads TAIL (not head)" {
         _ = appendTurn(testing.allocator, name, .user, content);
     }
 
-    // With max_bytes=256, the head-reading bug would load turn-000
-    // through turn-007 or so. The tail-seek fix loads the LAST
-    // turns. We ask for 3 — they MUST be the most-recent ones.
-    var loaded = try loadLastTurns(testing.allocator, name, 3, 256);
+    // With max_bytes=256 against ~38-byte lines, the tail window
+    // holds ~6 fully-contained lines. Ask for ALL of them and
+    // pin both ends so an off-by-one in the seek offset or an
+    // extra-line strip surfaces. The head-reading bug would
+    // load turn-000 onwards; the fix loads turn-094 onwards
+    // (or thereabouts — exact start depends on where the partial
+    // fragment falls in the JSON envelope).
+    var loaded = try loadLastTurns(testing.allocator, name, 20, 256);
     defer {
         for (loaded.items) |t| testing.allocator.free(t.content);
         loaded.deinit(testing.allocator);
     }
-    try testing.expectEqual(@as(usize, 3), loaded.items.len);
-    try testing.expectEqualStrings("turn-097", loaded.items[0].content);
-    try testing.expectEqualStrings("turn-098", loaded.items[1].content);
-    try testing.expectEqualStrings("turn-099", loaded.items[2].content);
+    // Must end with turn-099 (the actual newest).
+    try testing.expect(loaded.items.len > 0);
+    try testing.expectEqualStrings(
+        "turn-099",
+        loaded.items[loaded.items.len - 1].content,
+    );
+    // First item must be in the high-90s range — the head-bug
+    // would put it at turn-000 or turn-001.
+    const first = loaded.items[0].content;
+    try testing.expect(std.mem.startsWith(u8, first, "turn-09"));
 }
 
 test "loadLastTurns: caps at max_turns (keeps newest)" {

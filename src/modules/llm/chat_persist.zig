@@ -232,6 +232,12 @@ pub fn loadLastTurns(
     // files restored the oldest turns from the first chunk
     // instead of the newest. `fstat` returns size; lseek + skip
     // the partial first line gives a clean window onto the tail.
+    //
+    // On fstat/lseek failure for a known-oversized file, RETURN
+    // EMPTY rather than falling through to the head-read path.
+    // The head-read is exactly the bug we're fixing; silently
+    // re-introducing it on a syscall failure would be a worse
+    // failure mode than "no history loaded".
     var stat: Stat = undefined;
     var skip_partial_line = false;
     if (fstat(fd, &stat) == 0) {
@@ -245,9 +251,16 @@ pub fn loadLastTurns(
                 // the truncated head (and the bytes are duplicated
                 // in older history we're intentionally dropping).
                 skip_partial_line = true;
+            } else {
+                // fstat said the file is too big but lseek failed
+                // — refuse the head-read fallback.
+                return result;
             }
         }
     }
+    // Note: fstat itself failing is treated as "unknown size,
+    // probably small" — keep reading from offset 0 like the
+    // original behavior. Small files don't exhibit the bug.
 
     // Read in chunks until EOF or cap. Conservative because the
     // file may have grown unboundedly.
