@@ -822,6 +822,29 @@ pub fn configure(comptime cfg: Config) type {
             /// transition so DECSTBM is updated before the first
             /// inline-panel paint.
             chat_inline_paint_pending: bool = false,
+            /// Fast-path latch — set when only `chat_inline_input_buf`
+            /// (the typed text) changed, so a full panel rewalk
+            /// (per-turn `countTurnRows`, scrollback render) would
+            /// be wasted work. `provideTermBytes` checks this AFTER
+            /// the full `chat_inline_paint_pending` path and falls
+            /// back to a full paint if the cached geometry doesn't
+            /// match the current input shape (newline count grew /
+            /// shrunk, cols changed, …). Only the keystroke handler
+            /// sets it — every other state-change site continues to
+            /// arm `chat_inline_paint_pending` for the full repaint.
+            chat_inline_input_dirty: bool = false,
+            /// Cached geometry from the last successful full
+            /// `paintInlineChat`. The fast-path replays
+            /// `paintInputBlock` against these coords without
+            /// re-deriving them. Invalidated implicitly: any state
+            /// change that warrants a full repaint sets
+            /// `chat_inline_paint_pending`, which runs first and
+            /// refreshes the cache.
+            chat_inline_paint_cache_valid: bool = false,
+            chat_inline_paint_input_top_row: u16 = 0,
+            chat_inline_paint_input_row: u16 = 0,
+            chat_inline_paint_input_newlines: u16 = 0,
+            chat_inline_paint_total_cols: u16 = 0,
             /// Sized like the overlay's `chat_overlay_buf`. The
             /// inline panel is smaller (~8 rows × 200 cols) so 4 KB
             /// is plenty; matching the overlay's buffer keeps the
