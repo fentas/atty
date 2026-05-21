@@ -174,10 +174,60 @@ Runs the regex matcher unit tests plus 6 integration tests that spin up a server
 
 ## Security model
 
-- The daemon runs as your user — no `CAP_BPF` required for V2-A.
-- The socket is `0600`, so only your user can connect.
-- No network sockets; no file writes outside the UDS path.
-- No persistence — restart loses the threat map (intentional for V2-A; V2-B's BPF map becomes the source of truth).
+Current shape (post-#140 system-daemon install):
+
+- **User/group**: dedicated system `atty:atty`, created by
+  `contrib/install.sh`. No login shell, no home dir.
+- **Socket**: `/run/atty-guard/atty-guard.sock`, mode `0660`,
+  owned `atty:atty`. Users connect by joining the `atty` group
+  (`sudo usermod -aG atty $USER` + re-login). Per-connection
+  authorization via SO_PEERCRED reads the connecting peer's
+  EUID at accept-time. Mutating RPCs that touch persistent
+  state (`atoms add/remove`, `urls allow/block`, etc.) require
+  EUID=0 — operators reach them via `sudo atty-guard ...`,
+  which re-execs the CLI and connects back over the same
+  socket with root credentials. Per-UID writes are scoped to
+  the target UID's state directory regardless of who's root.
+- **State**: persisted under `/var/lib/atty-guard/` —
+  `commands.trusted.txt` (atom + URL trust hashes), plus
+  per-UID `users/<uid>/atoms.user.txt` and
+  `urls.decisions.txt`. All mutations go through the
+  sudo-mediated CLI; the daemon itself enforces EUID=0 on
+  the writes via SO_PEERCRED. The system atom corpus
+  (`atoms.system.txt`) is ownership-gated at load: the daemon
+  refuses to read it when metadata doesn't show `atty:atty`.
+  Other state files rely on `0640` perms (atty:atty owned)
+  plus SO_PEERCRED on the write path. State survives daemon
+  restarts; PID-based threat marks do not (held in-memory
+  only).
+- **Network**: opt-in. Default build features `osv-live` +
+  `atoms-fetch` need outbound HTTPS. The shipped systemd unit
+  hard-locks the daemon out of the network (`PrivateNetwork=yes`,
+  `RestrictAddressFamilies=AF_UNIX`); `install.sh` auto-installs
+  a `network.conf` drop-in that lifts both when those features
+  are detected via `--print-features`. Operators can opt out
+  (`--without-network`) or override (`--with-network`).
+- **eBPF**: opt-in via `--with-ebpf`. Drops in
+  `AmbientCapabilities=CAP_BPF CAP_PERFMON`,
+  `SystemCallFilter=bpf perf_event_open`, and
+  `--enable-ebpf` on `ExecStart`. Without the feature compiled
+  in OR without the drop-in, the daemon runs V2-A in-memory
+  only (no kernel enforcement).
+- **Single-instance**: BSD `flock` on `<socket>.lock` prevents
+  a second daemon from clobbering the live one's socket.
+- **Resource bounds**: server caps `max_concurrent_connections`
+  (default 64) and `idle_read_timeout_secs` (default 30s).
+  Configurable via `[server]` in the daemon's TOML config.
+
+### History
+
+The original V2-A daemon (PR #105) ran as the invoking user with
+a `0600` socket, no persistence, and no network. PR #140 moved it
+to a dedicated system user so the trust state lives outside the
+user's write reach (a process running as `$USER` poisoning atom
+files would otherwise be a DOS vector). PRs #141-#147 layered on
+the sudo-mediated CLI for mutations, per-UID atom overlays, and
+in-memory session trust mirrored to disk.
 
 ## Roadmap
 
