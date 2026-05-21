@@ -426,6 +426,244 @@ pub fn Module(comptime cfg: Config) type {
             return trimmed.len;
         }
 
+        /// Outcome of `runHttpFetchWithDeadline`. Owns the
+        /// response bytes (`response_buf[0..response_len]`) until
+        /// the caller frees the slice via `gpa.free(response_buf)`
+        /// in the success path, OR until the abandoning sub-thread
+        /// frees it on the timeout path. Two terminal kinds:
+        ///   - `ok`: `response_buf` + `status` are valid and the
+        ///     caller is responsible for consuming + freeing.
+        ///   - `err`: `response_buf` already freed (or never owned
+        ///     in the spawn-failed case); caller just reports the
+        ///     error and moves on.
+        const FetchKind = enum { ok, fetch_failed, timed_out, spawn_failed, oom };
+        const FetchOutcome = struct {
+            kind: FetchKind,
+            status: u16 = 0,
+            response_buf: ?[]u8 = null,
+            response_len: usize = 0,
+        };
+
+        /// Shared state between the fetch sub-thread and the
+        /// worker thread. Heap-allocated so the abandoning path
+        /// can hand ownership cleanly to the sub-thread without
+        /// the worker's frame being involved. Sub-thread frees
+        /// itself when it finishes AFTER being abandoned.
+        const HttpFetchTask = struct {
+            // Inputs — task-owned heap copies so the worker can
+            // return without keeping ANY caller storage alive.
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            url: []u8,
+            body: []u8,
+            // Headers: owned `auth` copy (or none), plus the
+            // Content-Type literal. Stored as a fixed slot count
+            // so the thread doesn't need an allocator dance.
+            auth_storage: ?[]u8,
+            // Response sink — owned by task during run, ownership
+            // transfers to whoever wins the swap on completion.
+            response_buf: []u8,
+
+            // Status transitions (acq_rel):
+            //   RUNNING → DONE (sub-thread finishes; worker
+            //                   sees swap == DONE and consumes)
+            //   RUNNING → ABANDONED (worker times out; sub-thread
+            //                        eventually finishes and frees)
+            status: std.atomic.Value(u8),
+
+            // Set by sub-thread before transitioning to DONE.
+            outcome: FetchOutcome = .{ .kind = .fetch_failed },
+
+            // Sub-thread handle — joined on success, detached on
+            // timeout. `null` only between init and spawn.
+            thread: ?std.Thread = null,
+
+            fn deinit(self: *HttpFetchTask) void {
+                const a = self.gpa;
+                a.free(self.url);
+                a.free(self.body);
+                if (self.auth_storage) |s| a.free(s);
+                a.free(self.response_buf);
+                a.destroy(self);
+            }
+
+            fn run(self: *HttpFetchTask) void {
+                var client: std.http.Client = .{ .allocator = self.gpa, .io = self.io };
+                defer client.deinit();
+
+                var headers_buf: [2]std.http.Header = undefined;
+                var headers_len: usize = 0;
+                headers_buf[headers_len] = .{ .name = "Content-Type", .value = "application/json" };
+                headers_len += 1;
+                if (self.auth_storage) |s| {
+                    headers_buf[headers_len] = .{ .name = "Authorization", .value = s };
+                    headers_len += 1;
+                }
+
+                var response_writer: std.Io.Writer = .fixed(self.response_buf);
+                const fetched = client.fetch(.{
+                    .location = .{ .url = self.url },
+                    .method = .POST,
+                    .payload = self.body,
+                    .extra_headers = headers_buf[0..headers_len],
+                    .response_writer = &response_writer,
+                }) catch {
+                    self.outcome = .{ .kind = .fetch_failed };
+                    self.publishDone();
+                    return;
+                };
+
+                self.outcome = .{
+                    .kind = .ok,
+                    .status = @intFromEnum(fetched.status),
+                    .response_buf = self.response_buf,
+                    .response_len = response_writer.end,
+                };
+                self.publishDone();
+            }
+
+            fn publishDone(self: *HttpFetchTask) void {
+                // Swap is the synchronization point: whoever sees
+                // the OLD value of RUNNING (= 0) is the worker
+                // thread; whoever sees ABANDONED owns cleanup.
+                const prev = self.status.swap(STATUS_DONE, .acq_rel);
+                if (prev == STATUS_ABANDONED) self.deinit();
+            }
+        };
+
+        const STATUS_RUNNING: u8 = 0;
+        const STATUS_DONE: u8 = 1;
+        const STATUS_ABANDONED: u8 = 2;
+
+        /// Run `std.http.Client.fetch` on a sub-thread with a
+        /// deadline (`timeout_ms` from config; `0` = no deadline).
+        /// On timely completion: returns the fetched result;
+        /// caller owns `response_buf` and must free it. On
+        /// timeout: returns `.timed_out`; the sub-thread is
+        /// detached and frees its own state when it eventually
+        /// completes (bounded leak — at most one in-flight per
+        /// worker). Spawn-failures and OOM are reported via their
+        /// own `FetchKind` variants.
+        ///
+        /// `url`, `body`, `auth_header` are copied into task-owned
+        /// heap so the worker can return without holding caller
+        /// storage alive across the timeout window.
+        fn runHttpFetchWithDeadline(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            url_in: []const u8,
+            body_in: []const u8,
+            auth_header_in: ?[]const u8,
+            response_cap: usize,
+            timeout_ms: u32,
+        ) FetchOutcome {
+            const task = gpa.create(HttpFetchTask) catch return .{ .kind = .oom };
+            errdefer gpa.destroy(task);
+
+            const url_dup = gpa.dupe(u8, url_in) catch return .{ .kind = .oom };
+            errdefer gpa.free(url_dup);
+            const body_dup = gpa.dupe(u8, body_in) catch return .{ .kind = .oom };
+            errdefer gpa.free(body_dup);
+            const auth_dup: ?[]u8 = if (auth_header_in) |h|
+                (gpa.dupe(u8, h) catch return .{ .kind = .oom })
+            else
+                null;
+            errdefer if (auth_dup) |s| gpa.free(s);
+            const response_buf = gpa.alloc(u8, response_cap) catch return .{ .kind = .oom };
+            errdefer gpa.free(response_buf);
+
+            task.* = HttpFetchTask{
+                .gpa = gpa,
+                .io = io,
+                .url = url_dup,
+                .body = body_dup,
+                .auth_storage = auth_dup,
+                .response_buf = response_buf,
+                .status = std.atomic.Value(u8).init(STATUS_RUNNING),
+                .outcome = .{ .kind = .fetch_failed },
+                .thread = null,
+            };
+
+            const thread = std.Thread.spawn(.{}, HttpFetchTask.run, .{task}) catch {
+                task.deinit();
+                return .{ .kind = .spawn_failed };
+            };
+            task.thread = thread;
+
+            // No-deadline mode: just join. Same blocking semantics
+            // as before, but unified through the helper.
+            if (timeout_ms == 0) {
+                thread.join();
+                const out = task.outcome;
+                // Take ownership of response_buf out of the task
+                // before destroying it.
+                if (out.kind == .ok) {
+                    const a = task.gpa;
+                    a.free(task.url);
+                    a.free(task.body);
+                    if (task.auth_storage) |s| a.free(s);
+                    a.destroy(task);
+                } else {
+                    task.deinit();
+                }
+                return out;
+            }
+
+            // Wall-clock deadline (mirrors subprocess Watchdog
+            // pattern — EINTR-shortened nanosleep doesn't advance
+            // elapsed so the deadline can't fire early).
+            const start_ms = nowMs();
+            const deadline_signed: i64 = @intCast(timeout_ms);
+            var slice: std.c.timespec = .{ .sec = 0, .nsec = @intCast(50 * std.time.ns_per_ms) };
+            while ((nowMs() - start_ms) < deadline_signed) {
+                if (task.status.load(.acquire) == STATUS_DONE) break;
+                _ = std.c.nanosleep(&slice, null);
+            }
+
+            if (task.status.load(.acquire) == STATUS_DONE) {
+                thread.join();
+                const out = task.outcome;
+                if (out.kind == .ok) {
+                    const a = task.gpa;
+                    a.free(task.url);
+                    a.free(task.body);
+                    if (task.auth_storage) |s| a.free(s);
+                    a.destroy(task);
+                } else {
+                    task.deinit();
+                }
+                return out;
+            }
+
+            // Deadline expired. Race-tight transition: swap to
+            // ABANDONED. If the sub-thread already transitioned to
+            // DONE between our last poll and the swap, the swap
+            // returns DONE and we still own the result; consume it.
+            const prev = task.status.swap(STATUS_ABANDONED, .acq_rel);
+            if (prev == STATUS_DONE) {
+                thread.join();
+                const out = task.outcome;
+                if (out.kind == .ok) {
+                    const a = task.gpa;
+                    a.free(task.url);
+                    a.free(task.body);
+                    if (task.auth_storage) |s| a.free(s);
+                    a.destroy(task);
+                } else {
+                    task.deinit();
+                }
+                return out;
+            }
+
+            // True timeout. Detach: the sub-thread will eventually
+            // complete and `publishDone` will see ABANDONED and
+            // call `deinit` on the task (freeing everything we
+            // allocated above). Bounded leak — at most one
+            // in-flight per worker until the orphan completes.
+            thread.detach();
+            return .{ .kind = .timed_out };
+        }
+
         /// One single-mode HTTP round-trip. On success returns
         /// `cmd_len > 0` and (when the model emitted one)
         /// `exp_len > 0`. On any failure `cmd_len == 0` and
@@ -459,63 +697,45 @@ pub fn Module(comptime cfg: Config) type {
                 break :blk std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key}) catch null;
             };
 
-            var headers_buf: [2]std.http.Header = undefined;
-            var headers_len: usize = 0;
-            headers_buf[headers_len] = .{ .name = "Content-Type", .value = "application/json" };
-            headers_len += 1;
-            if (auth_header) |h| {
-                headers_buf[headers_len] = .{ .name = "Authorization", .value = h };
-                headers_len += 1;
-            }
-
-            var client: std.http.Client = .{ .allocator = gpa, .io = io };
-            defer client.deinit();
-
             // Cap the response body at `max_response_bytes * 16`.
             // The JSON envelope around the message content is
             // larger than the content itself; 16× is a comfortable
-            // ceiling for typical chat-completion shapes. A
-            // misbehaving endpoint streaming gigabytes can no
-            // longer OOM the worker — `client.fetch` errors when
-            // the fixed writer overflows; we catch it and return 0
-            // (no partial parse — a truncated JSON envelope is
-            // useless anyway).
-            //
-            // Heap-allocated (was on the stack at 64 KiB; the bump
-            // to 16 KiB `max_response_bytes` made that 256 KiB,
-            // which is a substantial frame inside the worker
-            // thread). Scales with the comptime knob so a user
-            // raising `max_response_bytes` doesn't silently push
-            // the worker stack toward its limit.
+            // ceiling for typical chat-completion shapes.
             const response_cap = cfg.max_response_bytes * 16;
-            const response_buf = gpa.alloc(u8, response_cap) catch return RequestResult{
-                .cmd_len = 0,
-                .exp_len = 0,
-                .err_len = writeStatic(error_out, "out of memory allocating response buffer"),
-            };
+            const outcome = runHttpFetchWithDeadline(gpa, io, url, body, auth_header, response_cap, cfg.timeout_ms);
+            switch (outcome.kind) {
+                .ok => {},
+                .fetch_failed => return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "request failed (endpoint unreachable?)"),
+                },
+                .timed_out => {
+                    const msg = std.fmt.bufPrint(error_out, "HTTP request timed out ({d}ms)", .{cfg.timeout_ms}) catch
+                        error_out[0..writeStatic(error_out, "HTTP request timed out")];
+                    return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = msg.len };
+                },
+                .spawn_failed => return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "couldn't spawn HTTP worker thread"),
+                },
+                .oom => return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "out of memory allocating HTTP fetch state"),
+                },
+            }
+            const response_buf = outcome.response_buf.?;
             defer gpa.free(response_buf);
-            var response_writer: std.Io.Writer = .fixed(response_buf);
 
-            const fetched = client.fetch(.{
-                .location = .{ .url = url },
-                .method = .POST,
-                .payload = body,
-                .extra_headers = headers_buf[0..headers_len],
-                .response_writer = &response_writer,
-            }) catch return RequestResult{
-                .cmd_len = 0,
-                .exp_len = 0,
-                .err_len = writeStatic(error_out, "request failed (endpoint unreachable?)"),
-            };
-
-            const status = @intFromEnum(fetched.status);
-            if (status < 200 or status >= 300) {
-                const err_msg = std.fmt.bufPrint(error_out, "HTTP {d}", .{status}) catch
+            if (outcome.status < 200 or outcome.status >= 300) {
+                const err_msg = std.fmt.bufPrint(error_out, "HTTP {d}", .{outcome.status}) catch
                     error_out[0..writeStatic(error_out, "HTTP error")];
                 return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_msg.len };
             }
 
-            const extracted = extractResponse(response_buf[0..response_writer.end], out, explanation_out);
+            const extracted = extractResponse(response_buf[0..outcome.response_len], out, explanation_out);
             if (extracted.cmd_len == 0) {
                 return RequestResult{
                     .cmd_len = 0,
@@ -554,53 +774,41 @@ pub fn Module(comptime cfg: Config) type {
                 break :blk std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key}) catch null;
             };
 
-            var headers_buf: [2]std.http.Header = undefined;
-            var headers_len: usize = 0;
-            headers_buf[headers_len] = .{ .name = "Content-Type", .value = "application/json" };
-            headers_len += 1;
-            if (auth_header) |h| {
-                headers_buf[headers_len] = .{ .name = "Authorization", .value = h };
-                headers_len += 1;
-            }
-
-            var client: std.http.Client = .{ .allocator = gpa, .io = io };
-            defer client.deinit();
-
-            // Heap-allocate the response buffer — at the default
-            // cfg.max_response_bytes=16 KiB this is 256 KiB which is
-            // a substantial stack frame inside the worker thread.
-            // Scales with the comptime knob, so a user raising
-            // max_response_bytes shouldn't silently push the worker
-            // thread close to its stack limit.
             const response_cap = cfg.max_response_bytes * 16;
-            const response_buf = gpa.alloc(u8, response_cap) catch return RequestResult{
-                .cmd_len = 0,
-                .exp_len = 0,
-                .err_len = writeStatic(error_out, "out of memory allocating response buffer"),
-            };
+            const outcome = runHttpFetchWithDeadline(gpa, io, url, body, auth_header, response_cap, cfg.timeout_ms);
+            switch (outcome.kind) {
+                .ok => {},
+                .fetch_failed => return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "request failed (endpoint unreachable?)"),
+                },
+                .timed_out => {
+                    const msg = std.fmt.bufPrint(error_out, "HTTP request timed out ({d}ms)", .{cfg.timeout_ms}) catch
+                        error_out[0..writeStatic(error_out, "HTTP request timed out")];
+                    return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = msg.len };
+                },
+                .spawn_failed => return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "couldn't spawn HTTP worker thread"),
+                },
+                .oom => return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "out of memory allocating HTTP fetch state"),
+                },
+            }
+            const response_buf = outcome.response_buf.?;
             defer gpa.free(response_buf);
-            var response_writer: std.Io.Writer = .fixed(response_buf);
 
-            const fetched = client.fetch(.{
-                .location = .{ .url = url },
-                .method = .POST,
-                .payload = body,
-                .extra_headers = headers_buf[0..headers_len],
-                .response_writer = &response_writer,
-            }) catch return RequestResult{
-                .cmd_len = 0,
-                .exp_len = 0,
-                .err_len = writeStatic(error_out, "request failed (endpoint unreachable?)"),
-            };
-
-            const status = @intFromEnum(fetched.status);
-            if (status < 200 or status >= 300) {
-                const err_msg = std.fmt.bufPrint(error_out, "HTTP {d}", .{status}) catch
+            if (outcome.status < 200 or outcome.status >= 300) {
+                const err_msg = std.fmt.bufPrint(error_out, "HTTP {d}", .{outcome.status}) catch
                     error_out[0..writeStatic(error_out, "HTTP error")];
                 return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = err_msg.len };
             }
 
-            const n = extractRawContent(response_buf[0..response_writer.end], out);
+            const n = extractRawContent(response_buf[0..outcome.response_len], out);
             if (n == 0) {
                 return RequestResult{
                     .cmd_len = 0,

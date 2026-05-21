@@ -527,9 +527,16 @@ pub const Config = struct {
     /// - `.never` — ignore the flag entirely; only user-initiated
     ///   Alt+C opens the overlay
     overlay_open_policy: OverlayOpenPolicy = .notify,
-    /// Per-request timeout in ms. Stored for future use; not yet wired
-    /// to the HTTP client — requests may block indefinitely on a slow
-    /// or unreachable endpoint until the OS TCP timeout fires.
+    /// Per-request timeout in ms for HTTP providers. The worker
+    /// runs `client.fetch` on a sub-thread and polls completion
+    /// against this deadline; on timeout it abandons the sub-thread
+    /// (its resources leak until process exit — bounded by
+    /// `max_response_bytes * 16` per timeout) and returns
+    /// `HTTP request timed out (Nms)` so the proxy can clear
+    /// `in_flight` and surface the diagnostic. `0` disables the
+    /// deadline (worker blocks on the OS TCP timeout).
+    /// Subprocess providers use the same knob via their existing
+    /// SIGTERM/SIGKILL watchdog.
     timeout_ms: u32 = 30_000,
     /// Maximum response size we'll store. The model may emit more;
     /// we truncate. Bumped from the original 4 KB default because
