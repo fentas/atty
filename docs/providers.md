@@ -329,8 +329,8 @@ the ring stays filtered in this session but the file isn't updated.
   Tab-completed line from the typed prefix it expanded from —
   falls back to the keystroke buffer, which still reads the
   pre-Tab text. With OSC 133 markers active (the default after
-  `eval "$(atty init bash)"` / `atty init zsh`), the marker
-  stream's `;B` echoes the completed input region and atty
+  `eval "$(atty init bash)"` / `eval "$(atty init zsh)"`), the
+  marker stream's `;B` echoes the completed input region and atty
   re-syncs the line buffer from it. See
   [OSC 133 prompt markers](/architecture/#osc-133-prompt-markers-auto-detect)
   for the wider integration story and
