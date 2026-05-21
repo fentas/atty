@@ -1113,6 +1113,17 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "ok");
+        // Follow-up observable: confirm the threat map really
+        // reflects the Low write. Without this, a future refactor
+        // that makes `set(_, Low)` short-circuit before reaching
+        // the map could silently regress while the test stays
+        // green.
+        let level_reply = round_trip(
+            &mut stream,
+            r#"{"id":12,"method":"get_threat_level","pid":0}"#,
+        );
+        let lv: serde_json::Value = serde_json::from_str(&level_reply).unwrap();
+        assert_eq!(lv["level"], "low");
         let _ = std::fs::remove_file(socket);
     }
 
