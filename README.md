@@ -34,6 +34,12 @@ Features:
 
 &nbsp;
 
+### Disclaimer
+
+An LLM primarily generated this code and has not yet been fully reviewed or tested by a human maintainer. It may contain bugs, security issues, or non-idiomatic patterns.
+
+&nbsp;
+
 ### 🐚 What it looks like
 
 ```text
