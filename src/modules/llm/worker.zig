@@ -519,9 +519,15 @@ pub fn Module(comptime cfg: Config) type {
             }
 
             fn publishDone(self: *HttpFetchTask) void {
-                // Swap is the synchronization point: whoever sees
-                // the OLD value of RUNNING (= 0) is the worker
-                // thread; whoever sees ABANDONED owns cleanup.
+                // Ownership-handoff via the status atomic. This
+                // runs in the sub-thread; the swap returns the
+                // value the worker thread last wrote. Two cases:
+                //   prev == RUNNING: worker is still polling; it
+                //     will see DONE on its next load and consume
+                //     via consumeTask + thread.join().
+                //   prev == ABANDONED: worker hit the deadline,
+                //     detached us, and moved on. We own cleanup —
+                //     call self.deinit() to free the heap state.
                 const prev = self.status.swap(STATUS_DONE, .acq_rel);
                 if (prev == STATUS_ABANDONED) self.deinit();
             }

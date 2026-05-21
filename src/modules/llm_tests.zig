@@ -1059,13 +1059,17 @@ fn mockServerHungHandler(ctx: *MockServerCtx) void {
     const conn_fd = libc.accept(ctx.listen_fd, null, null);
     if (conn_fd < 0) return;
     defer _ = libc.close(conn_fd);
-    // Hold the connection without responding. POSIX `usleep`
-    // rejects values >= 1_000_000 with EINVAL (musl is strict
-    // about this; glibc is more permissive). Loop in 500 ms
-    // slices so the handler doesn't busy-spin if usleep returns
-    // early. The test exits well before any reasonable upper
-    // bound, breaking the loop via process teardown.
-    while (true) {
+    // Hold the connection past the test's deadline + slack
+    // (300 ms deadline + 1700 ms test bound = 2 s) but not
+    // forever — once we return, the conn fd closes and the
+    // detached HTTP fetch thread sees EOF, runs publishDone,
+    // observes ABANDONED, and self-deinits. Bounding the handler
+    // (vs `while (true)`) keeps thread + FD pressure from
+    // accumulating as the test suite grows. POSIX `usleep`
+    // rejects values >= 1_000_000 with EINVAL; loop in 500 ms
+    // slices.
+    var slept_ms: u32 = 0;
+    while (slept_ms < 10_000) : (slept_ms += 500) {
         _ = libc.usleep(500_000);
     }
 }
