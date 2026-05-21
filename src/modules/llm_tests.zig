@@ -27,6 +27,7 @@ test {
 // having to enumerate every individual test sibling.
 test {
     _ = @import("llm/paint_tests.zig");
+    _ = @import("llm/paint_width.zig");
     _ = @import("llm/hooks_tests.zig");
 }
 
