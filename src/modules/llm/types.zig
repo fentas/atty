@@ -532,8 +532,13 @@ pub const Config = struct {
     /// or unreachable endpoint until the OS TCP timeout fires.
     timeout_ms: u32 = 30_000,
     /// Maximum response size we'll store. The model may emit more;
-    /// we truncate.
-    max_response_bytes: comptime_int = 4096,
+    /// we truncate. Bumped from the original 4 KB default because
+    /// modern chat-mode responses (especially from smaller local
+    /// models that run on) routinely exceed 4 KB — the user-
+    /// visible failure mode was a turn cutting off mid-sentence
+    /// with no indicator. 16 KB fits most verbose replies; bump
+    /// further for models that emit walls of markdown.
+    max_response_bytes: comptime_int = 16 * 1024,
     /// Maximum prompt-body size (line.len - prefix.len). Larger
     /// inputs are ignored — likely paste / file content, not a
     /// natural-language task.
@@ -576,8 +581,10 @@ pub const Config = struct {
     /// Bytes of allocated content per turn (capped so an LLM that
     /// vomits 50 KB of "thinking" output can't OOM the runtime).
     /// Truncated at this length; the model loses the tail of a
-    /// pathological response.
-    max_turn_bytes: comptime_int = 4 * 1024,
+    /// pathological response. Matches `max_response_bytes` so a
+    /// single response that just barely fits in the worker buffer
+    /// isn't then re-truncated at turn-storage time.
+    max_turn_bytes: comptime_int = 16 * 1024,
     /// Auto-confirm delay (ms) for the `Alt+Shift+S` auto-exec
     /// path: how long the proxy waits between an LLM-injected
     /// command landing at the prompt and the auto-submitted Enter.

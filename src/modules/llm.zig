@@ -1173,6 +1173,15 @@ pub fn configure(comptime cfg: Config) type {
             Wrap.key("Alt+S") ++ " dialog \u{00B7} " ++
             Wrap.key("Alt+H") ++ " help";
 
+        /// Statusbar hint while a chat surface is open. The panel
+        /// header carries the structural shortcuts (`Alt+C close`,
+        /// `Enter send`); the statusbar carries the mode/provider
+        /// toggles where they're always visible without competing
+        /// with the panel divider's column budget.
+        const chat_open_hint = Wrap.icon("\u{2728}") ++ " " ++
+            Wrap.key("Alt+T") ++ " auto \u{00B7} " ++
+            Wrap.key("Alt+M") ++ " model";
+
         /// Reports whether the full chat overlay (Alt+Shift+C)
         /// currently owns atty's alt-screen on the user's outer
         /// terminal. The proxy queries this each master-read tick
@@ -1219,14 +1228,20 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
-            // Chat surface open → suppress the LLM discovery hint
-            // (panel chrome owns shortcut visibility) BUT keep the
-            // in-flight indicator so the user gets feedback that
-            // a request is running. The panel chrome doesn't paint
-            // its own spinner today; statusbar is the only signal.
+            // Chat surface open → swap the LLM discovery hint for
+            // the chat-mode toggle hint (`Alt+T auto · Alt+M
+            // model`). The panel header carries the structural
+            // shortcuts (`Alt+C close · Enter send`); the statusbar
+            // carries the mode/provider toggles so they're always
+            // visible without competing for the panel's column
+            // budget. `Alt+C` from the discovery hint would be
+            // misleading anyway — it advertises "open the panel"
+            // but the panel is already open. In-flight indicator
+            // keeps precedence so users see "thinking…" while a
+            // request is running.
             if (rt.chat_inline_open or rt.chat_overlay_open) {
                 if (rt.in_flight) return thinking_hint;
-                return null;
+                return chat_open_hint;
             }
             // Persistent dialog/auto mode segment takes precedence
             // over the transient "thinking…" indicator — the user

@@ -1265,7 +1265,7 @@ test "inline chat: em-dash and emoji survive writeSanitized (no `�` rendering)
     try testing.expect(std.mem.indexOf(u8, painted.?, "\u{FFFD}") == null);
 }
 
-test "inline chat chrome: trailing-hint shows Alt+T / Alt+M / Alt+C / Enter shortcuts" {
+test "inline chat chrome: divider trailing-hint shows close/send; statusbar carries Alt+T / Alt+M" {
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -1301,11 +1301,14 @@ test "inline chat chrome: trailing-hint shows Alt+T / Alt+M / Alt+C / Enter shor
     const painted = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(painted != null);
 
-    // All four shortcut labels surface in the divider chrome.
-    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+T") != null);
-    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+M") != null);
+    // Divider trailing hint = close/send only (structural shortcuts).
     try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+C") != null);
     try testing.expect(std.mem.indexOf(u8, painted.?, "Enter") != null);
+    // Statusbar carries the mode/provider toggles.
+    const status_hint = try L.statusText(&rt, &ctx);
+    try testing.expect(status_hint != null);
+    try testing.expect(std.mem.indexOf(u8, status_hint.?, "Alt+T") != null);
+    try testing.expect(std.mem.indexOf(u8, status_hint.?, "Alt+M") != null);
     // Auto mode is OFF — mode word has no `(auto)` annotation.
     try testing.expect(std.mem.indexOf(u8, painted.?, "(auto") == null);
 }
@@ -1396,9 +1399,6 @@ test "inline chat chrome: progressive trailing-hint shrinks on narrow terminal" 
 
     // Mode word reflects both flags.
     try testing.expect(std.mem.indexOf(u8, painted.?, "atty chat (auto, incognito)") != null);
-    // Some shortcut shape still surfaces — the keys are always
-    // present, even when labels get dropped for narrow rows.
-    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+T") != null);
-    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+M") != null);
+    // Divider trailing hint still has the structural shortcuts.
     try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+C") != null);
 }
