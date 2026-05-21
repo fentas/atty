@@ -1531,3 +1531,108 @@ test "inline-chat autofocus: config knob off — no field-level coverage but pin
     try testing.expect(L_on.config.inline_chat_autofocus_on_exec);
     try testing.expect(!L_off.config.inline_chat_autofocus_on_exec);
 }
+
+// ── #173 #7 — Alt+M cycle gate works inside chat ─────────────────────
+
+test "Alt+M cycle: fires inside chat panel without ai_mode_active" {
+    // Before #173 #7 the cycle handler short-circuited unless
+    // `ai_mode_active` (i.e. the user had typed `#: ` at the
+    // prompt). Inside the inline chat panel that flag is false
+    // — so users with a multi-provider config couldn't switch
+    // providers from the panel they were chatting in. Test:
+    // open the panel WITHOUT typing `#: `, hit Alt+M, verify
+    // current_provider_idx advanced.
+    const llm = @import("../llm.zig");
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .providers = &.{
+            .{ .name = "a", .config = .{ .http = .{ .model = "a" } } },
+            .{ .name = "b", .config = .{ .http = .{ .model = "b" } } },
+        },
+        .statusbar_icon_color = null,
+        .statusbar_shortcut_color = null,
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    // Pre-conditions: chat open + NO ai_mode_active.
+    rt.chat_inline_open = true;
+    try testing.expect(!rt.ai_mode_active);
+    try testing.expectEqual(@as(usize, 0), rt.current_provider_idx);
+
+    // Fire Alt+M.
+    const consumed = try L.onAction(&rt, &ctx, .llm_exec_cycle_model);
+    try testing.expect(consumed);
+    try testing.expectEqual(@as(usize, 1), rt.current_provider_idx);
+    _ = llm;
+}
+
+test "Alt+M cycle: returns .forward when neither chat nor ai mode active" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .providers = &.{
+            .{ .name = "a", .config = .{ .http = .{ .model = "a" } } },
+            .{ .name = "b", .config = .{ .http = .{ .model = "b" } } },
+        },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    // Nothing active — Alt+M must NOT swallow the key (returns
+    // false so the proxy forwards). User typing Alt+M at the
+    // shell prompt shouldn't get eaten by atty.
+    try testing.expect(!rt.ai_mode_active);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(!rt.chat_overlay_open);
+    const consumed = try L.onAction(&rt, &ctx, .llm_exec_cycle_model);
+    try testing.expect(!consumed);
+    try testing.expectEqual(@as(usize, 0), rt.current_provider_idx);
+}

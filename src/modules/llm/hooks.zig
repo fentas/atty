@@ -687,7 +687,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 .llm_exec_dialog => return toggleDialogMode(rt, ctx, .dialog),
                 .llm_exec_auto => return toggleDialogMode(rt, ctx, .auto),
                 .llm_exec_cycle_model => {
-                    if (!rt.ai_mode_active) return false;
+                    // Alt+M fires in any LLM-active context — the
+                    // `#: ` prompt-prefix mode (`ai_mode_active`)
+                    // OR an open chat surface. Without the chat-
+                    // open gate, the panel's user can't switch
+                    // providers without first dismissing the
+                    // panel + typing `#:` — defeats the point of
+                    // having a multi-provider config (#173 #7).
+                    if (!rt.ai_mode_active and !rt.chat_inline_open and !rt.chat_overlay_open) return false;
                     if (cfg.providers.len == 0) {
                         latchHint(rt, "single-provider config — set `providers = &.{ ... }` to cycle");
                         return true;
