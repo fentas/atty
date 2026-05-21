@@ -46,3 +46,6 @@ coverage/
 # build.zig bootstraps config.zig from the template on first build, so a
 # fresh clone "just works" and personal overrides never conflict on pull.
 /src/config.zig
+
+# ignore review folders but keep for reference
+/gpt-review
