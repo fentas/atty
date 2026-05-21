@@ -474,10 +474,6 @@ pub fn Module(comptime cfg: Config) type {
             // Set by sub-thread before transitioning to DONE.
             outcome: FetchOutcome = .{ .kind = .fetch_failed },
 
-            // Sub-thread handle — joined on success, detached on
-            // timeout. `null` only between init and spawn.
-            thread: ?std.Thread = null,
-
             fn deinit(self: *HttpFetchTask) void {
                 const a = self.gpa;
                 a.free(self.url);
@@ -588,7 +584,6 @@ pub fn Module(comptime cfg: Config) type {
                 .response_buf = response_buf,
                 .status = std.atomic.Value(u8).init(STATUS_RUNNING),
                 .outcome = .{ .kind = .fetch_failed },
-                .thread = null,
             };
             return task;
         }
@@ -605,17 +600,19 @@ pub fn Module(comptime cfg: Config) type {
             const task = initHttpFetchTask(gpa, io, url_in, body_in, auth_header_in, response_cap) catch
                 return .{ .kind = .oom };
 
+            // No-deadline mode: run inline on the worker thread.
+            // Skips the thread spawn + heap-of-dupes the deadline
+            // path needs for ownership transfer — pure waste when
+            // there's no deadline to enforce.
+            if (timeout_ms == 0) {
+                task.run();
+                return consumeTask(task);
+            }
+
             const thread = std.Thread.spawn(.{}, HttpFetchTask.run, .{task}) catch {
                 task.deinit();
                 return .{ .kind = .spawn_failed };
             };
-            task.thread = thread;
-
-            // No-deadline mode: join and consume.
-            if (timeout_ms == 0) {
-                thread.join();
-                return consumeTask(task);
-            }
 
             // Wall-clock deadline (mirrors subprocess Watchdog
             // pattern — EINTR-shortened nanosleep doesn't advance
