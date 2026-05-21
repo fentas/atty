@@ -14,6 +14,7 @@ const std = @import("std");
 const m = @import("../../module.zig");
 const dialog = @import("dialog.zig");
 const types = @import("types.zig");
+const pw = @import("paint_width.zig");
 const pty_mod = @import("../../pty.zig");
 const Pty = pty_mod.Pty;
 
@@ -273,10 +274,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 c.len > 2 and
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
+            // Raw-fallback render: cap by VISIBLE columns, not bytes,
+            // so a multi-byte glyph (`•` U+2022, emoji, CJK) never gets
+            // sliced mid-sequence into an invalid prefix the terminal
+            // renders as `�`. The 1024-col bound mirrors the previous
+            // 1024-byte heuristic — ample for the "we couldn't parse
+            // the envelope, surface raw bytes" path.
             if (!looks_like_envelope) {
-                const slice = if (c.len > 1024) c[0..1024] else c;
+                const slice = pw.truncateToCols(c, 1024);
                 try writeSanitized(w, slice);
-                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             }
             // Heap-arena off the runtime allocator so the stack
@@ -287,16 +294,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             defer arena.deinit();
             const R = dialog.Response(cfg.max_response_bytes);
             const parsed = arena.allocator().create(R) catch {
-                const slice = if (c.len > 1024) c[0..1024] else c;
+                const slice = pw.truncateToCols(c, 1024);
                 try writeSanitized(w, slice);
-                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             };
             parsed.* = .{};
             dialog.parseResponse(R, arena.allocator(), c, parsed) catch {
-                const slice = if (c.len > 1024) c[0..1024] else c;
+                const slice = pw.truncateToCols(c, 1024);
                 try writeSanitized(w, slice);
-                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             };
 
@@ -305,9 +312,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const desc = parsed.description();
                     const cmd = parsed.command();
                     if (desc.len > 0) {
-                        const dslice = if (desc.len > overlay_field_cap) desc[0..overlay_field_cap] else desc;
+                        const dslice = pw.truncateToCols(desc, overlay_field_cap);
                         try writeSanitized(w, dslice);
-                        if (desc.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                        if (dslice.len < desc.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                     }
                     // Always break to a new row before the command —
                     // otherwise an empty description would land the
@@ -315,18 +322,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // breaking the two-row layout invariant.
                     try w.writeAll("\r\n");
                     try w.writeAll("\x1B[2m      $ \x1B[0m\x1B[22;1;38;5;14m");
-                    const cslice = if (cmd.len > overlay_field_cap) cmd[0..overlay_field_cap] else cmd;
+                    const cslice = pw.truncateToCols(cmd, overlay_field_cap);
                     try writeSanitized(w, cslice);
                     try w.writeAll("\x1B[0m");
-                    if (cmd.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (cslice.len < cmd.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .question => {
                     const q = parsed.question();
-                    const qslice = if (q.len > overlay_field_cap) q[0..overlay_field_cap] else q;
+                    const qslice = pw.truncateToCols(q, overlay_field_cap);
                     try w.writeAll("\x1B[3m");
                     try writeSanitized(w, qslice);
                     try w.writeAll("\x1B[0m");
-                    if (q.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (qslice.len < q.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                     if (parsed.choices_count > 0) {
                         var i: usize = 0;
                         while (i < parsed.choices_count) : (i += 1) {
@@ -335,18 +342,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             const np = std.fmt.bufPrint(&num, "\x1B[2m   {d}.\x1B[0m ", .{i + 1}) catch unreachable;
                             try w.writeAll(np);
                             const choice = parsed.choice(i);
-                            const cslice2 = if (choice.len > overlay_field_cap) choice[0..overlay_field_cap] else choice;
+                            const cslice2 = pw.truncateToCols(choice, overlay_field_cap);
                             try writeSanitized(w, cslice2);
-                            if (choice.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                            if (cslice2.len < choice.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                         }
                     }
                 },
                 .done => {
                     const r = parsed.reason();
-                    const rslice = if (r.len > overlay_field_cap) r[0..overlay_field_cap] else r;
+                    const rslice = pw.truncateToCols(r, overlay_field_cap);
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m ");
                     try writeSanitized(w, rslice);
-                    if (r.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (rslice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
             }
         }
@@ -369,9 +376,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
             if (!looks_like_envelope) {
-                const slice = if (c.len > max_visible) c[0..max_visible] else c;
+                const slice = pw.truncateToCols(c, max_visible);
                 try writeSanitized(w, slice);
-                if (c.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 return;
             }
             // Parse with the dialog parser so any "open_chat as
@@ -390,9 +397,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
-                const slice = if (c.len > max_visible) c[0..max_visible] else c;
+                const slice = pw.truncateToCols(c, max_visible);
                 try writeSanitized(w, slice);
-                if (c.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 return;
             };
             // Per-action rendering — keep it one row each.
@@ -401,31 +408,32 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const cmd = parsed.command();
                     const desc = parsed.description();
                     if (desc.len > 0) {
-                        try writeSanitized(w, if (desc.len > max_visible / 2) desc[0..(max_visible / 2)] else desc);
+                        try writeSanitized(w, pw.truncateToCols(desc, max_visible / 2));
                         try w.writeAll(" \x1B[2m\u{2192}\x1B[0m ");
                     }
                     // Command in cyan-on-default to stand out as the
                     // actionable bit.
                     try w.writeAll("\x1B[22;38;5;14m");
                     const cmd_room: usize = if (max_visible > 20) max_visible - 20 else max_visible;
-                    try writeSanitized(w, if (cmd.len > cmd_room) cmd[0..cmd_room] else cmd);
+                    const cslice = pw.truncateToCols(cmd, cmd_room);
+                    try writeSanitized(w, cslice);
                     try w.writeAll("\x1B[0m");
-                    if (cmd.len > cmd_room) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (cslice.len < cmd.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .question => {
                     const q = parsed.question();
-                    const slice = if (q.len > max_visible) q[0..max_visible] else q;
+                    const slice = pw.truncateToCols(q, max_visible);
                     try w.writeAll("\x1B[3m"); // italic
                     try writeSanitized(w, slice);
                     try w.writeAll("\x1B[0m");
-                    if (q.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (slice.len < q.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .done => {
                     const r = parsed.reason();
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m "); // mauve check
-                    const slice = if (r.len > max_visible) r[0..max_visible] else r;
+                    const slice = pw.truncateToCols(r, max_visible);
                     try writeSanitized(w, slice);
-                    if (r.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (slice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
             }
         }
@@ -598,24 +606,29 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // long provider name doesn't squeeze the trailing
             // `Alt+C close · Enter send` shortcut hint off the row.
             // Trailing `…` (U+2026, 1 col) marks the cut so users
-            // know the full name is longer.
+            // know the full name is longer. Both the overflow check
+            // and the truncation walk codepoints so wide glyphs
+            // (CJK / emoji) bill 2 cols and multi-byte sequences
+            // can't get sliced mid-codepoint.
             var label_buf: [128]u8 = undefined;
             const label_cap: usize = @max(8, cols_usize / 3);
-            const provider_label: []const u8 = if (raw_label.len > label_cap and label_cap > 1) blk: {
-                const cut = @min(label_cap - 1, label_buf.len -| 3);
-                @memcpy(label_buf[0..cut], raw_label[0..cut]);
-                @memcpy(label_buf[cut .. cut + 3], "\u{2026}");
-                break :blk label_buf[0 .. cut + 3];
+            const raw_label_cols: usize = pw.measureCols(raw_label);
+            const provider_label: []const u8 = if (raw_label_cols > label_cap and label_cap > 1) blk: {
+                const truncated = pw.truncateToCols(raw_label, label_cap - 1);
+                const cap = @min(truncated.len, label_buf.len -| 3);
+                @memcpy(label_buf[0..cap], truncated[0..cap]);
+                @memcpy(label_buf[cap .. cap + 3], "\u{2026}");
+                break :blk label_buf[0 .. cap + 3];
             } else raw_label;
             // Format: `<icon> <mode_word> · <provider_label> ─`
             w.print("\x1B[2m\x1B[22;38;5;141m{s}\x1B[39;2m {s} \u{00B7} \x1B[22;38;5;14m{s}\x1B[39;2m \u{2500}", .{ icon, mode_word, provider_label }) catch return false;
-            // Visible-col count for the trail-clearance math.
-            // Icon double-width (2) + space + mode_word + " · " (3)
-            // + provider_label (label_cap upper bound) + " ─" (2).
-            // mode_word + label counted as byte length (ASCII-ish
-            // — emoji in names would underestimate but the clamp
-            // gives slack).
-            const label_visible: usize = 2 + 1 + mode_word.len + 3 + provider_label.len + 2;
+            // Visible-col count for the trail-clearance math —
+            // icon (2 wide) + space + mode_word + " · " (3 cols:
+            // sp + U+00B7 + sp) + provider_label + " ─" (2).
+            const label_visible: usize =
+                pw.measureCols(icon) + 1 +
+                pw.measureCols(mode_word) + 3 +
+                pw.measureCols(provider_label) + 2;
             // " Alt+C close · Enter send" is 25 visible cols.
             const trail_min_clearance: usize = 25;
             const trail_target: usize = if (cols_usize > label_visible + trail_min_clearance)
