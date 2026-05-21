@@ -426,7 +426,7 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // `ThreatMap::set` / `get`.
             if !peer.is_root {
                 match pid_owner_uid(pid) {
-                    Ok(owner_uid) if owner_uid != peer.uid => {
+                    OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
                         return ResponseBody::Error {
                             message: format!(
                                 "non-root caller (uid {}) cannot set threat level for pid {pid} (owned by uid {owner_uid})",
@@ -434,9 +434,26 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                             ),
                         };
                     }
-                    Err(msg) => {
+                    OwnerLookup::NotFound if !matches!(level, ThreatLevel::Low) => {
+                        // Non-root + non-Low + PID gone: reject.
+                        // We can't verify ownership of a dead PID,
+                        // so refuse to install a NEW mark on it
+                        // (could otherwise mark a soon-to-be-reused
+                        // PID that lands on a different user).
+                        return ResponseBody::Error {
+                            message: format!(
+                                "pid {pid} no longer exists — cannot set non-Low threat level"
+                            ),
+                        };
+                    }
+                    OwnerLookup::Error(msg) => {
                         return ResponseBody::Error { message: msg };
                     }
+                    // OwnerLookup::Owner(_) where uid matches, OR
+                    // OwnerLookup::NotFound + Low (pure eviction is
+                    // safe even when the PID is gone — leaving a
+                    // stale in-mem/BPF entry behind would be the
+                    // worse outcome): proceed.
                     _ => {}
                 }
             }
@@ -705,11 +722,22 @@ fn resolve_target_uid(peer: PeerCred, target_uid: Option<u32>) -> Result<u32, St
     }
 }
 
+/// Outcome of looking up the owning UID for a PID. `NotFound`
+/// distinguishes "the PID is gone" from "the lookup itself failed
+/// for some other reason" (hidepid, transient I/O, malformed
+/// proc) so callers can authorize Low (pure-eviction) requests on
+/// NotFound without weakening the gate for live cross-user PIDs.
+enum OwnerLookup {
+    Owner(u32),
+    NotFound,
+    Error(String),
+}
+
 /// Return the real UID that owns `pid` by parsing `/proc/<pid>/status`.
 /// Used to gate `SetThreatLevel` so a non-root caller can't mark
-/// another user's PID. Returns an error string suitable for the
-/// `ResponseBody::Error.message` field when the PID is missing
-/// (already-exited / never-existed) or `/proc` is unreadable.
+/// another user's PID. Returns `NotFound` when the PID is gone
+/// (`ENOENT`), `Error` for any other read/parse failure, and
+/// `Owner(uid)` on success.
 ///
 /// We parse the `Uid:` line (per `proc(5)`:
 /// `Uid:\treal\teffective\tsaved\tfsuid`) and take the FIRST
@@ -719,22 +747,27 @@ fn resolve_target_uid(peer: PeerCred, target_uid: Option<u32>) -> Result<u32, St
 /// otherwise be able to mark anything; pinning on the real uid
 /// matches `task->real_cred` ownership semantics that users mean
 /// by "my process".
-fn pid_owner_uid(pid: u32) -> Result<u32, String> {
+fn pid_owner_uid(pid: u32) -> OwnerLookup {
     let path = format!("/proc/{pid}/status");
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return OwnerLookup::NotFound,
+        Err(e) => return OwnerLookup::Error(format!("cannot read {path}: {e}")),
+    };
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
             let mut fields = rest.split_whitespace();
-            let real = fields
-                .next()
-                .ok_or_else(|| format!("{path}: malformed Uid line"))?;
-            return real
-                .parse::<u32>()
-                .map_err(|e| format!("{path}: parse uid: {e}"));
+            let real = match fields.next() {
+                Some(r) => r,
+                None => return OwnerLookup::Error(format!("{path}: malformed Uid line")),
+            };
+            return match real.parse::<u32>() {
+                Ok(uid) => OwnerLookup::Owner(uid),
+                Err(e) => OwnerLookup::Error(format!("{path}: parse uid: {e}")),
+            };
         }
     }
-    Err(format!("{path}: no Uid line"))
+    OwnerLookup::Error(format!("{path}: no Uid line"))
 }
 
 fn require_root_error(op: &str) -> ResponseBody {
@@ -998,7 +1031,7 @@ mod tests {
                 Some(p) => p,
                 None => continue,
             };
-            if let Ok(owner) = pid_owner_uid(pid) {
+            if let OwnerLookup::Owner(owner) = pid_owner_uid(pid) {
                 if owner != our_uid {
                     return Some(pid);
                 }
@@ -1055,6 +1088,31 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn set_threat_level_low_allowed_for_nonexistent_pid_from_non_root() {
+        // Pure-eviction (Low) must succeed even when the PID is
+        // gone — otherwise a non-root caller could never clear a
+        // mark they installed once their target process exited,
+        // leaving stale in-mem/BPF state behind. Real-world flow:
+        // (a) caller sets Critical on their own live PID, (b) the
+        // process exits, (c) cleanup attempts `set(_, Low)` to
+        // clear the mark. Without this allowance, step (c) would
+        // be rejected with "non-root cannot set level for pid
+        // (owned by uid ?)".
+        if running_as_root() {
+            return;
+        }
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":11,"method":"set_threat_level","pid":0,"level":"low"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "ok");
         let _ = std::fs::remove_file(socket);
     }
 
