@@ -953,6 +953,29 @@ test "parseStreamJson: short-circuits when both captures land" {
     try testing.expectEqualStrings("S-1", sid_out[0..p.session_id_len]);
 }
 
+test "parseStreamJson: oversized session_id abandons capture for the rest of the stream" {
+    // Pre-#168 `extractStreamSessionId` returned 0 immediately on
+    // overflow. The unified walker mirrors that by flipping
+    // want_session off — a later init event with a smaller (likely
+    // bogus) id must NOT be picked up. Result capture stays alive.
+    const cfg_a = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const Ma = worker_mod.Module(cfg_a);
+
+    const body_a =
+        \\{"type":"system","subtype":"init","session_id":"way-too-long-to-fit"}
+        \\{"type":"system","subtype":"init","session_id":"S2"}
+        \\{"type":"result","result":"ok"}
+    ;
+    var result_a: [64]u8 = undefined;
+    var sid_a: [8]u8 = undefined; // can't fit the first id
+    const pa = Ma.parseStreamJson(body_a, "result", "session_id", &result_a, &sid_a);
+    try testing.expectEqualStrings("ok", result_a[0..pa.result_len]);
+    try testing.expectEqual(@as(usize, 0), pa.session_id_len);
+}
+
 test "parseStreamJson: session truncation guard rejects oversized id" {
     const cfg = comptime makeTestCfg(.{
         .argv = &.{"/bin/true"},

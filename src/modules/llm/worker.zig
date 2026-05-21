@@ -862,7 +862,7 @@ pub fn Module(comptime cfg: Config) type {
         ) StreamParse {
             var out: StreamParse = .{};
             const want_result = result_field.len > 0 and result_out.len > 0;
-            const want_session = session_id_field.len > 0 and session_id_out.len > 0;
+            var want_session = session_id_field.len > 0 and session_id_out.len > 0;
             if (!want_result and !want_session) return out;
 
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -883,20 +883,27 @@ pub fn Module(comptime cfg: Config) type {
                 const type_str = type_val.string;
 
                 if (need_session and std.mem.eql(u8, type_str, "system")) {
-                    // claude wraps init as subtype="init". Other
-                    // CLIs may emit bare `type=system` without
-                    // subtype — only match the init flavor so a
-                    // mid-stream `type=system,subtype=info` doesn't
-                    // claim the session-id slot.
+                    // Match only `subtype="init"` — claude wraps
+                    // init events that way. Bare `type=system`
+                    // without subtype (e.g. a hypothetical
+                    // `subtype=info` mid-stream) mustn't claim
+                    // the session-id slot.
                     if (parsed.object.get("subtype")) |sv| if (sv == .string and std.mem.eql(u8, sv.string, "init")) {
                         if (parsed.object.get(session_id_field)) |idv| if (idv == .string) {
-                            // Reject overflowing ids — a truncated
-                            // half-id used for `--resume <id>`
-                            // would silently corrupt the CLI's
-                            // resume protocol.
                             if (idv.string.len <= session_id_out.len) {
                                 @memcpy(session_id_out[0..idv.string.len], idv.string);
                                 out.session_id_len = idv.string.len;
+                            } else {
+                                // Oversized id — preserve the
+                                // pre-#168 contract: the first
+                                // init event's id is the canonical
+                                // one. If it doesn't fit, abandon
+                                // session capture entirely rather
+                                // than silently picking up a
+                                // narrower id from a later (likely
+                                // bogus) re-init. Result capture
+                                // continues independently.
+                                want_session = false;
                             }
                         };
                     };
@@ -915,6 +922,19 @@ pub fn Module(comptime cfg: Config) type {
                 }
             }
             return out;
+        }
+
+        /// Return the configured session-id JSON field for a
+        /// subprocess provider's continuation mode, or empty
+        /// string when the provider isn't asking for session
+        /// capture. Centralises the `switch (sub.session)` that
+        /// both `doSubprocessRequest` and `doSubprocessDialogRequest`
+        /// otherwise duplicate.
+        pub fn sessionIdField(sub: SubprocessProvider) []const u8 {
+            return switch (sub.session) {
+                .continuation => |c| c.id_field,
+                .none => "",
+            };
         }
 
         /// Thin wrapper kept for callers (and tests) that only need
@@ -1025,10 +1045,7 @@ pub fn Module(comptime cfg: Config) type {
                     break :blk content_buf[0..n];
                 },
                 .json_stream => |js| blk: {
-                    const sid_field: []const u8 = switch (sub.session) {
-                        .continuation => |c| c.id_field,
-                        .none => "",
-                    };
+                    const sid_field = sessionIdField(sub);
                     const p = parseStreamJson(stdout, js.field, sid_field, &content_buf, session_id_out);
                     session_id_len_out.* = p.session_id_len;
                     if (p.result_len == 0) {
@@ -1096,10 +1113,7 @@ pub fn Module(comptime cfg: Config) type {
                     // Same single-pass walk as the single-mode
                     // path — captures result + session id in one
                     // scan over the body.
-                    const sid_field: []const u8 = switch (sub.session) {
-                        .continuation => |c| c.id_field,
-                        .none => "",
-                    };
+                    const sid_field = sessionIdField(sub);
                     const p = parseStreamJson(stdout, js.field, sid_field, out, session_id_out);
                     session_id_len_out.* = p.session_id_len;
                     break :blk p.result_len;
