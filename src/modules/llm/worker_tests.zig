@@ -368,6 +368,132 @@ test "subprocess timeout: /bin/sleep 5 with 500ms budget gets SIGKILL'd" {
     try testing.expect(elapsed >= 400);
 }
 
+test "subprocess timeout kills the whole process group (grandchildren too)" {
+    // Invariant: a timeout-driven kill MUST reach helpers and
+    // grandchildren that the spawned CLI may have forked, not
+    // just the direct child. Achieved by spawning with
+    // `pgid = 0` (child becomes its own process-group leader)
+    // and sending the kill via `kill(-pid, …)` (negative PID =
+    // process-group target per POSIX `kill(2)`).
+    //
+    // Fixture: `sh -c 'sleep 99 & echo $! >/tmp/.. ; sleep 99'`
+    // forks a backgrounded grandchild, writes its PID to a
+    // tempfile, then sleeps itself. Both processes must be
+    // gone after the watchdog fires.
+    const seed: u64 = blk: {
+        var ts: std.posix.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        break :blk @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    };
+    var pid_path_buf: [80]u8 = undefined;
+    const pid_path = try std.fmt.bufPrint(&pid_path_buf, "/tmp/atty-pgid-test-{x}.pid", .{seed});
+    var pid_path_z_buf: [128]u8 = undefined;
+    const pid_path_z = try std.fmt.bufPrintZ(&pid_path_z_buf, "{s}", .{pid_path});
+    defer _ = std.c.unlink(pid_path_z.ptr);
+
+    var script_buf: [256]u8 = undefined;
+    const script = try std.fmt.bufPrint(&script_buf, "sleep 99 & echo $! > {s}; sleep 99", .{pid_path});
+
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{ "/bin/sh", "-c", "PLACEHOLDER" },
+        .prompt_via = .stdin,
+        .timeout_ms = 500,
+    });
+    const M = worker_mod.Module(cfg);
+
+    // Override the argv at runtime — comptime cfg has a placeholder.
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    defer argv_list.deinit(testing.allocator);
+    try argv_list.appendSlice(testing.allocator, &.{ "/bin/sh", "-c", script });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var err: [128]u8 = undefined;
+    var err_len: usize = 0;
+    const sub_override: @import("types.zig").SubprocessProvider = .{
+        .argv = argv_list.items,
+        .prompt_via = .stdin,
+        .timeout_ms = 500,
+    };
+    const result = M.runSubprocess(
+        testing.allocator,
+        io,
+        sub_override,
+        "ignored",
+        &.{},
+        &err,
+        &err_len,
+    );
+    try testing.expectError(error.SubprocessFailed, result);
+    try testing.expect(std.mem.indexOf(u8, err[0..err_len], "timed out") != null);
+
+    // Read the grandchild's PID from the tempfile. The shell
+    // wrote it BEFORE its own sleep started, so the PID is
+    // recorded even if the watchdog killed the shell before
+    // its second `sleep` ran.
+    // Poll for the pidfile rather than reading once — under
+    // load the shell might still be racing the redirect when
+    // the watchdog fires. 1s overall deadline is well past
+    // the fork+write+sleep schedule (~microseconds) but tight
+    // enough that a regression (shell killed before write)
+    // surfaces as a test failure rather than a hang.
+    const Libc = struct {
+        extern "c" fn open(path: [*:0]const u8, flags: c_int) c_int;
+        extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+        extern "c" fn close(fd: c_int) c_int;
+        extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+    };
+    var pid_buf: [32]u8 = undefined;
+    var pid_len: usize = 0;
+    {
+        const poll_deadline_ms: i64 = 1000;
+        const start = nowMs();
+        while ((nowMs() - start) < poll_deadline_ms) {
+            const fd = Libc.open(pid_path_z.ptr, 0);
+            if (fd >= 0) {
+                defer _ = Libc.close(fd);
+                const n = Libc.read(fd, &pid_buf, pid_buf.len);
+                if (n > 0) {
+                    pid_len = @intCast(n);
+                    break;
+                }
+            }
+            var s: std.c.timespec = .{ .sec = 0, .nsec = @intCast(10 * std.time.ns_per_ms) };
+            _ = std.c.nanosleep(&s, null);
+        }
+        try testing.expect(pid_len > 0);
+    }
+    const pid_str = std.mem.trimEnd(u8, pid_buf[0..pid_len], " \t\r\n");
+    const grandchild_pid = try std.fmt.parseInt(std.c.pid_t, pid_str, 10);
+
+    // Poll for /proc/<grandchild_pid> to disappear. The
+    // watchdog already ran (we observed "timed out"), so the
+    // group kill has already been sent — we just need the
+    // kernel to deliver + reap. 2s overall deadline is
+    // generous for any sane CI runner; the kill cycle
+    // typically completes in single-digit ms.
+    var proc_path_buf: [64]u8 = undefined;
+    const proc_path = try std.fmt.bufPrintZ(
+        &proc_path_buf,
+        "/proc/{d}",
+        .{grandchild_pid},
+    );
+    const kill_deadline_ms: i64 = 2000;
+    const kill_start = nowMs();
+    var gone = false;
+    while ((nowMs() - kill_start) < kill_deadline_ms) {
+        if (Libc.access(proc_path.ptr, 0) < 0) {
+            gone = true;
+            break;
+        }
+        var s: std.c.timespec = .{ .sec = 0, .nsec = @intCast(20 * std.time.ns_per_ms) };
+        _ = std.c.nanosleep(&s, null);
+    }
+    try testing.expect(gone);
+}
+
 test "subprocess timeout = 0 disables watchdog (echo still works)" {
     const cfg = comptime makeTestCfg(.{
         .argv = &.{"/bin/echo"},

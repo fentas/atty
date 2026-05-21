@@ -925,11 +925,20 @@ pub fn Module(comptime cfg: Config) type {
             }
 
             const want_stdin = sub.prompt_via == .stdin;
+            // `pgid = 0` makes the child its own process group
+            // leader. Without this, a timeout-driven kill of the
+            // direct child leaves any helpers / grandchildren it
+            // spawned with the SAME pgid as atty — they keep
+            // running unattributed. With its own pgid, the
+            // Watchdog can target the whole group via negative
+            // PID below (`kill(-pgid)`) so the timeout actually
+            // bounds the entire subtree.
             var child = std.process.spawn(io, .{
                 .argv = argv_list.items,
                 .stdin = if (want_stdin) .pipe else .ignore,
                 .stdout = .pipe,
                 .stderr = .pipe,
+                .pgid = 0,
             }) catch {
                 err_len_out.* = writeStatic(error_out, "subprocess spawn failed (binary on $PATH?)");
                 return error.SubprocessFailed;
@@ -960,17 +969,27 @@ pub fn Module(comptime cfg: Config) type {
                     // but belt-and-suspenders).
                     if (done.load(.acquire)) return;
                     expired.store(true, .release);
-                    // SIGTERM first — gives well-behaved CLIs a
-                    // chance to flush stderr / close files. SIGKILL
-                    // 200 ms later catches anything that didn't
-                    // exit. `std.posix.kill` instead of
-                    // `child.kill` because the latter mutates
-                    // `child.id` and races with the main thread's
-                    // read/wait.
-                    std.posix.kill(pid, .TERM) catch {};
+                    // Signal the whole PROCESS GROUP, not just the
+                    // direct child. `pid` is the child's PID and
+                    // also its pgid (we spawned with `pgid = 0`,
+                    // so the child is its own process group
+                    // leader). Negative PID to `kill(2)` means
+                    // "deliver to the process group |pid|" — any
+                    // helpers / grandchildren the child spawned
+                    // get the same signal. SIGTERM first for
+                    // graceful flush, SIGKILL 200ms later for
+                    // anything that didn't exit. Fall back to
+                    // direct-PID kill if group kill fails (e.g.
+                    // group already empty / child already exited).
+                    const neg_pid: std.posix.pid_t = -pid;
+                    std.posix.kill(neg_pid, .TERM) catch {
+                        std.posix.kill(pid, .TERM) catch {};
+                    };
                     var grace: std.c.timespec = .{ .sec = 0, .nsec = @intCast(200 * std.time.ns_per_ms) };
                     _ = std.c.nanosleep(&grace, null);
-                    std.posix.kill(pid, .KILL) catch {};
+                    std.posix.kill(neg_pid, .KILL) catch {
+                        std.posix.kill(pid, .KILL) catch {};
+                    };
                 }
             };
             // If the user asked for a timeout but we can't spawn
@@ -985,9 +1004,21 @@ pub fn Module(comptime cfg: Config) type {
             const watchdog_thread: ?std.Thread = if (sub.timeout_ms > 0) blk: {
                 const t = std.Thread.spawn(.{}, Watchdog.run, .{ sub.timeout_ms, child.id orelse unreachable, &completed, &timed_out }) catch {
                     // At this point only stdin (maybe) was touched
-                    // — no other threads to join. Kill + reap the
-                    // child so it doesn't run unbounded.
-                    child.kill(io);
+                    // — no other threads to join. Group-kill the
+                    // child + any helpers it already spawned in
+                    // the microseconds since spawn returned. Same
+                    // negative-PID semantics as the Watchdog;
+                    // fall back to `child.kill` if the group call
+                    // fails (group empty / child already exited).
+                    const cid = child.id orelse unreachable;
+                    std.posix.kill(-cid, .KILL) catch child.kill(io);
+                    // Reap the child so it doesn't accumulate as
+                    // a zombie in the long-lived atty process.
+                    // Errors are swallowed because this is
+                    // already an error path — `wait` failing
+                    // (already-reaped / ECHILD) doesn't change
+                    // the outcome.
+                    _ = child.wait(io) catch null;
                     err_len_out.* = writeStatic(error_out, "subprocess watchdog thread spawn failed");
                     return error.SubprocessFailed;
                 };
@@ -1017,9 +1048,12 @@ pub fn Module(comptime cfg: Config) type {
             // ~10× the content for small responses).
             const read_cap = cfg.max_response_bytes * 16;
             const stdout_file = child.stdout orelse {
-                child.kill(io);
+                const cid = child.id orelse unreachable;
+                std.posix.kill(-cid, .KILL) catch child.kill(io);
                 completed.store(true, .release);
                 if (watchdog_thread) |t| t.join();
+                // Reap to avoid leaving a zombie in atty.
+                _ = child.wait(io) catch null;
                 err_len_out.* = writeStatic(error_out, "subprocess produced no stdout pipe");
                 return error.SubprocessFailed;
             };
@@ -1047,10 +1081,13 @@ pub fn Module(comptime cfg: Config) type {
             var reader = stdout_file.reader(io, &read_buf);
 
             const stdout_bytes = reader.interface.allocRemaining(gpa, .limited(read_cap)) catch {
-                child.kill(io);
+                const cid = child.id orelse unreachable;
+                std.posix.kill(-cid, .KILL) catch child.kill(io);
                 completed.store(true, .release);
                 if (stderr_thread) |t| t.join();
                 if (watchdog_thread) |t| t.join();
+                // Reap to avoid leaving a zombie in atty.
+                _ = child.wait(io) catch null;
                 err_len_out.* = writeStatic(error_out, "subprocess stdout read failed");
                 return error.SubprocessFailed;
             };
