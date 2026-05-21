@@ -1031,6 +1031,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.captured_truncated = false;
             rt.pending_command_len = 0;
             rt.pending_description_len = 0;
+            if (rt.last_assistant_json) |old| {
+                rt.allocator.free(old);
+                rt.last_assistant_json = null;
+            }
             rt.last_assistant_json_len = 0;
             rt.dialog_parse_retry_count = 0;
             rt.question_choices_count = 0;

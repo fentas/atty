@@ -678,10 +678,13 @@ pub fn configure(comptime cfg: Config) type {
             /// Owned by `pollShellInput` (where the JSON is
             /// parsed); appended verbatim as an `assistant_exec`
             /// turn so the conversation echoes back what the LLM
-            /// actually emitted.
-            /// Heap-promoted alongside `captured_output` — same
-            /// rationale (4 KB default off the inline Runtime).
-            last_assistant_json: *[cfg.max_response_bytes]u8,
+            /// actually emitted. Heap-allocated per-response (sized
+            /// to actual content) so a small reply doesn't reserve
+            /// `cfg.max_response_bytes` of inline buffer space.
+            /// `cfg.max_response_bytes` is the soft DoS cap — the
+            /// stash path truncates beyond it. `null` when no reply
+            /// has been stashed yet.
+            last_assistant_json: ?[]u8 = null,
             last_assistant_json_len: usize = 0,
             /// How many times we've already asked the LLM to re-do
             /// a malformed reply this dialog. Reset on dialog start
@@ -875,8 +878,6 @@ pub fn configure(comptime cfg: Config) type {
             // capture + 4 KB JSON).
             const captured_output = try allocator.create([cfg.captured_output_bytes]u8);
             errdefer allocator.destroy(captured_output);
-            const last_assistant_json = try allocator.create([cfg.max_response_bytes]u8);
-            errdefer allocator.destroy(last_assistant_json);
 
             // Attach-time api_base / api_key resolution serves
             // two purposes only:
@@ -944,7 +945,6 @@ pub fn configure(comptime cfg: Config) type {
                 .os_info = os_info,
                 .osc133_capture = Osc133.init(allocator),
                 .captured_output = captured_output,
-                .last_assistant_json = last_assistant_json,
             };
 
             // Chat-history persistence — when enabled, resolve the
@@ -994,7 +994,7 @@ pub fn configure(comptime cfg: Config) type {
             // worker-still-running path that intentionally leaks
             // worker-owned state below.
             rt.allocator.destroy(rt.captured_output);
-            rt.allocator.destroy(rt.last_assistant_json);
+            if (rt.last_assistant_json) |slice| rt.allocator.free(slice);
             if (rt.chat_persist_path.len > 0) rt.allocator.free(rt.chat_persist_path);
             if (rt.thread) |t| {
                 {
@@ -1020,6 +1020,7 @@ pub fn configure(comptime cfg: Config) type {
             }
             // Inert mode (no worker spawned): safe to clean up
             // synchronously.
+            if (rt.shared.res_buf) |old| rt.allocator.free(old);
             rt.allocator.destroy(rt.shared);
             rt.allocator.free(rt.api_base);
             rt.allocator.free(rt.api_key);

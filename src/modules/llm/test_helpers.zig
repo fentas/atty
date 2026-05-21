@@ -27,5 +27,5 @@ pub fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
     rt.allocator.free(rt.context_blob);
     rt.allocator.free(rt.os_info);
     rt.allocator.destroy(rt.captured_output);
-    rt.allocator.destroy(rt.last_assistant_json);
+    if (rt.last_assistant_json) |slice| rt.allocator.free(slice);
 }

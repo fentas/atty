@@ -1180,6 +1180,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
+            if (rt.shared.res_buf) |old| {
+                rt.allocator.free(old);
+                rt.shared.res_buf = null;
+            }
             rt.shared.res_len = 0;
             // Single-mode is one-shot — never resume. Each `Alt+A`
             // gets a fresh CLI session. Otherwise unrelated
@@ -1459,6 +1463,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // remove the 🧠 thinking… status.
                 if (rt.shared.res_gen != rt.shared.req_gen) {
                     rt.shared.res_done = false;
+                    if (rt.shared.res_buf) |old| {
+                        rt.allocator.free(old);
+                        rt.shared.res_buf = null;
+                    }
                     rt.shared.res_len = 0;
                     rt.shared.explanation_len = 0;
                     rt.shared.error_len = 0;
@@ -1473,8 +1481,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
                 res_kind = rt.shared.res_kind;
                 n = rt.shared.res_len;
-                @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
-                rt.inject_len = n;
+                if (rt.shared.res_buf) |slice| {
+                    const copy_n = @min(n, rt.inject_buf.len);
+                    @memcpy(rt.inject_buf[0..copy_n], slice[0..copy_n]);
+                    rt.inject_len = copy_n;
+                    n = copy_n;
+                    rt.allocator.free(slice);
+                    rt.shared.res_buf = null;
+                } else {
+                    rt.inject_len = 0;
+                    n = 0;
+                }
+                rt.shared.res_len = 0;
 
                 // Capture the CLI's session id (dialog mode only —
                 // single-mode is one-shot and intentionally
@@ -1588,9 +1606,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Stash the raw response so it becomes the next
             // assistant_exec turn. Done before parsing so we have
             // it whether or not the JSON parses cleanly.
-            const stash_n = @min(raw.len, rt.last_assistant_json.len);
-            @memcpy(rt.last_assistant_json[0..stash_n], raw[0..stash_n]);
-            rt.last_assistant_json_len = stash_n;
+            if (rt.last_assistant_json) |old| rt.allocator.free(old);
+            rt.last_assistant_json = null;
+            rt.last_assistant_json_len = 0;
+            const stash_n = @min(raw.len, cfg.max_response_bytes);
+            if (stash_n > 0) {
+                const buf = rt.allocator.alloc(u8, stash_n) catch null;
+                if (buf) |b| {
+                    @memcpy(b, raw[0..stash_n]);
+                    rt.last_assistant_json = b;
+                    rt.last_assistant_json_len = stash_n;
+                }
+            }
 
             var parsed: DialogResponse = .{};
             parseDialogResponse(rt.allocator, raw, &parsed) catch {
@@ -1651,7 +1678,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Echo the assistant's JSON back to the model
                     // on the next turn so the conversation stays
                     // coherent.
-                    const assistant_copy = rt.allocator.dupe(u8, rt.last_assistant_json[0..rt.last_assistant_json_len]) catch {
+                    const stash_slice = if (rt.last_assistant_json) |s| s[0..rt.last_assistant_json_len] else &[_]u8{};
+                    const assistant_copy = rt.allocator.dupe(u8, stash_slice) catch {
                         abortDialog(rt, ctx.io, "out of memory continuing dialog");
                         return null;
                     };
@@ -1863,7 +1891,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // dupe OOMs keeps the chat-scrollback story
                     // intact without abort-on-OOM.
                     if (rt.last_assistant_json_len > 0) {
-                        const assistant_copy = rt.allocator.dupe(u8, rt.last_assistant_json[0..rt.last_assistant_json_len]) catch null;
+                        const stash_slice = if (rt.last_assistant_json) |s| s[0..rt.last_assistant_json_len] else &[_]u8{};
+                        const assistant_copy = rt.allocator.dupe(u8, stash_slice) catch null;
                         if (assistant_copy) |copy| {
                             pushTurn(rt, .assistant_exec, copy) catch rt.allocator.free(copy);
                         }
@@ -2311,6 +2340,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
+            if (rt.shared.res_buf) |old| {
+                rt.allocator.free(old);
+                rt.shared.res_buf = null;
+            }
             rt.shared.res_len = 0;
             publishSessionId(rt);
             rt.shared.cv.signal(ctx.io);
@@ -2336,7 +2369,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // the model sees its own output in context. Without
             // this the corrective user turn would seem to come
             // from nowhere.
-            const bad_reply = rt.last_assistant_json[0..rt.last_assistant_json_len];
+            const bad_reply = if (rt.last_assistant_json) |s| s[0..rt.last_assistant_json_len] else &[_]u8{};
             const assistant_copy = try rt.allocator.dupe(u8, bad_reply);
             errdefer rt.allocator.free(assistant_copy);
             try pushTurn(rt, .assistant_exec, assistant_copy);

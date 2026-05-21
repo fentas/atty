@@ -564,16 +564,17 @@ pub const Config = struct {
     /// **Footprint note** (approximate, default-config in
     /// parens): per-attach memory has three pieces.
     /// - Heap (via `Runtime` directly): `captured_output_bytes`
-    ///   (16 KB) + `last_assistant_json` (`max_response_bytes`,
-    ///   16 KB).
+    ///   (16 KB) + `last_assistant_json` (dynamic — sized to actual
+    ///   response; `max_response_bytes` is the soft DoS cap).
     /// - Heap (via the `Shared` block): `req_buf`
-    ///   (`max_prompt_bytes`, 2 KB) + `res_buf`
-    ///   (`max_response_bytes`, 16 KB) + `body_buf`
-    ///   (`body_buf_bytes`, 32 KB).
+    ///   (`max_prompt_bytes`, 2 KB) + `res_buf` (dynamic — sized
+    ///   to actual response; `max_response_bytes` is the soft DoS
+    ///   cap) + `body_buf` (`body_buf_bytes`, 32 KB).
     /// - Inline on `Runtime`: `inject_buf` + `pending_command`
     ///   (each `max_response_bytes`, 32 KB total).
-    /// Default config: ~94 KB heap + 32 KB inline per instance.
-    /// Sizes scale with whichever knob you bump.
+    /// Default config: ~62 KB heap + 32 KB inline per instance with
+    /// no LLM reply in flight; +<=2x max_response_bytes (32 KB) on
+    /// reply turns. Sizes scale with whichever knob you bump.
     captured_output_bytes: comptime_int = 16 * 1024,
     /// Maximum conversation turns kept in memory. FIFO truncation
     /// when exceeded — older turns drop first.
