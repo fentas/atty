@@ -353,9 +353,12 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::{AsRawFd, FromRawFd};
 
-    // Lock file lives next to the socket (same parent dir,
-    // identical access policy — SystemD-created RuntimeDirectory
-    // for the system unit, user's $XDG_RUNTIME_DIR otherwise).
+    // Lock file lives next to the socket (same parent dir, so
+    // it inherits the daemon's RuntimeDirectory permissions).
+    // Mode is `0600`, NOT the socket's `0660` — only the daemon
+    // ever opens this file. The socket itself is group-readable
+    // so `atty` group members can connect; the lock is purely
+    // internal to the daemon process.
     let mut lock_path = socket.as_os_str().to_owned();
     lock_path.push(".lock");
     let lock_path: std::path::PathBuf = lock_path.into();
@@ -747,12 +750,14 @@ mod tests {
     use super::*;
 
     fn unique_socket_path() -> std::path::PathBuf {
+        // pid + monotonic counter — pid alone risks colliding
+        // across cargo's parallel test threads (same PID), and
+        // SystemTime nanos can repeat on coarse-resolution
+        // clocks or fast machines within the same tick.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::path::PathBuf::from(format!("/tmp/atty-guard-lock-test-{pid}-{nanos}.sock"))
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::path::PathBuf::from(format!("/tmp/atty-guard-lock-test-{pid}-{n}.sock"))
     }
 
     #[test]
