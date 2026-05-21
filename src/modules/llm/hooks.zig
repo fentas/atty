@@ -687,7 +687,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 .llm_exec_dialog => return toggleDialogMode(rt, ctx, .dialog),
                 .llm_exec_auto => return toggleDialogMode(rt, ctx, .auto),
                 .llm_exec_cycle_model => {
-                    if (!rt.ai_mode_active) return false;
+                    // Alt+M fires in any LLM-active context: the
+                    // `#: ` prompt-prefix flow (`ai_mode_active`),
+                    // an open chat surface, OR a mid-dialog state
+                    // (Alt+S started a dialog but neither chat
+                    // surface is open AND the prompt buffer has
+                    // been wiped post-commit so `ai_mode_active`
+                    // is back to false). Without all three the
+                    // user can't switch providers mid-flow —
+                    // defeats the point of a multi-provider config
+                    // (#173 #7).
+                    const llm_active = rt.ai_mode_active or rt.chat_inline_open or rt.chat_overlay_open or rt.dialog_persistent_mode != .off or rt.dialog_state != .idle;
+                    if (!llm_active) return false;
                     if (cfg.providers.len == 0) {
                         latchHint(rt, "single-provider config — set `providers = &.{ ... }` to cycle");
                         return true;
@@ -1780,17 +1791,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return .single;
         }
 
-        /// Best-effort human-readable label for a `Provider` value
-        /// — used when a `ProviderEntry.name` isn't set. HTTP
-        /// uses the model id; subprocess uses argv[0]; empty fallback
-        /// is "(unconfigured)" so the statusbar always has something
-        /// to render.
-        fn providerLabel(p: types.Provider) []const u8 {
-            return switch (p) {
-                .http => |h| if (h.model.len > 0) h.model else "(http)",
-                .subprocess => |s| if (s.argv.len > 0) s.argv[0] else "(subprocess)",
-            };
-        }
+        /// Re-export `worker_mod_ns.providerLabel` so the
+        /// statusbar / Alt+M code below reads as a local function.
+        const providerLabel = worker_mod_ns.providerLabel;
 
         fn publishSessionId(rt: *Runtime) void {
             if (rt.session_id.len == 0) {

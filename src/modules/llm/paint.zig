@@ -575,25 +575,47 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
             // Top divider row — dim chrome + mauve icon + cyan
             // shortcut, matching the overlay's visual vocabulary.
-            // In incognito mode, swap the ✨ sparkle for a 🕶 glasses
-            // glyph (`\u{1F576}`) so the user sees at a glance that
-            // their typing won't be recorded locally. NOTE: incognito
+            // Incognito swaps the ✨ sparkle for 🕶 glasses
+            // (`\u{1F576}`) so the user sees at a glance that
+            // typing won't be recorded locally. NOTE: incognito
             // gates LOCAL recording (atuin / shell history); chat
-            // prompts STILL go to the remote LLM API. The visual cue
-            // is "won't be saved here," not "won't leave this box."
+            // prompts STILL go to the remote LLM API.
+            //
+            // The divider also surfaces the active provider so
+            // the user knows which model is responding (#173 #6).
+            // Resolved via `resolveProviderForMode(.chat, …)` so
+            // a per-mode `providers[]` config that ships a chat-
+            // only entry reads correctly even when
+            // `current_provider_idx` points at a single-only
+            // entry that would otherwise show wrong.
             const cols_usize: usize = total_cols;
             w.print("\x1B[{d};1H\x1B[2K", .{top_row}) catch return false;
-            const title: []const u8 = if (ctx.incognito)
-                "\x1B[2m\x1B[22;38;5;141m\u{1F576}\x1B[39;2m atty chat (incognito) \u{2500}"
-            else
-                "\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}";
-            w.writeAll(title) catch return false;
-            // Pad the divider with horizontal-line characters across
-            // the rest of the row. cols_usize floor at 20 to avoid
-            // pathological zero-width panes.
-            // 🕶 / ✨ render double-width in Ghostty/kitty/foot/wezterm;
-            // "(incognito)" adds 12 cols, label trailer `─ ` adds 2.
-            const label_visible: usize = if (ctx.incognito) 26 else 15;
+            const resolved = types.resolveProviderForMode(.chat, cfg.providers, cfg.provider, rt.current_provider_idx);
+            const raw_label: []const u8 = if (resolved.name.len > 0) resolved.name else types.providerLabel(resolved.provider);
+            const icon: []const u8 = if (ctx.incognito) "\u{1F576}" else "\u{2728}";
+            const mode_word: []const u8 = if (ctx.incognito) "atty chat (incognito)" else "atty chat";
+            // Clamp the label to a third of the available cols so a
+            // long provider name doesn't squeeze the trailing
+            // `Alt+C close · Enter send` shortcut hint off the row.
+            // Trailing `…` (U+2026, 1 col) marks the cut so users
+            // know the full name is longer.
+            var label_buf: [128]u8 = undefined;
+            const label_cap: usize = @max(8, cols_usize / 3);
+            const provider_label: []const u8 = if (raw_label.len > label_cap and label_cap > 1) blk: {
+                const cut = @min(label_cap - 1, label_buf.len -| 3);
+                @memcpy(label_buf[0..cut], raw_label[0..cut]);
+                @memcpy(label_buf[cut .. cut + 3], "\u{2026}");
+                break :blk label_buf[0 .. cut + 3];
+            } else raw_label;
+            // Format: `<icon> <mode_word> · <provider_label> ─`
+            w.print("\x1B[2m\x1B[22;38;5;141m{s}\x1B[39;2m {s} \u{00B7} \x1B[22;38;5;14m{s}\x1B[39;2m \u{2500}", .{ icon, mode_word, provider_label }) catch return false;
+            // Visible-col count for the trail-clearance math.
+            // Icon double-width (2) + space + mode_word + " · " (3)
+            // + provider_label (label_cap upper bound) + " ─" (2).
+            // mode_word + label counted as byte length (ASCII-ish
+            // — emoji in names would underestimate but the clamp
+            // gives slack).
+            const label_visible: usize = 2 + 1 + mode_word.len + 3 + provider_label.len + 2;
             // " Alt+C close · Enter send" is 25 visible cols.
             const trail_min_clearance: usize = 25;
             const trail_target: usize = if (cols_usize > label_visible + trail_min_clearance)
