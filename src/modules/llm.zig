@@ -828,10 +828,14 @@ pub fn configure(comptime cfg: Config) type {
             /// be wasted work. `provideTermBytes` checks this AFTER
             /// the full `chat_inline_paint_pending` path and falls
             /// back to a full paint if the cached geometry doesn't
-            /// match the current input shape (newline count grew /
-            /// shrunk, cols changed, …). Only the keystroke handler
-            /// sets it — every other state-change site continues to
-            /// arm `chat_inline_paint_pending` for the full repaint.
+            /// match: cols changed, incognito toggled, or the
+            /// CLAMPED input-line count (`min(1+newlines,
+            /// input_lines_cap)`) would shift the scrollback
+            /// boundary. Long multi-line prompts that are already
+            /// at the cap keep fast-pathing — extra `\n` strokes
+            /// don't move the geometry. Only the keystroke handler
+            /// sets this latch; every other state-change site arms
+            /// `chat_inline_paint_pending` for the full repaint.
             chat_inline_input_dirty: bool = false,
             /// Cached geometry from the last successful full
             /// `paintInlineChat`. The fast-path replays

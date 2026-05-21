@@ -1047,10 +1047,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// only the input block + cursor restore.
         ///
         /// Bails (returns false → caller falls back to full paint)
-        /// when the cache is stale, the input's newline count
-        /// changed (which would shift the scrollback boundary), or
-        /// the terminal cols changed (cached coords no longer
-        /// describe the same viewport).
+        /// when the cache is stale, the terminal cols changed
+        /// (cached coords no longer describe the same viewport),
+        /// the incognito flag changed (chrome would be wrong), or
+        /// the CLAMPED input-line count (`min(1+newlines,
+        /// input_lines_cap)`) would shift the scrollback boundary.
+        /// Newlines past the cap don't trigger a bail — at that
+        /// point the input area is at its ceiling and additional
+        /// `\n` strokes keep geometry stable.
         fn paintInlineChatInputFast(rt: *Runtime, ctx: *m.Context) bool {
             if (!rt.chat_inline_paint_cache_valid or !rt.chat_inline_open) return false;
             const total_cols: u16 = ctx.terminal_cols orelse 80;
