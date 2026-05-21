@@ -800,10 +800,27 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // then module-registered defaults from `D.allDefaultBindings()`
                 // (the LLM module registers its own Alt+A/Alt+C/etc.).
                 // First-match-wins via the linear scan in `keymap.match`.
-                const matched_action = keymap.match(config.keymap.bindings, input) orelse
-                    keymap.match(D.allDefaultBindings(), input);
+                // **Skip atty's bindings when an inner shell-side
+                // alt-screen TUI is running** (vim, k9s, less, …) and
+                // no atty module owns the overlay. Otherwise atty's
+                // `Esc → llm_exec_cancel` binding intercepts the
+                // keystroke, consumes any stray atty state on the
+                // first press (e.g. a leftover `dialog_persistent_mode`
+                // flag), and the user has to press Esc TWICE for the
+                // TUI to see it. The shell-alt-screen TUI owns the
+                // keystroke routing while it's running; atty's CSI-u
+                // → legacy fallback below still translates protocol
+                // bytes so the TUI gets the form it understands.
+                const shell_owns_input = alt_screen.active and !ctx.module_overlay_active;
+                const matched_action: ?keymap.Action = if (shell_owns_input)
+                    null
+                else
+                    keymap.match(config.keymap.bindings, input) orelse
+                        keymap.match(D.allDefaultBindings(), input);
                 if (matched_action) |act| {
                     trace.log(.keymap, "matched action={s}", .{@tagName(act)});
+                } else if (shell_owns_input) {
+                    trace.log(.keymap, "bindings skipped (shell owns alt-screen)", .{});
                 } else {
                     trace.log(.keymap, "no match", .{});
                 }
