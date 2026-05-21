@@ -1041,7 +1041,8 @@ pub fn Module(comptime cfg: Config) type {
             // ~10× the content for small responses).
             const read_cap = cfg.max_response_bytes * 16;
             const stdout_file = child.stdout orelse {
-                child.kill(io);
+                const cid = child.id orelse unreachable;
+                std.posix.kill(-cid, .KILL) catch child.kill(io);
                 completed.store(true, .release);
                 if (watchdog_thread) |t| t.join();
                 err_len_out.* = writeStatic(error_out, "subprocess produced no stdout pipe");
@@ -1071,7 +1072,8 @@ pub fn Module(comptime cfg: Config) type {
             var reader = stdout_file.reader(io, &read_buf);
 
             const stdout_bytes = reader.interface.allocRemaining(gpa, .limited(read_cap)) catch {
-                child.kill(io);
+                const cid = child.id orelse unreachable;
+                std.posix.kill(-cid, .KILL) catch child.kill(io);
                 completed.store(true, .release);
                 if (stderr_thread) |t| t.join();
                 if (watchdog_thread) |t| t.join();

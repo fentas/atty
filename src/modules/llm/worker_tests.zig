@@ -369,15 +369,17 @@ test "subprocess timeout: /bin/sleep 5 with 500ms budget gets SIGKILL'd" {
 }
 
 test "subprocess timeout kills the whole process group (grandchildren too)" {
-    // Pre-#187-006 the Watchdog only killed the direct child;
-    // helpers / grandchildren spawned by the CLI kept running
-    // unattributed. Spawning with `pgid = 0` plus killpg via
-    // negative-PID `kill(2)` ends the entire subtree.
+    // Invariant: a timeout-driven kill MUST reach helpers and
+    // grandchildren that the spawned CLI may have forked, not
+    // just the direct child. Achieved by spawning with
+    // `pgid = 0` (child becomes its own process-group leader)
+    // and sending the kill via `kill(-pid, …)` (negative PID =
+    // process-group target per POSIX `kill(2)`).
     //
     // Fixture: `sh -c 'sleep 99 & echo $! >/tmp/.. ; sleep 99'`
     // forks a backgrounded grandchild, writes its PID to a
-    // tempfile, then sleeps itself. The Watchdog's group kill
-    // should reach both.
+    // tempfile, then sleeps itself. Both processes must be
+    // gone after the watchdog fires.
     const seed: u64 = blk: {
         var ts: std.posix.timespec = undefined;
         _ = std.c.clock_gettime(.MONOTONIC, &ts);
@@ -431,40 +433,65 @@ test "subprocess timeout kills the whole process group (grandchildren too)" {
     // wrote it BEFORE its own sleep started, so the PID is
     // recorded even if the watchdog killed the shell before
     // its second `sleep` ran.
+    // Poll for the pidfile rather than reading once — under
+    // load the shell might still be racing the redirect when
+    // the watchdog fires. 1s overall deadline is well past
+    // the fork+write+sleep schedule (~microseconds) but tight
+    // enough that a regression (shell killed before write)
+    // surfaces as a test failure rather than a hang.
     const Libc = struct {
         extern "c" fn open(path: [*:0]const u8, flags: c_int) c_int;
         extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
         extern "c" fn close(fd: c_int) c_int;
+        extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
     };
-    const fd = Libc.open(pid_path_z.ptr, 0);
-    try testing.expect(fd >= 0);
-    defer _ = Libc.close(fd);
     var pid_buf: [32]u8 = undefined;
-    const n = Libc.read(fd, &pid_buf, pid_buf.len);
-    try testing.expect(n > 0);
-    const pid_str = std.mem.trimEnd(u8, pid_buf[0..@intCast(n)], " \t\r\n");
+    var pid_len: usize = 0;
+    {
+        const poll_deadline_ms: i64 = 1000;
+        const start = nowMs();
+        while ((nowMs() - start) < poll_deadline_ms) {
+            const fd = Libc.open(pid_path_z.ptr, 0);
+            if (fd >= 0) {
+                defer _ = Libc.close(fd);
+                const n = Libc.read(fd, &pid_buf, pid_buf.len);
+                if (n > 0) {
+                    pid_len = @intCast(n);
+                    break;
+                }
+            }
+            var s: std.c.timespec = .{ .sec = 0, .nsec = @intCast(10 * std.time.ns_per_ms) };
+            _ = std.c.nanosleep(&s, null);
+        }
+        try testing.expect(pid_len > 0);
+    }
+    const pid_str = std.mem.trimEnd(u8, pid_buf[0..pid_len], " \t\r\n");
     const grandchild_pid = try std.fmt.parseInt(std.c.pid_t, pid_str, 10);
 
-    // The watchdog already ran (we observed `timed out`). Give
-    // SIGKILL a moment to be delivered + reaped, then confirm
-    // /proc/<grandchild_pid> no longer exists.
-    var slice: std.c.timespec = .{ .sec = 0, .nsec = @intCast(200 * std.time.ns_per_ms) };
-    _ = std.c.nanosleep(&slice, null);
+    // Poll for /proc/<grandchild_pid> to disappear. The
+    // watchdog already ran (we observed "timed out"), so the
+    // group kill has already been sent — we just need the
+    // kernel to deliver + reap. 2s overall deadline is
+    // generous for any sane CI runner; the kill cycle
+    // typically completes in single-digit ms.
     var proc_path_buf: [64]u8 = undefined;
     const proc_path = try std.fmt.bufPrintZ(
         &proc_path_buf,
         "/proc/{d}",
         .{grandchild_pid},
     );
-    // F_OK = 0 — existence check only.
-    const Access = struct {
-        extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
-    };
-    const access_rc = Access.access(proc_path.ptr, 0);
-    // access returns -1 with errno=ENOENT when the PID is gone.
-    // We only need to confirm "gone"; the exact errno isn't
-    // load-bearing.
-    try testing.expect(access_rc < 0);
+    const kill_deadline_ms: i64 = 2000;
+    const kill_start = nowMs();
+    var gone = false;
+    while ((nowMs() - kill_start) < kill_deadline_ms) {
+        if (Libc.access(proc_path.ptr, 0) < 0) {
+            gone = true;
+            break;
+        }
+        var s: std.c.timespec = .{ .sec = 0, .nsec = @intCast(20 * std.time.ns_per_ms) };
+        _ = std.c.nanosleep(&s, null);
+    }
+    try testing.expect(gone);
 }
 
 test "subprocess timeout = 0 disables watchdog (echo still works)" {
