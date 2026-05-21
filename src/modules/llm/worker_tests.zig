@@ -891,3 +891,150 @@ test "resolveProviderForMode: dialog mode doesn't pick auto-only entry" {
     const r = worker_mod.resolveProviderForMode(.dialog, entries, fallback, 0);
     try testing.expectEqualStrings("dialog-pick", r.name);
 }
+
+// ── #168 — unified parseStreamJson ─────────────────────────────────────
+
+test "parseStreamJson: captures result + session_id in one walk" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"S-1"}
+        \\{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}
+        \\{"type":"result","result":"ls -la"}
+    ;
+    var result_out: [128]u8 = undefined;
+    var sid_out: [64]u8 = undefined;
+    const p = M.parseStreamJson(body, "result", "session_id", &result_out, &sid_out);
+    try testing.expectEqualStrings("ls -la", result_out[0..p.result_len]);
+    try testing.expectEqualStrings("S-1", sid_out[0..p.session_id_len]);
+}
+
+test "parseStreamJson: empty session_id_field skips session capture" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"S-1"}
+        \\{"type":"result","result":"ok"}
+    ;
+    var result_out: [64]u8 = undefined;
+    var sid_out: [0]u8 = undefined;
+    const p = M.parseStreamJson(body, "result", "", &result_out, &sid_out);
+    try testing.expectEqualStrings("ok", result_out[0..p.result_len]);
+    try testing.expectEqual(@as(usize, 0), p.session_id_len);
+}
+
+test "parseStreamJson: first valid result wins, late duplicates ignored" {
+    // Pins the first-write-wins contract: once `out.result_len > 0`
+    // the gate `need_result = result_len == 0` blocks any later
+    // valid `type=result` line from overwriting. Same for
+    // session_id. Behavioral observation of the short-circuit
+    // contract — short-circuit's perf benefit (skipping JSON
+    // parses on tail lines) isn't directly testable here, but the
+    // result invariant IS.
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"S-1"}
+        \\{"type":"result","result":"first"}
+        \\{"type":"system","subtype":"init","session_id":"S-2"}
+        \\{"type":"result","result":"second"}
+    ;
+    var result_out: [64]u8 = undefined;
+    var sid_out: [64]u8 = undefined;
+    const p = M.parseStreamJson(body, "result", "session_id", &result_out, &sid_out);
+    try testing.expectEqualStrings("first", result_out[0..p.result_len]);
+    try testing.expectEqualStrings("S-1", sid_out[0..p.session_id_len]);
+}
+
+test "parseStreamJson: trailing garbage after both captures doesn't trip the walker" {
+    // Defensive: even though the `catch continue` on parseFromSlice
+    // alone would tolerate this, short-circuit means the garbage
+    // never reaches the parse step. Test pins the no-crash
+    // observation.
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"S-1"}
+        \\{"type":"result","result":"ok"}
+        \\NOT JSON {{{ a less-defensive parser would barf here
+    ;
+    var result_out: [64]u8 = undefined;
+    var sid_out: [64]u8 = undefined;
+    const p = M.parseStreamJson(body, "result", "session_id", &result_out, &sid_out);
+    try testing.expectEqualStrings("ok", result_out[0..p.result_len]);
+    try testing.expectEqualStrings("S-1", sid_out[0..p.session_id_len]);
+}
+
+test "parseStreamJson: oversized session_id abandons capture for the rest of the stream" {
+    // Pre-#168 `extractStreamSessionId` returned 0 immediately on
+    // overflow. The unified walker mirrors that by flipping
+    // want_session off — a later init event with a smaller (likely
+    // bogus) id must NOT be picked up. Result capture stays alive.
+    const cfg_a = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const Ma = worker_mod.Module(cfg_a);
+
+    const body_a =
+        \\{"type":"system","subtype":"init","session_id":"way-too-long-to-fit"}
+        \\{"type":"system","subtype":"init","session_id":"S2"}
+        \\{"type":"result","result":"ok"}
+    ;
+    var result_a: [64]u8 = undefined;
+    var sid_a: [8]u8 = undefined; // can't fit the first id
+    const pa = Ma.parseStreamJson(body_a, "result", "session_id", &result_a, &sid_a);
+    try testing.expectEqualStrings("ok", result_a[0..pa.result_len]);
+    try testing.expectEqual(@as(usize, 0), pa.session_id_len);
+}
+
+test "parseStreamJson: session truncation guard rejects oversized id" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"way-too-long-for-the-tiny-buffer"}
+        \\{"type":"result","result":"ok"}
+    ;
+    var result_out: [64]u8 = undefined;
+    var sid_out: [8]u8 = undefined; // smaller than the id
+    const p = M.parseStreamJson(body, "result", "session_id", &result_out, &sid_out);
+    try testing.expectEqualStrings("ok", result_out[0..p.result_len]);
+    try testing.expectEqual(@as(usize, 0), p.session_id_len);
+}
+
+test "extractStreamSessionId + extractJsonStreamResult wrappers still work" {
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"S-X"}
+        \\{"type":"result","result":"X"}
+    ;
+    var out: [64]u8 = undefined;
+    const n_r = M.extractJsonStreamResult(body, "result", &out);
+    try testing.expectEqualStrings("X", out[0..n_r]);
+    const n_s = M.extractStreamSessionId(body, "session_id", &out);
+    try testing.expectEqualStrings("S-X", out[0..n_s]);
+}
