@@ -931,10 +931,38 @@ test "parseStreamJson: empty session_id_field skips session capture" {
     try testing.expectEqual(@as(usize, 0), p.session_id_len);
 }
 
-test "parseStreamJson: short-circuits when both captures land" {
-    // Use a body with the result + init early, then a malformed
-    // line after. If parseStreamJson short-circuits correctly it
-    // won't trip over the garbage line.
+test "parseStreamJson: first valid result wins, late duplicates ignored" {
+    // Pins the first-write-wins contract: once `out.result_len > 0`
+    // the gate `need_result = result_len == 0` blocks any later
+    // valid `type=result` line from overwriting. Same for
+    // session_id. Behavioral observation of the short-circuit
+    // contract — short-circuit's perf benefit (skipping JSON
+    // parses on tail lines) isn't directly testable here, but the
+    // result invariant IS.
+    const cfg = comptime makeTestCfg(.{
+        .argv = &.{"/bin/true"},
+        .output = .{ .json_stream = .{ .field = "result" } },
+    });
+    const M = worker_mod.Module(cfg);
+
+    const body =
+        \\{"type":"system","subtype":"init","session_id":"S-1"}
+        \\{"type":"result","result":"first"}
+        \\{"type":"system","subtype":"init","session_id":"S-2"}
+        \\{"type":"result","result":"second"}
+    ;
+    var result_out: [64]u8 = undefined;
+    var sid_out: [64]u8 = undefined;
+    const p = M.parseStreamJson(body, "result", "session_id", &result_out, &sid_out);
+    try testing.expectEqualStrings("first", result_out[0..p.result_len]);
+    try testing.expectEqualStrings("S-1", sid_out[0..p.session_id_len]);
+}
+
+test "parseStreamJson: trailing garbage after both captures doesn't trip the walker" {
+    // Defensive: even though the `catch continue` on parseFromSlice
+    // alone would tolerate this, short-circuit means the garbage
+    // never reaches the parse step. Test pins the no-crash
+    // observation.
     const cfg = comptime makeTestCfg(.{
         .argv = &.{"/bin/true"},
         .output = .{ .json_stream = .{ .field = "result" } },
@@ -944,7 +972,7 @@ test "parseStreamJson: short-circuits when both captures land" {
     const body =
         \\{"type":"system","subtype":"init","session_id":"S-1"}
         \\{"type":"result","result":"ok"}
-        \\NOT JSON {{{ this would crash a less-defensive parser
+        \\NOT JSON {{{ a less-defensive parser would barf here
     ;
     var result_out: [64]u8 = undefined;
     var sid_out: [64]u8 = undefined;
