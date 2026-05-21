@@ -1038,39 +1038,3 @@ test "extractStreamSessionId + extractJsonStreamResult wrappers still work" {
     const n_s = M.extractStreamSessionId(body, "session_id", &out);
     try testing.expectEqualStrings("S-X", out[0..n_s]);
 }
-
-test "runHttpFetchWithDeadline against an unbound port returns .fetch_failed quickly" {
-    // Sanity check the helper's failure path: an unbound port
-    // gets ECONNREFUSED essentially instantly, exercising the
-    // sub-thread + ownership-transfer plumbing without needing
-    // a slow-loris fixture. (Timeout coverage proper would need
-    // a hung TCP listener; std.Io.net's listen API in Zig 0.16
-    // is verbose and the listener thread interleaves with the
-    // test allocator in ways that complicate the harness — left
-    // to integration / manual testing.)
-    const cfg = comptime makeTestCfg(.{
-        .argv = &.{"/bin/echo"},
-        .prompt_via = .final_arg,
-        .output = .raw,
-    });
-    const M = worker_mod.Module(cfg);
-
-    var threaded = std.Io.Threaded.init(testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    // Port 1 reliably has no listener (privileged, never bound
-    // by user processes). Picking an unlikely ephemeral port
-    // would race with whatever else is on the box; port 1 is
-    // deterministic.
-    const outcome = M.runHttpFetchWithDeadline(
-        testing.allocator,
-        io,
-        "http://127.0.0.1:1/",
-        "{\"hi\":1}",
-        null,
-        4096,
-        5000, // generous: ECONNREFUSED returns in microseconds
-    );
-    try testing.expectEqual(M.FetchKind.fetch_failed, outcome.kind);
-}

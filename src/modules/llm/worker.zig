@@ -541,9 +541,15 @@ pub fn Module(comptime cfg: Config) type {
         /// caller owns `response_buf` and must free it. On
         /// timeout: returns `.timed_out`; the sub-thread is
         /// detached and frees its own state when it eventually
-        /// completes (bounded leak — at most one in-flight per
-        /// worker). Spawn-failures and OOM are reported via their
-        /// own `FetchKind` variants.
+        /// completes. The worker can return and start a new
+        /// request immediately, so repeated requests against a
+        /// blackholed endpoint accumulate several orphaned tasks
+        /// in parallel until each one's `client.fetch` returns
+        /// (typically when the OS TCP timeout fires). Each
+        /// orphan holds ~`response_cap` bytes plus url/body/auth
+        /// dupes; users tuning `timeout_ms` should size with
+        /// retry behavior in mind. Spawn-failures and OOM are
+        /// reported via their own `FetchKind` variants.
         ///
         /// `url`, `body`, `auth_header` are copied into task-owned
         /// heap so the worker can return without holding caller
@@ -640,8 +646,11 @@ pub fn Module(comptime cfg: Config) type {
             // True timeout. Detach: the sub-thread will eventually
             // complete and `publishDone` will see ABANDONED and
             // call `deinit` on the task (freeing everything we
-            // allocated above). Bounded leak — at most one
-            // in-flight per worker until the orphan completes.
+            // allocated above). The worker returns and can start
+            // another request immediately, so concurrent orphans
+            // can accumulate against a blackholed endpoint —
+            // bounded only by the OS TCP timeout under which
+            // each orphan's `client.fetch` eventually returns.
             thread.detach();
             return .{ .kind = .timed_out };
         }
