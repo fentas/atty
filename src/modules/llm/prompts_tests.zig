@@ -30,9 +30,9 @@ test "single prompt has no question action mention" {
     try testing.expect(std.mem.indexOf(u8, mod.prompt_single, "```question") == null);
 }
 
-test "every prompt rule states action body is verbatim — no escaping" {
+test "every prompt rule states the action body is raw (no escaping)" {
     const all = [_][]const u8{ mod.prompt_single, mod.prompt_dialog, mod.prompt_auto };
     for (all) |p| {
-        try testing.expect(std.mem.indexOf(u8, p, "no escaping") != null);
+        try testing.expect(std.mem.indexOf(u8, p, "raw") != null);
     }
 }
