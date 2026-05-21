@@ -1066,3 +1066,63 @@ test "inline chat: col snapshot 0 → falls back to col 1" {
     try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_col);
     try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[8;1H") != null);
 }
+
+test "inline chat scrollback: newest turn stays visible when prior turns wrap multiple rows" {
+    // Regression for the start_turn back-walk fix — with multi-row
+    // wrapping turns and a tight scrollback budget, the OLDEST
+    // visible turn must get clipped, not the newest. Previous
+    // `visible_end - scrollback_budget` math anchored the wrong end
+    // because it assumed one row per turn.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+
+    // Seed three multi-row turns. Each long-enough to consume the
+    // full per-turn cap (3 rows) when wrapped at the panel's
+    // ~74-col content width.
+    const long_a = "AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA";
+    const long_b = "BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB";
+    const newest_marker = "CCCC-NEWEST-MARKER-CCCC";
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, long_a));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, long_b));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, newest_marker));
+    defer helpers.freeTurns(&rt);
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    // The newest turn's distinctive marker MUST be in the paint
+    // output. Old math would have rendered the oldest turn(s) at
+    // the panel top and clipped the newest off the bottom.
+    try testing.expect(std.mem.indexOf(u8, painted.?, newest_marker) != null);
+}

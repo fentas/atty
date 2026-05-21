@@ -33,7 +33,7 @@ pub const Utf8Iterator = struct {
         const b0 = it.bytes[start];
         if (b0 < 0x80) {
             it.i = start + 1;
-            const w: u8 = if (b0 < 0x20 or b0 == 0x7F) 0 else 1;
+            const w: u8 = if (b0 == 0x09) 1 else if (b0 < 0x20 or b0 == 0x7F) 0 else 1;
             return .{ .cp = b0, .byte_len = 1, .width = w };
         }
         const seq_len_or_err = std.unicode.utf8ByteSequenceLength(b0);
@@ -61,6 +61,7 @@ pub fn utf8Iter(bytes: []const u8) Utf8Iterator {
 }
 
 pub fn displayWidth(cp: u21) u8 {
+    if (cp == 0x09) return 1;
     if (cp < 0x20 or cp == 0x7F) return 0;
     if (cp < 0x80) return 1;
     if (isZeroWidth(cp)) return 0;

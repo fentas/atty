@@ -16,6 +16,11 @@ test "displayWidth: ASCII printable = 1, control = 0" {
     try testing.expectEqual(@as(u8, 0), displayWidth(0x7F));
 }
 
+test "displayWidth: tab billed as 1 col (writeSanitized passes it through)" {
+    try testing.expectEqual(@as(u8, 1), displayWidth(0x09));
+    try testing.expectEqual(@as(usize, 3), measureCols("a\tb"));
+}
+
 test "displayWidth: bullet U+2022 = 1 col (narrow)" {
     try testing.expectEqual(@as(u8, 1), displayWidth(0x2022));
 }

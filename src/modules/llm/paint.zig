@@ -358,20 +358,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
         }
 
-        /// Inline-panel turn renderer. Returns the number of rows
-        /// it consumed (>= 1). For envelope turns (parsed JSON) it
-        /// stays single-row — the structured `desc → cmd` summary
-        /// is meant to be compact. For raw prose (user / assistant
-        /// conclusion / observation) it WRAPS across rows so a
-        /// long reply doesn't get cut off mid-sentence: word-break
-        /// at the last space inside the row, hard-break on a
-        /// codepoint boundary if a token alone exceeds `max_visible`.
-        /// `max_rows` caps the wrap to keep one big turn from
-        /// pushing the rest of the scrollback off-panel; overflow
-        /// gets a dim "[…]" marker on the last row. Continuation
-        /// rows clear themselves (`\r\n\x1B[2K`) and start at col 1
-        /// — the caller's row counter must be advanced by the
-        /// return value before painting the next turn.
+        /// Returns rows used (>= 1) so the caller can advance its
+        /// row counter — wrap means raw prose turns can claim
+        /// multiple rows, and the scrollback loop's anchor math
+        /// depends on knowing exactly how many. Envelopes stay
+        /// single-row: their `desc → cmd` shape is already compact,
+        /// and wrapping would split structured fields across rows
+        /// for no readability win. `max_rows` exists because one
+        /// runaway reply would otherwise consume the whole panel;
+        /// overflow surfaces in the alt-screen overlay
+        /// (Alt+Shift+C) which has the full DECSTBM region.
         fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize, max_rows: usize) !usize {
             const c = turn.content;
             // Quick shape check: assistant turns from the dialog
@@ -441,6 +437,30 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 },
             }
             return 1;
+        }
+
+        /// Estimate how many panel rows a turn would consume if
+        /// rendered now. Mirrors `renderTurnContent`'s envelope-vs-
+        /// raw decision and the same wrap iterator so the back-walk
+        /// in `paintInlineChat` picks `start_turn` accurately
+        /// (newest-turn-anchored). Envelope turns always claim one
+        /// row; raw turns walk the wrap iterator counting chunks
+        /// up to `max_rows`. Cheap — no allocations.
+        fn countTurnRows(turn: dialog.Turn, cols: usize, max_rows: usize) usize {
+            const c = turn.content;
+            const looks_like_envelope = turn.kind == .assistant_exec and
+                c.len > 2 and
+                c[0] == '{' and
+                std.mem.indexOf(u8, c, "\"action\"") != null;
+            if (looks_like_envelope) return 1;
+            if (c.len == 0) return 1;
+            var it = pw.wrapIter(c, cols);
+            var rows: usize = 0;
+            while (it.next()) |_| {
+                rows += 1;
+                if (rows >= max_rows) break;
+            }
+            return if (rows == 0) 1 else rows;
         }
 
         /// Word-wrap a raw turn across up to `max_rows` rows of
@@ -526,7 +546,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     try w.writeAll("\x1B[2m\u{2026}\x1B[0m ");
                 }
 
-                try paintInputLine(w, seg, seg_cur_local, focus, line_idx == 0);
+                try paintInputLine(w, seg, seg_cur_local, focus);
 
                 if (is_nl) {
                     line_idx += 1;
@@ -537,31 +557,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     break;
                 }
             }
-            // Edge case: buf was empty and the while-loop body
-            // didn't run beyond `pos == 0 == buf.len`. Ensure the
-            // first input row at least gets the prompt.
-            if (buf.len == 0) {
-                try w.print("\x1B[{d};1H\x1B[2K", .{input_top_row});
-                try w.writeAll(prompt_style);
-                try w.writeAll("\u{276F}\x1B[0m ");
-                if (focus) try w.writeAll("\x1B[7m \x1B[0m") else try w.writeAll("\x1B[2m\u{2592}\x1B[0m");
-            }
         }
 
         /// Render a single line of input — text up to the cursor,
         /// cursor glyph (or EOL block when `cur_local` lands at the
-        /// end), and the tail. `is_first` keeps the 512-byte
-        /// windowing only on the first line so a long pasted prompt
-        /// still surfaces context around the cursor; subsequent
-        /// lines render without windowing because multi-line
-        /// buffers are typically short.
-        fn paintInputLine(w: *std.Io.Writer, line: []const u8, cur_local: ?usize, focus: bool, is_first: bool) !void {
+        /// end), and the tail. Applies a 512-byte window around the
+        /// cursor so a long pasted prompt still surfaces context on
+        /// either side instead of dragging the tail off-screen.
+        fn paintInputLine(w: *std.Io.Writer, line: []const u8, cur_local: ?usize, focus: bool) !void {
             const len = line.len;
             const cur_pos: ?usize = if (cur_local) |cl| (if (cl <= len) cl else null) else null;
 
             var win_start: usize = 0;
             var win_end: usize = len;
-            if (is_first and len > 512) {
+            if (len > 512) {
                 const visible_max: usize = 512;
                 const cur_for_window = cur_pos orelse len;
                 const half = visible_max / 2;
@@ -856,7 +865,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 row += 1;
                 scrollback_budget -= 1;
             }
-            const start_turn: usize = if (visible_end > scrollback_budget) visible_end - scrollback_budget else 0;
             // Per-turn wrap cap so a single long reply can't push
             // the whole scrollback off-panel. 3 rows ≈ 240 chars at
             // 80-col, plenty for a paragraph; longer turns end in
@@ -864,6 +872,34 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // overlay (Alt+Shift+C) which has the full DECSTBM
             // scroll region.
             const per_turn_max_rows: usize = 3;
+            // Pick `start_turn` by walking BACKWARDS from the newest
+            // visible turn and summing each candidate's rendered-row
+            // claim. Previously this was `visible_end -
+            // scrollback_budget` (one-row-per-turn assumption), which
+            // anchored the OLDEST turns at the panel top and let the
+            // newest turns get clipped — opposite of the intended
+            // tail-anchored layout. Pre-counting via the same wrap
+            // walk used at render time keeps the newest turn fully
+            // visible even when older neighbours each consume up to
+            // `per_turn_max_rows` rows.
+            var start_turn: usize = visible_end;
+            var rows_remaining: u16 = scrollback_budget;
+            while (start_turn > 0 and rows_remaining > 0) {
+                const idx = start_turn - 1;
+                const turn_rows: u16 = @intCast(@min(
+                    countTurnRows(rt.turns[idx], max_inline_visible, per_turn_max_rows),
+                    @as(usize, std.math.maxInt(u16)),
+                ));
+                if (turn_rows >= rows_remaining) {
+                    // Include this turn — the inner loop's per-turn
+                    // cap clips its render to `rows_remaining` rows.
+                    start_turn = idx;
+                    rows_remaining = 0;
+                    break;
+                }
+                rows_remaining -= turn_rows;
+                start_turn = idx;
+            }
             for (rt.turns[start_turn..visible_end]) |turn| {
                 if (row >= input_top_row) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
