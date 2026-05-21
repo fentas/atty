@@ -1,6 +1,6 @@
 # security guard — design + status
 
-Status: **V1 + V2 baseline shipped (atty side + sidecar + ONNX SLM + eBPF + OSV).** Next push: a `aho-corasick`-driven AtomMatcher Tier-1 layer (V2-G), context-window slicing for the SLM (V2-H), and a baked-in atom fetcher that periodically pulls IOCs from Sigma / GTFOBins / LOLBAS / OSV into `flagged_atoms.txt` (V2-I).
+Status: **All V1 + V2 slices shipped (atty side + sidecar + ONNX SLM + eBPF + OSV + AtomMatcher + atom fetcher + threat-level accumulator + opt-in auto-Block).** The implementation-status table below is the authoritative record; the design-rationale sections that follow describe what each slice DOES, in the order they shipped. Treat any "Next" / "queued" wording further down as historical context for that slice — not as current roadmap.
 
 ## Implementation status
 
@@ -22,7 +22,7 @@ Status: **V1 + V2 baseline shipped (atty side + sidecar + ONNX SLM + eBPF + OSV)
 | V2-G      | AtomMatcher — Aho-Corasick over `flagged_atoms.txt` for thousand-scale patterns.       | #119  | ✅ merged       |
 | V2-H      | Sliding-context-window for SLM — `OnnxBackend` gets ±N bytes around the AC hit.        | #120  | ✅ merged       |
 | V2-I      | Baked-in atom fetcher — periodic refresh of `flagged_atoms.txt`; one-shot CLI + cron-style interval mode. GTFOBins shipped first.                  | #121  | ✅ merged       |
-| V2-I-2    | Sigma + LOLBAS sources — extend the V2-I fetcher with the SigmaHQ Linux rule corpus and LOLBAS Windows-binary corpus.                              | #125  | ✅ merged       |
+| V2-I-2    | Sigma source (sanitized) — extend the V2-I fetcher with the SigmaHQ Linux rule corpus. (LOLBAS prototyped + dropped: Windows-native, not useful for Linux shells.) | #125  | ✅ merged       |
 | V2-J      | Threat-level accumulator — multi-hit Tier-1 + Tier-2 SLM combined via independent-probability math; multi-atom commands surface a higher combined confidence. | #126  | ✅ merged       |
 | V2-J-2    | Auto-Block escalation — opt-in TOML knob `[accumulator] block_threshold` lets the accumulator escalate Warn → Block when combined confidence reaches the configured value AND ≥ 2 distinct signals fired; atty side renders a red `REFUSED` line + clears readline instead of prompting. | #127  | ✅ merged       |
 
@@ -47,18 +47,18 @@ The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable t
 
 - Daemon-internal fetcher: `atty-guard atoms update` (one-shot) + `atty-guard --atoms-update-interval 6h` (cron-style background thread).
 - Sources, opt-in via TOML config (`[atoms.sources]`):
-  - **Sigma rules** (`detection.selection.CommandLine|contains` blocks from the SigmaHQ Linux corpus).
+  - **Sigma rules** (sanitized — `detection.selection.CommandLine|contains` blocks from the SigmaHQ Linux corpus).
   - **GTFOBins** (`functions.shell` from per-binary YAML manifests).
-  - **LOLBAS** (less relevant for Linux but same shape — Windows IOCs land here for ssh-pivot detection).
   - **OSV** (re-uses the existing live-lookup path; per-batch dump rather than per-classify query).
-- Atomic tmp+rename install into `~/.local/share/atty-guard/atoms.txt`; daemon SIGHUP-reloads.
+  - LOLBAS was prototyped but dropped — the corpus is Windows-native and didn't surface Linux shell IOCs in practice. Removed from `atom_fetcher.rs` ahead of the V2-I-2 ship.
+- Atomic tmp+rename install into `$STATE_DIRECTORY/atoms.system.txt` (default `/var/lib/atty-guard/atoms.system.txt`); ownership-gated load on the daemon side.
 - Feature-gated `atoms-fetch` so a build without the network deps still ships.
 
 After V2-G/H/I land, the threat-level accumulator across the AC + precise + SLM tiers becomes the natural follow-up (V2-J).
 
 ### What V2-J brings (#126)
 
-- `AtomMatcher::find_all` — walks every non-overlapping atom hit in a command, not just the first. With the Sigma + LOLBAS corpus (#125) a single command realistically carries 2-5 atoms.
+- `AtomMatcher::find_all` — walks every non-overlapping atom hit in a command, not just the first. With the GTFOBins + Sigma corpus (#125) a single command realistically carries 2-5 atoms.
 - `Tier1::classify_all` — collects EVERY signal that fired (regex layers + flagged-URL substrings + npm + bash-c-base64 + all atom hits) instead of returning the first match.
 - Independent-probability accumulator: `p_combined = 1 - prod(1 - p_i)`. Three atoms at 0.6 each combine to 0.936; a single regex hit at 1.0 stays 1.0. Saturates toward 1.0 monotonically as more signals fire.
 - SLM second-stage gating moved to `combined_conf < 0.9` — when Tier-1 already has enough signal we skip the ~50 ms SLM call.
@@ -419,13 +419,19 @@ Why NOT bundled:
 - **macOS Gatekeeper** prompts — the model of "block, explain, allow override with reason". Worth aping.
 - **Burp Suite intruder** confirmation dialogs — gold-standard pattern for "we've identified something risky, here's what we know".
 
-## Next step
+## Design history — original "next step" plan
 
-**Next in queue (V2-B):** `aya-rs` LSM hook + ringbuf consumer. Reasoning: the atty UDS surface is now stable (#104→#105→#106 merged). Adding BPF on top doesn't churn the protocol; it just swaps the threat-map backing from `Mutex<HashMap>` to a real BPF map and adds an async ringbuf consumer to the daemon. Build path needs `CAP_BPF` + a recent kernel (5.15+ for the `lsm/bprm_check_security` hook) — only the user-installed sidecar gains those caps; atty itself stays unprivileged.
+The text below was the V1 → V2 roadmap as written before the slices
+shipped. The implementation-status table at the top of this document
+is the authoritative current state; this section is preserved for
+the design rationale (why each slice was queued in that order) but
+the actual delivery shipped all of these and more.
 
-**Then V2-C:** `Tier2Backend` trait in `classifier.rs` with an `Onnx` impl gated behind a Cargo feature flag. Model bundle distribution is the open question — likely shipped alongside atty-guard's GitHub releases as a separate `model-bundle-vX.Y.tar.zst`.
+**V2-B (now: #110 + #113 + #117 + #144):** `aya-rs` LSM hook + ringbuf consumer. Reasoning: the atty UDS surface is stable (#104→#105→#106 merged). Adding BPF on top doesn't churn the protocol; it just swaps the threat-map backing from `Mutex<HashMap>` to a real BPF map and adds an async ringbuf consumer to the daemon. Build path needs `CAP_BPF` + a recent kernel (5.15+ for the `lsm/bprm_check_security` hook) — only the user-installed sidecar gains those caps; atty itself stays unprivileged.
 
-**Then V2-E:** auto-launch from atty proper (or a `systemd --user` unit shipped under `atty-guard/contrib/`).
+**V2-C (now: #109 + #116):** `Tier2Backend` trait in `classifier.rs` with an `Onnx` impl gated behind a Cargo feature flag. Model bundle distribution shipped via separate releases.
+
+**V2-E (now: #108 + #140):** auto-launch from atty proper. Originally framed as a `systemd --user` unit; landed as a hardened system-daemon unit (`atty:atty`) so detection state lives outside the user's write reach.
 
 ## External input archive
 
