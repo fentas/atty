@@ -674,18 +674,6 @@ pub fn configure(comptime cfg: Config) type {
             /// truncated.
             pending_description: [256]u8 = undefined,
             pending_description_len: usize = 0,
-            /// Raw JSON response body for the current exec step.
-            /// Owned by `pollShellInput` (where the JSON is
-            /// parsed); appended verbatim as an `assistant_exec`
-            /// turn so the conversation echoes back what the LLM
-            /// actually emitted. Heap-allocated per-response (sized
-            /// to actual content) so a small reply doesn't reserve
-            /// `cfg.max_response_bytes` of inline buffer space.
-            /// `cfg.max_response_bytes` is the soft DoS cap — the
-            /// stash path truncates beyond it. `null` when no reply
-            /// has been stashed yet.
-            last_assistant_json: ?[]u8 = null,
-            last_assistant_json_len: usize = 0,
             /// How many times we've already asked the LLM to re-do
             /// a malformed reply this dialog. Reset on dialog start
             /// and on a successful parse. Capped at
@@ -994,7 +982,6 @@ pub fn configure(comptime cfg: Config) type {
             // worker-still-running path that intentionally leaks
             // worker-owned state below.
             rt.allocator.destroy(rt.captured_output);
-            if (rt.last_assistant_json) |slice| rt.allocator.free(slice);
             if (rt.chat_persist_path.len > 0) rt.allocator.free(rt.chat_persist_path);
             if (rt.thread) |t| {
                 {

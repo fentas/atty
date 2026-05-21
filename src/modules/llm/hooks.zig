@@ -1603,23 +1603,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
             const raw = rt.inject_buf[0..n];
 
-            // Stash the raw response so it becomes the next
-            // assistant_exec turn. Done before parsing so we have
-            // it whether or not the JSON parses cleanly. Allocate
-            // the new slice FIRST and only swap on success — on OOM
-            // the previously stashed JSON survives so retry paths
-            // (`requestParseRetry`) can still echo back the prior
-            // malformed reply.
-            const stash_n = @min(raw.len, cfg.max_response_bytes);
-            if (stash_n > 0) {
-                if (rt.allocator.alloc(u8, stash_n)) |new_stash| {
-                    @memcpy(new_stash, raw[0..stash_n]);
-                    if (rt.last_assistant_json) |old| rt.allocator.free(old);
-                    rt.last_assistant_json = new_stash;
-                    rt.last_assistant_json_len = stash_n;
-                } else |_| {}
-            }
-
             var parsed: DialogResponse = .{};
             parseDialogResponse(rt.allocator, raw, &parsed) catch {
                 // Self-correction loop — give the model a chance to
@@ -1679,8 +1662,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Echo the assistant's JSON back to the model
                     // on the next turn so the conversation stays
                     // coherent.
-                    const stash_slice = if (rt.last_assistant_json) |s| s[0..rt.last_assistant_json_len] else &[_]u8{};
-                    const assistant_copy = rt.allocator.dupe(u8, stash_slice) catch {
+                    const assistant_copy = rt.allocator.dupe(u8, raw) catch {
                         abortDialog(rt, ctx.io, "out of memory continuing dialog");
                         return null;
                     };
@@ -1891,13 +1873,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Falling back to "atty asked a question" when
                     // dupe OOMs keeps the chat-scrollback story
                     // intact without abort-on-OOM.
-                    if (rt.last_assistant_json_len > 0) {
-                        const stash_slice = if (rt.last_assistant_json) |s| s[0..rt.last_assistant_json_len] else &[_]u8{};
-                        const assistant_copy = rt.allocator.dupe(u8, stash_slice) catch null;
-                        if (assistant_copy) |copy| {
-                            pushTurn(rt, .assistant_exec, copy) catch rt.allocator.free(copy);
-                        }
-                    }
+                    if (rt.allocator.dupe(u8, raw)) |copy| {
+                        pushTurn(rt, .assistant_exec, copy) catch rt.allocator.free(copy);
+                    } else |_| {}
                     const q = parsed.question();
                     // Multi-choice: copy choices into Runtime-
                     // owned storage so they outlive `parsed`. The
@@ -2369,11 +2347,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Echo the malformed reply back as an assistant turn so
             // the model sees its own output in context. Without
             // this the corrective user turn would seem to come
-            // from nowhere. Use the current `raw` directly — the
-            // `last_assistant_json` stash is allocate-then-swap and
-            // could still hold the PREVIOUS turn's reply if this
-            // turn's stash alloc OOM'd, which would feed the model
-            // a stale bad reply and confuse the self-correction.
+            // from nowhere.
             const assistant_copy = try rt.allocator.dupe(u8, raw);
             errdefer rt.allocator.free(assistant_copy);
             try pushTurn(rt, .assistant_exec, assistant_copy);
