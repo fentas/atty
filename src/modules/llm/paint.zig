@@ -1061,6 +1061,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (buf_newlines != rt.chat_inline_paint_input_newlines) return false;
 
             var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
+            // Focus state isn't cached — every focus toggle arms
+            // `chat_inline_paint_pending`, which refreshes the cache
+            // before fast-path can see a stale value.
             if (rt.chat_focus_in_panel) {
                 w.writeAll("\x1B[?25l\x1B[s") catch return false;
             } else {
@@ -1112,7 +1115,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 if (paintInlineChat(rt, ctx)) {
                     return rt.chat_inline_buf[0..rt.chat_inline_buf_len];
                 }
+                // Both paint attempts failed — same recovery path as
+                // the `chat_inline_paint_pending` arm above. Without
+                // this the panel stays "open" with no working paint.
                 rt.chat_inline_paint_cache_valid = false;
+                if (rt.chat_inline_open) {
+                    rt.chat_inline_open = false;
+                    latchErr(rt, "inline chat: terminal too small or paint buffer overflow");
+                    const inline_overflow_msg = "atty: inline chat: terminal too small or paint buffer overflow\n";
+                    _ = std.c.write(2, inline_overflow_msg, inline_overflow_msg.len);
+                }
             }
             // Chat overlay paint (phase 2a) takes precedence over
             // the conclusion + cursor-colour paths. The overlay's
