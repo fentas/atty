@@ -860,7 +860,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // (close + send) live here so the header reads as chrome,
             // not a cheat-sheet. The mode + provider toggles
             // (`Alt+T auto` / `Alt+M model`) live in the dim footer
-            // row above the input — see `paintInputBlock`. Two sizes:
+            // row above the input (painted further down in this
+            // function under the `has_footer` gate). Two sizes:
             //   full: " Alt+C close · Enter send" (25 cols)
             //   short: " Alt+C · Enter"            (14 cols)
             const hint_full = " \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m";
@@ -1015,12 +1016,25 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
             // Footer hint row — Alt+T toggles auto, Alt+M cycles
             // provider. Dim so it reads as chrome, not a turn; lives
-            // directly above the input prompt so the keys closest to
-            // the cursor's eye-line. Skipped when the panel has no
-            // room for an extra reserved row (see has_footer above).
+            // directly above the input prompt so the keys are
+            // closest to the cursor's eye-line. Two sizes so the
+            // hint doesn't wrap on narrow terminals:
+            //   full:  "  Alt+T auto · Alt+M model" (~28 cols)
+            //   short: "  Alt+T · Alt+M"            (~17 cols)
+            // The leading 2-space indent matches the empty-panel
+            // hint at line 1027 + the scrolled-back indicator at
+            // line 948 so all dim chrome rows align visually.
             if (has_footer) {
+                const footer_full = "  \x1B[2m\x1B[38;5;14mAlt+T\x1B[39m auto \u{00B7} \x1B[38;5;14mAlt+M\x1B[39m model\x1B[0m";
+                const footer_short = "  \x1B[2m\x1B[38;5;14mAlt+T\x1B[39m \u{00B7} \x1B[38;5;14mAlt+M\x1B[39m\x1B[0m";
+                const footer: []const u8 = if (cols_usize >= 28)
+                    footer_full
+                else if (cols_usize >= 17)
+                    footer_short
+                else
+                    "";
                 w.print("\x1B[{d};1H\x1B[2K", .{footer_row}) catch return false;
-                w.writeAll("  \x1B[2m\x1B[38;5;14mAlt+T\x1B[39m auto \u{00B7} \x1B[38;5;14mAlt+M\x1B[39m model\x1B[0m") catch return false;
+                if (footer.len > 0) w.writeAll(footer) catch return false;
             }
             if (rt.turns_len == 0 and scrollback_rows > 0) {
                 w.print("\x1B[{d};1H\x1B[2K", .{top_row + 1}) catch return false;

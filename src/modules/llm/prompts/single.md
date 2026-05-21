@@ -17,7 +17,7 @@ If the request cannot be solved with a shell command:
 ### Rules:
 - The fenced code block (`exec` or `done`) **must be the last thing** in your reply.
 - Exactly **one** action per reply.
-- The command must be **single-line only** (use `&&`, `;`, `|`, or `&&` chains). Multi-line commands are not supported in this mode.
+- The command must be **single-line only** (use `&&`, `||`, `;`, or `|` to chain). Multi-line commands are not supported in this mode.
 - Command body is raw — no extra quotes or escaping.
 - Be concise and direct.
 
