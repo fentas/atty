@@ -38,6 +38,7 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
+extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 extern "c" fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
@@ -244,13 +245,18 @@ pub fn loadLastTurns(
         const size: u64 = if (stat.size > 0) @intCast(stat.size) else 0;
         if (size > max_bytes) {
             const off: i64 = @intCast(size - max_bytes);
+            // Peek the byte at `off - 1` to detect whether the
+            // seek landed exactly at a line boundary. If the
+            // previous byte is `\n`, the read window starts at
+            // a complete line — dropping the "partial" first
+            // line would actually drop a VALID turn. Only set
+            // skip when we definitely landed mid-line.
+            var prev_byte: [1]u8 = undefined;
+            const peek_off: i64 = off - 1;
+            const peeked = pread(fd, &prev_byte, 1, peek_off);
+            const lands_on_boundary = peeked == 1 and prev_byte[0] == '\n';
             if (lseek(fd, off, 0) >= 0) {
-                // SEEK_SET landed inside an arbitrary line; the
-                // bytes before the next \n are a fragment.
-                // Discarding them avoids a parseLine failure on
-                // the truncated head (and the bytes are duplicated
-                // in older history we're intentionally dropping).
-                skip_partial_line = true;
+                skip_partial_line = !lands_on_boundary;
             } else {
                 // fstat said the file is too big but lseek failed
                 // — refuse the head-read fallback.

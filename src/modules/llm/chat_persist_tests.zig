@@ -138,6 +138,56 @@ test "loadLastTurns: file larger than max_bytes loads TAIL (not head)" {
     try testing.expect(std.mem.startsWith(u8, first, "turn-09"));
 }
 
+test "loadLastTurns: seek landing on line boundary keeps the first tail line" {
+    // Regression for the partial-line-skip false-positive: if
+    // the seek to `size - max_bytes` happens to land exactly
+    // at a `\n`-followed offset, the read window starts at a
+    // COMPLETE line and the "drop fragment" logic must NOT
+    // discard it. We craft the file so size - max_bytes lands
+    // exactly one byte after a `\n`.
+    var name_buf: [80]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-boundary-{x}.jsonl", .{seed});
+    const name_z = try testing.allocator.dupeZ(u8, name);
+    defer testing.allocator.free(name_z);
+    defer _ = std.c.unlink(name_z.ptr);
+
+    // Build a file shaped so we can compute the exact boundary.
+    // Padding line = 100 bytes (99 X + \n). Then two tail lines
+    // exactly 35 bytes each = 70 bytes. Total = 170 bytes.
+    // max_bytes = 70 → seek offset = 170 - 70 = 100. Byte 99 is
+    // the padding's `\n`, byte 100 starts the first JSON line —
+    // boundary case.
+    const fd = open(name_z.ptr, O_WRONLY | O_CREAT, @as(c_uint, 0o600));
+    try testing.expect(fd >= 0);
+    var pad: [100]u8 = undefined;
+    @memset(&pad, 'X');
+    pad[99] = '\n';
+    _ = write(fd, &pad, pad.len);
+    // Two minimal-shape JSON turns, padded with whitespace in
+    // the content to make each line exactly 35 bytes.
+    const line1 = "{\"kind\":\"user\",\"content\":\"first  \"}\n";
+    const line2 = "{\"kind\":\"user\",\"content\":\"second \"}\n";
+    try testing.expectEqual(@as(usize, 36), line1.len);
+    try testing.expectEqual(@as(usize, 36), line2.len);
+    _ = write(fd, line1.ptr, line1.len);
+    _ = write(fd, line2.ptr, line2.len);
+    _ = close(fd);
+    // File size: 100 + 36 + 36 = 172. max_bytes = 72 → seek
+    // offset = 100. Byte 99 is `\n` → boundary.
+    var loaded = try loadLastTurns(testing.allocator, name, 5, 72);
+    defer {
+        for (loaded.items) |t| testing.allocator.free(t.content);
+        loaded.deinit(testing.allocator);
+    }
+    // Both tail lines must be present (not just the second one).
+    try testing.expectEqual(@as(usize, 2), loaded.items.len);
+    try testing.expectEqualStrings("first  ", loaded.items[0].content);
+    try testing.expectEqualStrings("second ", loaded.items[1].content);
+}
+
 test "loadLastTurns: oversized single line with no trailing newline still parses" {
     // The seek-path's fall-through-when-no-\n branch is only
     // exercisable with a manually-constructed file (appendTurn
