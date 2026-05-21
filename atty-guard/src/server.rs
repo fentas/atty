@@ -424,17 +424,23 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // starttime alongside the level so a later `get` can
             // detect recycled PIDs and evict the stale entry — see
             // `ThreatMap::set` / `get`.
+            // Identity validated by the non-root + non-Low gate
+            // gets passed straight into ThreatMap so the map's
+            // commit uses the same (pid, starttime) the gate
+            // authorized — closes the residual TOCTOU window
+            // between the gate's read and the map's internal read.
+            let mut validated_starttime: Option<u64> = None;
             if !peer.is_root && !matches!(level, ThreatLevel::Low) {
                 // TOCTOU defense: read starttime BEFORE the
                 // ownership check and AGAIN AFTER, and reject if
                 // they differ. Otherwise an attacker could win
                 // the race between `pid_owner_uid` (sees the old
-                // process, owned by attacker's UID) and
-                // `ThreatMap::set`'s starttime read (sees a
-                // recycled PID now owned by a different user) —
-                // installing a non-Low mark + BPF entry against
-                // someone else's process. Identity = (pid,
-                // starttime) on Linux within one boot.
+                // process, owned by attacker's UID) and a later
+                // /proc read (sees a recycled PID now owned by a
+                // different user) — installing a non-Low mark +
+                // BPF entry against someone else's process.
+                // Identity = (pid, starttime) on Linux within one
+                // boot.
                 let start1 = match crate::threat_map::pid_starttime(pid) {
                     crate::threat_map::ProcRead::Found(t) => t,
                     crate::threat_map::ProcRead::NotFound => {
@@ -471,10 +477,13 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 }
                 let start2 = match crate::threat_map::pid_starttime(pid) {
                     crate::threat_map::ProcRead::Found(t) => t,
-                    _ => {
+                    crate::threat_map::ProcRead::NotFound => {
                         return ResponseBody::Error {
                             message: format!("pid {pid} disappeared mid-request"),
                         };
+                    }
+                    crate::threat_map::ProcRead::Error(msg) => {
+                        return ResponseBody::Error { message: msg };
                     }
                 };
                 if start1 != start2 {
@@ -484,6 +493,7 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                         ),
                     };
                 }
+                validated_starttime = Some(start2);
             } else if !peer.is_root {
                 // Non-root + Low: pure eviction. Permit even when
                 // the PID is gone; reject only when the ownership
@@ -505,20 +515,28 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                     OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
                 }
             }
-            if !state.threat.set(pid, level) {
-                // `ThreatMap::set` returns false when /proc/<pid>/stat
-                // is unreadable — typically because the PID exited
-                // between the auth check and the starttime read, but
-                // also possible under `hidepid` or transient
-                // /proc errors. Keep the message generic so we
-                // don't claim a definite cause we can't prove.
-                return ResponseBody::Error {
-                    message: format!(
-                        "unable to read /proc/{pid}/stat (pid may have exited) — threat level not set"
-                    ),
-                };
+            // Use the validated starttime when we have one so the
+            // map's commit can't race against PID recycling
+            // between the gate and the map's own /proc read. Other
+            // paths (root, Low) fall through to `set` which reads
+            // starttime internally; those paths don't carry the
+            // cross-user gate that needed the lock-step identity.
+            match validated_starttime {
+                Some(start) => {
+                    state.threat.set_with_starttime(pid, level, start);
+                    ResponseBody::Ok
+                }
+                None => {
+                    if !state.threat.set(pid, level) {
+                        return ResponseBody::Error {
+                            message: format!(
+                                "unable to read /proc/{pid}/stat (pid may have exited) — threat level not set"
+                            ),
+                        };
+                    }
+                    ResponseBody::Ok
+                }
             }
-            ResponseBody::Ok
         }
         Request::GetThreatLevel { pid } => ResponseBody::ThreatLevel {
             level: state.threat.get(pid),

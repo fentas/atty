@@ -57,17 +57,16 @@ impl ThreatMap {
         self
     }
 
-    /// Record a threat level for `pid`. For non-Low levels, reads
-    /// the PID's starttime from `/proc/<pid>/stat` so a later `get`
-    /// can detect PID reuse and evict the stale entry. Returns
-    /// `false` when the starttime read fails for a non-Low level
-    /// — typically because the PID exited (ENOENT), but also for
-    /// any other unreadable `/proc/<pid>/stat` (hidepid, transient
-    /// I/O). In that case no entry is stored and the BPF map isn't
-    /// touched. `Low` is a pure eviction and always succeeds:
-    /// callers must be able to clear an entry even after the
-    /// process has exited, otherwise stale entries could leak in
-    /// the BPF map.
+    /// Record a threat level for `pid`. Convenience wrapper that
+    /// reads starttime internally — callers who've already
+    /// validated a starttime (e.g. through the SetThreatLevel
+    /// auth gate's double-read) should use `set_with_starttime`
+    /// instead to avoid a residual TOCTOU window between their
+    /// auth check and this internal read.
+    ///
+    /// For non-Low levels, reads `/proc/<pid>/stat`. Returns
+    /// `false` when that read fails for any reason (NotFound or
+    /// other I/O). `Low` is pure eviction and always succeeds.
     pub fn set(&self, pid: u32, level: ThreatLevel) -> bool {
         if matches!(level, ThreatLevel::Low) {
             self.evict(pid);
@@ -77,6 +76,25 @@ impl ThreatMap {
             ProcRead::Found(t) => t,
             ProcRead::NotFound | ProcRead::Error(_) => return false,
         };
+        self.set_with_starttime_inner(pid, level, starttime);
+        true
+    }
+
+    /// Record a threat level using a caller-supplied starttime —
+    /// closes the TOCTOU window between an external auth check
+    /// and this map's internal /proc read. Caller is responsible
+    /// for proving the (pid, starttime) identity is the one they
+    /// just authorized. `Low` ignores the starttime and pure-
+    /// evicts.
+    pub fn set_with_starttime(&self, pid: u32, level: ThreatLevel, starttime: u64) {
+        if matches!(level, ThreatLevel::Low) {
+            self.evict(pid);
+            return;
+        }
+        self.set_with_starttime_inner(pid, level, starttime);
+    }
+
+    fn set_with_starttime_inner(&self, pid: u32, level: ThreatLevel, starttime: u64) {
         {
             let mut g = self.inner.lock().expect("threat_map poisoned");
             g.insert(pid, Entry { level, starttime });
@@ -92,7 +110,6 @@ impl ThreatMap {
                 eprintln!("atty-guard: BPF map update failed (pid {pid}): {e}");
             }
         }
-        true
     }
 
     /// Look up the threat level for `pid`. When a non-Low entry
