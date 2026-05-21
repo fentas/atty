@@ -441,8 +441,16 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 }
             }
             if !state.threat.set(pid, level) {
+                // `ThreatMap::set` returns false when /proc/<pid>/stat
+                // is unreadable — typically because the PID exited
+                // between the auth check and the starttime read, but
+                // also possible under `hidepid` or transient
+                // /proc errors. Keep the message generic so we
+                // don't claim a definite cause we can't prove.
                 return ResponseBody::Error {
-                    message: format!("pid {pid} no longer exists — threat level not set"),
+                    message: format!(
+                        "unable to read /proc/{pid}/stat (pid may have exited) — threat level not set"
+                    ),
                 };
             }
             ResponseBody::Ok

@@ -111,16 +111,47 @@ impl ThreatMap {
         match pid_starttime(pid) {
             Some(now) if now == stored.starttime => stored.level,
             _ => {
-                self.evict(pid);
+                // Conditional eviction: only remove if the entry
+                // we read is STILL the entry on file. Without this,
+                // a concurrent `set(pid, High)` for a reused PID
+                // could be wiped by an in-flight `get()` that
+                // started on the stale view — the new legitimate
+                // mark would silently disappear.
+                self.evict_if_stale(pid, stored.starttime);
                 ThreatLevel::Low
             }
         }
     }
 
+    /// Unconditional eviction — pure `Low` set path, where the
+    /// caller's contract is "clear whatever's there, regardless
+    /// of identity".
     fn evict(&self, pid: u32) {
         let removed = {
             let mut g = self.inner.lock().expect("threat_map poisoned");
             g.remove(&pid).is_some()
+        };
+        if removed {
+            if let Some(state) = &self.ebpf {
+                if let Err(e) = state.set_threat(pid, ThreatLevel::Low) {
+                    eprintln!("atty-guard: BPF map evict failed (pid {pid}): {e}");
+                }
+            }
+        }
+    }
+
+    /// Conditional eviction — used by `get()`'s PID-reuse defense.
+    /// Only removes the entry if its starttime still matches the
+    /// value the caller observed; if a concurrent `set` already
+    /// installed a fresh entry (different starttime), we leave
+    /// it alone so the new mark survives the race.
+    fn evict_if_stale(&self, pid: u32, expected_starttime: u64) {
+        let removed = {
+            let mut g = self.inner.lock().expect("threat_map poisoned");
+            match g.get(&pid) {
+                Some(e) if e.starttime == expected_starttime => g.remove(&pid).is_some(),
+                _ => false,
+            }
         };
         if removed {
             if let Some(state) = &self.ebpf {
@@ -206,6 +237,28 @@ mod tests {
         let m = ThreatMap::new();
         assert!(!m.set(0, ThreatLevel::High));
         assert_eq!(m.get(0), ThreatLevel::Low);
+    }
+
+    #[test]
+    fn get_preserves_fresh_entry_after_concurrent_reset() {
+        // Race emulation: `get()` reads a stale entry, decides to
+        // evict (starttime mismatch). Between the read and the
+        // eviction, another thread `set()`s a fresh entry for the
+        // same PID. The fresh entry must survive — without the
+        // conditional eviction in evict_if_stale, the get() would
+        // wipe the just-installed mark.
+        let m = ThreatMap::new();
+        let pid = std::process::id();
+        // Step 1: simulate a stale entry the test "saw" first.
+        let stale_starttime = u64::MAX;
+        // Step 2: the racing concurrent `set` lands.
+        assert!(m.set(pid, ThreatLevel::High));
+        // Step 3: the original `get()` discovers starttime
+        // mismatch (because the stale entry it captured had
+        // u64::MAX) and calls evict_if_stale with the OLD value.
+        m.evict_if_stale(pid, stale_starttime);
+        // The fresh entry must still be there.
+        assert_eq!(m.get(pid), ThreatLevel::High);
     }
 
     #[test]
