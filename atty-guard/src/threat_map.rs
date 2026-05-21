@@ -57,23 +57,27 @@ impl ThreatMap {
         self
     }
 
-    /// Record a threat level for `pid`. Reads the PID's starttime
-    /// from `/proc/<pid>/stat` so a later `get` can detect PID
-    /// reuse and evict the stale entry. Returns `false` when the
-    /// PID is gone before we can read its starttime — in that case
-    /// no entry is stored and the BPF map isn't touched.
+    /// Record a threat level for `pid`. For non-Low levels, reads
+    /// the PID's starttime from `/proc/<pid>/stat` so a later `get`
+    /// can detect PID reuse and evict the stale entry. Returns
+    /// `false` only when the PID is gone before the starttime read
+    /// for a non-Low level — in that case no entry is stored and
+    /// the BPF map isn't touched. `Low` is a pure eviction and
+    /// always succeeds: callers must be able to clear an entry
+    /// even after the process has exited, otherwise stale entries
+    /// could leak in the BPF map.
     pub fn set(&self, pid: u32, level: ThreatLevel) -> bool {
+        if matches!(level, ThreatLevel::Low) {
+            self.evict(pid);
+            return true;
+        }
         let starttime = match pid_starttime(pid) {
             Some(t) => t,
             None => return false,
         };
         {
             let mut g = self.inner.lock().expect("threat_map poisoned");
-            if matches!(level, ThreatLevel::Low) {
-                g.remove(&pid);
-            } else {
-                g.insert(pid, Entry { level, starttime });
-            }
+            g.insert(pid, Entry { level, starttime });
         }
         // Best-effort write-through. A failed BPF map update doesn't
         // invalidate the in-mem state — the daemon's view stays
@@ -175,9 +179,23 @@ mod tests {
     fn set_low_removes_entry() {
         let m = ThreatMap::new();
         let pid = std::process::id();
-        m.set(pid, ThreatLevel::Critical);
-        m.set(pid, ThreatLevel::Low);
+        assert!(m.set(pid, ThreatLevel::Critical));
+        assert!(m.set(pid, ThreatLevel::Low));
         assert_eq!(m.get(pid), ThreatLevel::Low);
+        // Confirm the eviction actually removed the entry — without
+        // this the test could pass when both `set` calls fail and
+        // `get` returns the default Low.
+        let g = m.inner.lock().unwrap();
+        assert!(!g.contains_key(&pid));
+    }
+
+    #[test]
+    fn set_low_succeeds_for_nonexistent_pid() {
+        // Pure-eviction path must work even when the PID is gone —
+        // otherwise a daemon restart-then-cleanup couldn't clear
+        // stale BPF map entries left by a previous incarnation.
+        let m = ThreatMap::new();
+        assert!(m.set(0, ThreatLevel::Low));
     }
 
     #[test]

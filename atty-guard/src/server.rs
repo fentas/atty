@@ -974,7 +974,9 @@ mod tests {
     /// (single-UID containers, locked-down PID namespaces with
     /// `hidepid`, etc.) — caller should skip the test in that
     /// case so a hostile environment doesn't silently mask the
-    /// security regression.
+    /// security regression. Reuses the production `pid_owner_uid`
+    /// helper so the test parses ownership the same way the gate
+    /// does — drift between the two would be a silent test bug.
     fn find_pid_owned_by_other_uid() -> Option<u32> {
         let our_uid = unsafe {
             extern "C" {
@@ -982,29 +984,15 @@ mod tests {
             }
             geteuid()
         };
-        for entry in std::fs::read_dir("/proc").ok()? {
-            let entry = entry.ok()?;
+        for entry in std::fs::read_dir("/proc").ok()?.flatten() {
             let name = entry.file_name();
-            let name_str = name.to_str()?;
-            let pid: u32 = match name_str.parse() {
-                Ok(p) => p,
-                Err(_) => continue,
+            let pid: u32 = match name.to_str().and_then(|s| s.parse().ok()) {
+                Some(p) => p,
+                None => continue,
             };
-            let status_path = format!("/proc/{pid}/status");
-            let content = match std::fs::read_to_string(&status_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("Uid:") {
-                    if let Some(real) = rest.split_whitespace().next() {
-                        if let Ok(owner) = real.parse::<u32>() {
-                            if owner != our_uid {
-                                return Some(pid);
-                            }
-                        }
-                    }
-                    break;
+            if let Ok(owner) = pid_owner_uid(pid) {
+                if owner != our_uid {
+                    return Some(pid);
                 }
             }
         }
