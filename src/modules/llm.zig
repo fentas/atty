@@ -357,6 +357,13 @@ pub fn configure(comptime cfg: Config) type {
             .{ .bytes = "\x1b[1;7A", .action = .llm_chat_inline_grow },
             .{ .bytes = keymap.key("Ctrl+Alt+Down"), .action = .llm_chat_inline_shrink, .label = "Ctrl+Alt+Down", .description = "inline chat: shrink panel by one row" },
             .{ .bytes = "\x1b[1;7B", .action = .llm_chat_inline_shrink },
+            // Chat-mode auto toggle. Dialog (confirm each exec) ↔
+            // auto (atty auto-executes). Only meaningful inside a
+            // chat surface; outside chat the persistent Alt+S /
+            // Alt+Shift+S bindings own this distinction. Dual
+            // encoded: kitty kbd CSI-u + legacy Alt+T.
+            .{ .bytes = keymap.key("Alt+t"), .action = .llm_chat_toggle_auto, .label = "Alt+T", .description = "chat: toggle auto-exec" },
+            .{ .bytes = "\x1b[116;3u", .action = .llm_chat_toggle_auto },
         };
 
         // HTTP worker thread + request/response plumbing extracted
@@ -1201,6 +1208,13 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            // Chat surface open → suppress the LLM statusbar hint
+            // entirely. The panel header carries the live shortcuts
+            // (Alt+T auto · Alt+M model · Alt+C close · Enter send),
+            // duplicating them in the statusbar would (a) waste a
+            // scarce row and (b) advertise `Alt+C chat` as a
+            // shortcut to open the panel — but it's already open.
+            if (rt.chat_inline_open or rt.chat_overlay_open) return null;
             // Persistent dialog/auto mode segment takes precedence
             // over the transient "thinking…" indicator — the user
             // wants to know they're IN a mode persistently across

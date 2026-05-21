@@ -1045,6 +1045,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                     return true;
                 },
+                .llm_chat_toggle_auto => {
+                    // Only meaningful while a chat surface is open
+                    // — outside chat the persistent-dialog modes
+                    // (Alt+S / Alt+Shift+S) own the auto/dialog
+                    // distinction. Toggle the auto flag, arm a
+                    // repaint so the chat panel chrome reflects
+                    // the new state.
+                    if (!(rt.chat_inline_open or rt.chat_overlay_open)) return false;
+                    rt.auto_mode_active = !rt.auto_mode_active;
+                    if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                    if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+                    return true;
+                },
                 .llm_chat_inline_grow, .llm_chat_inline_shrink => {
                     if (!rt.chat_inline_open) return false;
                     const current: u16 = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
@@ -1706,7 +1719,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Suppresses the inline conclusion banner (the
                     // panel IS the UI) and skips dialogReset (chat
                     // is open-ended; future replies stay coherent).
-                    if (currentDispatchMode(rt) == .chat) {
+                    if (rt.chat_inline_open or rt.chat_overlay_open) {
                         const reason = parsed.reason();
                         if (reason.len > 0) {
                             const reason_copy = rt.allocator.dupe(u8, reason) catch {
@@ -1920,7 +1933,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// `Mode`. Used by Alt+M cycle + the help overlay to pick
         /// the right provider entry from `cfg.providers[]`.
         fn currentDispatchMode(rt: *Runtime) types.Mode {
-            if (rt.chat_inline_open or rt.chat_overlay_open) return .chat;
+            // Chat surface open → the LLM dispatches as a regular
+            // dialog (with `auto` toggling the auto-exec sub-flavour).
+            // The standalone `.chat` mode is reserved for non-chat
+            // prose-only flows that don't take any LLM action; the
+            // chat panel itself is a richer surface that benefits
+            // from the full exec/question/done vocabulary.
+            if (rt.chat_inline_open or rt.chat_overlay_open) {
+                return if (rt.auto_mode_active) .auto else .dialog;
+            }
             if (rt.auto_mode_active or rt.dialog_persistent_mode == .auto) return .auto;
             if (rt.dialog_persistent_mode == .dialog or rt.dialog_state != .idle) return .dialog;
             return .single;

@@ -62,7 +62,7 @@ test "chat overlay (Alt+Shift+C): toggle emits alt-screen enter then exit" {
     try testing.expect(std.mem.indexOf(u8, opened.?, "atty chat") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "You:") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "explain X") != null);
-    try testing.expect(std.mem.indexOf(u8, opened.?, "[Alt+Shift+C close") != null);
+    try testing.expect(std.mem.indexOf(u8, opened.?, "Alt+Shift+C close") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "Enter send") != null);
     // DECSTBM scroll region is set so long content can't clobber
     // the input + footer at the bottom (regression for the
@@ -1262,4 +1262,89 @@ test "inline chat: em-dash and emoji survive writeSanitized (no `�` rendering)
     try testing.expect(std.mem.indexOf(u8, painted.?, "\u{4E2D}") != null);
     // No replacement char in the output.
     try testing.expect(std.mem.indexOf(u8, painted.?, "\u{FFFD}") == null);
+}
+
+test "inline chat chrome: trailing-hint shows Alt+T / Alt+M / Alt+C / Enter shortcuts" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 100,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    // All four shortcut labels surface in the divider chrome.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+T") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+M") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+C") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "Enter") != null);
+    // Auto mode is OFF — mode word has no `(auto)` annotation.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "(auto") == null);
+}
+
+test "inline chat chrome: auto-on flips mode word to `atty chat (auto)`" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 100,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    rt.auto_mode_active = true;
+    rt.chat_inline_paint_pending = true;
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "atty chat (auto)") != null);
 }

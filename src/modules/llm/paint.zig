@@ -141,7 +141,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Title bar — dim chrome so it reads as frame, not content.
             // Coloured icon picks up the same fg=141 used in the
             // statusbar AI hint (consistent visual vocabulary).
-            w.writeAll("\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m atty chat \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n") catch return false;
+            const overlay_mode_word: []const u8 = if (rt.auto_mode_active) "atty chat (auto)" else "atty chat";
+            w.print("\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m {s} \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n", .{overlay_mode_word}) catch return false;
 
             // Clamp the offset against FIFO eviction — pushTurn
             // can shrink `turns_len` after the user scrolled, and
@@ -236,7 +237,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 const ind = std.fmt.bufPrint(&sb, "\x1B[2m[\u{2191} {d} below]\x1B[0m ", .{overlay_offset}) catch "";
                 w.writeAll(ind) catch return false;
             }
-            w.writeAll("\x1B[2m[Alt+Shift+C close \u{00B7} Enter send \u{00B7} PgUp/PgDn scroll]\x1B[0m") catch return false;
+            w.writeAll("\x1B[2m[Alt+T auto \u{00B7} Alt+M model \u{00B7} Alt+Shift+C close \u{00B7} Enter send \u{00B7} PgUp/PgDn]\x1B[0m") catch return false;
             rt.chat_overlay_buf_len = w.end;
             return true;
         }
@@ -825,7 +826,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const resolved = types.resolveProviderForMode(.chat, cfg.providers, cfg.provider, rt.current_provider_idx);
             const raw_label: []const u8 = if (resolved.name.len > 0) resolved.name else types.providerLabel(resolved.provider);
             const icon: []const u8 = if (ctx.incognito) "\u{1F576}" else "\u{2728}";
-            const mode_word: []const u8 = if (ctx.incognito) "atty chat (incognito)" else "atty chat";
+            // Mode word reflects both incognito (no recording) and
+            // auto (atty auto-executes LLM commands). Both flags can
+            // co-apply — surface them parenthetically so the user
+            // sees the live state at a glance.
+            const mode_word: []const u8 = if (ctx.incognito and rt.auto_mode_active)
+                "atty chat (auto, incognito)"
+            else if (rt.auto_mode_active)
+                "atty chat (auto)"
+            else if (ctx.incognito)
+                "atty chat (incognito)"
+            else
+                "atty chat";
             // Clamp the label to a third of the available cols so a
             // long provider name doesn't squeeze the trailing
             // `Alt+C close · Enter send` shortcut hint off the row.
@@ -859,8 +871,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 pw.measureCols(icon) + 1 +
                 pw.measureCols(mode_word) + 3 +
                 pw.measureCols(provider_label) + 2;
-            // " Alt+C close · Enter send" is 25 visible cols.
-            const trail_min_clearance: usize = 25;
+            // Trailing shortcut hint: " Alt+T auto · Alt+M model ·
+            // Alt+C close · Enter send" — 51 visible cols. The mode
+            // & provider keys are non-obvious; surfacing them in the
+            // panel chrome makes them discoverable without bouncing
+            // through Alt+H. statusText suppresses its own LLM hint
+            // when the panel is open so this row owns the discovery
+            // surface.
+            const trail_min_clearance: usize = 51;
             const trail_target: usize = if (cols_usize > label_visible + trail_min_clearance)
                 cols_usize - label_visible - trail_min_clearance
             else
@@ -869,7 +887,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             while (i < trail_target) : (i += 1) {
                 w.writeAll("\u{2500}") catch return false;
             }
-            w.writeAll(" \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m") catch return false;
+            w.writeAll(" \x1B[22;38;5;14mAlt+T\x1B[39;2m auto \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m model \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m") catch return false;
 
             // Scrollback rows — fill from oldest visible turn to
             // most recent, each on its own row, truncated to fit
