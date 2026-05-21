@@ -117,13 +117,12 @@ pub fn serve(
                     "atty-guard: rejecting connection — already at cap of {max_conn} in-flight"
                 );
             }
-            // Explicit shutdown surfaces EOF to the client
-            // immediately (the bare `drop` would also close the
-            // fd, but the kernel can briefly queue the close
-            // before the FIN reaches the peer — `shutdown(Both)`
-            // forces an immediate half-close so read() on the
-            // client returns Ok(0) without a tail of
-            // EAGAIN/WouldBlock).
+            // Explicit `shutdown(Both)` ahead of `drop` so the
+            // client observes EOF promptly. The bare `drop`
+            // would close the fd too, but the kernel can
+            // briefly hold the close before the peer wakes from
+            // its `read`; calling shutdown explicitly forces an
+            // immediate end-of-stream the peer sees as Ok(0).
             let _ = stream.shutdown(std::net::Shutdown::Both);
             drop(stream);
             continue;
