@@ -1059,12 +1059,14 @@ fn mockServerHungHandler(ctx: *MockServerCtx) void {
     const conn_fd = libc.accept(ctx.listen_fd, null, null);
     if (conn_fd < 0) return;
     defer _ = libc.close(conn_fd);
-    // Hold the connection without responding.
+    // Hold the connection without responding. POSIX `usleep`
+    // rejects values >= 1_000_000 with EINVAL (musl is strict
+    // about this; glibc is more permissive). Loop in 500 ms
+    // slices so the handler doesn't busy-spin if usleep returns
+    // early. The test exits well before any reasonable upper
+    // bound, breaking the loop via process teardown.
     while (true) {
-        // Sleep ~30s at a time so we don't burn CPU. The test
-        // exits well before this, breaking the loop via process
-        // teardown.
-        _ = libc.usleep(30_000_000);
+        _ = libc.usleep(500_000);
     }
 }
 
@@ -1126,6 +1128,12 @@ test "HTTP request against a hung endpoint times out within the configured deadl
     const elapsed = @import("_lib.zig").nowMs() - start_ms;
 
     try testing.expectEqual(M.FetchKind.timed_out, outcome.kind);
+    // Lower bound pins "the poll loop actually waited" — without
+    // this a regression that returned .timed_out immediately
+    // (e.g. broken deadline math) would still pass with just the
+    // upper bound. Threshold = deadline minus one polling slice
+    // so a tick-late return still passes.
+    try testing.expect(elapsed >= 250);
     // The polling cadence is 50 ms; 300 ms deadline + one extra
     // tick = ≤ 400 ms theoretical max. Allow generous slack for
     // CI variance. Anything past 2 s means the deadline plumbing
