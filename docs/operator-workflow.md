@@ -89,7 +89,21 @@ What this does:
 3. Installs the binary to `/usr/local/bin/atty-guard`.
 4. Drops `atty-guard.service` into `/etc/systemd/system/`.
 5. Creates `/var/lib/atty-guard/` owned `atty:atty` mode 0750.
-6. Runs `systemctl daemon-reload && enable --now`. The daemon
+6. Auto-installs a `network.conf` systemd drop-in when the binary
+   has `osv-live` or `atoms-fetch` built in (detected via
+   `atty-guard --print-features`). The drop-in relaxes the
+   baseline unit's `PrivateNetwork=yes` +
+   `RestrictAddressFamilies=AF_UNIX` so outbound HTTPS reaches
+   OSV.dev and the atom-corpus sources. Without it those
+   features compile-and-run but every network call would fail.
+   Pass `--without-network` to skip even when features are
+   present; pass `--with-network` to force install regardless.
+
+   Note for upgrades: the `--print-features` probe was added in
+   issue #145. Operators with an older `atty-guard` binary
+   built with network features will see the auto-detect skip
+   silently — pass `--with-network` explicitly until you rebuild.
+7. Runs `systemctl daemon-reload && enable --now`. The daemon
    binds `/run/atty-guard/atty-guard.sock` (the unit's
    `RuntimeDirectory=` creates that path owned `atty:atty 0750`).
 

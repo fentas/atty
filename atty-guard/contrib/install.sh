@@ -36,6 +36,8 @@ set -euo pipefail
 # Parse args (before sudo re-exec so the flag forwards through).
 WITH_EBPF=0
 WITHOUT_EBPF=0
+WITH_NETWORK=0
+WITHOUT_NETWORK=0
 for arg in "$@"; do
     case "$arg" in
         --with-ebpf)
@@ -43,6 +45,12 @@ for arg in "$@"; do
             ;;
         --without-ebpf)
             WITHOUT_EBPF=1
+            ;;
+        --with-network)
+            WITH_NETWORK=1
+            ;;
+        --without-network)
+            WITHOUT_NETWORK=1
             ;;
         --help|-h)
             sed -n '2,32p' "$0" | sed 's/^# \?//'
@@ -57,6 +65,16 @@ for arg in "$@"; do
             echo "                   Use when downgrading from an ebpf install:"
             echo "                   without this flag a plain re-install leaves"
             echo "                   the existing drop-in in place (warn-only)."
+            echo "  --with-network   Install the network systemd drop-in (relaxes"
+            echo "                   PrivateNetwork=yes + adds AF_INET/AF_INET6)."
+            echo "                   Required for osv-live and atoms-fetch features."
+            echo "                   Auto-detected: if the binary has either feature"
+            echo "                   built in (via --print-features), the drop-in"
+            echo "                   is installed even without this flag — pass it"
+            echo "                   only to force install regardless of features."
+            echo "  --without-network  Explicitly remove the network drop-in. Use"
+            echo "                   if you previously installed network features"
+            echo "                   and are now downgrading to a network-free build."
             exit 0
             ;;
         *)
@@ -68,6 +86,10 @@ done
 
 if [[ $WITH_EBPF -eq 1 && $WITHOUT_EBPF -eq 1 ]]; then
     echo "error: --with-ebpf and --without-ebpf are mutually exclusive" >&2
+    exit 1
+fi
+if [[ $WITH_NETWORK -eq 1 && $WITHOUT_NETWORK -eq 1 ]]; then
+    echo "error: --with-network and --without-network are mutually exclusive" >&2
     exit 1
 fi
 
@@ -235,8 +257,104 @@ elif [[ -f "$EBPF_DROPIN_FILE" ]]; then
     echo "      pass --with-ebpf to re-confirm, --without-ebpf to remove."
 fi
 
+# Network drop-in. The baseline unit hard-locks the daemon out of
+# the network (PrivateNetwork=yes + RestrictAddressFamilies=AF_UNIX)
+# because the V2-A threat model didn't need network. V2-F / V2-I
+# features (osv-live + atoms-fetch) DO need outbound HTTPS. The
+# drop-in relaxes both restrictions. Auto-detect when either feature
+# is built in unless the operator explicitly opted out via
+# --without-network. --with-network forces install regardless of
+# detected features (useful when adding the drop-in ahead of a
+# rebuild with the features enabled).
+# Drop-in dir is shared with the ebpf branch above — reuse the
+# literal so a future relocation has a single touch point.
+NETWORK_DROPIN_FILE="$EBPF_DROPIN_DIR/network.conf"
+
+# Detect whether the installed binary needs network. --print-features
+# was added in #145; older binaries silently skip the detection (we
+# can't tell what they were built with).
+NEEDS_NETWORK=0
+PROBE_UNSUPPORTED=0
+if "$BIN_DST" --print-features >/dev/null 2>&1; then
+    if "$BIN_DST" --print-features 2>/dev/null | grep -qxE 'osv-live|atoms-fetch'; then
+        NEEDS_NETWORK=1
+    fi
+else
+    PROBE_UNSUPPORTED=1
+fi
+
+# Hint operators when the auto-detect can't run: the network
+# drop-in won't be installed, but if their old binary IS a
+# network build they'll see silent "endpoint unreachable" at
+# runtime. The note is suppressed when the operator has
+# explicitly opted in or out via flags — they've already
+# decided.
+if [[ $PROBE_UNSUPPORTED -eq 1 && $WITH_NETWORK -eq 0 && $WITHOUT_NETWORK -eq 0 ]]; then
+    echo "note: $BIN_DST is older than the --print-features probe (#145)." >&2
+    echo "      auto-detect cannot tell whether osv-live/atoms-fetch are built in." >&2
+    echo "      if either feature IS present, re-run with --with-network." >&2
+fi
+
+if [[ $WITH_NETWORK -eq 1 || ($NEEDS_NETWORK -eq 1 && $WITHOUT_NETWORK -ne 1) ]]; then
+    # `--with-network` over a non-network binary is allowed but
+    # warned — relaxing the sandbox without any network user
+    # widens the attack surface for no operational gain. Mirror
+    # the eBPF gate's verify-features pattern except as a warn
+    # rather than a hard error (operators may install the
+    # drop-in ahead of a rebuild, which is a legitimate flow).
+    if [[ $WITH_NETWORK -eq 1 && $NEEDS_NETWORK -eq 0 ]]; then
+        echo "note: --with-network passed but installed binary doesn't advertise" >&2
+        echo "      osv-live or atoms-fetch via --print-features. Drop-in will be" >&2
+        echo "      installed anyway, but no daemon code uses it currently." >&2
+    fi
+    install -d -o root -g root -m 0755 "$EBPF_DROPIN_DIR"
+    cat > "$NETWORK_DROPIN_FILE.tmp.$$" <<'EOF'
+# atty-guard network drop-in. Generated by `install.sh` when the
+# binary was built with `osv-live` or `atoms-fetch` features
+# (auto-detected via --print-features), or when the operator
+# passed --with-network explicitly. Relaxes the baseline unit's
+# PrivateNetwork=yes + RestrictAddressFamilies=AF_UNIX so outbound
+# HTTPS to OSV.dev and the atom-corpus sources can resolve.
+#
+# Remove this file to revert to the network-isolated baseline:
+#   sudo ./contrib/install.sh --without-network
+[Service]
+PrivateNetwork=no
+# Clear + re-add — systemd's directive doesn't "extend" when set
+# twice; the drop-in's value replaces the baseline's `AF_UNIX`.
+# AF_INET / AF_INET6 are the only families ureq + rustls need.
+RestrictAddressFamilies=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+EOF
+    mv -f "$NETWORK_DROPIN_FILE.tmp.$$" "$NETWORK_DROPIN_FILE"
+    chmod 0644 "$NETWORK_DROPIN_FILE"
+    if [[ $WITH_NETWORK -eq 1 ]]; then
+        echo "installed $NETWORK_DROPIN_FILE (--with-network)"
+    else
+        echo "installed $NETWORK_DROPIN_FILE (auto: binary has osv-live or atoms-fetch)"
+    fi
+elif [[ $WITHOUT_NETWORK -eq 1 ]]; then
+    if [[ -f "$NETWORK_DROPIN_FILE" ]]; then
+        rm -f "$NETWORK_DROPIN_FILE"
+        echo "removed $NETWORK_DROPIN_FILE (--without-network)"
+        rmdir "$EBPF_DROPIN_DIR" 2>/dev/null || true
+    else
+        echo "note: no network drop-in at $NETWORK_DROPIN_FILE — nothing to remove."
+    fi
+elif [[ -f "$NETWORK_DROPIN_FILE" ]]; then
+    echo "note: existing network drop-in at $NETWORK_DROPIN_FILE left in place."
+    echo "      pass --with-network to re-confirm, --without-network to remove."
+fi
+
 systemctl daemon-reload
 systemctl enable --now atty-guard.service
+# `enable --now` doesn't restart an already-active service, so a
+# drop-in change (ebpf.conf or network.conf added / removed)
+# wouldn't take effect until the next manual restart. `try-restart`
+# is a no-op when the unit is inactive and a clean restart when
+# it's running — re-running the installer now applies any drop-in
+# changes immediately.
+systemctl try-restart atty-guard.service
 echo
 systemctl --no-pager --lines=5 status atty-guard.service || true
 echo
