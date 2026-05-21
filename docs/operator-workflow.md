@@ -21,8 +21,9 @@ The "full" path adds:
 - **atty-guard** sidecar — UDS daemon, Tier-2 backend (stub /
   heuristic / ONNX BERT / ONNX Qwen-Coder), V2-J multi-hit
   accumulator + V2-J-2 auto-Block, V2-F live OSV.dev lookups.
-- **Atom corpus** — IOC strings pulled from GTFOBins / SigmaHQ /
-  LOLBAS, refreshed on a cron.
+- **Atom corpus** — IOC strings pulled from GTFOBins / SigmaHQ
+  (sanitized), refreshed on a cron. (LOLBAS was prototyped then
+  dropped — Windows-native, didn't surface Linux shell IOCs.)
 - **eBPF kernel hooks** — V2-B kernel-side enforcement
   (`bprm_check_security` LSM hook + `execve` tracepoint) so even
   a non-atty shell can't run a Block-verdict command via this
