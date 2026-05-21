@@ -95,7 +95,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// the module-overlay close edge and fires `sb.reactivate`
         /// within the same tick (`proxy.zig`'s `prev_overlay_active`
         /// edge handler).
-        fn paintChatOverlay(rt: *Runtime) bool {
+        fn paintChatOverlay(rt: *Runtime, ctx: *m.Context) bool {
             var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
             if (!rt.chat_overlay_open) {
                 // Close: reset scroll region (the alt-screen had its
@@ -141,8 +141,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Title bar — dim chrome so it reads as frame, not content.
             // Coloured icon picks up the same fg=141 used in the
             // statusbar AI hint (consistent visual vocabulary).
-            const overlay_mode_word: []const u8 = if (rt.auto_mode_active) "atty chat (auto)" else "atty chat";
-            w.print("\x1B[2m\x1B[22;38;5;141m\u{2728}\x1B[39;2m {s} \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n", .{overlay_mode_word}) catch return false;
+            // Mirror the inline divider's icon + mode-word logic so
+            // the overlay surface stays visually consistent: glasses
+            // glyph for incognito, parenthetical state flags for
+            // any combination of (auto, incognito).
+            const overlay_icon: []const u8 = if (ctx.incognito) "\u{1F576}" else "\u{2728}";
+            const overlay_mode_word: []const u8 = if (ctx.incognito and rt.auto_mode_active)
+                "atty chat (auto, incognito)"
+            else if (rt.auto_mode_active)
+                "atty chat (auto)"
+            else if (ctx.incognito)
+                "atty chat (incognito)"
+            else
+                "atty chat";
+            w.print("\x1B[2m\x1B[22;38;5;141m{s}\x1B[39;2m {s} \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\x1B[0m\r\n\r\n", .{ overlay_icon, overlay_mode_word }) catch return false;
 
             // Clamp the offset against FIFO eviction — pushTurn
             // can shrink `turns_len` after the user scrolled, and
@@ -823,7 +835,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // entry that would otherwise show wrong.
             const cols_usize: usize = total_cols;
             w.print("\x1B[{d};1H\x1B[2K", .{top_row}) catch return false;
-            const resolved = types.resolveProviderForMode(.chat, cfg.providers, cfg.provider, rt.current_provider_idx);
+            // Provider resolution uses the LIVE dispatch mode so the
+            // chrome label matches the provider that will actually
+            // serve the next request. Chat surfaces now dispatch as
+            // `.dialog`/`.auto` (per `currentDispatchMode` in
+            // hooks.zig); hardcoding `.chat` here was a relic of the
+            // earlier prose-only chat mode and would mis-advertise
+            // when a user's `providers[]` has a chat-only entry that
+            // no longer matches the live dispatch.
+            const chrome_mode: types.Mode = if (rt.auto_mode_active) .auto else .dialog;
+            const resolved = types.resolveProviderForMode(chrome_mode, cfg.providers, cfg.provider, rt.current_provider_idx);
             const raw_label: []const u8 = if (resolved.name.len > 0) resolved.name else types.providerLabel(resolved.provider);
             const icon: []const u8 = if (ctx.incognito) "\u{1F576}" else "\u{2728}";
             // Mode word reflects both incognito (no recording) and
@@ -1077,7 +1098,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // surfaces.
             if (rt.chat_overlay_paint_pending) {
                 rt.chat_overlay_paint_pending = false;
-                if (paintChatOverlay(rt)) {
+                if (paintChatOverlay(rt, ctx)) {
                     return rt.chat_overlay_buf[0..rt.chat_overlay_buf_len];
                 }
                 // Paint overran the buffer. The close path can't
