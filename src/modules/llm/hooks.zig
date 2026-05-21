@@ -67,6 +67,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const llm_consts = @import("consts.zig").Module(cfg);
         const inert_error_msg = llm_consts.inert_error_msg;
         const effective_dialog_system_prompt = llm_consts.effective_dialog_system_prompt;
+        const effective_auto_system_prompt = llm_consts.effective_auto_system_prompt;
+        const effective_chat_system_prompt = llm_consts.effective_chat_system_prompt;
 
         /// Parsed chat-input keystroke. Folds single-byte control
         /// codes (Ctrl+A/E/B/F/U/K/W, Backspace, DEL, Enter, Ctrl+D)
@@ -2186,11 +2188,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // potentially expensive). In fixture mode the worker
             // discards the body entirely, so skip the serialization
             // altogether.
+            // Pick the prompt by the LIVE dispatch mode so an open
+            // chat surface (`.chat`), an auto-exec persistent mode
+            // (`.auto`), or a regular dialog (`.dialog`) each get
+            // the matching atty-owned prompt instead of all routing
+            // through `effective_dialog_system_prompt` and missing
+            // the auto-mode refusal list / chat-mode prose default.
+            const live_mode = currentDispatchMode(rt);
+            const live_prompt: []const u8 = switch (live_mode) {
+                .single, .dialog => effective_dialog_system_prompt,
+                .auto => effective_auto_system_prompt,
+                .chat => effective_chat_system_prompt,
+            };
             const built_body: ?[]u8 = if (cfg.fixture_responses.len > 0) null else blk: {
                 const body = try buildDialogRequestBody(
                     rt.allocator,
                     model_for_request,
-                    effective_dialog_system_prompt,
+                    live_prompt,
                     rt.shell,
                     composed_context,
                     turn_slice,

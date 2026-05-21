@@ -30,7 +30,7 @@ pub const prompt_single: []const u8 =
     \\  <optional one-line prose reasoning>
     \\
     \\  ```exec
-    \\  <command, possibly multi-line, no escaping>
+    \\  <single-line shell command, no escaping>
     \\  ```
     \\
     \\Or if the task can't be done as a command:
@@ -42,7 +42,10 @@ pub const prompt_single: []const u8 =
     \\Rules:
     \\- The fenced block is the LAST thing in your reply.
     \\- Exactly ONE block per reply.
-    \\- Command body is verbatim — no quotes, no JSON escaping, multi-line OK.
+    \\- The command MUST be a single line — single-shot mode injects it
+    \\  straight at the user's shell prompt; multi-line commands don't
+    \\  survive readline. Use shell composition (`&&`, `;`, pipes) instead.
+    \\- Command body is verbatim — no quotes, no escaping.
     \\
     \\Examples:
     \\
