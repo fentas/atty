@@ -845,6 +845,15 @@ pub fn configure(comptime cfg: Config) type {
             chat_inline_paint_input_row: u16 = 0,
             chat_inline_paint_input_newlines: u16 = 0,
             chat_inline_paint_total_cols: u16 = 0,
+            /// Incognito state at the moment of the cached full
+            /// paint. The divider swaps the ✨ sparkle for 🕶 glasses
+            /// and re-labels the mode word when `ctx.incognito` is
+            /// set — those are CHROME changes the fast-path would
+            /// skip. Ctrl+Shift+I lives in the proxy (no per-module
+            /// notify hook), so this cache field is how the
+            /// fast-path detects the toggle and bails to a full
+            /// repaint.
+            chat_inline_paint_incognito: bool = false,
             /// Sized like the overlay's `chat_overlay_buf`. The
             /// inline panel is smaller (~8 rows × 200 cols) so 4 KB
             /// is plenty; matching the overlay's buffer keeps the

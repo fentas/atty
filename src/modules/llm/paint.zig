@@ -1033,6 +1033,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.chat_inline_paint_input_row = input_row;
             rt.chat_inline_paint_input_newlines = @intCast(buf_newlines);
             rt.chat_inline_paint_total_cols = total_cols;
+            rt.chat_inline_paint_incognito = ctx.incognito;
             rt.chat_inline_paint_cache_valid = true;
             rt.chat_inline_input_dirty = false;
             return true;
@@ -1053,6 +1054,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (!rt.chat_inline_paint_cache_valid or !rt.chat_inline_open) return false;
             const total_cols: u16 = ctx.terminal_cols orelse 80;
             if (total_cols != rt.chat_inline_paint_total_cols) return false;
+            // Ctrl+Shift+I lives in the proxy and toggles
+            // `ctx.incognito` without a per-module notify hook. The
+            // divider chrome (icon + mode_word) depends on this
+            // flag, so a mismatch means the cached chrome is stale.
+            if (ctx.incognito != rt.chat_inline_paint_incognito) return false;
 
             var buf_newlines: u16 = 0;
             for (rt.chat_inline_input_buf[0..rt.chat_inline_input_len]) |bb| {

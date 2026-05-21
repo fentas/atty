@@ -252,8 +252,17 @@ test "inline chat fast-path: keystroke replays only the input block, not the div
     const after_cols = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(after_cols != null);
     try testing.expect(std.mem.indexOf(u8, after_cols.?, "atty chat") != null);
-}
 
+    // Incognito toggle changes chrome (icon + mode_word) — fast-path
+    // must bail so the divider reflects the new state. Ctrl+Shift+I
+    // lives in the proxy and has no per-module notify hook; the
+    // fast-path detects via the cached flag.
+    rt.chat_inline_input_dirty = true;
+    ctx.incognito = true;
+    const after_incognito = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(after_incognito != null);
+    try testing.expect(std.mem.indexOf(u8, after_incognito.?, "incognito") != null);
+}
 
 test "inline chat (Alt+C): open paint CUP-restores to the cursor_row snapshot captured at first paint" {
     // Invariant: the first paint after toggle-open snapshots
