@@ -187,9 +187,12 @@ Current shape (post-#140 system-daemon install):
 - **State**: persisted under `/var/lib/atty-guard/` —
   `commands.trusted.txt` (sudo-mediated atom + URL trust),
   `users/<uid>/atoms.user.txt` and `urls.user.txt` (per-user
-  overlays). atty-guard refuses to load files that don't match
-  `atty:atty` ownership at startup. State survives daemon
-  restarts; PID-based threat marks do not (held in-memory only).
+  overlays). The system atom corpus (`atoms.system.txt`) is
+  ownership-gated at load: the daemon refuses to read it when
+  metadata doesn't show `atty:atty`. Other state files rely on
+  filesystem permissions + SO_PEERCRED on the write path. State
+  survives daemon restarts; PID-based threat marks do not (held
+  in-memory only).
 - **Network**: opt-in. Default build features `osv-live` +
   `atoms-fetch` need outbound HTTPS. The shipped systemd unit
   hard-locks the daemon out of the network (`PrivateNetwork=yes`,
