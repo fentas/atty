@@ -359,10 +359,12 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     lock_path.push(".lock");
     let lock_path: std::path::PathBuf = lock_path.into();
 
-    // O_CREAT | O_RDWR so we can lock and (if the file is new)
-    // chmod-via-umask sets perm 0600/0660 per the daemon's umask.
-    // Don't truncate — the file's contents are irrelevant; only
-    // the in-kernel flock state matters.
+    // O_CREAT | O_RDWR so we can lock. Permissions are the
+    // default `0666 & ~umask` (usually 0644 under the unit's
+    // default umask); contents are irrelevant — only the
+    // in-kernel flock state matters — and the file lives in
+    // the daemon's RuntimeDirectory which already gates access.
+    // Don't truncate so concurrent open + lock races stay safe.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
