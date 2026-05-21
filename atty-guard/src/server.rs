@@ -79,7 +79,18 @@ pub fn serve(
     // beyond the cap are dropped immediately so a buggy / hostile
     // local process can't pile up idle threads.
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let max_conn = server_cfg.max_concurrent_connections;
+    // Clamp cap to 1 if an operator misconfigured it to 0 (which
+    // would otherwise reject every connection, silently bricking
+    // the daemon). Print a stderr warning so the misconfig is
+    // discoverable rather than invisible.
+    let max_conn = if server_cfg.max_concurrent_connections == 0 {
+        eprintln!(
+            "atty-guard: max_concurrent_connections=0 is a misconfig — clamping to 1"
+        );
+        1
+    } else {
+        server_cfg.max_concurrent_connections
+    };
     let read_timeout = if server_cfg.idle_read_timeout_secs > 0 {
         Some(std::time::Duration::from_secs(server_cfg.idle_read_timeout_secs))
     } else {
@@ -106,6 +117,14 @@ pub fn serve(
                     "atty-guard: rejecting connection — already at cap of {max_conn} in-flight"
                 );
             }
+            // Explicit shutdown surfaces EOF to the client
+            // immediately (the bare `drop` would also close the
+            // fd, but the kernel can briefly queue the close
+            // before the FIN reaches the peer — `shutdown(Both)`
+            // forces an immediate half-close so read() on the
+            // client returns Ok(0) without a tail of
+            // EAGAIN/WouldBlock).
+            let _ = stream.shutdown(std::net::Shutdown::Both);
             drop(stream);
             continue;
         }
@@ -1035,6 +1054,17 @@ mod tests {
         });
         for _ in 0..500 {
             if UnixStream::connect(&socket).is_ok() {
+                // The probe connection succeeds (server is
+                // listening); the kernel-side accept happens
+                // shortly after, and the probe's handler thread
+                // sees EOF + exits, releasing its `ConnGuard`
+                // slot. Cap-sensitive tests rely on the in-flight
+                // counter being back to 0 by the time they
+                // connect — give the probe's handler time to
+                // exit before returning. 100 ms is well over the
+                // accept + spawn + read-EOF + exit cycle on any
+                // sane machine.
+                std::thread::sleep(Duration::from_millis(100));
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1625,21 +1655,33 @@ mod tests {
         // a handler thread blocked in read.
         let _hold1 = UnixStream::connect(&socket).expect("connect 1");
         let _hold2 = UnixStream::connect(&socket).expect("connect 2");
-        // Give the server a beat to accept + increment the
-        // counter for the two we just opened. Without this the
-        // 3rd connect can race ahead and be accepted as one of
-        // the cap-2 slots.
-        std::thread::sleep(Duration::from_millis(50));
+        // Give the server enough time to accept + increment the
+        // counter for the two held connections. 200ms is well
+        // over what a healthy accept loop needs and matches the
+        // generous CI margin used elsewhere in this file.
+        std::thread::sleep(Duration::from_millis(200));
         // Third connection: server accepts, sees prev=2 >= cap,
-        // drops it. Read should hit EOF (0 bytes).
+        // drops it. Read should return Ok(0) (EOF) once the
+        // server has closed its end. Pattern-match explicitly
+        // — `unwrap_or(0)` would mask a regression that
+        // ACCEPTED the connection but never wrote bytes
+        // (the read would time out with Err(WouldBlock), and
+        // `unwrap_or(0)` would collapse that into n=0 too,
+        // giving a false pass).
         let mut over = UnixStream::connect(&socket).expect("connect 3");
         let mut buf = [0u8; 16];
-        // Use a short read timeout so a regression that DOESN'T
-        // close doesn't hang the test indefinitely.
-        over.set_read_timeout(Some(Duration::from_millis(500)))
+        // 2 s margin so the test passes on slow CI even when
+        // the server's accept loop is briefly preempted; on a
+        // healthy run EOF arrives within a few ms of connect.
+        over.set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set timeout");
-        let n = over.read(&mut buf).unwrap_or(0);
-        assert_eq!(n, 0, "third connection must see EOF (cap rejected)");
+        match over.read(&mut buf) {
+            Ok(0) => {} // EOF — what we want
+            Ok(n) => panic!("expected EOF, got {n} bytes (cap was bypassed?)"),
+            Err(e) => panic!(
+                "expected EOF, got read error {e} (cap was bypassed, server held connection idle?)"
+            ),
+        }
         let _ = std::fs::remove_file(socket);
     }
 
@@ -1652,20 +1694,32 @@ mod tests {
         // surfaces the server's close as EOF (n=0).
         let cfg = crate::config::ServerConfig {
             max_concurrent_connections: 64,
-            idle_read_timeout_secs: 1, // shortest allowed
+            // Smallest non-zero value (0 disables; whole-second
+            // precision per set_read_timeout's contract).
+            idle_read_timeout_secs: 1,
         };
         let (socket, _h) = spawn_server_with_cfg(cfg);
         let mut stream = UnixStream::connect(&socket).expect("connect");
         let mut buf = [0u8; 16];
-        // Read up to 2x the configured timeout — gives the
-        // server room to fire its timeout and close even on
-        // slow CI runners. If the timeout works, read returns
-        // 0 (EOF) within this window.
+        // Read up to 3x the configured timeout — gives the
+        // server room to fire its timeout and close the
+        // connection even on slow CI runners. If the timeout
+        // works, server's read returns Err, server drops the
+        // stream, kernel surfaces close as Ok(0) to the client.
+        // Pattern-match explicitly so a regression where the
+        // server keeps the connection alive surfaces as
+        // Err(WouldBlock) from the CLIENT side, not as a
+        // false n=0 pass.
         stream
             .set_read_timeout(Some(Duration::from_millis(3000)))
             .expect("set timeout");
-        let n = stream.read(&mut buf).unwrap_or(0);
-        assert_eq!(n, 0, "silent connection must see EOF after server timeout");
+        match stream.read(&mut buf) {
+            Ok(0) => {} // server closed — what we want
+            Ok(n) => panic!("expected EOF, got {n} bytes"),
+            Err(e) => panic!(
+                "expected EOF after server timeout, got {e} (timeout not enforced?)"
+            ),
+        }
         let _ = std::fs::remove_file(socket);
     }
 }
