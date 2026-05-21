@@ -66,6 +66,19 @@ pub const ResolvedProvider = struct {
     name: []const u8,
 };
 
+/// Best-effort human-readable label for a `Provider` when no
+/// `ProviderEntry.name` is set. HTTP uses the model id;
+/// subprocess uses argv[0]. Caller decides between this and a
+/// configured `name` — pair with `resolveProviderForMode` for
+/// the canonical "what should the statusbar/header show"
+/// rendering.
+pub fn providerLabel(p: Provider) []const u8 {
+    return switch (p) {
+        .http => |h| if (h.model.len > 0) h.model else "(http)",
+        .subprocess => |s| if (s.argv.len > 0) s.argv[0] else "(subprocess)",
+    };
+}
+
 /// Pick the provider that serves `mode` from `providers[]`,
 /// preferring the entry at `current_idx` when its `for_modes`
 /// covers the mode. Falls back to the first matching entry,

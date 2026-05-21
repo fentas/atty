@@ -1636,3 +1636,82 @@ test "Alt+M cycle: returns .forward when neither chat nor ai mode active" {
     try testing.expect(!consumed);
     try testing.expectEqual(@as(usize, 0), rt.current_provider_idx);
 }
+
+test "Alt+M cycle: fires when chat OVERLAY is open" {
+    const L = configure(.{
+        .provider = .{ .http = .{ .model = "x", .api_base = "http://test/v1", .api_base_env = "ATTY_TEST_NEVER", .api_base_fallback_env = "ATTY_TEST_NEVER", .api_key_env = "ATTY_TEST_NEVER" } },
+        .providers = &.{
+            .{ .name = "a", .config = .{ .http = .{ .model = "a" } } },
+            .{ .name = "b", .config = .{ .http = .{ .model = "b" } } },
+        },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    rt.chat_overlay_open = true;
+    try testing.expect(!rt.ai_mode_active);
+    try testing.expect(!rt.chat_inline_open);
+    const consumed = try L.onAction(&rt, &ctx, .llm_exec_cycle_model);
+    try testing.expect(consumed);
+    try testing.expectEqual(@as(usize, 1), rt.current_provider_idx);
+}
+
+test "Alt+M cycle: fires when dialog_persistent_mode is on (no chat surface)" {
+    // Mid-dialog state: user pressed Alt+S, persistent dialog
+    // mode is set, but neither chat surface is open and the
+    // `#: ` prompt buffer was wiped post-commit so
+    // ai_mode_active is false. Alt+M should still cycle.
+    const L = configure(.{
+        .provider = .{ .http = .{ .model = "x", .api_base = "http://test/v1", .api_base_env = "ATTY_TEST_NEVER", .api_base_fallback_env = "ATTY_TEST_NEVER", .api_key_env = "ATTY_TEST_NEVER" } },
+        .providers = &.{
+            .{ .name = "a", .config = .{ .http = .{ .model = "a" } } },
+            .{ .name = "b", .config = .{ .http = .{ .model = "b" } } },
+        },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    rt.dialog_persistent_mode = .dialog;
+    try testing.expect(!rt.ai_mode_active);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(!rt.chat_overlay_open);
+    const consumed = try L.onAction(&rt, &ctx, .llm_exec_cycle_model);
+    try testing.expect(consumed);
+    try testing.expectEqual(@as(usize, 1), rt.current_provider_idx);
+}

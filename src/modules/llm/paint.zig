@@ -18,18 +18,6 @@ const worker_mod_ns = @import("worker.zig");
 const pty_mod = @import("../../pty.zig");
 const Pty = pty_mod.Pty;
 
-/// Best-effort human-readable label for a `Provider` value when
-/// no `ProviderEntry.name` is set. HTTP uses the model id;
-/// subprocess uses argv[0]; falls back to "(unconfigured)".
-/// Duplicated from hooks.zig — they're parallel surfaces and a
-/// shared helper module would create a circular import.
-fn providerLabelFallback(p: types.Provider) []const u8 {
-    return switch (p) {
-        .http => |h| if (h.model.len > 0) h.model else "(http)",
-        .subprocess => |s| if (s.argv.len > 0) s.argv[0] else "(subprocess)",
-    };
-}
-
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {
         // `latchErr` is part of the dialog Module helpers — same
@@ -604,15 +592,30 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const cols_usize: usize = total_cols;
             w.print("\x1B[{d};1H\x1B[2K", .{top_row}) catch return false;
             const resolved = worker_mod_ns.resolveProviderForMode(.chat, cfg.providers, cfg.provider, rt.current_provider_idx);
-            const provider_label: []const u8 = if (resolved.name.len > 0) resolved.name else providerLabelFallback(resolved.provider);
+            const raw_label: []const u8 = if (resolved.name.len > 0) resolved.name else worker_mod_ns.providerLabel(resolved.provider);
             const icon: []const u8 = if (ctx.incognito) "\u{1F576}" else "\u{2728}";
             const mode_word: []const u8 = if (ctx.incognito) "atty chat (incognito)" else "atty chat";
+            // Clamp the label to a third of the available cols so a
+            // long provider name doesn't squeeze the trailing
+            // `Alt+C close · Enter send` shortcut hint off the row.
+            // Trailing `…` (U+2026, 1 col) marks the cut so users
+            // know the full name is longer.
+            var label_buf: [128]u8 = undefined;
+            const label_cap: usize = @max(8, cols_usize / 3);
+            const provider_label: []const u8 = if (raw_label.len > label_cap and label_cap > 1) blk: {
+                const cut = @min(label_cap - 1, label_buf.len -| 3);
+                @memcpy(label_buf[0..cut], raw_label[0..cut]);
+                @memcpy(label_buf[cut .. cut + 3], "\u{2026}");
+                break :blk label_buf[0 .. cut + 3];
+            } else raw_label;
             // Format: `<icon> <mode_word> · <provider_label> ─`
             w.print("\x1B[2m\x1B[22;38;5;141m{s}\x1B[39;2m {s} \u{00B7} \x1B[22;38;5;14m{s}\x1B[39;2m \u{2500}", .{ icon, mode_word, provider_label }) catch return false;
             // Visible-col count for the trail-clearance math.
             // Icon double-width (2) + space + mode_word + " · " (3)
-            // + provider_label + " ─" (2). mode_word counted as
-            // its byte length (ASCII).
+            // + provider_label (label_cap upper bound) + " ─" (2).
+            // mode_word + label counted as byte length (ASCII-ish
+            // — emoji in names would underestimate but the clamp
+            // gives slack).
             const label_visible: usize = 2 + 1 + mode_word.len + 3 + provider_label.len + 2;
             // " Alt+C close · Enter send" is 25 visible cols.
             const trail_min_clearance: usize = 25;
