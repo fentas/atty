@@ -436,8 +436,8 @@ pub fn Module(comptime cfg: Config) type {
         ///   - `err`: `response_buf` already freed (or never owned
         ///     in the spawn-failed case); caller just reports the
         ///     error and moves on.
-        const FetchKind = enum { ok, fetch_failed, timed_out, spawn_failed, oom };
-        const FetchOutcome = struct {
+        pub const FetchKind = enum { ok, fetch_failed, timed_out, spawn_failed, oom };
+        pub const FetchOutcome = struct {
             kind: FetchKind,
             status: u16 = 0,
             response_buf: ?[]u8 = null,
@@ -548,28 +548,29 @@ pub fn Module(comptime cfg: Config) type {
         /// `url`, `body`, `auth_header` are copied into task-owned
         /// heap so the worker can return without holding caller
         /// storage alive across the timeout window.
-        fn runHttpFetchWithDeadline(
+        /// Init the heap-owned task. Returns an error union so
+        /// `errdefer` chains fire correctly on partial OOM — a
+        /// plain `catch return .{...}` form (returning a value, not
+        /// an error union) silently skips `errdefer`, leaking the
+        /// already-allocated dupes.
+        fn initHttpFetchTask(
             gpa: std.mem.Allocator,
             io: std.Io,
             url_in: []const u8,
             body_in: []const u8,
             auth_header_in: ?[]const u8,
             response_cap: usize,
-            timeout_ms: u32,
-        ) FetchOutcome {
-            const task = gpa.create(HttpFetchTask) catch return .{ .kind = .oom };
+        ) !*HttpFetchTask {
+            const task = try gpa.create(HttpFetchTask);
             errdefer gpa.destroy(task);
 
-            const url_dup = gpa.dupe(u8, url_in) catch return .{ .kind = .oom };
+            const url_dup = try gpa.dupe(u8, url_in);
             errdefer gpa.free(url_dup);
-            const body_dup = gpa.dupe(u8, body_in) catch return .{ .kind = .oom };
+            const body_dup = try gpa.dupe(u8, body_in);
             errdefer gpa.free(body_dup);
-            const auth_dup: ?[]u8 = if (auth_header_in) |h|
-                (gpa.dupe(u8, h) catch return .{ .kind = .oom })
-            else
-                null;
+            const auth_dup: ?[]u8 = if (auth_header_in) |h| try gpa.dupe(u8, h) else null;
             errdefer if (auth_dup) |s| gpa.free(s);
-            const response_buf = gpa.alloc(u8, response_cap) catch return .{ .kind = .oom };
+            const response_buf = try gpa.alloc(u8, response_cap);
             errdefer gpa.free(response_buf);
 
             task.* = HttpFetchTask{
@@ -583,6 +584,20 @@ pub fn Module(comptime cfg: Config) type {
                 .outcome = .{ .kind = .fetch_failed },
                 .thread = null,
             };
+            return task;
+        }
+
+        pub fn runHttpFetchWithDeadline(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            url_in: []const u8,
+            body_in: []const u8,
+            auth_header_in: ?[]const u8,
+            response_cap: usize,
+            timeout_ms: u32,
+        ) FetchOutcome {
+            const task = initHttpFetchTask(gpa, io, url_in, body_in, auth_header_in, response_cap) catch
+                return .{ .kind = .oom };
 
             const thread = std.Thread.spawn(.{}, HttpFetchTask.run, .{task}) catch {
                 task.deinit();
@@ -590,30 +605,17 @@ pub fn Module(comptime cfg: Config) type {
             };
             task.thread = thread;
 
-            // No-deadline mode: just join. Same blocking semantics
-            // as before, but unified through the helper.
+            // No-deadline mode: join and consume.
             if (timeout_ms == 0) {
                 thread.join();
-                const out = task.outcome;
-                // Take ownership of response_buf out of the task
-                // before destroying it.
-                if (out.kind == .ok) {
-                    const a = task.gpa;
-                    a.free(task.url);
-                    a.free(task.body);
-                    if (task.auth_storage) |s| a.free(s);
-                    a.destroy(task);
-                } else {
-                    task.deinit();
-                }
-                return out;
+                return consumeTask(task);
             }
 
             // Wall-clock deadline (mirrors subprocess Watchdog
             // pattern — EINTR-shortened nanosleep doesn't advance
             // elapsed so the deadline can't fire early).
             const start_ms = nowMs();
-            const deadline_signed: i64 = @intCast(timeout_ms);
+            const deadline_signed: i64 = @as(i64, timeout_ms);
             var slice: std.c.timespec = .{ .sec = 0, .nsec = @intCast(50 * std.time.ns_per_ms) };
             while ((nowMs() - start_ms) < deadline_signed) {
                 if (task.status.load(.acquire) == STATUS_DONE) break;
@@ -622,17 +624,7 @@ pub fn Module(comptime cfg: Config) type {
 
             if (task.status.load(.acquire) == STATUS_DONE) {
                 thread.join();
-                const out = task.outcome;
-                if (out.kind == .ok) {
-                    const a = task.gpa;
-                    a.free(task.url);
-                    a.free(task.body);
-                    if (task.auth_storage) |s| a.free(s);
-                    a.destroy(task);
-                } else {
-                    task.deinit();
-                }
-                return out;
+                return consumeTask(task);
             }
 
             // Deadline expired. Race-tight transition: swap to
@@ -642,17 +634,7 @@ pub fn Module(comptime cfg: Config) type {
             const prev = task.status.swap(STATUS_ABANDONED, .acq_rel);
             if (prev == STATUS_DONE) {
                 thread.join();
-                const out = task.outcome;
-                if (out.kind == .ok) {
-                    const a = task.gpa;
-                    a.free(task.url);
-                    a.free(task.body);
-                    if (task.auth_storage) |s| a.free(s);
-                    a.destroy(task);
-                } else {
-                    task.deinit();
-                }
-                return out;
+                return consumeTask(task);
             }
 
             // True timeout. Detach: the sub-thread will eventually
@@ -662,6 +644,25 @@ pub fn Module(comptime cfg: Config) type {
             // in-flight per worker until the orphan completes.
             thread.detach();
             return .{ .kind = .timed_out };
+        }
+
+        /// Take ownership of the task's outcome — on success, the
+        /// caller owns `response_buf` and frees it via `gpa.free`;
+        /// the helper frees the rest of the task's heap state. On
+        /// failure, the helper frees everything (including the
+        /// untouched response_buf).
+        fn consumeTask(task: *HttpFetchTask) FetchOutcome {
+            const out = task.outcome;
+            if (out.kind == .ok) {
+                const a = task.gpa;
+                a.free(task.url);
+                a.free(task.body);
+                if (task.auth_storage) |s| a.free(s);
+                a.destroy(task);
+            } else {
+                task.deinit();
+            }
+            return out;
         }
 
         /// One single-mode HTTP round-trip. On success returns
