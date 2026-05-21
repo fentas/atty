@@ -1348,3 +1348,56 @@ test "inline chat chrome: auto-on flips mode word to `atty chat (auto)`" {
     try testing.expect(painted != null);
     try testing.expect(std.mem.indexOf(u8, painted.?, "atty chat (auto)") != null);
 }
+
+test "inline chat chrome: progressive trailing-hint shrinks on narrow terminal" {
+    // The full hint is ~51 cols. With a narrow terminal + the
+    // `(auto, incognito)` mode word, the chrome shouldn't overrun
+    // — progressively shrinks to medium (38) or short (22) form
+    // depending on how much room is left after the mode word +
+    // provider label.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+        .incognito = true,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    rt.auto_mode_active = true;
+    rt.chat_inline_paint_pending = true;
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    // Mode word reflects both flags.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "atty chat (auto, incognito)") != null);
+    // Some shortcut shape still surfaces — the keys are always
+    // present, even when labels get dropped for narrow rows.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+T") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+M") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+C") != null);
+}

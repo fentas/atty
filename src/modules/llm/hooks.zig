@@ -68,7 +68,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const inert_error_msg = llm_consts.inert_error_msg;
         const effective_dialog_system_prompt = llm_consts.effective_dialog_system_prompt;
         const effective_auto_system_prompt = llm_consts.effective_auto_system_prompt;
-        const effective_chat_system_prompt = llm_consts.effective_chat_system_prompt;
 
         /// Parsed chat-input keystroke. Folds single-byte control
         /// codes (Ctrl+A/E/B/F/U/K/W, Backspace, DEL, Enter, Ctrl+D)
@@ -2247,9 +2246,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // the auto-mode refusal list / chat-mode prose default.
             const live_mode = currentDispatchMode(rt);
             const live_prompt: []const u8 = switch (live_mode) {
-                .single, .dialog => effective_dialog_system_prompt,
+                // `.chat` is reserved for `for_modes` provider
+                // masks; `currentDispatchMode` doesn't return it
+                // any more. Route to the dialog prompt for
+                // defensive completeness.
+                .single, .dialog, .chat => effective_dialog_system_prompt,
                 .auto => effective_auto_system_prompt,
-                .chat => effective_chat_system_prompt,
             };
             const built_body: ?[]u8 = if (cfg.fixture_responses.len > 0) null else blk: {
                 const body = try buildDialogRequestBody(

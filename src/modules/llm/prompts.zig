@@ -13,8 +13,10 @@
 //!   ```exec      → run a shell command
 //!   ```question  → multi-choice prompt
 //!   ```done      → finish with a one-sentence summary (terminal toast)
-//! No fence = pure chat (allowed in `prompt_chat`; treated as
-//! `done` + reason in the other modes).
+//! No fence = pure chat — treated as `done` + reason; chat
+//! surfaces push that reason as an assistant turn so the
+//! conversation stays open (other modes emit the conclusion
+//! banner and end the dialog).
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -221,69 +223,20 @@ pub const prompt_auto: []const u8 =
     \\  ```
 ;
 
-/// Alt+C / Alt+Shift+C — open-ended conversation. Default to prose.
-pub const prompt_chat: []const u8 =
-    \\You are running inside `atty`, a terminal assistant. The user is
-    \\chatting with you — exploring, asking, talking. Default to plain prose
-    \\replies. Don't emit any structured action unless explicitly asked.
-    \\
-    \\If the user asks you to run something:
-    \\
-    \\  <prose explaining what the command does>
-    \\
-    \\  ```exec
-    \\  <command, possibly multi-line, no escaping>
-    \\  ```
-    \\
-    \\If you need them to choose between options:
-    \\
-    \\  ```question
-    \\  <question prompt>
-    \\  - <choice 1>
-    \\  - <choice 2>
-    \\  ```
-    \\
-    \\Rules:
-    \\- An action fenced block (if any) is the LAST thing in your reply.
-    \\- Exactly ONE action, at most. Pure prose is also a valid reply.
-    \\- Action body is verbatim — no quotes, no JSON escaping.
-    \\
-    \\Examples:
-    \\
-    \\User: what's the state of the test suite?
-    \\
-    \\Your reply:
-    \\  All 794 tests pass on this branch as of the last commit. Anything specific you want to dig into?
-    \\
-    \\User: run them for me
-    \\
-    \\Your reply:
-    \\  Running the zig test target.
-    \\
-    \\  ```exec
-    \\  zig build test 2>&1 | tail -5
-    \\  ```
-    \\
-    \\User: which provider should I pick for code generation?
-    \\
-    \\Your reply:
-    \\  ```question
-    \\  Depends on the tradeoff. Pick one:
-    \\  - claude-sonnet-4 — best at structured output, paid
-    \\  - gpt-4o-mini — fast on small tasks, paid
-    \\  - qwen2.5-coder:32b — local, free, needs GPU
-    \\  ```
-;
-
 /// Select the atty-owned prompt for `mode`. Caller appends the
 /// user's `cfg.system_prompt` (if any) after a blank line so domain
 /// context stacks on top of the action protocol.
 pub fn selectPrompt(mode: types.Mode) []const u8 {
     return switch (mode) {
         .single => prompt_single,
-        .dialog => prompt_dialog,
+        // Chat surfaces (`Alt+C` / `Alt+Shift+C`) dispatch as
+        // `.dialog` or `.auto` via `currentDispatchMode`; the bare
+        // `.chat` Mode value only routes through `for_modes` masks
+        // for provider resolution today. Defaulting to the dialog
+        // prompt here is the sensible fall-back if a caller ever
+        // surfaces `.chat` for prompt selection.
+        .dialog, .chat => prompt_dialog,
         .auto => prompt_auto,
-        .chat => prompt_chat,
     };
 }
 

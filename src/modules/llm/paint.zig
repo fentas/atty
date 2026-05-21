@@ -871,23 +871,45 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 pw.measureCols(icon) + 1 +
                 pw.measureCols(mode_word) + 3 +
                 pw.measureCols(provider_label) + 2;
-            // Trailing shortcut hint: " Alt+T auto · Alt+M model ·
-            // Alt+C close · Enter send" — 51 visible cols. The mode
-            // & provider keys are non-obvious; surfacing them in the
-            // panel chrome makes them discoverable without bouncing
-            // through Alt+H. statusText suppresses its own LLM hint
-            // when the panel is open so this row owns the discovery
-            // surface.
-            const trail_min_clearance: usize = 51;
-            const trail_target: usize = if (cols_usize > label_visible + trail_min_clearance)
-                cols_usize - label_visible - trail_min_clearance
+            // Trailing shortcut hint — progressively shrinks as
+            // cols tightens so the chrome never overruns into the
+            // panel body. Three sizes:
+            //   full:  " Alt+T auto · Alt+M model · Alt+C close · Enter send" (51 cols)
+            //   med:   " Alt+T auto · Alt+M model · Alt+C close"              (38 cols)
+            //   short: " Alt+T · Alt+M · Alt+C"                                (22 cols)
+            // The mode + provider keys are non-obvious; the short
+            // form drops labels but keeps the keys so users can
+            // still find them. Statusbar suppresses its LLM hint
+            // when the panel is open so this row owns discovery.
+            const hint_full = " \x1B[22;38;5;14mAlt+T\x1B[39;2m auto \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m model \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m";
+            const hint_med = " \x1B[22;38;5;14mAlt+T\x1B[39;2m auto \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m model \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m close\x1B[0m";
+            const hint_short = " \x1B[22;38;5;14mAlt+T\x1B[39;2m \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m\x1B[0m";
+            const min_dashes: usize = 4;
+            const hint: []const u8 = if (cols_usize >= label_visible + 51 + min_dashes)
+                hint_full
+            else if (cols_usize >= label_visible + 38 + min_dashes)
+                hint_med
+            else if (cols_usize >= label_visible + 22 + min_dashes)
+                hint_short
             else
-                4;
+                "\x1B[0m"; // No room for any hint — leave the row blank past the label.
+            const hint_cols: usize = if (hint.ptr == hint_full.ptr)
+                51
+            else if (hint.ptr == hint_med.ptr)
+                38
+            else if (hint.ptr == hint_short.ptr)
+                22
+            else
+                0;
+            const trail_target: usize = if (cols_usize > label_visible + hint_cols + min_dashes)
+                cols_usize - label_visible - hint_cols
+            else
+                min_dashes;
             var i: usize = 0;
             while (i < trail_target) : (i += 1) {
                 w.writeAll("\u{2500}") catch return false;
             }
-            w.writeAll(" \x1B[22;38;5;14mAlt+T\x1B[39;2m auto \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m model \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m") catch return false;
+            w.writeAll(hint) catch return false;
 
             // Scrollback rows — fill from oldest visible turn to
             // most recent, each on its own row, truncated to fit

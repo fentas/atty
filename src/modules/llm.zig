@@ -1208,13 +1208,15 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
-            // Chat surface open → suppress the LLM statusbar hint
-            // entirely. The panel header carries the live shortcuts
-            // (Alt+T auto · Alt+M model · Alt+C close · Enter send),
-            // duplicating them in the statusbar would (a) waste a
-            // scarce row and (b) advertise `Alt+C chat` as a
-            // shortcut to open the panel — but it's already open.
-            if (rt.chat_inline_open or rt.chat_overlay_open) return null;
+            // Chat surface open → suppress the LLM discovery hint
+            // (panel chrome owns shortcut visibility) BUT keep the
+            // in-flight indicator so the user gets feedback that
+            // a request is running. The panel chrome doesn't paint
+            // its own spinner today; statusbar is the only signal.
+            if (rt.chat_inline_open or rt.chat_overlay_open) {
+                if (rt.in_flight) return thinking_hint;
+                return null;
+            }
             // Persistent dialog/auto mode segment takes precedence
             // over the transient "thinking…" indicator — the user
             // wants to know they're IN a mode persistently across
