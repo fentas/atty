@@ -1012,6 +1012,13 @@ pub fn Module(comptime cfg: Config) type {
                     // fails (group empty / child already exited).
                     const cid = child.id orelse unreachable;
                     std.posix.kill(-cid, .KILL) catch child.kill(io);
+                    // Reap the child so it doesn't accumulate as
+                    // a zombie in the long-lived atty process.
+                    // Errors are swallowed because this is
+                    // already an error path — `wait` failing
+                    // (already-reaped / ECHILD) doesn't change
+                    // the outcome.
+                    _ = child.wait(io) catch null;
                     err_len_out.* = writeStatic(error_out, "subprocess watchdog thread spawn failed");
                     return error.SubprocessFailed;
                 };
@@ -1045,6 +1052,8 @@ pub fn Module(comptime cfg: Config) type {
                 std.posix.kill(-cid, .KILL) catch child.kill(io);
                 completed.store(true, .release);
                 if (watchdog_thread) |t| t.join();
+                // Reap to avoid leaving a zombie in atty.
+                _ = child.wait(io) catch null;
                 err_len_out.* = writeStatic(error_out, "subprocess produced no stdout pipe");
                 return error.SubprocessFailed;
             };
@@ -1077,6 +1086,8 @@ pub fn Module(comptime cfg: Config) type {
                 completed.store(true, .release);
                 if (stderr_thread) |t| t.join();
                 if (watchdog_thread) |t| t.join();
+                // Reap to avoid leaving a zombie in atty.
+                _ = child.wait(io) catch null;
                 err_len_out.* = writeStatic(error_out, "subprocess stdout read failed");
                 return error.SubprocessFailed;
             };
