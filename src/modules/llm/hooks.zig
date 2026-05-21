@@ -1180,6 +1180,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
+            if (rt.shared.res_buf) |old| {
+                rt.allocator.free(old);
+                rt.shared.res_buf = null;
+            }
             rt.shared.res_len = 0;
             // Single-mode is one-shot — never resume. Each `Alt+A`
             // gets a fresh CLI session. Otherwise unrelated
@@ -1459,6 +1463,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // remove the 🧠 thinking… status.
                 if (rt.shared.res_gen != rt.shared.req_gen) {
                     rt.shared.res_done = false;
+                    if (rt.shared.res_buf) |old| {
+                        rt.allocator.free(old);
+                        rt.shared.res_buf = null;
+                    }
                     rt.shared.res_len = 0;
                     rt.shared.explanation_len = 0;
                     rt.shared.error_len = 0;
@@ -1473,8 +1481,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
                 res_kind = rt.shared.res_kind;
                 n = rt.shared.res_len;
-                @memcpy(rt.inject_buf[0..n], rt.shared.res_buf[0..n]);
-                rt.inject_len = n;
+                if (rt.shared.res_buf) |slice| {
+                    const copy_n = @min(n, rt.inject_buf.len);
+                    @memcpy(rt.inject_buf[0..copy_n], slice[0..copy_n]);
+                    rt.inject_len = copy_n;
+                    n = copy_n;
+                    rt.allocator.free(slice);
+                    rt.shared.res_buf = null;
+                } else {
+                    rt.inject_len = 0;
+                    n = 0;
+                }
 
                 // Capture the CLI's session id (dialog mode only —
                 // single-mode is one-shot and intentionally
@@ -1585,13 +1602,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
             const raw = rt.inject_buf[0..n];
 
-            // Stash the raw response so it becomes the next
-            // assistant_exec turn. Done before parsing so we have
-            // it whether or not the JSON parses cleanly.
-            const stash_n = @min(raw.len, rt.last_assistant_json.len);
-            @memcpy(rt.last_assistant_json[0..stash_n], raw[0..stash_n]);
-            rt.last_assistant_json_len = stash_n;
-
             var parsed: DialogResponse = .{};
             parseDialogResponse(rt.allocator, raw, &parsed) catch {
                 // Self-correction loop — give the model a chance to
@@ -1605,7 +1615,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // please re-emit JSON exactly like this …").
                 if (rt.dialog_parse_retry_count < cfg.dialog_parse_retry_max) {
                     rt.dialog_parse_retry_count += 1;
-                    requestParseRetry(rt, ctx, "wasn't valid JSON") catch {
+                    requestParseRetry(rt, ctx, raw, "wasn't valid JSON") catch {
                         latchErr(rt, "LLM reply wasn't valid JSON — cancel and retry");
                         dialogReset(rt, ctx.io);
                         rt.ai_mode_active = false;
@@ -1634,7 +1644,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // doesn't satisfy our protocol contract).
                         if (rt.dialog_parse_retry_count < cfg.dialog_parse_retry_max) {
                             rt.dialog_parse_retry_count += 1;
-                            requestParseRetry(rt, ctx, "had action=exec but no command field") catch {
+                            requestParseRetry(rt, ctx, raw, "had action=exec but no command field") catch {
                                 latchErr(rt, "LLM reply had no command — cancel and retry");
                                 dialogReset(rt, ctx.io);
                                 rt.ai_mode_active = false;
@@ -1651,7 +1661,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Echo the assistant's JSON back to the model
                     // on the next turn so the conversation stays
                     // coherent.
-                    const assistant_copy = rt.allocator.dupe(u8, rt.last_assistant_json[0..rt.last_assistant_json_len]) catch {
+                    const assistant_copy = rt.allocator.dupe(u8, raw) catch {
                         abortDialog(rt, ctx.io, "out of memory continuing dialog");
                         return null;
                     };
@@ -1862,12 +1872,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Falling back to "atty asked a question" when
                     // dupe OOMs keeps the chat-scrollback story
                     // intact without abort-on-OOM.
-                    if (rt.last_assistant_json_len > 0) {
-                        const assistant_copy = rt.allocator.dupe(u8, rt.last_assistant_json[0..rt.last_assistant_json_len]) catch null;
-                        if (assistant_copy) |copy| {
-                            pushTurn(rt, .assistant_exec, copy) catch rt.allocator.free(copy);
-                        }
-                    }
+                    if (rt.allocator.dupe(u8, raw)) |copy| {
+                        pushTurn(rt, .assistant_exec, copy) catch rt.allocator.free(copy);
+                    } else |_| {}
                     const q = parsed.question();
                     // Multi-choice: copy choices into Runtime-
                     // owned storage so they outlive `parsed`. The
@@ -2311,6 +2318,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_pending = true;
             rt.shared.req_gen +%= 1;
             rt.shared.res_done = false;
+            if (rt.shared.res_buf) |old| {
+                rt.allocator.free(old);
+                rt.shared.res_buf = null;
+            }
             rt.shared.res_len = 0;
             publishSessionId(rt);
             rt.shared.cv.signal(ctx.io);
@@ -2331,13 +2342,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// corrective prompt. Caller's responsibility to gate on
         /// retry budget; this function unconditionally fires the
         /// retry.
-        fn requestParseRetry(rt: *Runtime, ctx: *m.Context, reason: []const u8) !void {
+        fn requestParseRetry(rt: *Runtime, ctx: *m.Context, raw: []const u8, reason: []const u8) !void {
             // Echo the malformed reply back as an assistant turn so
             // the model sees its own output in context. Without
             // this the corrective user turn would seem to come
             // from nowhere.
-            const bad_reply = rt.last_assistant_json[0..rt.last_assistant_json_len];
-            const assistant_copy = try rt.allocator.dupe(u8, bad_reply);
+            const assistant_copy = try rt.allocator.dupe(u8, raw);
             errdefer rt.allocator.free(assistant_copy);
             try pushTurn(rt, .assistant_exec, assistant_copy);
 
@@ -2352,20 +2362,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             //   • markdown fences (```json …``` wrappers).
             //   • prose preamble ("Sure! Here you go:") before the JSON.
             const concrete_hint: []const u8 = blk: {
-                if (std.mem.indexOf(u8, bad_reply, "} {") != null or
-                    std.mem.indexOf(u8, bad_reply, "}\n{") != null or
-                    std.mem.indexOf(u8, bad_reply, "}\r\n{") != null)
+                if (std.mem.indexOf(u8, raw, "} {") != null or
+                    std.mem.indexOf(u8, raw, "}\n{") != null or
+                    std.mem.indexOf(u8, raw, "}\r\n{") != null)
                 {
                     break :blk " You emitted TWO JSON objects. The `open_chat` field must be INSIDE the same object as `action`, e.g. {\"action\":\"question\",\"question\":\"…\",\"open_chat\":true} — NOT a separate {\"open_chat\":true} appended after.";
                 }
-                if (std.mem.indexOf(u8, bad_reply, "```") != null) {
+                if (std.mem.indexOf(u8, raw, "```") != null) {
                     break :blk " Drop the ```json fence — emit the raw object.";
                 }
                 // Heuristic for prose preamble: first non-whitespace
                 // char isn't `{`.
                 var i: usize = 0;
-                while (i < bad_reply.len and (bad_reply[i] == ' ' or bad_reply[i] == '\n' or bad_reply[i] == '\r' or bad_reply[i] == '\t')) : (i += 1) {}
-                if (i < bad_reply.len and bad_reply[i] != '{') {
+                while (i < raw.len and (raw[i] == ' ' or raw[i] == '\n' or raw[i] == '\r' or raw[i] == '\t')) : (i += 1) {}
+                if (i < raw.len and raw[i] != '{') {
                     break :blk " Drop any prose before the `{` — the FIRST non-whitespace character must be `{`.";
                 }
                 break :blk "";

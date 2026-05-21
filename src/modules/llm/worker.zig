@@ -151,11 +151,18 @@ pub fn Module(comptime cfg: Config) type {
             /// a new prompt while the previous one was still in
             /// flight" case).
             req_gen: u64 = 0,
-            /// Latest LLM response. Worker writes both on success
-            /// (`res_len > 0`) AND on failure (`res_len = 0` with
-            /// `res_done = true`) so `pollShellInput` can clear
-            /// `in_flight` in both cases.
-            res_buf: [cfg.max_response_bytes]u8 = undefined,
+            /// Latest LLM response. Heap-allocated per-response so a
+            /// small reply (the common case) doesn't reserve
+            /// `cfg.max_response_bytes` of inline buffer space.
+            /// `cfg.max_response_bytes` bounds `cmd_len` via the
+            /// decoder's stack buffer — `storeResponse` only sees
+            /// already-capped slices. `null` when no response is
+            /// staged; `storeResponse` frees the previous slice
+            /// before allocating the new one, and the proxy frees
+            /// it again after copying into `inject_buf` — so the
+            /// slice never outlives one consume cycle. Proxy reads
+            /// under `mutex`.
+            res_buf: ?[]u8 = null,
             res_len: usize = 0,
             /// Explanation text parsed from the response when
             /// `with_explanation` is set. Surfaced via
@@ -233,6 +240,28 @@ pub fn Module(comptime cfg: Config) type {
             const n = @min(src.len, dst.len);
             @memcpy(dst[0..n], src[0..n]);
             return n;
+        }
+
+        /// Replace the staged response slice atomically. Frees any
+        /// previous heap slice before allocating the new one so the
+        /// buffer never outlives one consume cycle. Caller must hold
+        /// `shared.mutex`.
+        pub fn storeResponse(gpa: std.mem.Allocator, shared: *Shared, bytes: []const u8) !void {
+            if (shared.res_buf) |old| gpa.free(old);
+            shared.res_buf = null;
+            shared.res_len = 0;
+            const buf = try gpa.alloc(u8, bytes.len);
+            @memcpy(buf, bytes);
+            shared.res_buf = buf;
+            shared.res_len = bytes.len;
+        }
+
+        /// Free the staged response slice if any. Caller must hold
+        /// `shared.mutex`.
+        pub fn clearResBuf(gpa: std.mem.Allocator, shared: *Shared) void {
+            if (shared.res_buf) |old| gpa.free(old);
+            shared.res_buf = null;
+            shared.res_len = 0;
         }
 
         /// Build the single-mode OpenAI chat-completion JSON
@@ -1269,11 +1298,16 @@ pub fn Module(comptime cfg: Config) type {
                     const fi = shared.fixture_idx % fixture_n;
                     shared.fixture_idx = (fi + 1) % fixture_n;
                     const canned = cfg.fixture_responses[fi];
-                    const copy_n = @min(canned.len, shared.res_buf.len);
-                    @memcpy(shared.res_buf[0..copy_n], canned[0..copy_n]);
-                    shared.res_len = copy_n;
+                    const copy_n = @min(canned.len, cfg.max_response_bytes);
+                    var fixture_err: usize = 0;
+                    storeResponse(gpa, shared, canned[0..copy_n]) catch {
+                        clearResBuf(gpa, shared);
+                        const oom_msg = "out of memory staging fixture response";
+                        fixture_err = @min(oom_msg.len, shared.error_buf.len);
+                        @memcpy(shared.error_buf[0..fixture_err], oom_msg[0..fixture_err]);
+                    };
                     shared.explanation_len = 0;
-                    shared.error_len = 0;
+                    shared.error_len = fixture_err;
                     shared.res_gen = serving_gen;
                     shared.res_kind = req_kind;
                     shared.res_done = true;
@@ -1426,8 +1460,22 @@ pub fn Module(comptime cfg: Config) type {
                 // separately.
                 shared.mutex.lockUncancelable(io);
                 if (result.cmd_len > 0) {
-                    @memcpy(shared.res_buf[0..result.cmd_len], response_buf[0..result.cmd_len]);
-                    shared.res_len = result.cmd_len;
+                    storeResponse(gpa, shared, response_buf[0..result.cmd_len]) catch {
+                        // OOM staging the response — fall through to
+                        // the error path so the proxy still sees
+                        // res_done and clears in_flight.
+                        clearResBuf(gpa, shared);
+                        shared.explanation_len = 0;
+                        const oom_msg = "out of memory staging response";
+                        const en = @min(oom_msg.len, shared.error_buf.len);
+                        @memcpy(shared.error_buf[0..en], oom_msg[0..en]);
+                        shared.error_len = en;
+                        shared.res_gen = serving_gen;
+                        shared.res_kind = req_kind;
+                        shared.res_done = true;
+                        shared.mutex.unlock(io);
+                        continue;
+                    };
                     if (result.exp_len > 0) {
                         @memcpy(shared.explanation_buf[0..result.exp_len], explanation_local[0..result.exp_len]);
                         shared.explanation_len = result.exp_len;
@@ -1436,7 +1484,7 @@ pub fn Module(comptime cfg: Config) type {
                     }
                     shared.error_len = 0;
                 } else {
-                    shared.res_len = 0;
+                    clearResBuf(gpa, shared);
                     shared.explanation_len = 0;
                     if (result.err_len > 0) {
                         const en = @min(result.err_len, shared.error_buf.len);

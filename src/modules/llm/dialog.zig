@@ -1012,6 +1012,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.shared.req_gen +%= 1;
             rt.shared.req_pending = false;
             rt.shared.res_done = false;
+            if (rt.shared.res_buf) |old| {
+                rt.allocator.free(old);
+                rt.shared.res_buf = null;
+            }
             rt.shared.res_len = 0;
             rt.shared.request_session_id_len = 0;
             rt.shared.response_session_id_len = 0;
@@ -1031,7 +1035,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.captured_truncated = false;
             rt.pending_command_len = 0;
             rt.pending_description_len = 0;
-            rt.last_assistant_json_len = 0;
             rt.dialog_parse_retry_count = 0;
             rt.question_choices_count = 0;
             // Disarm the conclusion auto-emit latch — but keep the
