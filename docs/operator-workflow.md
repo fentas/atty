@@ -98,6 +98,11 @@ What this does:
    features compile-and-run but every network call would fail.
    Pass `--without-network` to skip even when features are
    present; pass `--with-network` to force install regardless.
+
+   Note for upgrades: the `--print-features` probe was added in
+   issue #145. Operators with an older `atty-guard` binary
+   built with network features will see the auto-detect skip
+   silently — pass `--with-network` explicitly until you rebuild.
 7. Runs `systemctl daemon-reload && enable --now`. The daemon
    binds `/run/atty-guard/atty-guard.sock` (the unit's
    `RuntimeDirectory=` creates that path owned `atty:atty 0750`).
