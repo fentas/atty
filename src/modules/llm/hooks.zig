@@ -56,7 +56,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             raw: []const u8,
             out: *DialogResponse,
         ) !void {
-            return dialog.parseResponseLenient(DialogResponse, allocator, raw, out);
+            _ = allocator;
+            dialog.parseFencedResponse(DialogResponse, raw, out);
         }
         pub const buildDialogRequestBody = dialog.buildRequestBody;
 

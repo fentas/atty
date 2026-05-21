@@ -55,8 +55,9 @@ pub const State = enum {
 
 /// One of three top-level actions the model can pick in a dialog
 /// step: continue executing (`exec`), pause for clarification
-/// (`question`), or stop (`done`). Matches the JSON envelope's
-/// `action` field.
+/// (`question`), or stop (`done`). Selected by the markdown lang
+/// tag in the fenced-action protocol — see `prompts.zig` for the
+/// system prompts that train the model on this contract.
 pub const Action = enum { exec, question, done };
 
 /// Conversation-turn taxonomy. The full conversation is a `[]Turn`
@@ -242,30 +243,12 @@ pub fn parseResponse(
     }
 }
 
-/// Lenient parser for the fenced-action protocol — see `prompts.zig`.
-///
-/// Walks `raw` backward looking for the LAST ```<lang>...``` block.
-/// On a recognized lang tag (`exec`/`sh`/`bash`/`shell` → exec,
-/// `question`/`ask`/`q` → question, `done`/`finish`/`end` → done),
-/// fills `out.action` and the corresponding body field. The body is
-/// taken VERBATIM — no escape processing, multi-line preserved.
-///
-/// Falls back gracefully:
-///   - No fence found → `out.action = .done`, full text becomes the
-///     reason. Chat mode treats `.done`+reason as "render as a turn,
-///     keep the conversation open."
-///   - Closing fence missing → body extends to end of `raw`.
-///   - Unknown lang tag → ignored (look further back for another
-///     fence; if none, fall through to the no-fence case).
-///
-/// `description` for `exec` and `reason` for `done` are filled from
-/// the prose ABOVE the fence (last non-blank paragraph). Question
-/// choices are parsed from `- foo` / `* foo` / `1. foo` lines inside
-/// the question body.
-///
-/// Never errors — even on garbage input the worst case is
-/// `.done` + reason = raw text. The protocol's whole point is to
-/// eliminate the "STRICTLY JSON" retry loop.
+/// Parser for the fenced-action protocol. Never errors — pure prose
+/// degrades to `.done` + reason = raw text so a chat surface can
+/// render it as a turn and keep the conversation open instead of
+/// rejecting with a "STRICTLY JSON" retry that hostile small models
+/// can't escape. See `prompts.zig` for the contract the LLM is
+/// trained to honour.
 pub fn parseFencedResponse(comptime ResponseT: type, raw: []const u8, out: *ResponseT) void {
     out.* = .{ .action = .done };
 
@@ -290,83 +273,42 @@ pub fn parseFencedResponse(comptime ResponseT: type, raw: []const u8, out: *Resp
         },
         .question => {
             out.action = .question;
-            // First non-blank line = question prompt; subsequent
-            // bullet lines (- / * / N.) = choices.
-            var qprompt: []const u8 = body;
-            var first_nl: usize = 0;
-            while (first_nl < body.len and body[first_nl] != '\n') : (first_nl += 1) {}
-            if (first_nl < body.len) {
-                // Look ahead for the first bullet line to terminate
-                // the question prompt. Lines BEFORE the first bullet
-                // are the prompt (multi-paragraph OK).
-                var line_start: usize = 0;
-                var prompt_end: usize = body.len;
-                while (line_start < body.len) {
-                    var line_end = line_start;
-                    while (line_end < body.len and body[line_end] != '\n') : (line_end += 1) {}
-                    const line = trimStart(body[line_start..line_end]);
-                    if (isBulletLine(line)) {
-                        prompt_end = trim(body[0..line_start]).len + (if (line_start > 0) prose_offset_back(body, line_start) else 0);
-                        if (prompt_end > line_start) prompt_end = line_start;
-                        break;
-                    }
-                    line_start = line_end + 1;
+            // Lines BEFORE the first bullet are the prompt (single-
+            // or multi-paragraph); bullet lines and everything after
+            // are choices.
+            var prompt_end: usize = body.len;
+            var line_start: usize = 0;
+            while (line_start < body.len) {
+                var line_end = line_start;
+                while (line_end < body.len and body[line_end] != '\n') : (line_end += 1) {}
+                if (isBulletLine(trimStart(body[line_start..line_end]))) {
+                    prompt_end = line_start;
+                    break;
                 }
-                qprompt = trim(body[0..prompt_end]);
-                // Parse choices from the rest.
-                var idx: usize = prompt_end;
-                while (idx < body.len and out.choices_count < max_choices) {
-                    var line_end = idx;
-                    while (line_end < body.len and body[line_end] != '\n') : (line_end += 1) {}
-                    const line = trimStart(body[idx..line_end]);
-                    if (isBulletLine(line)) {
-                        const choice_text = trim(stripBullet(line));
-                        if (choice_text.len > 0) {
-                            const n = @min(choice_text.len, choice_max_len);
-                            @memcpy(out.choices_storage[out.choices_count][0..n], choice_text[0..n]);
-                            out.choices_lens[out.choices_count] = n;
-                            out.choices_count += 1;
-                        }
-                    }
-                    idx = line_end + 1;
-                }
+                line_start = line_end + 1;
             }
-            copyInto(&out.question_buf, &out.question_len, qprompt);
+            copyInto(&out.question_buf, &out.question_len, trim(body[0..prompt_end]));
+            var idx: usize = prompt_end;
+            while (idx < body.len and out.choices_count < max_choices) {
+                var line_end = idx;
+                while (line_end < body.len and body[line_end] != '\n') : (line_end += 1) {}
+                const line = trimStart(body[idx..line_end]);
+                if (isBulletLine(line)) {
+                    const choice_text = trim(stripBullet(line));
+                    if (choice_text.len > 0) {
+                        const n = @min(choice_text.len, choice_max_len);
+                        @memcpy(out.choices_storage[out.choices_count][0..n], choice_text[0..n]);
+                        out.choices_lens[out.choices_count] = n;
+                        out.choices_count += 1;
+                    }
+                }
+                idx = line_end + 1;
+            }
         },
         .done => {
             out.action = .done;
             copyInto(&out.reason_buf, &out.reason_len, body);
         },
-    }
-}
-
-/// Try the fenced protocol first; on parse failure (no recognized
-/// fence AND we want strict semantics), fall back to the JSON
-/// envelope parser. Used by transitional callers that still need to
-/// accept old-style JSON responses while atty's prompts roll out the
-/// fenced protocol.
-pub fn parseResponseLenient(
-    comptime ResponseT: type,
-    allocator: std.mem.Allocator,
-    raw: []const u8,
-    out: *ResponseT,
-) !void {
-    // The fenced path always succeeds — worst case it returns
-    // `.done` + reason = raw text. Try it first; the worker decides
-    // whether to also attempt the JSON envelope shape based on the
-    // result.
-    parseFencedResponse(ResponseT, raw, out);
-    if (out.action == .done and out.command_len == 0 and out.question_len == 0) {
-        // No action fence found. Before falling through to chat /
-        // conclusion handling, take one more shot at the legacy
-        // JSON envelope shape — preserves backward compatibility
-        // with prompts/models that still emit `{"action":…}`.
-        const trimmed = trim(raw);
-        if (trimmed.len > 2 and trimmed[0] == '{' and trimmed[trimmed.len - 1] == '}') {
-            var json_attempt: ResponseT = .{};
-            parseResponse(ResponseT, allocator, trimmed, &json_attempt) catch return;
-            out.* = json_attempt;
-        }
     }
 }
 
@@ -485,7 +427,7 @@ fn parseLangTag(line: []const u8) ?Action {
     while (end < line.len and line[end] != '\n' and line[end] != ' ' and line[end] != '\t') : (end += 1) {}
     const tag = line[i..end];
     if (tag.len == 0) return null;
-    if (eqIgnoreCase(tag, "exec") or eqIgnoreCase(tag, "sh") or eqIgnoreCase(tag, "bash") or eqIgnoreCase(tag, "shell")) return .exec;
+    if (eqIgnoreCase(tag, "exec") or eqIgnoreCase(tag, "sh") or eqIgnoreCase(tag, "bash") or eqIgnoreCase(tag, "zsh") or eqIgnoreCase(tag, "shell")) return .exec;
     if (eqIgnoreCase(tag, "question") or eqIgnoreCase(tag, "ask") or eqIgnoreCase(tag, "q")) return .question;
     if (eqIgnoreCase(tag, "done") or eqIgnoreCase(tag, "finish") or eqIgnoreCase(tag, "end")) return .done;
     return null;
@@ -543,13 +485,6 @@ fn copyInto(buf: []u8, len: *usize, src: []const u8) void {
     const n = @min(src.len, buf.len);
     @memcpy(buf[0..n], src[0..n]);
     len.* = n;
-}
-
-// Forward declaration placeholder — not used in fenced parse path.
-fn prose_offset_back(body: []const u8, idx: usize) usize {
-    _ = body;
-    _ = idx;
-    return 0;
 }
 
 /// Compose the OpenAI chat-completion request body for a dialog
@@ -1372,10 +1307,32 @@ test "parseFencedResponse: numbered + asterisk choices both parse" {
     try testing.expectEqualStrings("third option", r.choice(2));
 }
 
-test "parseResponseLenient: legacy JSON envelope still parses" {
+test "parseFencedResponse: zsh lang alias maps to exec" {
     const R = Response(4096);
     var r: R = .{};
-    try parseResponseLenient(R, testing.allocator, "{\"action\":\"exec\",\"command\":\"ls\",\"description\":\"list\"}", &r);
+    parseFencedResponse(R, "```zsh\nls -la\n```", &r);
     try testing.expectEqual(Action.exec, r.action);
-    try testing.expectEqualStrings("ls", r.command());
+    try testing.expectEqualStrings("ls -la", r.command());
+}
+
+test "parseFencedResponse: multi-paragraph question prompt before bullets" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw =
+        \\```question
+        \\We need to decide how to handle this rebase.
+        \\
+        \\The branch has 12 commits and master has moved 30 commits forward.
+        \\
+        \\- Rebase interactively (long but clean)
+        \\- Squash everything into one commit then rebase
+        \\- Cherry-pick the changes onto master directly
+        \\```
+    ;
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.question, r.action);
+    // Question prompt keeps the multi-paragraph shape (both
+    // sentences before the first bullet).
+    try testing.expect(std.mem.indexOf(u8, r.question(), "12 commits and master") != null);
+    try testing.expectEqual(@as(usize, 3), r.choices_count);
 }
