@@ -36,7 +36,9 @@ pub struct ServerConfig {
     /// queuing indefinitely. Default 64 — generous for typical
     /// single-user use (one shell × handful of classify calls
     /// in flight) and tight enough that a runaway client can't
-    /// peg the daemon.
+    /// peg the daemon. Values above a few hundred meaningfully
+    /// weaken the DoS bound; values of 0 are clamped to 1 at
+    /// startup with a stderr warning.
     #[serde(default = "default_max_concurrent_connections")]
     pub max_concurrent_connections: usize,
     /// Per-connection read timeout in seconds. An idle client
