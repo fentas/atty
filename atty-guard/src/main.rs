@@ -329,6 +329,69 @@ fn print_compiled_features() {
     }
 }
 
+/// Lock-acquisition failure modes — distinguish "another daemon
+/// holds the lock" (operator-visible, exit cleanly) from generic
+/// I/O failure (open of the lock file failed for some other
+/// reason — permission, missing directory, etc.).
+#[derive(Debug)]
+enum LockError {
+    AlreadyRunning,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for LockError {
+    fn from(e: std::io::Error) -> Self {
+        LockError::Io(e)
+    }
+}
+
+/// Open (or create) a sibling `<socket>.lock` file and acquire
+/// a non-blocking exclusive BSD flock on it. Returns the open
+/// `File` whose lifetime carries the lock — caller must keep it
+/// alive for the daemon's lifetime. Drop = lock release.
+fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::File, LockError> {
+    use std::os::unix::io::AsRawFd;
+
+    // Lock file lives next to the socket (same parent dir,
+    // identical access policy — SystemD-created RuntimeDirectory
+    // for the system unit, user's $XDG_RUNTIME_DIR otherwise).
+    let mut lock_path = socket.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock_path: std::path::PathBuf = lock_path.into();
+
+    // O_CREAT | O_RDWR so we can lock and (if the file is new)
+    // chmod-via-umask sets perm 0600/0660 per the daemon's umask.
+    // Don't truncate — the file's contents are irrelevant; only
+    // the in-kernel flock state matters.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    // flock with LOCK_EX | LOCK_NB. Linux constants:
+    //   LOCK_EX = 2, LOCK_NB = 4.
+    extern "C" {
+        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int)
+            -> std::os::raw::c_int;
+    }
+    const LOCK_EX: std::os::raw::c_int = 2;
+    const LOCK_NB: std::os::raw::c_int = 4;
+
+    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if rc == 0 {
+        return Ok(file);
+    }
+    let err = std::io::Error::last_os_error();
+    // EWOULDBLOCK / EAGAIN → contended. Both spell out as
+    // ErrorKind::WouldBlock on Linux.
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        return Err(LockError::AlreadyRunning);
+    }
+    Err(LockError::Io(err))
+}
+
 fn main() -> std::io::Result<()> {
     let mut cli = Cli::parse();
 
@@ -407,11 +470,41 @@ fn main() -> std::io::Result<()> {
         None => config::Config::default(),
     };
 
-    // SO_REUSEADDR equivalent for UDS: unlink stale socket file first.
-    // On restart after a crash the previous socket file may linger and
-    // bind would otherwise fail with EADDRINUSE. We're not protecting
-    // against a concurrent live daemon — that would clobber, which
-    // is the wrong outcome, so guard with a flock TODO.
+    // Single-instance guard via flock on a sibling `.lock` file.
+    // Holding the file alive for the daemon's lifetime keeps the
+    // lock; on process exit (crash or clean), the kernel releases
+    // it. A second `atty-guard` against the same socket path will
+    // see EWOULDBLOCK and refuse to start — avoids the old race
+    // where unconditional `remove_file` could clobber a live
+    // daemon's socket and let new clients connect to the wrong
+    // process. The `.lock` file itself stays on disk across
+    // restarts (its presence is meaningless without the kernel
+    // lock state); only the in-kernel BSD lock matters.
+    //
+    // Bound `_lock` to a name (not `_`) so it survives to the end
+    // of `main`; an underscore-only binding would drop
+    // immediately, releasing the lock before `server::serve` even
+    // starts.
+    let _lock = match acquire_single_instance_lock(&socket) {
+        Ok(file) => file,
+        Err(LockError::AlreadyRunning) => {
+            eprintln!(
+                "atty-guard: another instance is already running on {} — refusing to start",
+                socket.display()
+            );
+            std::process::exit(1);
+        }
+        Err(LockError::Io(e)) => {
+            eprintln!(
+                "atty-guard: cannot acquire single-instance lock for {}: {e}",
+                socket.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    // Lock acquired — safe to unlink any stale socket left by a
+    // previous crashed instance (the kernel already cleared its
+    // flock, so we know there's no live owner).
     let _ = std::fs::remove_file(&socket);
 
     if cli.verbosity >= 1 {
@@ -550,4 +643,62 @@ fn main() -> std::io::Result<()> {
         osv_client,
         trust_store,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_socket_path() -> std::path::PathBuf {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::path::PathBuf::from(format!("/tmp/atty-guard-lock-test-{pid}-{nanos}.sock"))
+    }
+
+    #[test]
+    fn lock_is_exclusive() {
+        let socket = unique_socket_path();
+        // Cleanup any leftover .lock from a previous run.
+        let lock_path = {
+            let mut p = socket.as_os_str().to_owned();
+            p.push(".lock");
+            std::path::PathBuf::from(p)
+        };
+        let _ = std::fs::remove_file(&lock_path);
+
+        let first = acquire_single_instance_lock(&socket).expect("first lock should succeed");
+        match acquire_single_instance_lock(&socket) {
+            Err(LockError::AlreadyRunning) => {}
+            Ok(_) => panic!("second lock should NOT succeed while first holds it"),
+            Err(other) => panic!("expected AlreadyRunning, got {other:?}"),
+        }
+        // Drop first → kernel releases the flock.
+        drop(first);
+        let _second = acquire_single_instance_lock(&socket)
+            .expect("lock should be re-acquirable after first dropped");
+        // Cleanup so /tmp doesn't accumulate stale .lock files.
+        let _ = std::fs::remove_file(&lock_path);
+    }
+
+    #[test]
+    fn lock_path_is_socket_sibling() {
+        // Belt-and-braces: the lock path must be `<socket>.lock`,
+        // not e.g. moved into /var/lock or /tmp. Operators rely
+        // on it living next to the socket.
+        let socket = unique_socket_path();
+        let lock_path = {
+            let mut p = socket.as_os_str().to_owned();
+            p.push(".lock");
+            std::path::PathBuf::from(p)
+        };
+        let _ = std::fs::remove_file(&lock_path);
+
+        let _lock = acquire_single_instance_lock(&socket).expect("lock should succeed");
+        assert!(lock_path.exists(), "lock file at {lock_path:?} should exist");
+        drop(_lock);
+        let _ = std::fs::remove_file(&lock_path);
+    }
 }
