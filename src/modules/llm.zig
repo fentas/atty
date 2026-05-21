@@ -843,7 +843,15 @@ pub fn configure(comptime cfg: Config) type {
             chat_inline_paint_cache_valid: bool = false,
             chat_inline_paint_input_top_row: u16 = 0,
             chat_inline_paint_input_row: u16 = 0,
-            chat_inline_paint_input_newlines: u16 = 0,
+            /// Clamped input-line count from the previous full paint
+            /// (`min(1 + newlines, panel_rows / 2)`). Compared
+            /// against the live equivalent — fast-path only bails
+            /// when the CLAMPED value would shift, not on raw
+            /// newline-count changes, so long multi-line prompts
+            /// that are already at the cap continue to fast-path
+            /// instead of re-rendering on every keystroke.
+            chat_inline_paint_input_lines: u16 = 0,
+            chat_inline_paint_input_lines_cap: u16 = 0,
             chat_inline_paint_total_cols: u16 = 0,
             /// Incognito state at the moment of the cached full
             /// paint. The divider swaps the ✨ sparkle for 🕶 glasses
