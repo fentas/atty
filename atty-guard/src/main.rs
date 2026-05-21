@@ -380,9 +380,18 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     #[cfg(not(target_os = "linux"))]
     compile_error!("atty-guard: lock-file helper hardcodes Linux O_* values");
 
+    // open(2) is C varargs (`int open(const char*, int, ...)`).
+    // Declaring it with a fixed 3-arg signature is technically
+    // UB — Rust's ABI distinguishes fixed from variadic, and on
+    // some platforms the calling conventions differ (e.g.
+    // floating-point regs on AArch64 hardfp). The variadic
+    // form is the portable correct shape.
     extern "C" {
-        fn open(path: *const std::os::raw::c_char, flags: std::os::raw::c_int, mode: std::os::raw::c_uint)
-            -> std::os::raw::c_int;
+        fn open(
+            path: *const std::os::raw::c_char,
+            flags: std::os::raw::c_int,
+            ...
+        ) -> std::os::raw::c_int;
     }
     const O_RDONLY: std::os::raw::c_int = 0;
     const O_CREAT: std::os::raw::c_int = 0o100;
