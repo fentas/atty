@@ -943,7 +943,46 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             w.writeAll("\x1B[0m\r\n") catch {};
 
             if (reason.len > 0) {
-                w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{reason}) catch {};
+                // Multi-line reason: each line gets its own `│ `
+                // prefix so an LLM prose reply with embedded `\n`
+                // renders as proper banner rows. A bare `{s}`
+                // print would emit raw LF — terminal advances the
+                // row but keeps the column, so the next character
+                // (a subsequent banner row OR the closing border)
+                // lands wherever the reason left off, with the
+                // visible right-drift that motivated this fix.
+                var it = std.mem.splitScalar(u8, reason, '\n');
+                var first = true;
+                while (it.next()) |raw_line| {
+                    // Trim trailing `\r` so a CRLF doesn't double-
+                    // count, and trim trailing whitespace so a
+                    // stray space at the EOL doesn't pad the row.
+                    var line = raw_line;
+                    if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+                    while (line.len > 0 and (line[line.len - 1] == ' ' or line[line.len - 1] == '\t')) line = line[0 .. line.len - 1];
+                    // Skip empty lines entirely — including any
+                    // leading blank lines so the `✓` marker doesn't
+                    // land on a `│ ✓ <empty>` row when the reason
+                    // starts with `\n`. `first` stays true until a
+                    // non-empty line claims the checkmark.
+                    if (line.len == 0) continue;
+                    if (first) {
+                        w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{line}) catch {};
+                        first = false;
+                    } else {
+                        // Continuation rows: `│` + 3 spaces aligns
+                        // the prose at col 5, matching the first
+                        // row's text position (col 1 vbar + space +
+                        // `✓` glyph + space → text starts col 5).
+                        w.print("\x1B[2m\u{2502}\x1B[0m   {s}\r\n", .{line}) catch {};
+                    }
+                }
+                // All-whitespace reason → no row emitted above. Fall
+                // through to the empty-reason `done` row so the
+                // banner still has a `│ ✓` line.
+                if (first) {
+                    w.writeAll("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m done\r\n") catch {};
+                }
             } else {
                 w.writeAll("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m done\r\n") catch {};
             }
@@ -1063,6 +1102,105 @@ test "Module.captureConclusion writes reason + counts into the buffer" {
     // prompt's cursor column).
     try testing.expect(std.mem.startsWith(u8, out, "\r\n"));
     try testing.expect(!std.mem.startsWith(u8, out, "\n\n"));
+}
+
+test "Module.captureConclusion wraps multi-line reason — every row keeps the `│ ` prefix" {
+    // Regression for the right-drift bug: when `reason` contains
+    // embedded `\n`, a bare `{s}` print emitted raw LF — the
+    // terminal moved cursor down without resetting column, so
+    // subsequent banner rows drifted right and the closing border
+    // landed mid-text. Now each line gets its own `│ ` prefix +
+    // `\r\n`.
+    const FakeRuntime = struct {
+        conclusion_buf: [2048]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    const multiline =
+        \\Here's what I can see:
+        \\- Shell: bash
+        \\- PWD: /home/user
+    ;
+    M.captureConclusion(&rt, multiline, 0, 0, 1);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    // No raw LF inside the banner (every newline must be `\r\n`).
+    // The opening `\r\n` IS preceded by `\r`, so a pure LF would
+    // appear only inside the content section if the bug regressed.
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        if (out[i] == '\n') {
+            try testing.expect(i > 0);
+            try testing.expectEqual(@as(u8, '\r'), out[i - 1]);
+        }
+    }
+
+    // Each prose line appears in the output. First line carries the
+    // ✓ marker; continuations indent under it.
+    try testing.expect(std.mem.indexOf(u8, out, "Here's what I can see:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "- Shell: bash") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "- PWD: /home/user") != null);
+
+    // Exactly four `│` rows in the buffer: three reason lines
+    // (split on `\n`) + one counts line. A loose lower bound
+    // would let regressions (stray empty `│` row from a trailing
+    // newline) slip through.
+    var vbar_count: usize = 0;
+    var j: usize = 0;
+    while (j + 2 < out.len) : (j += 1) {
+        if (out[j] == 0xE2 and out[j + 1] == 0x94 and out[j + 2] == 0x82) vbar_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 4), vbar_count);
+}
+
+test "Module.captureConclusion two-line reason with trailing newline → 2 reason rows" {
+    // `splitScalar("first\nsecond\n", '\n')` yields
+    // `["first", "second", ""]`. The empty trailing element gets
+    // skipped — no stray blank `│` row inside the banner.
+    const FakeRuntime = struct {
+        conclusion_buf: [2048]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    M.captureConclusion(&rt, "first\nsecond\n", 0, 0, 1);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    // 2 reason rows + 1 counts row = exactly 3 `│` glyphs.
+    var vbar_count: usize = 0;
+    var j: usize = 0;
+    while (j + 2 < out.len) : (j += 1) {
+        if (out[j] == 0xE2 and out[j + 1] == 0x94 and out[j + 2] == 0x82) vbar_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), vbar_count);
+}
+
+test "Module.captureConclusion all-whitespace reason → falls back to bare ✓ done row" {
+    // Edge case: a reason of pure `\n`s would leave `first` true
+    // after the loop. The fall-through emits the empty-reason
+    // `│ ✓ done` row so the banner still has its required
+    // checkmark line.
+    const FakeRuntime = struct {
+        conclusion_buf: [1024]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    M.captureConclusion(&rt, "\n\n\n", 0, 0, 0);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    // Exactly two `│` rows (✓ done + counts) — no stray blanks.
+    var vbar_count: usize = 0;
+    var j: usize = 0;
+    while (j + 2 < out.len) : (j += 1) {
+        if (out[j] == 0xE2 and out[j + 1] == 0x94 and out[j + 2] == 0x82) vbar_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), vbar_count);
+    try testing.expect(std.mem.indexOf(u8, out, "done") != null);
 }
 
 test "Module.captureConclusion falls back to 'done' when reason is empty" {
