@@ -502,9 +502,9 @@ A second module in the guardrail family. Where `guardrail` matches a comptime li
 | V2-A   | `atty-guard` Rust sidecar mirrors Tier-1; gains in-mem PID → ThreatLevel map.        |
 | V2-D   | atty queries the sidecar over UDS before its own in-proc patterns. Graceful fallback.|
 | V2-E   | `atty-guard/contrib/install.sh` + hardened `atty-guard.service` system daemon.       |
-| V2-C   | Pluggable Tier-2: `--tier2 stub|heuristic` (4 extra regex rules); `onnx` follows.   |
-| V2-B   | eBPF LSM hook + execve tracepoint backstop (skeleton landed; impl ahead).            |
-| V2-G/H/I | AtomMatcher (Aho-Corasick) + sliding window + atom fetcher (GTFOBins/Sigma/LOLBAS).|
+| V2-C   | Pluggable Tier-2: `--tier2 stub|heuristic|onnx` (regex / heuristic / ONNX SLM).      |
+| V2-B   | eBPF LSM hook (`bprm_check_security`) + execve + AF_ALG tracepoints — shipped.       |
+| V2-G/H/I | AtomMatcher (Aho-Corasick) + sliding window + atom fetcher (GTFOBins / sanitized Sigma). |
 | V2-J   | Threat-level accumulator: independent-probability combine across Tier-1 + Tier-2.    |
 | V2-J-2 | Opt-in auto-Block escalation. Daemon-`Block` verdict triggers a red `REFUSED` line + clears readline atty-side (no prompt). |
 
