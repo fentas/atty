@@ -1004,9 +1004,14 @@ pub fn Module(comptime cfg: Config) type {
             const watchdog_thread: ?std.Thread = if (sub.timeout_ms > 0) blk: {
                 const t = std.Thread.spawn(.{}, Watchdog.run, .{ sub.timeout_ms, child.id orelse unreachable, &completed, &timed_out }) catch {
                     // At this point only stdin (maybe) was touched
-                    // — no other threads to join. Kill + reap the
-                    // child so it doesn't run unbounded.
-                    child.kill(io);
+                    // — no other threads to join. Group-kill the
+                    // child + any helpers it already spawned in
+                    // the microseconds since spawn returned. Same
+                    // negative-PID semantics as the Watchdog;
+                    // fall back to `child.kill` if the group call
+                    // fails (group empty / child already exited).
+                    const cid = child.id orelse unreachable;
+                    std.posix.kill(-cid, .KILL) catch child.kill(io);
                     err_len_out.* = writeStatic(error_out, "subprocess watchdog thread spawn failed");
                     return error.SubprocessFailed;
                 };
