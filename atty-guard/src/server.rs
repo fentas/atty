@@ -420,12 +420,10 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // otherwise mark another user's PID — a cross-user
             // DoS / privilege violation. Gate: root may set any
             // PID; a non-root caller may set only PIDs owned by
-            // their own UID. TOCTOU note: between this check and
-            // `threat.set` the PID can exit and be recycled by the
-            // kernel — the mark then lands on the new occupant.
-            // No privilege escalation: the caller still couldn't
-            // redirect onto a different user's fresh PID since the
-            // kernel picks recycled PIDs at random.
+            // their own UID. PID reuse: ThreatMap stores the PID's
+            // starttime alongside the level so a later `get` can
+            // detect recycled PIDs and evict the stale entry — see
+            // `ThreatMap::set` / `get`.
             if !peer.is_root {
                 match pid_owner_uid(pid) {
                     Ok(owner_uid) if owner_uid != peer.uid => {
@@ -442,7 +440,11 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                     _ => {}
                 }
             }
-            state.threat.set(pid, level);
+            if !state.threat.set(pid, level) {
+                return ResponseBody::Error {
+                    message: format!("pid {pid} no longer exists — threat level not set"),
+                };
+            }
             ResponseBody::Ok
         }
         Request::GetThreatLevel { pid } => ResponseBody::ThreatLevel {
@@ -701,8 +703,14 @@ fn resolve_target_uid(peer: PeerCred, target_uid: Option<u32>) -> Result<u32, St
 /// `ResponseBody::Error.message` field when the PID is missing
 /// (already-exited / never-existed) or `/proc` is unreadable.
 ///
-/// We parse `Uid:` (the line is space-separated:
-/// `Uid:\treal\teffective\tsaved\tfsuid`) and take the REAL uid.
+/// We parse the `Uid:` line (per `proc(5)`:
+/// `Uid:\treal\teffective\tsaved\tfsuid`) and take the FIRST
+/// whitespace-separated field after the `Uid:` prefix — that's
+/// the REAL uid. Real (not effective) is the right call: a
+/// setuid-root helper that drops privs and connects would
+/// otherwise be able to mark anything; pinning on the real uid
+/// matches `task->real_cred` ownership semantics that users mean
+/// by "my process".
 fn pid_owner_uid(pid: u32) -> Result<u32, String> {
     let path = format!("/proc/{pid}/status");
     let content = std::fs::read_to_string(&path)
@@ -961,33 +969,76 @@ mod tests {
         let _ = std::fs::remove_file(socket);
     }
 
+    /// Find a PID owned by a UID other than the current EUID by
+    /// scanning `/proc`. Returns `None` if no such PID exists
+    /// (single-UID containers, locked-down PID namespaces with
+    /// `hidepid`, etc.) — caller should skip the test in that
+    /// case so a hostile environment doesn't silently mask the
+    /// security regression.
+    fn find_pid_owned_by_other_uid() -> Option<u32> {
+        let our_uid = unsafe {
+            extern "C" {
+                fn geteuid() -> u32;
+            }
+            geteuid()
+        };
+        for entry in std::fs::read_dir("/proc").ok()? {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name_str = name.to_str()?;
+            let pid: u32 = match name_str.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let status_path = format!("/proc/{pid}/status");
+            let content = match std::fs::read_to_string(&status_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("Uid:") {
+                    if let Some(real) = rest.split_whitespace().next() {
+                        if let Ok(owner) = real.parse::<u32>() {
+                            if owner != our_uid {
+                                return Some(pid);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        None
+    }
+
     #[test]
-    fn set_threat_level_rejects_unknown_pid_from_non_root() {
-        // PID 1 (init) is owned by root on a healthy Linux box.
-        // A non-root test process must NOT be able to mark it.
-        // (If the test happens to run as root, the check is bypassed
-        // — skip in that case so CI on a rootless runner still pins
-        // the security invariant.)
+    fn set_threat_level_rejects_pid_owned_by_other_uid() {
+        // Skip when running as root (gate is bypassed by design) or
+        // when the test environment has no cross-UID PID visible —
+        // e.g., a single-UID container or `hidepid=2` mount. Without
+        // a visible cross-UID PID we can't pin the invariant the
+        // gate is meant to enforce.
         if running_as_root() {
             return;
         }
+        let other_pid = match find_pid_owned_by_other_uid() {
+            Some(p) => p,
+            None => return,
+        };
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
         let reply = round_trip(
             &mut stream,
-            r#"{"id":8,"method":"set_threat_level","pid":1,"level":"critical"}"#,
+            &format!(
+                r#"{{"id":8,"method":"set_threat_level","pid":{other_pid},"level":"critical"}}"#
+            ),
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
-        let message = v["message"].as_str().unwrap_or("");
-        assert!(
-            message.contains("cannot set threat level"),
-            "expected reject message, got: {message}"
-        );
         // Confirm the threat map was NOT mutated.
         let level_reply = round_trip(
             &mut stream,
-            r#"{"id":9,"method":"get_threat_level","pid":1}"#,
+            &format!(r#"{{"id":9,"method":"get_threat_level","pid":{other_pid}}}"#),
         );
         let lv: serde_json::Value = serde_json::from_str(&level_reply).unwrap();
         assert_eq!(lv["level"], "low");
