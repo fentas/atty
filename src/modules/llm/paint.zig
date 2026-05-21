@@ -928,13 +928,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 row += 1;
                 scrollback_budget -= 1;
             }
-            // Per-turn wrap cap so a single long reply can't push
-            // the whole scrollback off-panel. 3 rows ≈ 240 chars at
-            // 80-col, plenty for a paragraph; longer turns end in
-            // a dim `[…]` and remain visible in the alt-screen
-            // overlay (Alt+Shift+C) which has the full DECSTBM
-            // scroll region.
-            const per_turn_max_rows: usize = 3;
+            // No per-turn truncation: each turn renders its full
+            // wrap-chunk count, capped only by the scrollback
+            // budget. The OLDEST visible turn naturally gets
+            // clipped (via `oldest_turn_cap` in the back-walk
+            // below) when total demand exceeds budget; older
+            // turns scroll off the top. Use PageUp/PageDown to
+            // walk back through chat history.
+            const per_turn_max_rows: usize = scrollback_budget;
             // Pick `start_turn` by walking BACKWARDS from the newest
             // visible turn and summing each candidate's rendered-row
             // claim. Previously this was `visible_end -
