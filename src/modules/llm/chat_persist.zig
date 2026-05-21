@@ -38,6 +38,7 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
+extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 extern "c" fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
@@ -199,10 +200,12 @@ pub fn appendTurn(allocator: std.mem.Allocator, path: []const u8, kind: dialog.T
 /// (allocated via `allocator`). Returns an empty list when the file
 /// is missing / unreadable / empty.
 ///
-/// Implementation: read the whole file (capped at `max_bytes` to
-/// avoid pathological growth), split into lines from the END,
-/// reverse-walk taking the last N parseable lines, then re-reverse
-/// the result.
+/// Implementation: when the file is larger than `max_bytes`, seek
+/// to `size - max_bytes` and discard the (necessarily-partial)
+/// first line — that gives a clean tail window onto the newest
+/// content. Then split into lines, reverse-walk taking the last N
+/// parseable entries, and re-reverse so the caller sees them in
+/// chronological order.
 pub fn loadLastTurns(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -224,6 +227,47 @@ pub fn loadLastTurns(
     if (fd < 0) return result; // missing / unreadable → no history
     defer _ = close(fd);
 
+    // For files larger than the cap, seek to size - max_bytes
+    // so we read the TAIL — the most recent turns. The previous
+    // implementation read from offset 0, which for >max_bytes
+    // files restored the oldest turns from the first chunk
+    // instead of the newest. `fstat` returns size; lseek + skip
+    // the partial first line gives a clean window onto the tail.
+    //
+    // On fstat/lseek failure for a known-oversized file, RETURN
+    // EMPTY rather than falling through to the head-read path.
+    // The head-read is exactly the bug we're fixing; silently
+    // re-introducing it on a syscall failure would be a worse
+    // failure mode than "no history loaded".
+    var stat: Stat = undefined;
+    var skip_partial_line = false;
+    if (fstat(fd, &stat) == 0) {
+        const size: u64 = if (stat.size > 0) @intCast(stat.size) else 0;
+        if (size > max_bytes) {
+            const off: i64 = @intCast(size - max_bytes);
+            // Peek the byte at `off - 1` to detect whether the
+            // seek landed exactly at a line boundary. If the
+            // previous byte is `\n`, the read window starts at
+            // a complete line — dropping the "partial" first
+            // line would actually drop a VALID turn. Only set
+            // skip when we definitely landed mid-line.
+            var prev_byte: [1]u8 = undefined;
+            const peek_off: i64 = off - 1;
+            const peeked = pread(fd, &prev_byte, 1, peek_off);
+            const lands_on_boundary = peeked == 1 and prev_byte[0] == '\n';
+            if (lseek(fd, off, 0) >= 0) {
+                skip_partial_line = !lands_on_boundary;
+            } else {
+                // fstat said the file is too big but lseek failed
+                // — refuse the head-read fallback.
+                return result;
+            }
+        }
+    }
+    // Note: fstat itself failing is treated as "unknown size,
+    // probably small" — keep reading from offset 0 like the
+    // original behavior. Small files don't exhibit the bug.
+
     // Read in chunks until EOF or cap. Conservative because the
     // file may have grown unboundedly.
     var raw: std.ArrayList(u8) = .empty;
@@ -236,6 +280,25 @@ pub fn loadLastTurns(
         try raw.appendSlice(allocator, chunk[0..@as(usize, @intCast(got))]);
     }
     if (raw.items.len == 0) return result;
+
+    if (skip_partial_line) {
+        if (std.mem.indexOfScalar(u8, raw.items, '\n')) |nl| {
+            // Drop everything up to and including the first \n —
+            // that's the truncated fragment plus its terminator.
+            const drop_n = nl + 1;
+            const remaining = raw.items.len - drop_n;
+            std.mem.copyForwards(u8, raw.items[0..remaining], raw.items[drop_n..]);
+            raw.shrinkRetainingCapacity(remaining);
+        }
+        // No newline in the read window means one of two things:
+        //   (a) the seek landed at the start of a line and the
+        //       file's last line has no trailing \n;
+        //   (b) a single JSON line is longer than `max_bytes`.
+        // Either way, fall through to the parse loop below — if
+        // the buffer parses as a single valid line we keep it;
+        // if not, we return empty as before. The fall-through is
+        // cheap and the only path that gains a valid turn from it.
+    }
 
     // Walk newest → oldest (reverse over LF-delimited lines),
     // collect up to max_turns parseable entries, then reverse.

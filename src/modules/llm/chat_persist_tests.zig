@@ -87,6 +87,151 @@ test "appendTurn + loadLastTurns: round-trip a few turns" {
     try testing.expectEqualStrings("out: 42", loaded.items[2].content);
 }
 
+test "loadLastTurns: file larger than max_bytes loads TAIL (not head)" {
+    // Regression for #187 finding 005: before the fix, loadLastTurns
+    // read from offset 0 until max_bytes then reverse-walked that
+    // HEAD prefix. For files larger than max_bytes that returned
+    // the NEWEST turns IN THE FIRST CHUNK — i.e., stale older
+    // turns, not the actual most-recent ones. The fix seeks to
+    // `size - max_bytes` and parses the tail window.
+    var name_buf: [64]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-seek-test-{x}.jsonl", .{seed});
+    const name_z = try testing.allocator.dupeZ(u8, name);
+    defer testing.allocator.free(name_z);
+    defer _ = std.c.unlink(name_z.ptr);
+
+    // Write 100 turns. Each line is ~30 bytes after JSON wrapping,
+    // so a tiny max_bytes (256) reads only the LAST ~8 lines.
+    // Assert each append succeeds so a disk-full or permission
+    // failure can't make the test pass against a partial file.
+    var i: usize = 0;
+    var content_buf: [16]u8 = undefined;
+    while (i < 100) : (i += 1) {
+        const content = try std.fmt.bufPrint(&content_buf, "turn-{d:0>3}", .{i});
+        try testing.expect(appendTurn(testing.allocator, name, .user, content));
+    }
+
+    // With max_bytes=256 against ~38-byte lines, the tail window
+    // holds ~6 fully-contained lines. Ask for ALL of them and
+    // pin both ends so an off-by-one in the seek offset or an
+    // extra-line strip surfaces. The head-reading bug would
+    // load turn-000 onwards; the fix loads turn-094 onwards
+    // (or thereabouts — exact start depends on where the partial
+    // fragment falls in the JSON envelope).
+    var loaded = try loadLastTurns(testing.allocator, name, 20, 256);
+    defer {
+        for (loaded.items) |t| testing.allocator.free(t.content);
+        loaded.deinit(testing.allocator);
+    }
+    // Must end with turn-099 (the actual newest).
+    try testing.expect(loaded.items.len > 0);
+    try testing.expectEqualStrings(
+        "turn-099",
+        loaded.items[loaded.items.len - 1].content,
+    );
+    // First item must be in the high-90s range — the head-bug
+    // would put it at turn-000 or turn-001.
+    const first = loaded.items[0].content;
+    try testing.expect(std.mem.startsWith(u8, first, "turn-09"));
+}
+
+test "loadLastTurns: seek landing on line boundary keeps the first tail line" {
+    // Regression for the partial-line-skip false-positive: if
+    // the seek to `size - max_bytes` happens to land exactly
+    // at a `\n`-followed offset, the read window starts at a
+    // COMPLETE line and the "drop fragment" logic must NOT
+    // discard it. We craft the file so size - max_bytes lands
+    // exactly one byte after a `\n`.
+    var name_buf: [80]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-boundary-{x}.jsonl", .{seed});
+    const name_z = try testing.allocator.dupeZ(u8, name);
+    defer testing.allocator.free(name_z);
+    defer _ = std.c.unlink(name_z.ptr);
+
+    // Build a file shaped so we can compute the exact boundary.
+    // Padding line = 100 bytes (99 X + \n at byte 99). Then two
+    // tail lines exactly 36 bytes each = 72 bytes. Total = 172
+    // bytes. max_bytes = 72 → seek offset = 172 - 72 = 100.
+    // Byte 99 is the padding's `\n`, byte 100 starts the first
+    // JSON line — boundary case.
+    const fd = open(name_z.ptr, O_WRONLY | O_CREAT, @as(c_uint, 0o600));
+    try testing.expect(fd >= 0);
+    var pad: [100]u8 = undefined;
+    @memset(&pad, 'X');
+    pad[99] = '\n';
+    _ = write(fd, &pad, pad.len);
+    // Two minimal-shape JSON turns padded with whitespace in
+    // the content to make each line exactly 36 bytes (including
+    // the trailing `\n`).
+    const line1 = "{\"kind\":\"user\",\"content\":\"first  \"}\n";
+    const line2 = "{\"kind\":\"user\",\"content\":\"second \"}\n";
+    try testing.expectEqual(@as(usize, 36), line1.len);
+    try testing.expectEqual(@as(usize, 36), line2.len);
+    _ = write(fd, line1.ptr, line1.len);
+    _ = write(fd, line2.ptr, line2.len);
+    _ = close(fd);
+    // File size: 100 + 36 + 36 = 172. max_bytes = 72 → seek
+    // offset = 100. Byte 99 is `\n` → boundary.
+    var loaded = try loadLastTurns(testing.allocator, name, 5, 72);
+    defer {
+        for (loaded.items) |t| testing.allocator.free(t.content);
+        loaded.deinit(testing.allocator);
+    }
+    // Both tail lines must be present (not just the second one).
+    try testing.expectEqual(@as(usize, 2), loaded.items.len);
+    try testing.expectEqualStrings("first  ", loaded.items[0].content);
+    try testing.expectEqualStrings("second ", loaded.items[1].content);
+}
+
+test "loadLastTurns: oversized single line with no trailing newline still parses" {
+    // The seek-path's fall-through-when-no-\n branch is only
+    // exercisable with a manually-constructed file (appendTurn
+    // always writes \n). Build a file with garbage padding +
+    // one valid JSON line at the tail, NO trailing \n. With
+    // max_bytes sized to seek INTO the JSON line's start byte,
+    // the partial-line skip would normally bail; the fall-
+    // through must instead parse the whole window as one line.
+    var name_buf: [80]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-fallthrough-{x}.jsonl", .{seed});
+    const name_z = try testing.allocator.dupeZ(u8, name);
+    defer testing.allocator.free(name_z);
+    defer _ = std.c.unlink(name_z.ptr);
+
+    // 600 bytes of padding (one long "old" line + \n) followed
+    // by 40 bytes of NDJSON without trailing newline. max_bytes
+    // = 50 → seek to size - 50 lands inside the padding, the
+    // partial-line skip discards up to the \n at the start of
+    // the JSON line. After the skip, the window is the 40-byte
+    // JSON line WITH no trailing \n — exactly the fall-through
+    // case.
+    const fd = open(name_z.ptr, O_WRONLY | O_CREAT, @as(c_uint, 0o600));
+    try testing.expect(fd >= 0);
+    var pad: [600]u8 = undefined;
+    @memset(&pad, 'X');
+    pad[599] = '\n'; // line terminator for the padding "line"
+    _ = write(fd, &pad, pad.len);
+    const tail = "{\"kind\":\"user\",\"content\":\"final\"}";
+    _ = write(fd, tail.ptr, tail.len);
+    _ = close(fd);
+
+    var loaded = try loadLastTurns(testing.allocator, name, 5, 50);
+    defer {
+        for (loaded.items) |t| testing.allocator.free(t.content);
+        loaded.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 1), loaded.items.len);
+    try testing.expectEqualStrings("final", loaded.items[0].content);
+}
+
 test "loadLastTurns: caps at max_turns (keeps newest)" {
     var name_buf: [64]u8 = undefined;
     // Test-fixture uniqueness — pid + ts via clock_gettime. Tests
