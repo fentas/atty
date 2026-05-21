@@ -74,7 +74,7 @@ The output `.o` ships alongside the daemon binary. Userspace finds it via `dirna
 
 ```sh
 atty-guard --enable-ebpf
-# atty-guard: listening on /run/user/1000/atty-guard.sock (tier2=stub)
+# atty-guard: listening on /run/atty-guard/atty-guard.sock (tier2=stub)
 # atty-guard: eBPF: loaded atty_guard.bpf.o
 # atty-guard: eBPF: attached lsm/bprm_check_security
 # atty-guard: eBPF: attached tracepoint:syscalls:sys_enter_execve
@@ -109,7 +109,7 @@ Going with (1) for now; track this paragraph as the "we did consider it" record.
 ## Safety / failure modes
 
 - **BPF verifier rejects the program**: daemon falls back to in-memory mode + logs a warning. atty's UDS contract is unaffected; only the kernel-side enforcement is missing.
-- **Daemon crashes**: BPF programs stay loaded (kernel-attached); without userspace draining the ringbuf, new events back up and `bpf_ringbuf_reserve` returns NULL — the programs degrade to "log nothing, allow everything" on the async side. The sync LSM path STILL functions because it reads the threat map directly; the only loss is async event collection. systemd-user `Restart=on-failure` brings the daemon back fast.
+- **Daemon crashes**: BPF programs stay loaded (kernel-attached); without userspace draining the ringbuf, new events back up and `bpf_ringbuf_reserve` returns NULL — the programs degrade to "log nothing, allow everything" on the async side. The sync LSM path STILL functions because it reads the threat map directly; the only loss is async event collection. systemd `Restart=on-failure` (set in the shipped system unit) brings the daemon back fast.
 - **Kernel < 5.7**: feature detection at startup; daemon errors out cleanly when `--enable-ebpf` was passed.
 - **No CAP_BPF**: same — error at startup with a clear message pointing at the systemd unit `AmbientCapabilities` config.
 

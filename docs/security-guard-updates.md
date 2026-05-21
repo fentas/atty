@@ -87,7 +87,7 @@ The aggregation lives in `fentas/atty-guard-data`'s CI; output is the signed bun
 | 1 | This doc + skeleton `data_update.rs` + bundle-format types. | This PR. |
 | 2 | Local-file source (`atty-guard --update-from /path/to/bundle.tar.zst`). Useful for testing, offline-installs, air-gapped envs. | Next PR. |
 | 3 | HTTPS fetcher + signature verification + atomic install. | After Stage 2 lands + a real signing key is set up. |
-| 4 | systemd-user timer for periodic refresh (default: daily at random offset to avoid synchronised thundering herds). | After Stage 3. |
+| 4 | systemd timer for periodic refresh (system-level, `OnCalendar=daily` + `RandomizedDelaySec` to avoid synchronised thundering herds). | After Stage 3. |
 | 5 | Schema 2 — adds runtime-reloadable Tier-2 heuristics + structured kernel-exploit shapes. | When the bundle outgrows v1. |
 
 ## Why not pull OSV / GitHub Advisory directly from atty-guard
