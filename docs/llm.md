@@ -241,7 +241,7 @@ Every failure path latches an `error` notification (muted red +
 | `no endpoint set — export $LLM_API_BASE or …`          | Module attached but `api_base` resolved empty. Synchronous, fires on `onInput`.|
 | `request failed (endpoint unreachable?)`               | `client.fetch` errored — DNS, connect refused, network unreachable.            |
 | `HTTP <status>`                                        | Endpoint responded with non-2xx. 404 commonly means the configured model name doesn't match anything served. |
-| `couldn't extract a command from the response`         | HTTP 200 but the response shape didn't parse — the model returned only prose, only comments, or unparseable JSON. |
+| `couldn't extract a command from the response`         | HTTP 200 but no recognized fenced action — the model returned only prose with no ``` ```exec / ```question / ```done ``` fence. In chat surfaces atty falls through and renders the prose as an assistant turn; in single / dialog / auto modes that text becomes the `done` reason. |
 
 `Config.statusbar.error_ttl_ms` controls how long the
 notification stays visible (60 s default). The hint slot (used
@@ -283,10 +283,17 @@ prompt too.
 
 Two parallel UIs render the same conversation ring — pick the one that fits the moment.
 
-- **`Alt+C` — inline chat panel.** Reserves N rows above the statusbar (default 10) for a slim chat strip. The shell stays visible above the panel; cursor focus moves into the panel's input row. For casual back-and-forth while still watching command output scroll above.
+- **`Alt+C` — inline chat panel.** Reserves N rows above the statusbar (default 10) for a slim chat strip. The shell stays visible above the panel; cursor focus moves into the panel's input row. For casual back-and-forth while still watching command output scroll above. `Ctrl+Alt+Up/Down` grows/shrinks the panel one row at a time; `Shift+Enter` inserts a newline in the input (multi-line prompts); `Ctrl+End` snaps the view back to the live tail after a PageUp.
 - **`Alt+Shift+C` — full chat overlay.** Takes over the screen via alt-screen swap. Bigger view of the conversation history, structured assistant rendering, more room. For focused review of long sessions.
 
-Both share the same `turns[]` ring + dialog state, so an `action=exec` envelope returned while either surface is open injects the suggested command at the user's shell prompt. The two surfaces are mutually exclusive — opening one closes the other so cursor focus is unambiguous.
+Both share the same `turns[]` ring + dialog state, and both dispatch as `.dialog` (or `.auto` if `Alt+T` toggled auto-exec while the panel is open) so a ``` ```exec ``` fenced action returned while either surface is open injects the suggested command at the user's shell prompt. The two surfaces are mutually exclusive — opening one closes the other so cursor focus is unambiguous.
+
+Chat turn rendering:
+- **Markdown styling** — `**bold**` renders as SGR bold, `` `code` `` as cyan. See `src/modules/llm/md_render.zig`.
+- **Hard line breaks** — `\n` in the LLM's reply preserves as a panel row break (was previously flattened to space).
+- **UTF-8 / wide chars** — codepoint-aware truncation via `src/modules/llm/paint_width.zig`; emoji + CJK bill the right number of columns.
+- **Word wrap** — long turns wrap at the last space inside the column budget; the OLDEST visible turn gets clipped first so the newest reply stays anchored at the bottom.
+- **`done` action in chat** — pushes the reason as an assistant turn (no conclusion banner, no dialog close); the conversation stays open. Outside chat surfaces, `done` still emits the conclusion banner and ends the loop.
 
 ## Keybindings
 
@@ -297,11 +304,17 @@ Press **`Alt+H`** any time to scroll the full cheat-sheet into shell history. Th
 | `Alt+A`         | Single-shot prompt (one command, no dialog).              |
 | `Alt+S`         | Dialog mode (multi-turn exec/observe loop).               |
 | `Alt+Shift+S`   | Auto-exec (dialog + auto-confirm each step).              |
-| `Alt+M`         | Cycle through `config.models`.                            |
+| `Alt+M`         | Cycle through `config.providers[]` entries matching the current dispatch mode. Fires inside chat surfaces too. |
 | `Alt+C`         | Toggle inline chat panel.                                 |
 | `Alt+Shift+C`   | Toggle full-screen chat overlay.                          |
+| `Alt+T`         | (chat only) Toggle auto-exec inside a chat surface.       |
 | `Alt+H`         | Show this cheat-sheet (LLM-mode hint when in `#: `).      |
 | `Ctrl+Shift+X`  | Cancel any active exec / dialog / auto.                   |
+| `Ctrl+Alt+Up`   | (chat only) Grow inline chat panel by one row.            |
+| `Ctrl+Alt+Down` | (chat only) Shrink inline chat panel by one row.          |
+| `Shift+Enter`   | (chat input) Insert newline instead of submitting.        |
+| `PageUp` / `PageDown` | (chat only) Scroll chat history one page back/forward. |
+| `Ctrl+End`      | (chat only) Snap chat view to the live tail.              |
 
 Override any of these by listing a different `bytes` for the same `action` in `Keymap.bindings` — the user list wins via first-match.
 
@@ -316,13 +329,13 @@ Override any of these by listing a different `bytes` for the same `action` in `K
 | `provider`                    | `.{ .http = .{} }`                       | Single-provider shorthand. Used when `providers` is empty. See below for variants.    |
 | `providers`                   | `&.{}`                                   | Per-mode provider array. When non-empty, takes precedence over `provider`. First entry whose `for_modes.matches(current_mode)` wins. `Alt+M` cycles among `cycleable` entries that match the current mode. See "Per-mode dispatch" below. |
 | `with_explanation`            | `true`                                   | Ask model for an explanation + fenced command; show explanation in the hint row.      |
-| `system_prompt`               | `""`                                     | Override the canned system prompt. Empty → canned prompt for the `with_explanation` mode. |
-| `dialog_system_prompt`        | `""`                                     | Override the dialog-mode JSON-envelope system prompt. Empty → canned.                  |
-| `context_env_vars`            | `&.{}`                                   | Env vars whose values get appended to the user message as `Context: KEY=value, …`.    |
+| `system_prompt`               | `""`                                     | Extra domain context APPENDED after atty's fenced-action prompt for single-shot mode (`Alt+A`). atty always prepends its own protocol prompt — see `src/modules/llm/prompts/single.md`. |
+| `dialog_system_prompt`        | `""`                                     | Extra domain context APPENDED after atty's fenced-action prompt for dialog/auto/chat modes. atty's protocol prompts live in `src/modules/llm/prompts/{dialog,auto}.md`. |
+| `context_env_vars`            | `&.{ "EDITOR", "VISUAL", "LANG", "TERM", "TZ" }` | Env vars whose values get appended to the user message as `Context: KEY=value, …`. Defaults are identity-free shell-task essentials. **Never list credential-shaped names** (`*_API_KEY`, `*_TOKEN`, `AWS_*`, etc.); values transmit verbatim to the LLM endpoint. Set to `&.{}` to disable. |
 | `enter_action`                | `.none`                                  | What Enter on `#: …` does. `.none` (default), `.single`, `.dialog`, `.auto`.          |
 | `auto_delay_ms`               | `800`                                    | Auto-exec confirm delay (ms) for `Alt+Shift+S`. Any keystroke aborts.                 |
 | `history_turns_max`           | `8`                                      | Ring capacity. The model sees at most this many recent turns per request.             |
-| `dialog_parse_retry_max`      | `2`                                      | How many times atty re-prompts the model when a JSON envelope fails to parse.         |
+| `dialog_parse_retry_max`      | `2`                                      | How many times atty re-prompts the model when no recognized fenced action is found in the response (rare with the fenced-action protocol — most responses degrade gracefully to `done` + reason without a retry). |
 
 ### Provider — HTTP variant fields
 
@@ -416,7 +429,7 @@ streaming when wired up.
 
 | Field                         | Default                                  | What it does                                                                          |
 |-------------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
-| `inline_chat_rows`            | `10`                                     | Rows the Alt+C inline panel claims above the statusbar. Minimum 3 (comptime-checked). |
+| `inline_chat_rows`            | `10`                                     | Rows the `Alt+C` inline panel claims above the statusbar. Minimum 3 (comptime-checked). Override at runtime with `Ctrl+Alt+Up`/`Ctrl+Alt+Down` — resets to `cfg.inline_chat_rows` on panel close. |
 | `overlay_open_policy`         | `.notify`                                | What to do when the model emits `"open_chat": true`. `.always` / `.notify` / `.never`. |
 
 ### Persistence — survive across sessions

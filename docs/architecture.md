@@ -543,6 +543,31 @@ shell so the prompt clears, and calls `StatusBar.setTransient(...)`
 to flash `🗑 deleted: <line>` for 3 s before the bar reverts to its
 normal text.
 
+### Bypass while a shell-alt-screen TUI is running
+
+When the shell enters alt-screen (vim, less, k9s, tmux, …) and no
+atty module owns the overlay, the binding-match scan is skipped
+entirely — bytes flow raw to the inner TUI. Specifically the guard
+is `alt_screen.active and !ctx.module_overlay_active`:
+
+- `alt_screen.active` tracks the OUTER terminal's alt-screen state
+  via the OSC 1049 edge detector. True when the shell has handed
+  off the screen to an inner program.
+- `ctx.module_overlay_active` is true when an atty module (today
+  the LLM module's chat overlay via `isOverlayActive`) is the one
+  driving the alt-screen.
+
+Without this guard, atty's `Esc → llm_exec_cancel` binding would
+intercept Esc inside k9s/vim, consume any stray atty state on the
+first press, and the user would have to press Esc twice before
+the TUI saw it. Atty's own chat overlay (`module_overlay_active =
+true`) keeps its bindings live — `Alt+T`, `Alt+M`, `Alt+Shift+C`
+etc. all work normally inside the chat overlay.
+
+CSI-u → legacy translation in the same code path (`csiUToLegacy`)
+still fires when `!matched_binding`, so a kitty-kbd-encoded Esc
+like `\x1b[27u` lands at the inner TUI as legacy `\x1b`.
+
 ## Status bar + incognito
 
 Off by default (`config.statusbar.enabled = false`); opt in if you
