@@ -420,7 +420,12 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // otherwise mark another user's PID — a cross-user
             // DoS / privilege violation. Gate: root may set any
             // PID; a non-root caller may set only PIDs owned by
-            // their own UID.
+            // their own UID. TOCTOU note: between this check and
+            // `threat.set` the PID can exit and be recycled by the
+            // kernel — the mark then lands on the new occupant.
+            // No privilege escalation: the caller still couldn't
+            // redirect onto a different user's fresh PID since the
+            // kernel picks recycled PIDs at random.
             if !peer.is_root {
                 match pid_owner_uid(pid) {
                     Ok(owner_uid) if owner_uid != peer.uid => {
