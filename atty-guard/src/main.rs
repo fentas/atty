@@ -776,6 +776,7 @@ fn main() -> std::io::Result<()> {
         ebpf_state,
         osv_client,
         trust_store,
+        file_cfg.server.clone(),
     )
 }
 

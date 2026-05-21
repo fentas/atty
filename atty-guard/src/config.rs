@@ -17,6 +17,55 @@ pub struct Config {
     /// every knob has a conservative compiled-in fallback.
     #[serde(default)]
     pub accumulator: AccumulatorConfig,
+    /// Server-side resource caps. Defaults are documented on
+    /// each field; the [server] table is optional in the file
+    /// and falls back to safe values when omitted.
+    #[serde(default)]
+    pub server: ServerConfig,
+}
+
+/// Bounded-resources knobs for the UDS server. The socket is
+/// group-accessible (atty group on system installs); without
+/// these caps a buggy / hostile local process could exhaust
+/// daemon resources by opening many idle connections.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    /// Maximum concurrent connections accepted at one time.
+    /// Reached → new connections are accepted-then-closed
+    /// immediately so the client sees a fast EOF rather than
+    /// queuing indefinitely. Default 64 — generous for typical
+    /// single-user use (one shell × handful of classify calls
+    /// in flight) and tight enough that a runaway client can't
+    /// peg the daemon. Values above a few hundred meaningfully
+    /// weaken the DoS bound; values of 0 are clamped to 1 at
+    /// startup with a stderr warning.
+    #[serde(default = "default_max_concurrent_connections")]
+    pub max_concurrent_connections: usize,
+    /// Per-connection read timeout in seconds. An idle client
+    /// holding a connection without sending any bytes is
+    /// disconnected after this many seconds. Default 30 —
+    /// well past a healthy classify round-trip (sub-millisecond
+    /// to single-digit milliseconds) and short enough that a
+    /// silent client can't squat on a handler thread forever.
+    /// Set to 0 to disable.
+    #[serde(default = "default_idle_read_timeout_secs")]
+    pub idle_read_timeout_secs: u64,
+}
+
+fn default_max_concurrent_connections() -> usize {
+    64
+}
+fn default_idle_read_timeout_secs() -> u64 {
+    30
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        ServerConfig {
+            max_concurrent_connections: default_max_concurrent_connections(),
+            idle_read_timeout_secs: default_idle_read_timeout_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
