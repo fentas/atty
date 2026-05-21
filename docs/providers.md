@@ -325,14 +325,17 @@ the ring stays filtered in this session but the file isn't updated.
   no exit code attached (bash format has no slot for one; zsh
   extended-history's duration field is set to `0`).
 - **Tab completion isn't followed on shells without OSC 133.**
-  Without prompt markers, atty's line model can't tell a Tab-
-  completed line from the typed prefix it expanded from — falls
-  back to the keystroke buffer, which still reads the pre-Tab
-  text. With OSC 133 markers active (the default after
+  Without prompt markers, atty's line model can't tell a
+  Tab-completed line from the typed prefix it expanded from —
+  falls back to the keystroke buffer, which still reads the
+  pre-Tab text. With OSC 133 markers active (the default after
   `eval "$(atty init bash)"` / `atty init zsh`), the marker
   stream's `;B` echoes the completed input region and atty
-  re-syncs the line buffer from it. See the
-  [line-state](/architecture/#line-state-model) section.
+  re-syncs the line buffer from it. See
+  [OSC 133 prompt markers](/architecture/#osc-133-prompt-markers-auto-detect)
+  for the wider integration story and
+  [line-state model](/architecture/#line-state-model) for the
+  underlying state machine.
 - **Substring-mode ghost** isn't implemented yet — the ghost renderer
   only paints the tail past the query position, which is wrong for
   non-prefix hits. Set `.match = .prefix` (the default).
