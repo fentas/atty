@@ -242,6 +242,316 @@ pub fn parseResponse(
     }
 }
 
+/// Lenient parser for the fenced-action protocol — see `prompts.zig`.
+///
+/// Walks `raw` backward looking for the LAST ```<lang>...``` block.
+/// On a recognized lang tag (`exec`/`sh`/`bash`/`shell` → exec,
+/// `question`/`ask`/`q` → question, `done`/`finish`/`end` → done),
+/// fills `out.action` and the corresponding body field. The body is
+/// taken VERBATIM — no escape processing, multi-line preserved.
+///
+/// Falls back gracefully:
+///   - No fence found → `out.action = .done`, full text becomes the
+///     reason. Chat mode treats `.done`+reason as "render as a turn,
+///     keep the conversation open."
+///   - Closing fence missing → body extends to end of `raw`.
+///   - Unknown lang tag → ignored (look further back for another
+///     fence; if none, fall through to the no-fence case).
+///
+/// `description` for `exec` and `reason` for `done` are filled from
+/// the prose ABOVE the fence (last non-blank paragraph). Question
+/// choices are parsed from `- foo` / `* foo` / `1. foo` lines inside
+/// the question body.
+///
+/// Never errors — even on garbage input the worst case is
+/// `.done` + reason = raw text. The protocol's whole point is to
+/// eliminate the "STRICTLY JSON" retry loop.
+pub fn parseFencedResponse(comptime ResponseT: type, raw: []const u8, out: *ResponseT) void {
+    out.* = .{ .action = .done };
+
+    const fence = findLastActionFence(raw) orelse {
+        // No recognized action fence — treat entire response as a
+        // `done`/reason. Chat-mode callers can render this as a
+        // plain prose turn and continue the conversation.
+        copyInto(&out.reason_buf, &out.reason_len, trim(raw));
+        return;
+    };
+
+    const prose = trim(raw[0..fence.fence_start]);
+    const body = trim(raw[fence.body_start..fence.body_end]);
+
+    switch (fence.action) {
+        .exec => {
+            out.action = .exec;
+            copyInto(&out.command_buf, &out.command_len, body);
+            if (prose.len > 0) {
+                copyInto(&out.description_buf, &out.description_len, prose);
+            }
+        },
+        .question => {
+            out.action = .question;
+            // First non-blank line = question prompt; subsequent
+            // bullet lines (- / * / N.) = choices.
+            var qprompt: []const u8 = body;
+            var first_nl: usize = 0;
+            while (first_nl < body.len and body[first_nl] != '\n') : (first_nl += 1) {}
+            if (first_nl < body.len) {
+                // Look ahead for the first bullet line to terminate
+                // the question prompt. Lines BEFORE the first bullet
+                // are the prompt (multi-paragraph OK).
+                var line_start: usize = 0;
+                var prompt_end: usize = body.len;
+                while (line_start < body.len) {
+                    var line_end = line_start;
+                    while (line_end < body.len and body[line_end] != '\n') : (line_end += 1) {}
+                    const line = trimStart(body[line_start..line_end]);
+                    if (isBulletLine(line)) {
+                        prompt_end = trim(body[0..line_start]).len + (if (line_start > 0) prose_offset_back(body, line_start) else 0);
+                        if (prompt_end > line_start) prompt_end = line_start;
+                        break;
+                    }
+                    line_start = line_end + 1;
+                }
+                qprompt = trim(body[0..prompt_end]);
+                // Parse choices from the rest.
+                var idx: usize = prompt_end;
+                while (idx < body.len and out.choices_count < max_choices) {
+                    var line_end = idx;
+                    while (line_end < body.len and body[line_end] != '\n') : (line_end += 1) {}
+                    const line = trimStart(body[idx..line_end]);
+                    if (isBulletLine(line)) {
+                        const choice_text = trim(stripBullet(line));
+                        if (choice_text.len > 0) {
+                            const n = @min(choice_text.len, choice_max_len);
+                            @memcpy(out.choices_storage[out.choices_count][0..n], choice_text[0..n]);
+                            out.choices_lens[out.choices_count] = n;
+                            out.choices_count += 1;
+                        }
+                    }
+                    idx = line_end + 1;
+                }
+            }
+            copyInto(&out.question_buf, &out.question_len, qprompt);
+        },
+        .done => {
+            out.action = .done;
+            copyInto(&out.reason_buf, &out.reason_len, body);
+        },
+    }
+}
+
+/// Try the fenced protocol first; on parse failure (no recognized
+/// fence AND we want strict semantics), fall back to the JSON
+/// envelope parser. Used by transitional callers that still need to
+/// accept old-style JSON responses while atty's prompts roll out the
+/// fenced protocol.
+pub fn parseResponseLenient(
+    comptime ResponseT: type,
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+    out: *ResponseT,
+) !void {
+    // The fenced path always succeeds — worst case it returns
+    // `.done` + reason = raw text. Try it first; the worker decides
+    // whether to also attempt the JSON envelope shape based on the
+    // result.
+    parseFencedResponse(ResponseT, raw, out);
+    if (out.action == .done and out.command_len == 0 and out.question_len == 0) {
+        // No action fence found. Before falling through to chat /
+        // conclusion handling, take one more shot at the legacy
+        // JSON envelope shape — preserves backward compatibility
+        // with prompts/models that still emit `{"action":…}`.
+        const trimmed = trim(raw);
+        if (trimmed.len > 2 and trimmed[0] == '{' and trimmed[trimmed.len - 1] == '}') {
+            var json_attempt: ResponseT = .{};
+            parseResponse(ResponseT, allocator, trimmed, &json_attempt) catch return;
+            out.* = json_attempt;
+        }
+    }
+}
+
+const ActionFenceMatch = struct {
+    fence_start: usize, // index of the opening ``` (before the lang tag)
+    body_start: usize, // index of the first byte of the body
+    body_end: usize, // index just past the last body byte (excludes closing fence)
+    action: Action,
+};
+
+/// Walk `raw` backward looking for the last ` ```<action> ... ``` `
+/// block. Returns null if no recognized lang tag is found.
+fn findLastActionFence(raw: []const u8) ?ActionFenceMatch {
+    // Strategy: find every ``` (3+ backticks at start of line or
+    // after whitespace), pair them up, take the last pair whose
+    // opening fence has a recognized lang tag.
+    var search_from: usize = raw.len;
+    while (search_from > 0) {
+        const close_idx = findFenceBefore(raw, search_from) orelse return null;
+        // Try to find an opening fence BEFORE this one. If none —
+        // including when `close_idx` itself sits at byte 0 — fall
+        // through to the unpaired-fence branch which treats the
+        // single fence as an UNCLOSED opener (body runs to EOF).
+        const open_idx = findFenceBefore(raw, close_idx) orelse {
+            // Unpaired closing fence — treat the unclosed body as
+            // running to end-of-input (i.e. the LLM forgot to
+            // close). Re-examine with `close_idx` as a potential
+            // opening fence.
+            const lang_from = lineEndAfterFence(raw, close_idx);
+            const lang_line = raw[close_idx..lang_from];
+            const action = parseLangTag(lang_line) orelse {
+                search_from = close_idx;
+                continue;
+            };
+            return .{
+                .fence_start = close_idx,
+                .body_start = lang_from,
+                .body_end = raw.len,
+                .action = action,
+            };
+        };
+        // Lang tag lives on the same line as the opening fence.
+        const lang_from = lineEndAfterFence(raw, open_idx);
+        const lang_line = raw[open_idx..lang_from];
+        const action = parseLangTag(lang_line) orelse {
+            // Not an action fence — keep walking back.
+            search_from = open_idx;
+            continue;
+        };
+        return .{
+            .fence_start = open_idx,
+            .body_start = lang_from,
+            .body_end = close_idx,
+            .action = action,
+        };
+    }
+    return null;
+}
+
+/// Locate the last `^[ \t]*```` occurrence STRICTLY before `before`.
+/// Returns the index of the first backtick in that fence run, or
+/// null. Treats 3+ contiguous backticks as a fence; tolerates
+/// leading indentation (the model occasionally adds it).
+fn findFenceBefore(raw: []const u8, before: usize) ?usize {
+    if (before == 0) return null;
+    var i: usize = before;
+    while (i > 0) {
+        i -= 1;
+        if (raw[i] != '`') continue;
+        // Walk left collecting consecutive backticks.
+        var start = i;
+        while (start > 0 and raw[start - 1] == '`') : (start -= 1) {}
+        const run_len = i - start + 1;
+        if (run_len < 3) continue;
+        // Ensure backticks are at line start (allowing leading
+        // whitespace) — guards against backticks INSIDE prose.
+        var bol = start;
+        while (bol > 0 and raw[bol - 1] != '\n') : (bol -= 1) {
+            if (raw[bol - 1] != ' ' and raw[bol - 1] != '\t') {
+                // Backticks have non-whitespace before them on the
+                // same line → not a fence. Skip past this run.
+                i = start;
+                if (i == 0) return null;
+                break;
+            }
+        } else {
+            return start;
+        }
+        // Loop continues to look further back.
+        if (i == 0) break;
+    }
+    return null;
+}
+
+/// Returns the byte index of the newline that ends the line `fence`
+/// is on (or `raw.len` if the fence is on the last line).
+fn lineEndAfterFence(raw: []const u8, fence: usize) usize {
+    var i: usize = fence;
+    // Skip past the backtick run + the lang tag (up to newline).
+    while (i < raw.len and raw[i] == '`') : (i += 1) {}
+    while (i < raw.len and raw[i] != '\n') : (i += 1) {}
+    if (i < raw.len) i += 1; // step past the newline
+    return i;
+}
+
+/// Map a fence's `<backticks><lang><eol>` prefix line to an Action.
+/// Aliases: exec/sh/bash/shell → exec, question/ask/q → question,
+/// done/finish/end → done. Whitespace-tolerant; case-insensitive.
+fn parseLangTag(line: []const u8) ?Action {
+    // Strip leading backticks.
+    var i: usize = 0;
+    while (i < line.len and line[i] == '`') : (i += 1) {}
+    // Trim whitespace.
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    var end: usize = i;
+    while (end < line.len and line[end] != '\n' and line[end] != ' ' and line[end] != '\t') : (end += 1) {}
+    const tag = line[i..end];
+    if (tag.len == 0) return null;
+    if (eqIgnoreCase(tag, "exec") or eqIgnoreCase(tag, "sh") or eqIgnoreCase(tag, "bash") or eqIgnoreCase(tag, "shell")) return .exec;
+    if (eqIgnoreCase(tag, "question") or eqIgnoreCase(tag, "ask") or eqIgnoreCase(tag, "q")) return .question;
+    if (eqIgnoreCase(tag, "done") or eqIgnoreCase(tag, "finish") or eqIgnoreCase(tag, "end")) return .done;
+    return null;
+}
+
+fn eqIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        const la = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
+        const lb = if (cb >= 'A' and cb <= 'Z') cb + 32 else cb;
+        if (la != lb) return false;
+    }
+    return true;
+}
+
+fn trim(s: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = s.len;
+    while (start < end and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r')) : (start += 1) {}
+    while (end > start and (s[end - 1] == ' ' or s[end - 1] == '\t' or s[end - 1] == '\n' or s[end - 1] == '\r')) : (end -= 1) {}
+    return s[start..end];
+}
+
+fn trimStart(s: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < s.len and (s[start] == ' ' or s[start] == '\t')) : (start += 1) {}
+    return s[start..];
+}
+
+fn isBulletLine(line: []const u8) bool {
+    if (line.len < 2) return false;
+    // `- foo` / `* foo` / `• foo` / `N. foo` / `N) foo`.
+    if ((line[0] == '-' or line[0] == '*') and line[1] == ' ') return true;
+    // `•` (U+2022) = 0xE2 0x80 0xA2 (3 bytes) — bullet glyph the
+    // LLM sometimes emits when rendering a list visually.
+    if (line.len >= 4 and line[0] == 0xE2 and line[1] == 0x80 and line[2] == 0xA2 and line[3] == ' ') return true;
+    // Numbered: digits, then `.` or `)`, then space.
+    var i: usize = 0;
+    while (i < line.len and line[i] >= '0' and line[i] <= '9') : (i += 1) {}
+    if (i > 0 and i < line.len and (line[i] == '.' or line[i] == ')') and i + 1 < line.len and line[i + 1] == ' ') return true;
+    return false;
+}
+
+fn stripBullet(line: []const u8) []const u8 {
+    if (line.len < 2) return line;
+    if ((line[0] == '-' or line[0] == '*') and line[1] == ' ') return line[2..];
+    if (line.len >= 4 and line[0] == 0xE2 and line[1] == 0x80 and line[2] == 0xA2 and line[3] == ' ') return line[4..];
+    var i: usize = 0;
+    while (i < line.len and line[i] >= '0' and line[i] <= '9') : (i += 1) {}
+    if (i > 0 and i < line.len and (line[i] == '.' or line[i] == ')') and i + 1 < line.len and line[i + 1] == ' ') return line[i + 2 ..];
+    return line;
+}
+
+fn copyInto(buf: []u8, len: *usize, src: []const u8) void {
+    const n = @min(src.len, buf.len);
+    @memcpy(buf[0..n], src[0..n]);
+    len.* = n;
+}
+
+// Forward declaration placeholder — not used in fenced parse path.
+fn prose_offset_back(body: []const u8, idx: usize) usize {
+    _ = body;
+    _ = idx;
+    return 0;
+}
+
 /// Compose the OpenAI chat-completion request body for a dialog
 /// turn. The system message bakes in the configured prompt PLUS a
 /// stable shell-name / context-blob preamble — putting those on
@@ -934,4 +1244,138 @@ test "Module.freeTurns frees every entry and resets the count" {
     try testing.expectEqual(@as(usize, 0), rt.turns_len);
     // Safe to call on an empty ring.
     F.M.freeTurns(&rt);
+}
+
+test "parseFencedResponse: exec with multi-line body + prose description" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw =
+        \\I'll snapshot the env and the last three commits.
+        \\
+        \\```exec
+        \\echo "PWD=$PWD"
+        \\echo "SHELL=$SHELL"
+        \\git log --oneline -3
+        \\```
+    ;
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.exec, r.action);
+    try testing.expectEqualStrings(
+        \\echo "PWD=$PWD"
+        \\echo "SHELL=$SHELL"
+        \\git log --oneline -3
+    , r.command());
+    try testing.expectEqualStrings("I'll snapshot the env and the last three commits.", r.description());
+}
+
+test "parseFencedResponse: done with reason" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw =
+        \\All tests pass.
+        \\
+        \\```done
+        \\test suite green on this branch
+        \\```
+    ;
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.done, r.action);
+    try testing.expectEqualStrings("test suite green on this branch", r.reason());
+}
+
+test "parseFencedResponse: question with choices" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw =
+        \\```question
+        \\How should we handle the broken commit?
+        \\- Revert it
+        \\- Amend and force-push
+        \\- Roll back the branch
+        \\```
+    ;
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.question, r.action);
+    try testing.expectEqualStrings("How should we handle the broken commit?", r.question());
+    try testing.expectEqual(@as(usize, 3), r.choices_count);
+    try testing.expectEqualStrings("Revert it", r.choice(0));
+    try testing.expectEqualStrings("Amend and force-push", r.choice(1));
+    try testing.expectEqualStrings("Roll back the branch", r.choice(2));
+}
+
+test "parseFencedResponse: no fence → done with full text as reason" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw = "Just chatting about how the test suite looks today. No action needed.";
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.done, r.action);
+    try testing.expectEqualStrings(raw, r.reason());
+}
+
+test "parseFencedResponse: lang aliases bash/sh/shell → exec" {
+    const R = Response(4096);
+    inline for (.{ "bash", "sh", "shell", "EXEC" }) |lang| {
+        var r: R = .{};
+        const raw = "```" ++ lang ++ "\nls -la\n```";
+        parseFencedResponse(R, raw, &r);
+        try testing.expectEqual(Action.exec, r.action);
+        try testing.expectEqualStrings("ls -la", r.command());
+    }
+}
+
+test "parseFencedResponse: last fence wins when multiple are present" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw =
+        \\For example you'd write:
+        \\
+        \\```exec
+        \\echo example
+        \\```
+        \\
+        \\But what I actually want to run is:
+        \\
+        \\```exec
+        \\echo real
+        \\```
+    ;
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.exec, r.action);
+    try testing.expectEqualStrings("echo real", r.command());
+}
+
+test "parseFencedResponse: missing closing fence — body extends to EOF" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw = "```exec\nzig build test 2>&1 | tail -5";
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.exec, r.action);
+    try testing.expectEqualStrings("zig build test 2>&1 | tail -5", r.command());
+}
+
+test "parseFencedResponse: numbered + asterisk choices both parse" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw =
+        \\```question
+        \\Pick one:
+        \\1. first option
+        \\* second option
+        \\- third option
+        \\```
+    ;
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.question, r.action);
+    try testing.expectEqual(@as(usize, 3), r.choices_count);
+    try testing.expectEqualStrings("first option", r.choice(0));
+    try testing.expectEqualStrings("second option", r.choice(1));
+    try testing.expectEqualStrings("third option", r.choice(2));
+}
+
+test "parseResponseLenient: legacy JSON envelope still parses" {
+    const R = Response(4096);
+    var r: R = .{};
+    try parseResponseLenient(R, testing.allocator, "{\"action\":\"exec\",\"command\":\"ls\",\"description\":\"list\"}", &r);
+    try testing.expectEqual(Action.exec, r.action);
+    try testing.expectEqualStrings("ls", r.command());
 }

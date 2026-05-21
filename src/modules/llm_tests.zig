@@ -255,28 +255,23 @@ test "extractResponse — missing content field returns zero lengths" {
     try testing.expectEqual(@as(usize, 0), r.explanation_len);
 }
 
-test "effective_system_prompt picks the with-explanation default" {
-    const L_on = configure(.{ .with_explanation = true });
-    const L_off = configure(.{ .with_explanation = false });
-    // The two defaults differ in their guidance about fences /
-    // explanations; pin that they don't collapse to the same string.
-    try testing.expect(!std.mem.eql(u8, L_on.effective_system_prompt, L_off.effective_system_prompt));
-    // The with-explanation prompt should reference the fence /
-    // explanation guidance.
-    try testing.expect(std.mem.indexOf(u8, L_on.effective_system_prompt, "fenced") != null);
-    try testing.expect(std.mem.indexOf(u8, L_off.effective_system_prompt, "No markdown") != null);
+test "effective_system_prompt defaults to atty's fenced-action protocol" {
+    const L = configure(.{});
+    // atty's protocol mentions the ```exec fenced action — the
+    // contract the parser depends on.
+    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "```exec") != null);
+    // The "verbatim, no escaping" rule appears — defining the key
+    // difference from the legacy JSON-envelope protocol.
+    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "verbatim") != null);
 }
 
-test "effective_system_prompt honours an explicit override" {
-    const L = configure(.{ .with_explanation = true, .system_prompt = "be terse" });
-    // User override replaces the task-framing slot but the
-    // invariant atty preamble stays at the head. The override
-    // must appear in full at the tail.
-    try testing.expect(std.mem.endsWith(u8, L.effective_system_prompt, "be terse"));
-    // Preamble survives — meta-question routing isn't lost on
-    // override.
-    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "inside atty") != null);
-    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "Alt+S") != null);
+test "effective_system_prompt prepends atty's protocol; user override appends" {
+    const L = configure(.{ .system_prompt = "Prefer ripgrep over grep when available." });
+    // atty's fenced-action contract stays at the head — the parser
+    // can't function without it.
+    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "```exec") != null);
+    // User's additional domain context appears in full at the tail.
+    try testing.expect(std.mem.endsWith(u8, L.effective_system_prompt, "Prefer ripgrep over grep when available."));
 }
 
 test "resolveApiBase priority — static cfg.api_base beats both env vars" {
