@@ -856,34 +856,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 pw.measureCols(icon) + 1 +
                 pw.measureCols(mode_word) + 3 +
                 pw.measureCols(provider_label) + 2;
-            // Trailing shortcut hint — progressively shrinks as
-            // cols tightens so the chrome never overruns into the
-            // panel body. Three sizes:
-            //   full:  " Alt+T auto · Alt+M model · Alt+C close · Enter send" (51 cols)
-            //   med:   " Alt+T auto · Alt+M model · Alt+C close"              (38 cols)
-            //   short: " Alt+T · Alt+M · Alt+C"                                (22 cols)
-            // The mode + provider keys are non-obvious; the short
-            // form drops labels but keeps the keys so users can
-            // still find them. Statusbar suppresses its LLM hint
-            // when the panel is open so this row owns discovery.
-            const hint_full = " \x1B[22;38;5;14mAlt+T\x1B[39;2m auto \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m model \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m";
-            const hint_med = " \x1B[22;38;5;14mAlt+T\x1B[39;2m auto \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m model \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m close\x1B[0m";
-            const hint_short = " \x1B[22;38;5;14mAlt+T\x1B[39;2m \u{00B7} \x1B[22;38;5;14mAlt+M\x1B[39;2m \u{00B7} \x1B[22;38;5;14mAlt+C\x1B[39;2m\x1B[0m";
+            // Divider trailing hint — only the surface-level shortcuts
+            // (close + send) live here so the header reads as chrome,
+            // not a cheat-sheet. The mode + provider toggles
+            // (`Alt+T auto` / `Alt+M model`) live in the dim footer
+            // row above the input (painted further down in this
+            // function under the `has_footer` gate). Two sizes:
+            //   full: " Alt+C close · Enter send" (25 cols)
+            //   short: " Alt+C · Enter"            (14 cols)
+            const hint_full = " \x1B[22;38;5;14mAlt+C\x1B[39;2m close \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m send\x1B[0m";
+            const hint_short = " \x1B[22;38;5;14mAlt+C\x1B[39;2m \u{00B7} \x1B[22;38;5;14mEnter\x1B[39;2m\x1B[0m";
             const min_dashes: usize = 4;
-            const hint: []const u8 = if (cols_usize >= label_visible + 51 + min_dashes)
+            const hint: []const u8 = if (cols_usize >= label_visible + 25 + min_dashes)
                 hint_full
-            else if (cols_usize >= label_visible + 38 + min_dashes)
-                hint_med
-            else if (cols_usize >= label_visible + 22 + min_dashes)
+            else if (cols_usize >= label_visible + 14 + min_dashes)
                 hint_short
             else
-                "\x1B[0m"; // No room for any hint — leave the row blank past the label.
+                "\x1B[0m";
             const hint_cols: usize = if (hint.ptr == hint_full.ptr)
-                51
-            else if (hint.ptr == hint_med.ptr)
-                38
+                25
             else if (hint.ptr == hint_short.ptr)
-                22
+                14
             else
                 0;
             const trail_target: usize = if (cols_usize > label_visible + hint_cols + min_dashes)
@@ -916,12 +909,25 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const input_lines_cap: u16 = if (panel_rows >= 4) @max(@as(u16, 1), panel_rows / 2) else 1;
             const input_lines: u16 = @min(desired_input_lines, input_lines_cap);
             const input_top_row: u16 = input_row - (input_lines - 1);
-            const scrollback_rows: u16 = if (input_top_row > top_row + 1) input_top_row - top_row - 1 else 0;
+            // Footer hint row sits one row above input — carries the
+            // mode/provider toggles (Alt+T / Alt+M) so the divider
+            // chrome can stay focused on close/send. Only reserved
+            // when the panel has room: needs at least
+            // divider + 1 scrollback + footer + input = 4 rows. The
+            // input-lines cap above already guards `panel_rows >= 4`
+            // for any multi-line render, so when the panel is too
+            // small for a footer we just don't allocate one.
+            const has_footer: bool = (input_top_row > top_row + 2);
+            const footer_row: u16 = if (has_footer) input_top_row - 1 else 0;
+            const scrollback_top_limit: u16 = if (has_footer) footer_row else input_top_row;
+            const scrollback_rows: u16 = if (scrollback_top_limit > top_row + 1) scrollback_top_limit - top_row - 1 else 0;
             var row: u16 = top_row + 1;
             // Blank-clear every scrollback row up front so prior
-            // chat content doesn't leak when the turns shrink.
+            // chat content doesn't leak when the turns shrink. Stop
+            // at the footer row (when present) so the footer paint
+            // below has a clean slate to write into.
             var r: u16 = row;
-            while (r < input_top_row) : (r += 1) {
+            while (r < scrollback_top_limit) : (r += 1) {
                 w.print("\x1B[{d};1H\x1B[2K", .{r}) catch return false;
             }
 
@@ -939,8 +945,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // overlay's scrolled-back indicator.
             var scrollback_budget: u16 = scrollback_rows;
             if (inline_offset > 0 and scrollback_budget > 1) {
-                var sb: [40]u8 = undefined;
-                const head = std.fmt.bufPrint(&sb, "  \x1B[2m\u{2191} {d} more turn(s) below\x1B[0m", .{inline_offset}) catch "";
+                var sb: [80]u8 = undefined;
+                const head = std.fmt.bufPrint(&sb, "  \x1B[2m\u{2191} {d} below \u{00B7} \x1B[22;38;5;14mCtrl+End\x1B[39;2m for tail\x1B[0m", .{inline_offset}) catch "";
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
                 w.writeAll(head) catch return false;
                 row += 1;
@@ -991,7 +997,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
             var first_visible_turn = true;
             for (rt.turns[start_turn..visible_end]) |turn| {
-                if (row >= input_top_row) break;
+                if (row >= scrollback_top_limit) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
                 const prefix: []const u8 = switch (turn.kind) {
                     .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
@@ -999,7 +1005,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     .observation => "\x1B[2mOutput:\x1B[0m ",
                 };
                 w.writeAll(prefix) catch return false;
-                const remaining_rows: usize = @intCast(input_top_row - row);
+                const remaining_rows: usize = @intCast(scrollback_top_limit - row);
                 const turn_rows_cap: usize = if (first_visible_turn and oldest_turn_cap > 0)
                     @min(@as(usize, oldest_turn_cap), remaining_rows)
                 else
@@ -1007,6 +1013,28 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 const rows_used = renderTurnContent(&w, turn, max_inline_visible, turn_rows_cap) catch 1;
                 row += @intCast(rows_used);
                 first_visible_turn = false;
+            }
+            // Footer hint row — Alt+T toggles auto, Alt+M cycles
+            // provider. Dim so it reads as chrome, not a turn; lives
+            // directly above the input prompt so the keys are
+            // closest to the cursor's eye-line. Two sizes so the
+            // hint doesn't wrap on narrow terminals:
+            //   full:  "  Alt+T auto · Alt+M model" (~28 cols)
+            //   short: "  Alt+T · Alt+M"            (~17 cols)
+            // The leading 2-space indent matches the empty-panel
+            // hint at line 1027 + the scrolled-back indicator at
+            // line 948 so all dim chrome rows align visually.
+            if (has_footer) {
+                const footer_full = "  \x1B[2m\x1B[38;5;14mAlt+T\x1B[39m auto \u{00B7} \x1B[38;5;14mAlt+M\x1B[39m model\x1B[0m";
+                const footer_short = "  \x1B[2m\x1B[38;5;14mAlt+T\x1B[39m \u{00B7} \x1B[38;5;14mAlt+M\x1B[39m\x1B[0m";
+                const footer: []const u8 = if (cols_usize >= 28)
+                    footer_full
+                else if (cols_usize >= 17)
+                    footer_short
+                else
+                    "";
+                w.print("\x1B[{d};1H\x1B[2K", .{footer_row}) catch return false;
+                if (footer.len > 0) w.writeAll(footer) catch return false;
             }
             if (rt.turns_len == 0 and scrollback_rows > 0) {
                 w.print("\x1B[{d};1H\x1B[2K", .{top_row + 1}) catch return false;

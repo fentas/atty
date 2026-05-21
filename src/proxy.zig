@@ -1035,6 +1035,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         .chat_scroll_down,
                         .chat_scroll_page_up,
                         .chat_scroll_page_down,
+                        .chat_scroll_to_tail,
                         .llm_chat_inline_grow,
                         .llm_chat_inline_shrink,
                         .llm_chat_toggle_auto,

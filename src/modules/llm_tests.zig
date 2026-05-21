@@ -260,9 +260,9 @@ test "effective_system_prompt defaults to atty's fenced-action protocol" {
     // atty's protocol mentions the ```exec fenced action — the
     // contract the parser depends on.
     try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "```exec") != null);
-    // The "verbatim, no escaping" rule appears — defining the key
+    // The "raw — no escaping" rule appears — defining the key
     // difference from the legacy JSON-envelope protocol.
-    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "verbatim") != null);
+    try testing.expect(std.mem.indexOf(u8, L.effective_system_prompt, "raw") != null);
 }
 
 test "effective_system_prompt prepends atty's protocol; user override appends" {
