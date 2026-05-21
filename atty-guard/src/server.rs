@@ -412,6 +412,31 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             ResponseBody::Classify(result)
         }
         Request::SetThreatLevel { pid, level } => {
+            // SetThreatLevel can promote a PID into the eBPF
+            // threat_map (when V2-B is enabled), and a Critical
+            // level forces later classifies for that PID's tree to
+            // Block. Because the socket is group-accessible (0660
+            // + the `atty` group), any same-group client could
+            // otherwise mark another user's PID — a cross-user
+            // DoS / privilege violation. Gate: root may set any
+            // PID; a non-root caller may set only PIDs owned by
+            // their own UID.
+            if !peer.is_root {
+                match pid_owner_uid(pid) {
+                    Ok(owner_uid) if owner_uid != peer.uid => {
+                        return ResponseBody::Error {
+                            message: format!(
+                                "non-root caller (uid {}) cannot set threat level for pid {pid} (owned by uid {owner_uid})",
+                                peer.uid
+                            ),
+                        };
+                    }
+                    Err(msg) => {
+                        return ResponseBody::Error { message: msg };
+                    }
+                    _ => {}
+                }
+            }
             state.threat.set(pid, level);
             ResponseBody::Ok
         }
@@ -665,6 +690,32 @@ fn resolve_target_uid(peer: PeerCred, target_uid: Option<u32>) -> Result<u32, St
     }
 }
 
+/// Return the real UID that owns `pid` by parsing `/proc/<pid>/status`.
+/// Used to gate `SetThreatLevel` so a non-root caller can't mark
+/// another user's PID. Returns an error string suitable for the
+/// `ResponseBody::Error.message` field when the PID is missing
+/// (already-exited / never-existed) or `/proc` is unreadable.
+///
+/// We parse `Uid:` (the line is space-separated:
+/// `Uid:\treal\teffective\tsaved\tfsuid`) and take the REAL uid.
+fn pid_owner_uid(pid: u32) -> Result<u32, String> {
+    let path = format!("/proc/{pid}/status");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            let mut fields = rest.split_whitespace();
+            let real = fields
+                .next()
+                .ok_or_else(|| format!("{path}: malformed Uid line"))?;
+            return real
+                .parse::<u32>()
+                .map_err(|e| format!("{path}: parse uid: {e}"));
+        }
+    }
+    Err(format!("{path}: no Uid line"))
+}
+
 fn require_root_error(op: &str) -> ResponseBody {
     ResponseBody::Error {
         message: format!(
@@ -756,6 +807,13 @@ mod tests {
     use super::*;
     use std::io::{BufRead, Write};
     use std::time::Duration;
+
+    fn running_as_root() -> bool {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        unsafe { geteuid() == 0 }
+    }
 
     fn unique_socket() -> std::path::PathBuf {
         let pid = std::process::id();
@@ -861,13 +919,17 @@ mod tests {
     fn set_get_threat_level() {
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
+        // Use the test process's own PID — `set_threat_level`
+        // now requires the target PID to belong to the connecting
+        // UID (or root). The test process always owns itself.
+        let pid = std::process::id();
         let _ = round_trip(
             &mut stream,
-            r#"{"id":4,"method":"set_threat_level","pid":4242,"level":"high"}"#,
+            &format!(r#"{{"id":4,"method":"set_threat_level","pid":{pid},"level":"high"}}"#),
         );
         let reply = round_trip(
             &mut stream,
-            r#"{"id":5,"method":"get_threat_level","pid":4242}"#,
+            &format!(r#"{{"id":5,"method":"get_threat_level","pid":{pid}}}"#),
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "threat_level");
@@ -879,17 +941,68 @@ mod tests {
     fn classify_upgrades_when_pid_high() {
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
+        let pid = std::process::id();
         let _ = round_trip(
             &mut stream,
-            r#"{"id":6,"method":"set_threat_level","pid":7777,"level":"high"}"#,
+            &format!(r#"{{"id":6,"method":"set_threat_level","pid":{pid},"level":"high"}}"#),
         );
         let reply = round_trip(
             &mut stream,
-            r#"{"id":7,"method":"classify","command":"ls","context":{"pid":7777}}"#,
+            &format!(r#"{{"id":7,"method":"classify","command":"ls","context":{{"pid":{pid}}}}}"#),
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["verdict"], "warn");
         assert_eq!(v["category"], "pid_high_threat");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn set_threat_level_rejects_unknown_pid_from_non_root() {
+        // PID 1 (init) is owned by root on a healthy Linux box.
+        // A non-root test process must NOT be able to mark it.
+        // (If the test happens to run as root, the check is bypassed
+        // — skip in that case so CI on a rootless runner still pins
+        // the security invariant.)
+        if running_as_root() {
+            return;
+        }
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":8,"method":"set_threat_level","pid":1,"level":"critical"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        let message = v["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("cannot set threat level"),
+            "expected reject message, got: {message}"
+        );
+        // Confirm the threat map was NOT mutated.
+        let level_reply = round_trip(
+            &mut stream,
+            r#"{"id":9,"method":"get_threat_level","pid":1}"#,
+        );
+        let lv: serde_json::Value = serde_json::from_str(&level_reply).unwrap();
+        assert_eq!(lv["level"], "low");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn set_threat_level_rejects_nonexistent_pid_from_non_root() {
+        if running_as_root() {
+            return;
+        }
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        // PID 0 is a kernel-only sentinel; /proc/0 doesn't exist.
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":10,"method":"set_threat_level","pid":0,"level":"high"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
         let _ = std::fs::remove_file(socket);
     }
 
