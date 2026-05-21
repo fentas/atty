@@ -790,6 +790,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             var msg_buf: [128]u8 = undefined;
                             const msg = std.fmt.bufPrint(&msg_buf, "provider: {s} ({d}/{d})", .{ label, next + 1, cfg.providers.len }) catch label;
                             latchHint(rt, msg);
+                            // The chat panel divider renders the
+                            // active provider via
+                            // resolveProviderForMode(.chat, …); arm
+                            // a repaint so the user sees the cycle
+                            // reflected in the chrome, not only in
+                            // the statusbar hint.
+                            if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                            if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
                             return true;
                         }
                     }

@@ -1951,3 +1951,64 @@ test "inline chat: pasted UTF-8 (e.g. `•` = 0xE2 0x80 0xA2) lands in the buffe
     _ = try L.onInput(&rt, &ctx, "\u{2022} bullet");
     try testing.expectEqualStrings("\u{2022} bullet", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
 }
+
+test "Alt+M cycle arms chat panel repaint so divider shows the new provider" {
+    // Regression: cycle_model bumped `current_provider_idx` and
+    // emitted a statusbar hint, but never armed
+    // `chat_inline_paint_pending` / `chat_overlay_paint_pending`.
+    // The divider in `paintInlineChat` reads
+    // `resolveProviderForMode(.chat, …)` on every paint, so the
+    // updated provider only surfaces once SOMETHING else triggers
+    // a repaint — until then the panel chrome shows the stale name.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .providers = &.{
+            .{ .name = "a", .config = .{ .http = .{ .api_base = "http://a/", .api_base_env = "ATTY_TEST_NEVER", .api_base_fallback_env = "ATTY_TEST_NEVER", .api_key_env = "ATTY_TEST_NEVER" } } },
+            .{ .name = "b", .config = .{ .http = .{ .api_base = "http://b/", .api_base_env = "ATTY_TEST_NEVER", .api_base_fallback_env = "ATTY_TEST_NEVER", .api_key_env = "ATTY_TEST_NEVER" } } },
+        },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_inline_paint_pending = false;
+    try testing.expectEqual(@as(usize, 0), rt.current_provider_idx);
+
+    const consumed = try L.onAction(&rt, &ctx, .llm_exec_cycle_model);
+    try testing.expect(consumed);
+    try testing.expectEqual(@as(usize, 1), rt.current_provider_idx);
+    try testing.expect(rt.chat_inline_paint_pending);
+
+    // Overlay arm also fires when the overlay is the surface in
+    // use (mutual exclusion in practice but the cycle handler
+    // checks both flags independently — defensive).
+    rt.chat_inline_open = false;
+    rt.chat_overlay_open = true;
+    rt.chat_overlay_paint_pending = false;
+    _ = try L.onAction(&rt, &ctx, .llm_exec_cycle_model);
+    try testing.expect(rt.chat_overlay_paint_pending);
+}
