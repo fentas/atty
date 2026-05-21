@@ -14,7 +14,6 @@ const std = @import("std");
 const m = @import("../../module.zig");
 const dialog = @import("dialog.zig");
 const types = @import("types.zig");
-const worker_mod_ns = @import("worker.zig");
 const pty_mod = @import("../../pty.zig");
 const Pty = pty_mod.Pty;
 
@@ -591,8 +590,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // entry that would otherwise show wrong.
             const cols_usize: usize = total_cols;
             w.print("\x1B[{d};1H\x1B[2K", .{top_row}) catch return false;
-            const resolved = worker_mod_ns.resolveProviderForMode(.chat, cfg.providers, cfg.provider, rt.current_provider_idx);
-            const raw_label: []const u8 = if (resolved.name.len > 0) resolved.name else worker_mod_ns.providerLabel(resolved.provider);
+            const resolved = types.resolveProviderForMode(.chat, cfg.providers, cfg.provider, rt.current_provider_idx);
+            const raw_label: []const u8 = if (resolved.name.len > 0) resolved.name else types.providerLabel(resolved.provider);
             const icon: []const u8 = if (ctx.incognito) "\u{1F576}" else "\u{2728}";
             const mode_word: []const u8 = if (ctx.incognito) "atty chat (incognito)" else "atty chat";
             // Clamp the label to a third of the available cols so a

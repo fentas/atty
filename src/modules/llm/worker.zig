@@ -55,71 +55,14 @@ const ProviderEntry = types.ProviderEntry;
 const Mode = types.Mode;
 const nowMs = @import("../_lib.zig").nowMs;
 
-/// Per-request provider pick. `name` is the entry's label;
-/// empty string means "no entry name was set — derive a label
-/// at the call site via `providerLabel(provider)` or similar".
-/// The fallback / single-shorthand case always returns an empty
-/// name. Lifetimes borrow from `cfg.providers` / `cfg.provider`
-/// — both are comptime-static so the slice outlives the worker.
-pub const ResolvedProvider = struct {
-    provider: Provider,
-    name: []const u8,
-};
-
-/// Best-effort human-readable label for a `Provider` when no
-/// `ProviderEntry.name` is set. HTTP uses the model id;
-/// subprocess uses argv[0]. Caller decides between this and a
-/// configured `name` — pair with `resolveProviderForMode` for
-/// the canonical "what should the statusbar/header show"
-/// rendering.
-pub fn providerLabel(p: Provider) []const u8 {
-    return switch (p) {
-        .http => |h| if (h.model.len > 0) h.model else "(http)",
-        .subprocess => |s| if (s.argv.len > 0) s.argv[0] else "(subprocess)",
-    };
-}
-
-/// Pick the provider that serves `mode` from `providers[]`,
-/// preferring the entry at `current_idx` when its `for_modes`
-/// covers the mode. Falls back to the first matching entry,
-/// then to `fallback` (the single-provider shorthand) when
-/// nothing matches. Empty `providers[]` always returns
-/// `fallback`.
-pub fn resolveProviderForMode(
-    mode: Mode,
-    providers: []const ProviderEntry,
-    fallback: Provider,
-    current_idx: usize,
-) ResolvedProvider {
-    if (providers.len == 0) return .{ .provider = fallback, .name = "" };
-    if (current_idx < providers.len) {
-        const entry = providers[current_idx];
-        if (entry.for_modes.matches(mode)) {
-            return .{ .provider = entry.config, .name = entry.name };
-        }
-    }
-    for (providers) |entry| {
-        if (entry.for_modes.matches(mode)) {
-            return .{ .provider = entry.config, .name = entry.name };
-        }
-    }
-    return .{ .provider = fallback, .name = "" };
-}
-
-/// Compatibility wrapper — old `resolveProvider(req_kind, …)`
-/// call sites that don't know the precise dispatch mode collapse
-/// the request kind's `.dialog` into a generic dialog mode.
-/// Prefer `resolveProviderForMode` when the trigger site knows
-/// whether we're in `.auto` or `.chat` specifically — those
-/// modes are reachable only through the explicit form.
-pub fn resolveProvider(
-    req_kind: anytype,
-    providers: []const ProviderEntry,
-    fallback: Provider,
-    current_idx: usize,
-) ResolvedProvider {
-    return resolveProviderForMode(Mode.fromRequestKind(req_kind), providers, fallback, current_idx);
-}
+// Resolver types + helpers live in types.zig now (paint.zig
+// surfaces them without dragging in the HTTP worker). Re-exports
+// keep existing call sites + tests on this module's namespace
+// stable.
+pub const ResolvedProvider = types.ResolvedProvider;
+pub const providerLabel = types.providerLabel;
+pub const resolveProviderForMode = types.resolveProviderForMode;
+pub const resolveProvider = types.resolveProvider;
 
 pub fn Module(comptime cfg: Config) type {
     return struct {
