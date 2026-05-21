@@ -42,6 +42,10 @@ pub const prompt_single: []const u8 =
     \\  ```
     \\
     \\Rules:
+    \\- The action MUST live inside a fenced code block with the lang tag
+    \\  (```exec or ```done). The fence IS the protocol — without it,
+    \\  atty doesn't recognize the action. Even a one-line `done` needs
+    \\  the fence.
     \\- The fenced block is the LAST thing in your reply.
     \\- Exactly ONE block per reply.
     \\- The command MUST be a single line — single-shot mode injects it
@@ -108,11 +112,33 @@ pub const prompt_dialog: []const u8 =
     \\  ```
     \\
     \\Rules:
+    \\- EVERY action MUST live inside a fenced code block with the action
+    \\  lang tag. The fence IS the protocol. Without it, atty renders your
+    \\  reply as plain chat prose — `exec` commands aren't suggested,
+    \\  `question` bullets aren't selectable, `done` doesn't trigger the
+    \\  completion banner. Even a single-line action needs the fence.
     \\- The fenced block is the LAST thing in your reply.
     \\- Exactly ONE action per reply.
     \\- Action body is verbatim — no quotes, no JSON escaping.
     \\- Aim for the smallest number of steps. When you know the answer, use
     \\  it instead of probing.
+    \\
+    \\WRONG vs RIGHT — both replies have the same shape, only the fence
+    \\differs:
+    \\
+    \\WRONG (no fence, atty renders as chat — no question UI):
+    \\
+    \\  What would you like to do next?
+    \\  - Run the tests
+    \\  - Check git status
+    \\
+    \\RIGHT:
+    \\
+    \\  ```question
+    \\  What would you like to do next?
+    \\  - Run the tests
+    \\  - Check git status
+    \\  ```
     \\
     \\Examples:
     \\
@@ -189,10 +215,32 @@ pub const prompt_auto: []const u8 =
     \\  ```
     \\
     \\Rules:
+    \\- EVERY action MUST live inside a fenced code block with the action
+    \\  lang tag. The fence IS the protocol. Without it, atty renders your
+    \\  reply as plain chat prose — `exec` commands aren't auto-executed,
+    \\  `question` bullets aren't selectable, `done` doesn't end the loop.
+    \\  Even a single-line action needs the fence.
     \\- The fenced block is the LAST thing in your reply.
     \\- Exactly ONE action per reply.
     \\- Action body is verbatim — no quotes, no JSON escaping.
     \\- Aim for the smallest number of steps.
+    \\
+    \\WRONG vs RIGHT — same content, only the fence differs:
+    \\
+    \\WRONG (no fence, atty renders as chat — no question UI, command
+    \\does not auto-execute):
+    \\
+    \\  Should I proceed with the deploy?
+    \\  - Yes, deploy
+    \\  - No, abort
+    \\
+    \\RIGHT:
+    \\
+    \\  ```question
+    \\  Should I proceed with the deploy?
+    \\  - Yes, deploy
+    \\  - No, abort
+    \\  ```
     \\
     \\Examples:
     \\
