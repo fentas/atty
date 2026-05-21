@@ -1633,7 +1633,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // please re-emit JSON exactly like this …").
                 if (rt.dialog_parse_retry_count < cfg.dialog_parse_retry_max) {
                     rt.dialog_parse_retry_count += 1;
-                    requestParseRetry(rt, ctx, "wasn't valid JSON") catch {
+                    requestParseRetry(rt, ctx, raw, "wasn't valid JSON") catch {
                         latchErr(rt, "LLM reply wasn't valid JSON — cancel and retry");
                         dialogReset(rt, ctx.io);
                         rt.ai_mode_active = false;
@@ -1662,7 +1662,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // doesn't satisfy our protocol contract).
                         if (rt.dialog_parse_retry_count < cfg.dialog_parse_retry_max) {
                             rt.dialog_parse_retry_count += 1;
-                            requestParseRetry(rt, ctx, "had action=exec but no command field") catch {
+                            requestParseRetry(rt, ctx, raw, "had action=exec but no command field") catch {
                                 latchErr(rt, "LLM reply had no command — cancel and retry");
                                 dialogReset(rt, ctx.io);
                                 rt.ai_mode_active = false;
@@ -2365,13 +2365,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// corrective prompt. Caller's responsibility to gate on
         /// retry budget; this function unconditionally fires the
         /// retry.
-        fn requestParseRetry(rt: *Runtime, ctx: *m.Context, reason: []const u8) !void {
+        fn requestParseRetry(rt: *Runtime, ctx: *m.Context, raw: []const u8, reason: []const u8) !void {
             // Echo the malformed reply back as an assistant turn so
             // the model sees its own output in context. Without
             // this the corrective user turn would seem to come
-            // from nowhere.
-            const bad_reply = if (rt.last_assistant_json) |s| s[0..rt.last_assistant_json_len] else &[_]u8{};
-            const assistant_copy = try rt.allocator.dupe(u8, bad_reply);
+            // from nowhere. Use the current `raw` directly — the
+            // `last_assistant_json` stash is allocate-then-swap and
+            // could still hold the PREVIOUS turn's reply if this
+            // turn's stash alloc OOM'd, which would feed the model
+            // a stale bad reply and confuse the self-correction.
+            const assistant_copy = try rt.allocator.dupe(u8, raw);
             errdefer rt.allocator.free(assistant_copy);
             try pushTurn(rt, .assistant_exec, assistant_copy);
 
@@ -2386,20 +2389,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             //   • markdown fences (```json …``` wrappers).
             //   • prose preamble ("Sure! Here you go:") before the JSON.
             const concrete_hint: []const u8 = blk: {
-                if (std.mem.indexOf(u8, bad_reply, "} {") != null or
-                    std.mem.indexOf(u8, bad_reply, "}\n{") != null or
-                    std.mem.indexOf(u8, bad_reply, "}\r\n{") != null)
+                if (std.mem.indexOf(u8, raw, "} {") != null or
+                    std.mem.indexOf(u8, raw, "}\n{") != null or
+                    std.mem.indexOf(u8, raw, "}\r\n{") != null)
                 {
                     break :blk " You emitted TWO JSON objects. The `open_chat` field must be INSIDE the same object as `action`, e.g. {\"action\":\"question\",\"question\":\"…\",\"open_chat\":true} — NOT a separate {\"open_chat\":true} appended after.";
                 }
-                if (std.mem.indexOf(u8, bad_reply, "```") != null) {
+                if (std.mem.indexOf(u8, raw, "```") != null) {
                     break :blk " Drop the ```json fence — emit the raw object.";
                 }
                 // Heuristic for prose preamble: first non-whitespace
                 // char isn't `{`.
                 var i: usize = 0;
-                while (i < bad_reply.len and (bad_reply[i] == ' ' or bad_reply[i] == '\n' or bad_reply[i] == '\r' or bad_reply[i] == '\t')) : (i += 1) {}
-                if (i < bad_reply.len and bad_reply[i] != '{') {
+                while (i < raw.len and (raw[i] == ' ' or raw[i] == '\n' or raw[i] == '\r' or raw[i] == '\t')) : (i += 1) {}
+                if (i < raw.len and raw[i] != '{') {
                     break :blk " Drop any prose before the `{` — the FIRST non-whitespace character must be `{`.";
                 }
                 break :blk "";
