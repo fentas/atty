@@ -526,7 +526,7 @@ pub fn Module(comptime cfg: Config) type {
             defer client.deinit();
 
             // Heap-allocate the response buffer — at the default
-            // cfg.max_response_bytes=4KiB this is 64 KiB which is
+            // cfg.max_response_bytes=16 KiB this is 256 KiB which is
             // a substantial stack frame inside the worker thread.
             // Scales with the comptime knob, so a user raising
             // max_response_bytes shouldn't silently push the worker

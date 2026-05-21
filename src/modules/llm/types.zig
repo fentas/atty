@@ -565,14 +565,14 @@ pub const Config = struct {
     /// parens): per-attach memory has three pieces.
     /// - Heap (via `Runtime` directly): `captured_output_bytes`
     ///   (16 KB) + `last_assistant_json` (`max_response_bytes`,
-    ///   4 KB).
+    ///   16 KB).
     /// - Heap (via the `Shared` block): `req_buf`
     ///   (`max_prompt_bytes`, 2 KB) + `res_buf`
-    ///   (`max_response_bytes`, 4 KB) + `body_buf`
+    ///   (`max_response_bytes`, 16 KB) + `body_buf`
     ///   (`body_buf_bytes`, 32 KB).
     /// - Inline on `Runtime`: `inject_buf` + `pending_command`
-    ///   (each `max_response_bytes`, 8 KB total).
-    /// Default config: ~58 KB heap + 8 KB inline per instance.
+    ///   (each `max_response_bytes`, 32 KB total).
+    /// Default config: ~94 KB heap + 32 KB inline per instance.
     /// Sizes scale with whichever knob you bump.
     captured_output_bytes: comptime_int = 16 * 1024,
     /// Maximum conversation turns kept in memory. FIFO truncation
