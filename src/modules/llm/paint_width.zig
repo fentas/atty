@@ -181,6 +181,67 @@ pub fn truncateToCols(bytes: []const u8, max_cols: usize) []const u8 {
     return bytes[0..end];
 }
 
+/// Greedy word-wrap iterator. `next()` yields slices of `bytes` each at
+/// most `cols` display columns wide, breaking at the last space inside
+/// the slice when possible and hard-breaking on a codepoint boundary
+/// otherwise. Trailing spaces between chunks are consumed (so wrapping
+/// `"foo bar"` at cols=3 yields `"foo"`, `"bar"` — not `"foo"`, `" ba"`).
+pub const WrapIterator = struct {
+    bytes: []const u8,
+    i: usize = 0,
+    cols: usize,
+
+    pub fn next(it: *WrapIterator) ?[]const u8 {
+        if (it.i >= it.bytes.len) return null;
+        // Drop runs of plain spaces that landed between wrap points.
+        while (it.i < it.bytes.len and it.bytes[it.i] == ' ') it.i += 1;
+        if (it.i >= it.bytes.len) return null;
+
+        const start = it.i;
+        var ci = utf8Iter(it.bytes[start..]);
+        var used: usize = 0;
+        var fit_end: usize = 0;
+        var last_space_start: ?usize = null;
+        var last_space_after: usize = 0;
+        var before_step: usize = 0;
+        while (ci.next()) |c| {
+            const new_used = used + c.width;
+            if (new_used > it.cols) break;
+            if (c.cp == ' ') {
+                last_space_start = before_step;
+                last_space_after = ci.i;
+            }
+            used = new_used;
+            fit_end = ci.i;
+            before_step = ci.i;
+        }
+
+        if (start + fit_end >= it.bytes.len) {
+            it.i = it.bytes.len;
+            return it.bytes[start..it.bytes.len];
+        }
+
+        if (last_space_start) |sp| {
+            if (sp > 0) {
+                it.i = start + last_space_after;
+                return it.bytes[start .. start + sp];
+            }
+        }
+
+        // No space found inside this row — hard break.
+        if (fit_end == 0) {
+            var single = utf8Iter(it.bytes[start..]);
+            if (single.next()) |c2| fit_end = c2.byte_len;
+        }
+        it.i = start + fit_end;
+        return it.bytes[start .. start + fit_end];
+    }
+};
+
+pub fn wrapIter(bytes: []const u8, cols: usize) WrapIterator {
+    return .{ .bytes = bytes, .cols = if (cols == 0) 1 else cols };
+}
+
 test {
     _ = @import("paint_width_tests.zig");
 }

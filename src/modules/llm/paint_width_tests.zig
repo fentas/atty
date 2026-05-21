@@ -105,3 +105,73 @@ test "truncateToCols on invalid sequence doesn't loop forever" {
     const out = truncateToCols(&garbage, 10);
     try testing.expect(out.len <= garbage.len);
 }
+
+const wrapIter = mod.wrapIter;
+
+fn collectWraps(allocator: std.mem.Allocator, text: []const u8, cols: usize) ![][]const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    defer list.deinit(allocator);
+    var it = wrapIter(text, cols);
+    while (it.next()) |chunk| try list.append(allocator, chunk);
+    return list.toOwnedSlice(allocator);
+}
+
+test "wrapIter: short string fits in one chunk" {
+    const out = try collectWraps(testing.allocator, "hi", 5);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 1), out.len);
+    try testing.expectEqualSlices(u8, "hi", out[0]);
+}
+
+test "wrapIter: breaks at word boundary, drops the wrapping space" {
+    const out = try collectWraps(testing.allocator, "hello world", 5);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 2), out.len);
+    try testing.expectEqualSlices(u8, "hello", out[0]);
+    try testing.expectEqualSlices(u8, "world", out[1]);
+}
+
+test "wrapIter: multi-word picks the last fitting space" {
+    const out = try collectWraps(testing.allocator, "hello brave new world", 10);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualSlices(u8, "hello", out[0]);
+    try testing.expectEqualSlices(u8, "brave new", out[1]);
+    try testing.expectEqualSlices(u8, "world", out[2]);
+}
+
+test "wrapIter: long unbreakable token hard-breaks on codepoint boundary" {
+    const out = try collectWraps(testing.allocator, "supercalifragilistic", 5);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 4), out.len);
+    try testing.expectEqualSlices(u8, "super", out[0]);
+    try testing.expectEqualSlices(u8, "calif", out[1]);
+    try testing.expectEqualSlices(u8, "ragil", out[2]);
+    try testing.expectEqualSlices(u8, "istic", out[3]);
+}
+
+test "wrapIter: respects display width — wide char fills row even alone" {
+    const out = try collectWraps(testing.allocator, "\u{4E2D}\u{6587}", 2);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 2), out.len);
+    try testing.expectEqualSlices(u8, "\u{4E2D}", out[0]);
+    try testing.expectEqualSlices(u8, "\u{6587}", out[1]);
+}
+
+test "wrapIter: empty input → no chunks" {
+    const out = try collectWraps(testing.allocator, "", 10);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "wrapIter: all-whitespace input drops everything" {
+    const out = try collectWraps(testing.allocator, "     ", 10);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "wrapIter: cols=0 falls back to 1-col, still terminates" {
+    const out = try collectWraps(testing.allocator, "ab", 0);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 2), out.len);
+}

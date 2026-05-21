@@ -358,14 +358,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
         }
 
-        /// Inline-panel single-row turn renderer — the panel's
-        /// scrollback rows are precious, so each turn gets exactly
-        /// one row. `max_visible` caps the visible cols; longer
-        /// content gets a "[…]" ellipsis. Parses the envelope when
-        /// the shape suggests one and falls back to raw content
-        /// otherwise. The caller positions the row (CUP + clear);
-        /// this function only emits content bytes (and SGR resets).
-        fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize) !void {
+        /// Inline-panel turn renderer. Returns the number of rows
+        /// it consumed (>= 1). For envelope turns (parsed JSON) it
+        /// stays single-row — the structured `desc → cmd` summary
+        /// is meant to be compact. For raw prose (user / assistant
+        /// conclusion / observation) it WRAPS across rows so a
+        /// long reply doesn't get cut off mid-sentence: word-break
+        /// at the last space inside the row, hard-break on a
+        /// codepoint boundary if a token alone exceeds `max_visible`.
+        /// `max_rows` caps the wrap to keep one big turn from
+        /// pushing the rest of the scrollback off-panel; overflow
+        /// gets a dim "[…]" marker on the last row. Continuation
+        /// rows clear themselves (`\r\n\x1B[2K`) and start at col 1
+        /// — the caller's row counter must be advanced by the
+        /// return value before painting the next turn.
+        fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize, max_rows: usize) !usize {
             const c = turn.content;
             // Quick shape check: assistant turns from the dialog
             // protocol always start with `{` and contain `"action"`.
@@ -376,10 +383,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
             if (!looks_like_envelope) {
-                const slice = pw.truncateToCols(c, max_visible);
-                try writeSanitized(w, slice);
-                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
-                return;
+                return try renderWrappedRaw(w, c, max_visible, max_rows);
             }
             // Parse with the dialog parser so any "open_chat as
             // separate object" or trailing-prose drift falls back
@@ -397,12 +401,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
-                const slice = pw.truncateToCols(c, max_visible);
-                try writeSanitized(w, slice);
-                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
-                return;
+                return try renderWrappedRaw(w, c, max_visible, max_rows);
             };
-            // Per-action rendering — keep it one row each.
+            // Per-action rendering — single row each. The envelope
+            // shape is already compact (description → command);
+            // wrap would just break the structured summary across
+            // rows for no readability win.
             switch (parsed.action) {
                 .exec => {
                     const cmd = parsed.command();
@@ -436,6 +440,31 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (slice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
             }
+            return 1;
+        }
+
+        /// Word-wrap a raw turn across up to `max_rows` rows of
+        /// `cols` cols each. Continuation rows emit CR+LF + clear
+        /// so the caller's CUP for the next turn paints onto a
+        /// known row. Returns the number of rows consumed (>= 1
+        /// — empty content still claims the prefix row so the
+        /// `prefix:` chrome doesn't visually orphan).
+        fn renderWrappedRaw(w: *std.Io.Writer, content: []const u8, cols: usize, max_rows: usize) !usize {
+            if (content.len == 0 or max_rows == 0) return 1;
+            var it = pw.wrapIter(content, cols);
+            var rows: usize = 0;
+            var overflow = false;
+            while (it.next()) |chunk| {
+                if (rows >= max_rows) {
+                    overflow = true;
+                    break;
+                }
+                if (rows > 0) try w.writeAll("\r\n\x1B[2K");
+                try writeSanitized(w, chunk);
+                rows += 1;
+            }
+            if (overflow) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+            return if (rows == 0) 1 else rows;
         }
 
         /// Compute the (row, col) position the real terminal cursor
@@ -678,6 +707,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 scrollback_budget -= 1;
             }
             const start_turn: usize = if (visible_end > scrollback_budget) visible_end - scrollback_budget else 0;
+            // Per-turn wrap cap so a single long reply can't push
+            // the whole scrollback off-panel. 3 rows ≈ 240 chars at
+            // 80-col, plenty for a paragraph; longer turns end in
+            // a dim `[…]` and remain visible in the alt-screen
+            // overlay (Alt+Shift+C) which has the full DECSTBM
+            // scroll region.
+            const per_turn_max_rows: usize = 3;
             for (rt.turns[start_turn..visible_end]) |turn| {
                 if (row >= input_row) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
@@ -687,8 +723,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     .observation => "\x1B[2mOutput:\x1B[0m ",
                 };
                 w.writeAll(prefix) catch return false;
-                renderTurnContent(&w, turn, max_inline_visible) catch return false;
-                row += 1;
+                const remaining_rows: usize = @intCast(input_row - row);
+                const turn_rows_cap: usize = @min(per_turn_max_rows, remaining_rows);
+                const rows_used = renderTurnContent(&w, turn, max_inline_visible, turn_rows_cap) catch 1;
+                row += @intCast(rows_used);
             }
             if (rt.turns_len == 0) {
                 w.print("\x1B[{d};1H\x1B[2K", .{top_row + 1}) catch return false;
