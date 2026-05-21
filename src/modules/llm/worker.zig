@@ -588,6 +588,56 @@ pub fn Module(comptime cfg: Config) type {
             return task;
         }
 
+        /// No-deadline fast path: runs `client.fetch` inline on
+        /// the calling thread without any task / dupe machinery.
+        /// Only the response buffer is heap-allocated (and
+        /// returned to the caller for consumption + free). Used
+        /// when `timeout_ms == 0` — the caller has explicitly
+        /// opted out of the deadline, so the thread + dupes that
+        /// the deadline path needs for ownership transfer would
+        /// be pure overhead.
+        fn runHttpFetchInline(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            url_in: []const u8,
+            body_in: []const u8,
+            auth_header_in: ?[]const u8,
+            response_cap: usize,
+        ) FetchOutcome {
+            const response_buf = gpa.alloc(u8, response_cap) catch return .{ .kind = .oom };
+
+            var client: std.http.Client = .{ .allocator = gpa, .io = io };
+            defer client.deinit();
+
+            var headers_buf: [2]std.http.Header = undefined;
+            var headers_len: usize = 0;
+            headers_buf[headers_len] = .{ .name = "Content-Type", .value = "application/json" };
+            headers_len += 1;
+            if (auth_header_in) |h| {
+                headers_buf[headers_len] = .{ .name = "Authorization", .value = h };
+                headers_len += 1;
+            }
+
+            var response_writer: std.Io.Writer = .fixed(response_buf);
+            const fetched = client.fetch(.{
+                .location = .{ .url = url_in },
+                .method = .POST,
+                .payload = body_in,
+                .extra_headers = headers_buf[0..headers_len],
+                .response_writer = &response_writer,
+            }) catch {
+                gpa.free(response_buf);
+                return .{ .kind = .fetch_failed };
+            };
+
+            return .{
+                .kind = .ok,
+                .status = @intFromEnum(fetched.status),
+                .response_buf = response_buf,
+                .response_len = response_writer.end,
+            };
+        }
+
         pub fn runHttpFetchWithDeadline(
             gpa: std.mem.Allocator,
             io: std.Io,
@@ -597,17 +647,17 @@ pub fn Module(comptime cfg: Config) type {
             response_cap: usize,
             timeout_ms: u32,
         ) FetchOutcome {
+            // No-deadline mode: skip the task + dupe machinery
+            // entirely. Pre-PR behavior (a single inline
+            // `client.fetch`) is preserved bit-for-bit modulo the
+            // response_buf heap allocation, which was always
+            // there.
+            if (timeout_ms == 0) {
+                return runHttpFetchInline(gpa, io, url_in, body_in, auth_header_in, response_cap);
+            }
+
             const task = initHttpFetchTask(gpa, io, url_in, body_in, auth_header_in, response_cap) catch
                 return .{ .kind = .oom };
-
-            // No-deadline mode: run inline on the worker thread.
-            // Skips the thread spawn + heap-of-dupes the deadline
-            // path needs for ownership transfer — pure waste when
-            // there's no deadline to enforce.
-            if (timeout_ms == 0) {
-                task.run();
-                return consumeTask(task);
-            }
 
             const thread = std.Thread.spawn(.{}, HttpFetchTask.run, .{task}) catch {
                 task.deinit();

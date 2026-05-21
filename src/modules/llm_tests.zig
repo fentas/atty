@@ -1130,8 +1130,16 @@ test "runHttpFetchWithDeadline timeout_ms=0 runs inline + returns ok" {
 }
 
 test "HTTP request against a hung endpoint times out within the configured deadline" {
-    var threaded = std.Io.Threaded.init(testing.allocator, .{});
-    defer threaded.deinit();
+    // Use page_allocator (not testing.allocator) for the
+    // Threaded IO instance: the timeout path intentionally
+    // detaches the HTTP sub-thread, which keeps using this `io`
+    // long after the test returns. Tying its lifetime to the
+    // test process (via page_allocator + no `deinit`) avoids a
+    // UAF when the orphaned thread eventually completes — the
+    // testing.allocator + defer-deinit pattern used elsewhere
+    // would tear down `io` while the orphan still holds a
+    // pointer to it.
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
     const real_io = threaded.io();
 
     const listen_fd = libc.socket(libc.AF_INET, libc.SOCK_STREAM, libc.IPPROTO_TCP);
