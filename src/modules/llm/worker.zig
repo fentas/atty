@@ -451,9 +451,21 @@ pub fn Module(comptime cfg: Config) type {
             // the fixed writer overflows; we catch it and return 0
             // (no partial parse — a truncated JSON envelope is
             // useless anyway).
+            //
+            // Heap-allocated (was on the stack at 64 KiB; the bump
+            // to 16 KiB `max_response_bytes` made that 256 KiB,
+            // which is a substantial frame inside the worker
+            // thread). Scales with the comptime knob so a user
+            // raising `max_response_bytes` doesn't silently push
+            // the worker stack toward its limit.
             const response_cap = cfg.max_response_bytes * 16;
-            var response_buf: [response_cap]u8 = undefined;
-            var response_writer: std.Io.Writer = .fixed(&response_buf);
+            const response_buf = gpa.alloc(u8, response_cap) catch return RequestResult{
+                .cmd_len = 0,
+                .exp_len = 0,
+                .err_len = writeStatic(error_out, "out of memory allocating response buffer"),
+            };
+            defer gpa.free(response_buf);
+            var response_writer: std.Io.Writer = .fixed(response_buf);
 
             const fetched = client.fetch(.{
                 .location = .{ .url = url },
@@ -526,7 +538,7 @@ pub fn Module(comptime cfg: Config) type {
             defer client.deinit();
 
             // Heap-allocate the response buffer — at the default
-            // cfg.max_response_bytes=4KiB this is 64 KiB which is
+            // cfg.max_response_bytes=16 KiB this is 256 KiB which is
             // a substantial stack frame inside the worker thread.
             // Scales with the comptime knob, so a user raising
             // max_response_bytes shouldn't silently push the worker
