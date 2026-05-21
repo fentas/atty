@@ -331,7 +331,22 @@ pub fn configure(comptime cfg: Config) type {
                 client.read_timeout_ms = cfg.daemon_timeout_ms;
                 rt.daemon = client;
             }
-            const result = try rt.daemon.?.classifyOrErr(line, .{});
+            // Forward the live context so the daemon can apply
+            // PID-keyed threat-map upgrades (server.rs:391 promotes
+            // Safe → Warn/Block when the source PID's tree is
+            // already marked high-risk by an earlier confirmed
+            // command). Without `ctx.shell_pid` here, the V2-J
+            // threat-accumulator + V2-J-2 auto-Block path on the
+            // daemon stays effectively dead — atty marks the PID
+            // but never sends it back on the next classify.
+            // `ctx.incognito` lets the daemon adjust telemetry /
+            // logging policy when the user has toggled it; shell
+            // string would need plumbing through Runtime first, so
+            // left null for now.
+            const result = try rt.daemon.?.classifyOrErr(line, .{
+                .pid = ctx.shell_pid,
+                .incognito = ctx.incognito,
+            });
             // Lazy seed of in-proc trust set from the daemon's
             // commands.trusted.txt. Runs once per atty session after
             // the FIRST successful daemon classify — by then the

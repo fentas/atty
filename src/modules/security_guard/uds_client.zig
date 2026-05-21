@@ -433,7 +433,7 @@ pub const Client = struct {
     }
 };
 
-fn buildClassifyJson(
+pub fn buildClassifyJson(
     w: *std.Io.Writer,
     id: u64,
     command: []const u8,
