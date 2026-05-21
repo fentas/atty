@@ -433,7 +433,7 @@ pub const Client = struct {
     }
 };
 
-fn buildClassifyJson(
+pub fn buildClassifyJson(
     w: *std.Io.Writer,
     id: u64,
     command: []const u8,
@@ -442,6 +442,8 @@ fn buildClassifyJson(
     try w.print("{{\"id\":{d},\"method\":\"classify\",\"command\":\"", .{id});
     try writeEscaped(w, command);
     try w.writeAll("\",\"context\":{");
+    // Field order is incidental — the daemon parses by name
+    // (serde_json on the Rust side ignores field order).
     var first = true;
     if (ctx.pid) |pid| {
         try w.print("\"pid\":{d}", .{pid});

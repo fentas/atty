@@ -110,3 +110,47 @@ test "Client.health on missing socket → false (doesn't panic)" {
     defer c.deinit();
     try testing.expect(!c.health());
 }
+
+test "buildClassifyJson — empty context emits empty context object" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try mod.buildClassifyJson(&w, 7, "ls -la", .{});
+    const out = buf[0..w.end];
+    try testing.expectEqualStrings(
+        "{\"id\":7,\"method\":\"classify\",\"command\":\"ls -la\",\"context\":{}}\n",
+        out,
+    );
+}
+
+test "buildClassifyJson — pid forwarded into wire envelope" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try mod.buildClassifyJson(&w, 7, "rm -rf /", .{ .pid = 4242 });
+    const out = buf[0..w.end];
+    try testing.expectEqualStrings(
+        "{\"id\":7,\"method\":\"classify\",\"command\":\"rm -rf /\",\"context\":{\"pid\":4242}}\n",
+        out,
+    );
+}
+
+test "buildClassifyJson — pid + incognito both forwarded" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try mod.buildClassifyJson(&w, 7, "cmd", .{ .pid = 4242, .incognito = true });
+    const out = buf[0..w.end];
+    try testing.expectEqualStrings(
+        "{\"id\":7,\"method\":\"classify\",\"command\":\"cmd\",\"context\":{\"pid\":4242,\"incognito\":true}}\n",
+        out,
+    );
+}
+
+test "buildClassifyJson — incognito only (no pid)" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try mod.buildClassifyJson(&w, 7, "cmd", .{ .incognito = true });
+    const out = buf[0..w.end];
+    try testing.expectEqualStrings(
+        "{\"id\":7,\"method\":\"classify\",\"command\":\"cmd\",\"context\":{\"incognito\":true}}\n",
+        out,
+    );
+}
