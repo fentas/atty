@@ -527,9 +527,21 @@ pub const Config = struct {
     /// - `.never` — ignore the flag entirely; only user-initiated
     ///   Alt+C opens the overlay
     overlay_open_policy: OverlayOpenPolicy = .notify,
-    /// Per-request timeout in ms. Stored for future use; not yet wired
-    /// to the HTTP client — requests may block indefinitely on a slow
-    /// or unreachable endpoint until the OS TCP timeout fires.
+    /// Per-request timeout in ms for HTTP providers. The worker
+    /// runs `client.fetch` on a sub-thread and polls completion
+    /// against this deadline; on timeout the proxy gets back
+    /// `HTTP request timed out (Nms)` so it clears `in_flight`
+    /// and surfaces the diagnostic. The detached sub-thread keeps
+    /// running in the background; it frees its own heap state
+    /// when `client.fetch` eventually returns (typically when the
+    /// OS TCP timeout fires). Until then the orphaned task holds
+    /// ~`max_response_bytes * 16` bytes — repeated requests
+    /// against a blackholed endpoint can accumulate several
+    /// orphans before any of them complete. `0` disables the
+    /// deadline (worker blocks on the OS TCP timeout).
+    /// Subprocess providers have their own deadline at
+    /// `SubprocessProvider.timeout_ms`, enforced via SIGTERM /
+    /// SIGKILL on the child process group.
     timeout_ms: u32 = 30_000,
     /// Maximum response size we'll store. The model may emit more;
     /// we truncate. Bumped from the original 4 KB default because
