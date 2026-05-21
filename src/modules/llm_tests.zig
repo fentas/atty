@@ -1070,6 +1070,65 @@ fn mockServerHungHandler(ctx: *MockServerCtx) void {
     }
 }
 
+test "runHttpFetchWithDeadline timeout_ms=0 runs inline + returns ok" {
+    // Pins the no-deadline fast-path: `timeout_ms == 0` should
+    // skip the thread spawn and run the fetch inline on the
+    // worker thread, then consume the task normally. A regression
+    // here (e.g. inline path failing to publish the outcome or
+    // returning a wrong FetchKind) would otherwise ship silent
+    // because all existing HTTP tests go through the deadlined
+    // path.
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    const listen_fd = libc.socket(libc.AF_INET, libc.SOCK_STREAM, libc.IPPROTO_TCP);
+    if (listen_fd < 0) return error.SocketFailed;
+    defer _ = libc.close(listen_fd);
+    const one: c_int = 1;
+    _ = libc.setsockopt(listen_fd, libc.SOL_SOCKET, libc.SO_REUSEADDR, &one, @sizeOf(c_int));
+    var sa_in: libc.sockaddr_in = .{
+        .family = libc.AF_INET,
+        .port = 0,
+        .addr = std.mem.nativeToBig(u32, 0x7f000001),
+    };
+    if (libc.bind(listen_fd, &sa_in, @sizeOf(libc.sockaddr_in)) < 0) return error.BindFailed;
+    if (libc.listen(listen_fd, 1) < 0) return error.ListenFailed;
+    var bound_addr: libc.sockaddr_in = undefined;
+    var bound_len: u32 = @sizeOf(libc.sockaddr_in);
+    if (libc.getsockname(listen_fd, &bound_addr, &bound_len) < 0) return error.GetSockNameFailed;
+    const port = std.mem.bigToNative(u16, bound_addr.port);
+
+    const body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}";
+    var mock_ctx: MockServerCtx = .{ .listen_fd = listen_fd, .response_body = body };
+    const mock_thread = try std.Thread.spawn(.{}, mockServerHandler, .{&mock_ctx});
+    defer mock_thread.join();
+
+    const worker = @import("llm/worker.zig");
+    const M = worker.Module(.{ .provider = .{ .http = .{} } });
+
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/v1", .{port});
+
+    const outcome = M.runHttpFetchWithDeadline(
+        testing.allocator,
+        real_io,
+        url,
+        "{\"x\":1}",
+        null,
+        4096,
+        0, // no-deadline — inline path
+    );
+    // testing.allocator is fine here: the inline path always
+    // owns + frees its task before returning, so no orphan
+    // can outlive the test.
+    try testing.expectEqual(M.FetchKind.ok, outcome.kind);
+    try testing.expect(outcome.response_buf != null);
+    defer testing.allocator.free(outcome.response_buf.?);
+    try testing.expectEqual(@as(u16, 200), outcome.status);
+    try testing.expect(outcome.response_len > 0);
+}
+
 test "HTTP request against a hung endpoint times out within the configured deadline" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
