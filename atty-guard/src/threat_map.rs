@@ -331,27 +331,13 @@ mod tests {
         assert_eq!(m.get(pid), ThreatLevel::High);
     }
 
-    #[test]
-    fn get_preserves_entry_when_proc_read_fails_transiently() {
-        // ProcRead::Error from pid_starttime (hidepid, transient
-        // I/O) MUST NOT trigger eviction — that would silently
-        // downgrade High/Critical to Low on noise. We can't
-        // synthesize a real transient /proc error in a unit test,
-        // but we can pin the contract by directly inspecting that
-        // the match in get() only evicts on Found-mismatch or
-        // NotFound. This test is a thin sentinel — a refactor
-        // that mishandles the Error arm would fail the asserts
-        // below because the seeded entry would survive only when
-        // the live starttime DOES match.
-        let m = ThreatMap::new();
-        let pid = std::process::id();
-        // Seed with the REAL starttime so get() matches and
-        // returns the stored level. This proves the Found-match
-        // branch works as expected — the Error branch shares
-        // the same "preserve" outcome.
-        assert!(m.set(pid, ThreatLevel::High));
-        assert_eq!(m.get(pid), ThreatLevel::High);
-    }
+    // Note: `ProcRead::Error` arm of `get()` (preserve stored
+    // level on transient /proc read failure) is structurally
+    // documented in `threat_map.rs:get()` but not unit-testable
+    // without injecting a fake /proc reader. The behavior is
+    // enforced by the explicit `ProcRead::Error(_) => stored.level`
+    // match arm — any refactor changing that branch is a visible
+    // code change, not a silent regression.
 
     #[test]
     fn get_evicts_when_starttime_mismatches() {
