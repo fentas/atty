@@ -534,9 +534,9 @@ pub const Config = struct {
     /// Maximum response size we'll store. The model may emit more;
     /// we truncate. Bumped from the original 4 KB default because
     /// modern chat-mode responses (especially from smaller local
-    /// models that run on) routinely exceed 4 KB — the user-
-    /// visible failure mode was a turn cutting off mid-sentence
-    /// with no indicator. 16 KB fits most verbose replies; bump
+    /// models that tend to be verbose) routinely exceed 4 KB —
+    /// the user-visible failure mode was a turn cutting off mid-
+    /// sentence with no indicator. 16 KB fits most replies; bump
     /// further for models that emit walls of markdown.
     max_response_bytes: comptime_int = 16 * 1024,
     /// Maximum prompt-body size (line.len - prefix.len). Larger
