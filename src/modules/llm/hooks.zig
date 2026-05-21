@@ -1605,18 +1605,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
             // Stash the raw response so it becomes the next
             // assistant_exec turn. Done before parsing so we have
-            // it whether or not the JSON parses cleanly.
-            if (rt.last_assistant_json) |old| rt.allocator.free(old);
-            rt.last_assistant_json = null;
-            rt.last_assistant_json_len = 0;
+            // it whether or not the JSON parses cleanly. Allocate
+            // the new slice FIRST and only swap on success — on OOM
+            // the previously stashed JSON survives so retry paths
+            // (`requestParseRetry`) can still echo back the prior
+            // malformed reply.
             const stash_n = @min(raw.len, cfg.max_response_bytes);
             if (stash_n > 0) {
-                const buf = rt.allocator.alloc(u8, stash_n) catch null;
-                if (buf) |b| {
-                    @memcpy(b, raw[0..stash_n]);
-                    rt.last_assistant_json = b;
+                if (rt.allocator.alloc(u8, stash_n)) |new_stash| {
+                    @memcpy(new_stash, raw[0..stash_n]);
+                    if (rt.last_assistant_json) |old| rt.allocator.free(old);
+                    rt.last_assistant_json = new_stash;
                     rt.last_assistant_json_len = stash_n;
-                }
+                } else |_| {}
             }
 
             var parsed: DialogResponse = .{};
