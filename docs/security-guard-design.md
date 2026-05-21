@@ -21,7 +21,7 @@ Status: **All V1 + V2 slices shipped (atty side + sidecar + ONNX SLM + eBPF + OS
 | V2-F      | Live OSV.dev lookup for `npm install <pkg>` Tier-1 misses.                            | #118  | ✅ merged       |
 | V2-G      | AtomMatcher — Aho-Corasick over `flagged_atoms.txt` for thousand-scale patterns.       | #119  | ✅ merged       |
 | V2-H      | Sliding-context-window for SLM — `OnnxBackend` gets ±N bytes around the AC hit.        | #120  | ✅ merged       |
-| V2-I      | Baked-in atom fetcher — periodic refresh of `flagged_atoms.txt`; one-shot CLI + cron-style interval mode. GTFOBins shipped first.                  | #121  | ✅ merged       |
+| V2-I      | Baked-in atom fetcher — periodic refresh of `atoms.system.txt` (runtime overlay; bundled `flagged_atoms.txt` stays compile-time embedded). One-shot `--update-atoms-now` + cron-style `--atoms-update-interval`. GTFOBins shipped first.                  | #121  | ✅ merged       |
 | V2-I-2    | Sigma source (sanitized) — extend the V2-I fetcher with the SigmaHQ Linux rule corpus. (LOLBAS prototyped + dropped: Windows-native, not useful for Linux shells.) | #125  | ✅ merged       |
 | V2-J      | Threat-level accumulator — multi-hit Tier-1 + Tier-2 SLM combined via independent-probability math; multi-atom commands surface a higher combined confidence. | #126  | ✅ merged       |
 | V2-J-2    | Auto-Block escalation — opt-in TOML knob `[accumulator] block_threshold` lets the accumulator escalate Warn → Block when combined confidence reaches the configured value AND ≥ 2 distinct signals fired; atty side renders a red `REFUSED` line + clears readline instead of prompting. | #127  | ✅ merged       |
@@ -45,14 +45,24 @@ The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable t
 
 ### What V2-I brings (after V2-H)
 
-- Daemon-internal fetcher: `atty-guard atoms update` (one-shot) + `atty-guard --atoms-update-interval 6h` (cron-style background thread).
-- Sources, opt-in via TOML config (`[atoms.sources]`):
-  - **Sigma rules** (sanitized — `detection.selection.CommandLine|contains` blocks from the SigmaHQ Linux corpus).
+- Daemon CLI surface: `atty-guard --update-atoms-now` (one-shot
+  refresh + exit) + `atty-guard --atoms-update-interval 6h`
+  (background cron-style refresh thread).
+- Source selection via `--atoms-sources gtfobins,sigma` (default
+  = the full enabled set):
   - **GTFOBins** (`functions.shell` from per-binary YAML manifests).
-  - **OSV** (re-uses the existing live-lookup path; per-batch dump rather than per-classify query).
-  - LOLBAS was prototyped but dropped — the corpus is Windows-native and didn't surface Linux shell IOCs in practice. Removed from `atom_fetcher.rs` ahead of the V2-I-2 ship.
-- Atomic tmp+rename install into `$STATE_DIRECTORY/atoms.system.txt` (default `/var/lib/atty-guard/atoms.system.txt`); ownership-gated load on the daemon side.
-- Feature-gated `atoms-fetch` so a build without the network deps still ships.
+  - **Sigma rules** (sanitized — `CommandLine|contains` selections
+    from the SigmaHQ Linux corpus).
+- Sources NOT in the fetcher:
+  - **OSV** is a separate live-lookup feature (`osv-live`) that
+    runs per-classify, not a bulk dump. Different code path.
+  - **LOLBAS** was prototyped and dropped — Windows-native, didn't
+    surface Linux shell IOCs in practice.
+- Atomic tmp+rename install into `$STATE_DIRECTORY/atoms.system.txt`
+  (default `/var/lib/atty-guard/atoms.system.txt`); ownership-gated
+  load on the daemon side.
+- Feature-gated `atoms-fetch` so a build without the network deps
+  still ships.
 
 After V2-G/H/I land, the threat-level accumulator across the AC + precise + SLM tiers becomes the natural follow-up (V2-J).
 
