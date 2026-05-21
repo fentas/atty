@@ -350,7 +350,8 @@ impl From<std::io::Error> for LockError {
 /// `File` whose lifetime carries the lock — caller must keep it
 /// alive for the daemon's lifetime. Drop = lock release.
 fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::File, LockError> {
-    use std::os::unix::io::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
 
     // Lock file lives next to the socket (same parent dir,
     // identical access policy — SystemD-created RuntimeDirectory
@@ -359,18 +360,35 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     lock_path.push(".lock");
     let lock_path: std::path::PathBuf = lock_path.into();
 
-    // O_CREAT | O_RDWR so we can lock. Permissions are the
-    // default `0666 & ~umask` (usually 0644 under the unit's
-    // default umask); contents are irrelevant — only the
-    // in-kernel flock state matters — and the file lives in
-    // the daemon's RuntimeDirectory which already gates access.
-    // Don't truncate so concurrent open + lock races stay safe.
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    // Open with `O_RDONLY | O_CREAT` via raw libc — Rust's
+    // `OpenOptions` refuses read-only + create. `flock` doesn't
+    // require write access, and forcing O_RDWR would block
+    // restart against a leftover `.lock` file created with
+    // 0644 perms by a previous run under a different umask.
+    // Contents are irrelevant — only the in-kernel flock state
+    // matters — and a concurrent O_CREAT race is safe (both
+    // processes see the same inode; only one wins the flock).
+    extern "C" {
+        fn open(path: *const std::os::raw::c_char, flags: std::os::raw::c_int, mode: std::os::raw::c_uint)
+            -> std::os::raw::c_int;
+    }
+    const O_RDONLY: std::os::raw::c_int = 0;
+    const O_CREAT: std::os::raw::c_int = 0o100;
+    const O_CLOEXEC: std::os::raw::c_int = 0o2000000;
+
+    let mut path_z = lock_path.as_os_str().as_bytes().to_vec();
+    path_z.push(0);
+    let fd = unsafe {
+        open(
+            path_z.as_ptr() as *const std::os::raw::c_char,
+            O_RDONLY | O_CREAT | O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(LockError::Io(std::io::Error::last_os_error()));
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
 
     // flock with LOCK_EX | LOCK_NB. Linux constants:
     //   LOCK_EX = 2, LOCK_NB = 4.
@@ -381,17 +399,27 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     const LOCK_EX: std::os::raw::c_int = 2;
     const LOCK_NB: std::os::raw::c_int = 4;
 
-    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-    if rc == 0 {
-        return Ok(file);
+    // Retry on EINTR — a signal interruption isn't a real
+    // failure, just a kernel quirk that aborts the syscall.
+    // Loop bound prevents pathological signal storms from
+    // hanging startup forever (after N retries, give up).
+    let mut attempts: u32 = 0;
+    loop {
+        let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+        if rc == 0 {
+            return Ok(file);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted && attempts < 8 {
+            attempts += 1;
+            continue;
+        }
+        // EWOULDBLOCK / EAGAIN → contended.
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            return Err(LockError::AlreadyRunning);
+        }
+        return Err(LockError::Io(err));
     }
-    let err = std::io::Error::last_os_error();
-    // EWOULDBLOCK / EAGAIN → contended. Both spell out as
-    // ErrorKind::WouldBlock on Linux.
-    if err.kind() == std::io::ErrorKind::WouldBlock {
-        return Err(LockError::AlreadyRunning);
-    }
-    Err(LockError::Io(err))
 }
 
 fn main() -> std::io::Result<()> {
@@ -504,10 +532,37 @@ fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     };
-    // Lock acquired — safe to unlink any stale socket left by a
+    // Lock acquired — safe to unlink any STALE SOCKET left by a
     // previous crashed instance (the kernel already cleared its
-    // flock, so we know there's no live owner).
-    let _ = std::fs::remove_file(&socket);
+    // flock, so no live owner). Guard against `--socket`
+    // pointing at a non-socket regular file: silently unlinking
+    // would delete arbitrary data the operator didn't expect.
+    // Only unlink when `symlink_metadata` confirms a socket type.
+    match std::fs::symlink_metadata(&socket) {
+        Ok(md) => {
+            use std::os::unix::fs::FileTypeExt;
+            if md.file_type().is_socket() {
+                let _ = std::fs::remove_file(&socket);
+            } else {
+                eprintln!(
+                    "atty-guard: --socket {} exists and is not a Unix socket — refusing to overwrite",
+                    socket.display()
+                );
+                std::process::exit(1);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Common case on first run / clean restart: no
+            // stale file to remove. Bind below will create it.
+        }
+        Err(e) => {
+            eprintln!(
+                "atty-guard: cannot stat --socket {}: {e}",
+                socket.display()
+            );
+            std::process::exit(1);
+        }
+    }
 
     if cli.verbosity >= 1 {
         eprintln!(
