@@ -691,8 +691,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // the terminal is too small for base + inline_chat_rows;
             // panel_rows = live - base derives the true (possibly
             // clamped) panel height.
+            // Effective panel height — `chat_inline_rows_override`
+            // (set by Ctrl+Alt+Up/Down on the live session) wins
+            // over the comptime `cfg.inline_chat_rows` default.
+            // `ctx.statusbar_reserve` reflects the proxy's clamped
+            // reservation; it tracks the override on the next tick
+            // after the grow/shrink action via the dispatcher's
+            // applyReserveRows path.
+            const effective_inline_rows: u16 = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
             const live_reserve: u16 = ctx.statusbar_reserve orelse
-                (base_reserve + cfg.inline_chat_rows + cfg.inline_chat_top_gap);
+                (base_reserve + effective_inline_rows + cfg.inline_chat_top_gap);
             // Panel needs at least 3 rows after the top gap is taken
             // out: divider + ≥1 scrollback + input. Below that, the
             // `scrollback_rows = panel_rows - 2` calc later in this

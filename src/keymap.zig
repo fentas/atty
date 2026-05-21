@@ -186,6 +186,14 @@ pub const Action = union(enum) {
     /// shell unchanged.
     chat_scroll_page_up,
     chat_scroll_page_down,
+    /// Grow / shrink the inline chat panel by one row, bounded by
+    /// `inline_chat_rows_min` and the available terminal height.
+    /// Stores the live height in `Runtime.chat_inline_rows_override`
+    /// — survives the chat session but resets when the panel closes.
+    /// Default **Ctrl+Alt+Up / Ctrl+Alt+Down** (dual-encoded for
+    /// kitty kbd + legacy modified-arrow form).
+    llm_chat_inline_grow,
+    llm_chat_inline_shrink,
     /// Render a one-screen cheat-sheet of every keybinding atty
     /// surfaces — pulled from `config.keymap.bindings`. Scrolls into
     /// shell history (like the LLM conclusion banner) so it stays

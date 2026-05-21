@@ -343,6 +343,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // post-Ctrl+D bytes don't land in the
                             // now-closed panel's buffer.
                             rt.chat_inline_open = false;
+                            rt.chat_inline_rows_override = null;
                             rt.chat_inline_paint_pending = true;
                             return .swallow;
                         },
@@ -859,6 +860,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // to zero. Mirror of the inline-toggle arm.
                         if (rt.chat_inline_open) {
                             rt.chat_inline_open = false;
+                            rt.chat_inline_rows_override = null;
                             rt.chat_inline_paint_pending = true;
                         }
                         rt.chat_overlay_open = true;
@@ -911,6 +913,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // armed snap doesn't override a fresh user
                     // focus choice on the next `;D`.
                     rt.chat_refocus_pending = false;
+                    if (!rt.chat_inline_open) {
+                        // Drop the live height override on close so
+                        // the next open starts at `cfg.inline_chat_rows`
+                        // again. The user opted into a bigger panel
+                        // for THIS session, not as a persistent
+                        // preference.
+                        rt.chat_inline_rows_override = null;
+                    }
                     if (rt.chat_inline_open) {
                         // Disarm the conclusion auto-emit latch so the
                         // banner doesn't fire while inline chat is
@@ -993,6 +1003,25 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (target_overlay) {
                         rt.chat_overlay_paint_pending = true;
                     } else {
+                        rt.chat_inline_paint_pending = true;
+                    }
+                    return true;
+                },
+                .llm_chat_inline_grow, .llm_chat_inline_shrink => {
+                    if (!rt.chat_inline_open) return false;
+                    const current: u16 = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
+                    // Upper bound is loose — proxy.zig's
+                    // `applyReserveRows` clamps against the live
+                    // terminal height. Hard-cap at u16/4 here just
+                    // so a stuck-key user can't push the override
+                    // into nonsensical territory.
+                    const next: u16 = switch (action) {
+                        .llm_chat_inline_grow => if (current < std.math.maxInt(u16) / 4) current + 1 else current,
+                        .llm_chat_inline_shrink => if (current > 3) current - 1 else current,
+                        else => unreachable,
+                    };
+                    if (next != current) {
+                        rt.chat_inline_rows_override = next;
                         rt.chat_inline_paint_pending = true;
                     }
                     return true;

@@ -345,6 +345,16 @@ pub fn configure(comptime cfg: Config) type {
             // sees PageUp normally.
             .{ .bytes = keymap.key("PageUp"), .action = .chat_scroll_page_up, .label = "PageUp", .description = "chat: scroll back one page (when chat surface is open)" },
             .{ .bytes = keymap.key("PageDown"), .action = .chat_scroll_page_down, .label = "PageDown", .description = "chat: scroll forward one page (when chat surface is open)" },
+            // Inline panel resize — grow/shrink the panel one row
+            // per press. Legacy modified-arrow + kitty kbd CSI-u
+            // dual encoding (modifier 7 = Shift+Alt+Ctrl, 8 = Meta,
+            // 4 = Ctrl+Alt for the kitty kbd modifier encoding).
+            // Ctrl+Alt+Arrow is rarely consumed by terminals so
+            // the binding lands reliably.
+            .{ .bytes = keymap.key("Ctrl+Alt+Up"), .action = .llm_chat_inline_grow, .label = "Ctrl+Alt+Up", .description = "inline chat: grow panel by one row" },
+            .{ .bytes = "\x1b[1;7A", .action = .llm_chat_inline_grow },
+            .{ .bytes = keymap.key("Ctrl+Alt+Down"), .action = .llm_chat_inline_shrink, .label = "Ctrl+Alt+Down", .description = "inline chat: shrink panel by one row" },
+            .{ .bytes = "\x1b[1;7B", .action = .llm_chat_inline_shrink },
         };
 
         // HTTP worker thread + request/response plumbing extracted
@@ -826,6 +836,12 @@ pub fn configure(comptime cfg: Config) type {
             /// never exceeds `turns_len - 1` (one turn stays visible).
             chat_view_offset: usize = 0,
             chat_inline_view_offset: usize = 0,
+            /// Live height override for the inline panel. `null` ⇒
+            /// `cfg.inline_chat_rows`; Ctrl+Alt+Up bumps, Ctrl+Alt+Down
+            /// trims, both clamped to `[3, ~]`. Resets to `null` on
+            /// panel close so the next open starts at the configured
+            /// default again.
+            chat_inline_rows_override: ?u16 = null,
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -1167,7 +1183,8 @@ pub fn configure(comptime cfg: Config) type {
         /// between the shell prompt and the panel divider).
         pub fn extraReserveRows(rt: *Runtime) u16 {
             if (!rt.chat_inline_open) return 0;
-            return cfg.inline_chat_rows + cfg.inline_chat_top_gap;
+            const rows = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
+            return rows + cfg.inline_chat_top_gap;
         }
 
         /// SIGWINCH hook — dispatcher calls this after the statusbar

@@ -1018,6 +1018,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         .chat_scroll_down,
                         .chat_scroll_page_up,
                         .chat_scroll_page_down,
+                        .llm_chat_inline_grow,
+                        .llm_chat_inline_shrink,
                         => {
                             // Hand the action to the llm module via
                             // the generic onAction dispatch. Module

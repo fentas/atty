@@ -1796,3 +1796,120 @@ test "inline chat: Enter on all-whitespace buffer (incl. embedded newlines) is a
     try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
     try testing.expectEqual(@as(usize, 0), rt.turns_len);
 }
+
+test "inline chat: Ctrl+Alt+Up grows panel height by one row" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // No-op when the panel is closed — action returns false so the
+    // keystroke can flow through to whatever else binds it.
+    try testing.expectEqual(false, try L.onAction(&rt, &ctx, .llm_chat_inline_grow));
+    try testing.expectEqual(@as(?u16, null), rt.chat_inline_rows_override);
+
+    rt.chat_inline_open = true;
+    // Grow once — override jumps from null (= cfg default, 10) to 11.
+    try testing.expectEqual(true, try L.onAction(&rt, &ctx, .llm_chat_inline_grow));
+    try testing.expect(rt.chat_inline_rows_override != null);
+    try testing.expectEqual(@as(u16, 11), rt.chat_inline_rows_override.?);
+
+    // Shrink twice — once back to 10, once to 9.
+    _ = try L.onAction(&rt, &ctx, .llm_chat_inline_shrink);
+    _ = try L.onAction(&rt, &ctx, .llm_chat_inline_shrink);
+    try testing.expectEqual(@as(u16, 9), rt.chat_inline_rows_override.?);
+}
+
+test "inline chat: shrink clamps at min height (3)" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_inline_rows_override = 3;
+    // Already at min — shrink is a no-op (still consumes the action).
+    try testing.expectEqual(true, try L.onAction(&rt, &ctx, .llm_chat_inline_shrink));
+    try testing.expectEqual(@as(u16, 3), rt.chat_inline_rows_override.?);
+}
+
+test "inline chat: closing the panel clears the height override" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_inline_rows_override = 12;
+    // Alt+C closes the panel — handler should drop the override.
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expectEqual(false, rt.chat_inline_open);
+    try testing.expectEqual(@as(?u16, null), rt.chat_inline_rows_override);
+}
