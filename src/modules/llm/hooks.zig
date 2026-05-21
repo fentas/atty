@@ -1696,6 +1696,36 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     return rt.pending_command[0..rt.pending_command_len];
                 },
                 .done => {
+                    // Chat mode: `done` from the LLM means "I've
+                    // said what I want to say." It's a turn, not a
+                    // conversation-end. Push the reason as an
+                    // assistant turn so the user sees the reply in
+                    // the chat scrollback, arm the paint latch, and
+                    // leave the surface open — the user closes the
+                    // panel themselves via Alt+C / Alt+Shift+C.
+                    // Suppresses the inline conclusion banner (the
+                    // panel IS the UI) and skips dialogReset (chat
+                    // is open-ended; future replies stay coherent).
+                    if (currentDispatchMode(rt) == .chat) {
+                        const reason = parsed.reason();
+                        if (reason.len > 0) {
+                            const reason_copy = rt.allocator.dupe(u8, reason) catch {
+                                latchErr(rt, "out of memory pushing chat reply");
+                                return null;
+                            };
+                            pushTurn(rt, .assistant_exec, reason_copy) catch {
+                                rt.allocator.free(reason_copy);
+                                latchErr(rt, "out of memory pushing chat reply");
+                                return null;
+                            };
+                        }
+                        if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                        if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+                        // Stay in chat-active state; next user turn
+                        // fires another dialog request.
+                        rt.dialog_state = .idle;
+                        return null;
+                    }
                     // Tally the conversation so the user gets a
                     // glance-able summary of what just happened —
                     // useful both for the loop they just exited
