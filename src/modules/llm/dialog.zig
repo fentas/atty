@@ -943,7 +943,33 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             w.writeAll("\x1B[0m\r\n") catch {};
 
             if (reason.len > 0) {
-                w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{reason}) catch {};
+                // Multi-line reason: each line gets its own `│ `
+                // prefix so an LLM prose reply with embedded `\n`
+                // renders as proper banner rows. A bare `{s}`
+                // print would emit raw LF — terminal advances the
+                // row but keeps the column, so the next character
+                // (a subsequent banner row OR the closing border)
+                // lands wherever the reason left off, with the
+                // visible right-drift that motivated this fix.
+                var it = std.mem.splitScalar(u8, reason, '\n');
+                var first = true;
+                while (it.next()) |raw_line| {
+                    // Trim trailing `\r` so a CRLF doesn't double-
+                    // count, and trim trailing whitespace so a
+                    // stray space at the EOL doesn't pad the row.
+                    var line = raw_line;
+                    if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+                    while (line.len > 0 and (line[line.len - 1] == ' ' or line[line.len - 1] == '\t')) line = line[0 .. line.len - 1];
+                    if (first) {
+                        w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{line}) catch {};
+                        first = false;
+                    } else {
+                        // Continuation rows indent 2 cols past the
+                        // ✓ marker so the prose aligns under the
+                        // first row's reason text.
+                        w.print("\x1B[2m\u{2502}\x1B[0m   {s}\r\n", .{line}) catch {};
+                    }
+                }
             } else {
                 w.writeAll("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m done\r\n") catch {};
             }
@@ -1063,6 +1089,55 @@ test "Module.captureConclusion writes reason + counts into the buffer" {
     // prompt's cursor column).
     try testing.expect(std.mem.startsWith(u8, out, "\r\n"));
     try testing.expect(!std.mem.startsWith(u8, out, "\n\n"));
+}
+
+test "Module.captureConclusion wraps multi-line reason — every row keeps the `│ ` prefix" {
+    // Regression for the right-drift bug: when `reason` contains
+    // embedded `\n`, a bare `{s}` print emitted raw LF — the
+    // terminal moved cursor down without resetting column, so
+    // subsequent banner rows drifted right and the closing border
+    // landed mid-text. Now each line gets its own `│ ` prefix +
+    // `\r\n`.
+    const FakeRuntime = struct {
+        conclusion_buf: [2048]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    const multiline =
+        \\Here's what I can see:
+        \\- Shell: bash
+        \\- PWD: /home/user
+    ;
+    M.captureConclusion(&rt, multiline, 0, 0, 1);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    // No raw LF inside the banner (every newline must be `\r\n`).
+    // The opening `\r\n` IS preceded by `\r`, so a pure LF would
+    // appear only inside the content section if the bug regressed.
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        if (out[i] == '\n') {
+            try testing.expect(i > 0);
+            try testing.expectEqual(@as(u8, '\r'), out[i - 1]);
+        }
+    }
+
+    // Each prose line appears in the output. First line carries the
+    // ✓ marker; continuations indent under it.
+    try testing.expect(std.mem.indexOf(u8, out, "Here's what I can see:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "- Shell: bash") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "- PWD: /home/user") != null);
+
+    // Three reason rows (split by `\n`) each prefixed with `│`.
+    var vbar_count: usize = 0;
+    var j: usize = 0;
+    while (j + 2 < out.len) : (j += 1) {
+        if (out[j] == 0xE2 and out[j + 1] == 0x94 and out[j + 2] == 0x82) vbar_count += 1;
+    }
+    // 3 reason rows + 1 counts row = 4 vertical bars at minimum.
+    try testing.expect(vbar_count >= 4);
 }
 
 test "Module.captureConclusion falls back to 'done' when reason is empty" {
