@@ -584,13 +584,32 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const dim = !focus;
             if (cur_pos) |c_abs| {
                 if (c_abs >= win_start) {
+                    // The "cell under the cursor" is the FULL UTF-8
+                    // sequence starting at c_abs, not just one byte
+                    // — slicing `line[c_abs..c_abs+1]` would emit a
+                    // half-codepoint when the user pasted multi-
+                    // byte chars (e.g. `•`) and rendered as `�`.
+                    // Cursor advancement is still byte-wise (the
+                    // edit ops in applyChatEdit work in bytes), so
+                    // a cursor parked mid-codepoint shows the bytes
+                    // starting at that offset and the terminal
+                    // handles the invalid prefix — uncommon path.
+                    const cell_advance: usize = blk: {
+                        if (c_abs >= len) break :blk 0;
+                        var iter = pw.utf8Iter(line[c_abs..]);
+                        if (iter.next()) |c| {
+                            const end = c_abs + c.byte_len;
+                            if (end <= len) break :blk c.byte_len;
+                        }
+                        break :blk 1;
+                    };
                     if (dim) try w.writeAll("\x1B[2m");
                     if (c_abs > win_start) try writeSanitized(w, line[win_start..c_abs]);
                     if (dim) try w.writeAll("\x1B[0m");
                     if (focus) {
                         if (c_abs < len) {
                             try w.writeAll("\x1B[7m");
-                            try writeSanitized(w, line[c_abs .. c_abs + 1]);
+                            try writeSanitized(w, line[c_abs .. c_abs + cell_advance]);
                             try w.writeAll("\x1B[0m");
                         } else {
                             try w.writeAll("\x1B[7m \x1B[0m");
@@ -598,15 +617,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     } else {
                         if (c_abs < len) {
                             try w.writeAll("\x1B[2m");
-                            try writeSanitized(w, line[c_abs .. c_abs + 1]);
+                            try writeSanitized(w, line[c_abs .. c_abs + cell_advance]);
                             try w.writeAll("\x1B[0m");
                         } else {
                             try w.writeAll("\x1B[2m\u{2592}\x1B[0m");
                         }
                     }
-                    if (c_abs + 1 < win_end) {
+                    if (c_abs + cell_advance < win_end) {
                         if (dim) try w.writeAll("\x1B[2m");
-                        try writeSanitized(w, line[c_abs + 1 .. win_end]);
+                        try writeSanitized(w, line[c_abs + cell_advance .. win_end]);
                         if (dim) try w.writeAll("\x1B[0m");
                     }
                 } else {
@@ -784,15 +803,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // and the truncation walk codepoints so wide glyphs
             // (CJK / emoji) bill 2 cols and multi-byte sequences
             // can't get sliced mid-codepoint.
-            var label_buf: [128]u8 = undefined;
-            const label_cap: usize = @max(8, cols_usize / 3);
+            // 32-col cap on the label keeps `label_buf` sized for
+            // the worst-case all-4-byte-codepoint label (32 × 4 +
+            // 3 ellipsis bytes ≤ 256). Without the inner cap, a
+            // user on a very wide terminal could push label_cap
+            // past `label_buf.len - 3`; the previous `@min` re-cut
+            // the codepoint-aligned truncated slice mid-sequence
+            // (caught by Copilot review on #175).
+            var label_buf: [256]u8 = undefined;
+            const label_cap: usize = @min(32, @max(8, cols_usize / 3));
             const raw_label_cols: usize = pw.measureCols(raw_label);
             const provider_label: []const u8 = if (raw_label_cols > label_cap and label_cap > 1) blk: {
                 const truncated = pw.truncateToCols(raw_label, label_cap - 1);
-                const cap = @min(truncated.len, label_buf.len -| 3);
-                @memcpy(label_buf[0..cap], truncated[0..cap]);
-                @memcpy(label_buf[cap .. cap + 3], "\u{2026}");
-                break :blk label_buf[0 .. cap + 3];
+                @memcpy(label_buf[0..truncated.len], truncated);
+                @memcpy(label_buf[truncated.len .. truncated.len + 3], "\u{2026}");
+                break :blk label_buf[0 .. truncated.len + 3];
             } else raw_label;
             // Format: `<icon> <mode_word> · <provider_label> ─`
             w.print("\x1B[2m\x1B[22;38;5;141m{s}\x1B[39;2m {s} \u{00B7} \x1B[22;38;5;14m{s}\x1B[39;2m \u{2500}", .{ icon, mode_word, provider_label }) catch return false;

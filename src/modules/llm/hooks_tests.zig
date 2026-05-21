@@ -1913,3 +1913,41 @@ test "inline chat: closing the panel clears the height override" {
     try testing.expectEqual(false, rt.chat_inline_open);
     try testing.expectEqual(@as(?u16, null), rt.chat_inline_rows_override);
 }
+
+test "inline chat: pasted UTF-8 (e.g. `•` = 0xE2 0x80 0xA2) lands in the buffer" {
+    // Regression for Copilot review on #175 — parseChatKey's
+    // printable-insert arm previously only accepted 0x20..0x7E
+    // and dropped 0x80..0xFF as `.none`, so a paste of `•`
+    // (3 UTF-8 bytes, all in the high range) silently vanished.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "\u{2022} bullet");
+    try testing.expectEqualStrings("\u{2022} bullet", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}

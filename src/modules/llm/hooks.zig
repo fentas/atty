@@ -173,11 +173,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     while (scan < input.len) : (scan += 1) {
                         const x = input[scan];
                         if (x >= '0' and x <= '9') {
+                            // Cap accumulation at 1M — realistic CSI
+                            // params fit in 16 bits; this guards
+                            // against malformed/adversarial input
+                            // running `p = p*10 + d` until usize
+                            // overflows + traps in safety builds.
                             if (!saw_semi) {
-                                p1 = p1 * 10 + (x - '0');
+                                if (p1 < 0x100000) p1 = p1 * 10 + (x - '0');
                                 have_p1 = true;
                             } else {
-                                p2 = p2 * 10 + (x - '0');
+                                if (p2 < 0x100000) p2 = p2 * 10 + (x - '0');
                                 have_p2 = true;
                             }
                         } else if (x == ';') {
@@ -196,11 +201,25 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 // CSI-u: <codepoint>;<mod>u
                                 // mod value 1=none, 2=Shift, 3=Alt,
                                 // 4=Shift+Alt, 5=Ctrl, 6=Shift+Ctrl,
-                                // 7=Shift+Alt+Ctrl, 8=Super, … —
+                                // 7=Ctrl+Alt, 8=Shift+Alt+Ctrl, … —
                                 // shift-bit is `(mod - 1) & 1`.
                                 const mod: usize = if (have_p2) p2 else 1;
                                 const shift = ((mod -| 1) & 1) != 0;
                                 if (p1 == 13 and shift) return .{ .insert = '\n' };
+                                // Bare CSI-u (no modifier) for an
+                                // ASCII printable codepoint folds to
+                                // an insert — some terminals at
+                                // higher kitty progressive-enhance
+                                // levels send `\x1b[8226;1u` etc.
+                                // for typed chars instead of raw
+                                // bytes. Multi-byte codepoints
+                                // (p1 > 0x7E) need a state machine
+                                // to emit remaining UTF-8 bytes
+                                // across calls; left out for now —
+                                // atty pushes only flag 1, where
+                                // terminals emit raw UTF-8 for typed
+                                // non-ASCII.
+                                if (mod == 1 and p1 >= 0x20 and p1 <= 0x7E) return .{ .insert = @intCast(p1) };
                             }
                             return .none;
                         } else {
@@ -233,7 +252,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 0x15 => .kill_to_start, // Ctrl+U
                 0x17 => .kill_word_back, // Ctrl+W
                 0x0D, 0x0A => .enter,
-                0x20...0x7E => .{ .insert = b },
+                // 0x80..0xFF lets multi-byte UTF-8 paste land in
+                // the buffer byte-by-byte — the terminal reassembles
+                // the codepoint on render. Without this, typing or
+                // pasting `•` (`0xE2 0x80 0xA2`) was silently
+                // dropped because every byte hit the `.none` arm.
+                0x20...0x7E, 0x80...0xFF => .{ .insert = b },
                 else => .none,
             };
         }

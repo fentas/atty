@@ -346,11 +346,13 @@ pub fn configure(comptime cfg: Config) type {
             .{ .bytes = keymap.key("PageUp"), .action = .chat_scroll_page_up, .label = "PageUp", .description = "chat: scroll back one page (when chat surface is open)" },
             .{ .bytes = keymap.key("PageDown"), .action = .chat_scroll_page_down, .label = "PageDown", .description = "chat: scroll forward one page (when chat surface is open)" },
             // Inline panel resize — grow/shrink the panel one row
-            // per press. Legacy modified-arrow + kitty kbd CSI-u
-            // dual encoding (modifier 7 = Shift+Alt+Ctrl, 8 = Meta,
-            // 4 = Ctrl+Alt for the kitty kbd modifier encoding).
-            // Ctrl+Alt+Arrow is rarely consumed by terminals so
-            // the binding lands reliably.
+            // per press. Dual encoded: `keymap.key("Ctrl+Alt+Up")`
+            // resolves to the kitty kbd CSI-u form on terminals
+            // that pushed flag 1; `\x1b[1;7A` is the legacy xterm
+            // modifyOtherKeys encoding (modifier 7 = Ctrl+Alt;
+            // Shift+Alt+Ctrl would be 8). Ctrl+Alt+Arrow is
+            // rarely consumed by terminals so the binding lands
+            // reliably.
             .{ .bytes = keymap.key("Ctrl+Alt+Up"), .action = .llm_chat_inline_grow, .label = "Ctrl+Alt+Up", .description = "inline chat: grow panel by one row" },
             .{ .bytes = "\x1b[1;7A", .action = .llm_chat_inline_grow },
             .{ .bytes = keymap.key("Ctrl+Alt+Down"), .action = .llm_chat_inline_shrink, .label = "Ctrl+Alt+Down", .description = "inline chat: shrink panel by one row" },
