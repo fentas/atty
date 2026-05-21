@@ -835,16 +835,44 @@ pub fn Module(comptime cfg: Config) type {
             return stdout_bytes;
         }
 
-        /// Scan a stream-json body for the first `type="system",
-        /// subtype="init"` line and extract `<field>` (typically
-        /// `session_id`). Returns the byte count written to `out`,
-        /// or 0 if no init event was found / the field was missing
-        /// or non-string.
-        pub fn extractStreamSessionId(body: []const u8, field: []const u8, out: []u8) usize {
+        /// Combined output of a single stream-json walk.
+        pub const StreamParse = struct {
+            result_len: usize = 0,
+            session_id_len: usize = 0,
+        };
+
+        /// One-pass walker over a stream-json body. Captures the
+        /// value of `result_field` from the first `type="result"`
+        /// line AND the value of `session_id_field` from the first
+        /// `type="system",subtype="init"` line, returning both in
+        /// a single `StreamParse`. Pass empty field/out slices for
+        /// the capture you don't need — the walker skips the
+        /// corresponding branch entirely. Short-circuits once both
+        /// requested captures have landed.
+        ///
+        /// Replaces the pre-#168 two-walk approach
+        /// (`extractStreamSessionId` + `extractJsonStreamResult`
+        /// each iterated the body separately).
+        pub fn parseStreamJson(
+            body: []const u8,
+            result_field: []const u8,
+            session_id_field: []const u8,
+            result_out: []u8,
+            session_id_out: []u8,
+        ) StreamParse {
+            var out: StreamParse = .{};
+            const want_result = result_field.len > 0 and result_out.len > 0;
+            const want_session = session_id_field.len > 0 and session_id_out.len > 0;
+            if (!want_result and !want_session) return out;
+
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             var it = std.mem.splitScalar(u8, body, '\n');
             while (it.next()) |raw_line| {
+                const need_result = want_result and out.result_len == 0;
+                const need_session = want_session and out.session_id_len == 0;
+                if (!need_result and !need_session) return out;
+
                 const line = std.mem.trim(u8, raw_line, " \t\r");
                 if (line.len == 0) continue;
                 _ = arena.reset(.retain_capacity);
@@ -852,57 +880,55 @@ pub fn Module(comptime cfg: Config) type {
                 if (parsed != .object) continue;
                 const type_val = parsed.object.get("type") orelse continue;
                 if (type_val != .string) continue;
-                if (!std.mem.eql(u8, type_val.string, "system")) continue;
-                // claude wraps init events as subtype="init". Other
-                // CLIs may emit `type=system` without subtype — we
-                // only match the init flavor to avoid picking up a
-                // mid-stream `type=system,subtype=info`.
-                const subtype_val = parsed.object.get("subtype") orelse continue;
-                if (subtype_val != .string) continue;
-                if (!std.mem.eql(u8, subtype_val.string, "init")) continue;
-                const id_val = parsed.object.get(field) orelse continue;
-                if (id_val != .string) continue;
-                // Reject ids that don't fit in `out` outright —
-                // returning a truncated half-id and using it for
-                // `--resume <id>` would silently corrupt the CLI's
-                // resume protocol. Better to act like no init
-                // event was seen than to ship a broken handle.
-                if (id_val.string.len > out.len) return 0;
-                @memcpy(out[0..id_val.string.len], id_val.string);
-                return id_val.string.len;
+                const type_str = type_val.string;
+
+                if (need_session and std.mem.eql(u8, type_str, "system")) {
+                    // claude wraps init as subtype="init". Other
+                    // CLIs may emit bare `type=system` without
+                    // subtype — only match the init flavor so a
+                    // mid-stream `type=system,subtype=info` doesn't
+                    // claim the session-id slot.
+                    if (parsed.object.get("subtype")) |sv| if (sv == .string and std.mem.eql(u8, sv.string, "init")) {
+                        if (parsed.object.get(session_id_field)) |idv| if (idv == .string) {
+                            // Reject overflowing ids — a truncated
+                            // half-id used for `--resume <id>`
+                            // would silently corrupt the CLI's
+                            // resume protocol.
+                            if (idv.string.len <= session_id_out.len) {
+                                @memcpy(session_id_out[0..idv.string.len], idv.string);
+                                out.session_id_len = idv.string.len;
+                            }
+                        };
+                    };
+                }
+
+                if (need_result and std.mem.eql(u8, type_str, "result")) {
+                    // Walk past malformed result events instead of
+                    // returning 0 — a stray "result with wrong
+                    // shape" early in the stream mustn't suppress
+                    // a later valid one.
+                    if (parsed.object.get(result_field)) |fv| if (fv == .string) {
+                        const n = @min(fv.string.len, result_out.len);
+                        @memcpy(result_out[0..n], fv.string[0..n]);
+                        out.result_len = n;
+                    };
+                }
             }
-            return 0;
+            return out;
         }
 
-        /// Parse a stream-json subprocess output (one JSON object
-        /// per line) and write the value of `<field>` on the
-        /// `type="result"` event into `out`. Returns the byte
-        /// count, or 0 if no result event was found / field was
-        /// missing / shape was wrong. Intermediate events
-        /// (system / assistant partials / etc.) are skipped.
+        /// Thin wrapper kept for callers (and tests) that only need
+        /// the session id. Single-purpose, single-walk shape.
+        pub fn extractStreamSessionId(body: []const u8, field: []const u8, out: []u8) usize {
+            var unused: [0]u8 = undefined;
+            return parseStreamJson(body, "", field, &unused, out).session_id_len;
+        }
+
+        /// Thin wrapper kept for callers (and tests) that only need
+        /// the result field. Single-purpose, single-walk shape.
         pub fn extractJsonStreamResult(body: []const u8, field: []const u8, out: []u8) usize {
-            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena.deinit();
-            var it = std.mem.splitScalar(u8, body, '\n');
-            while (it.next()) |raw_line| {
-                const line = std.mem.trim(u8, raw_line, " \t\r");
-                if (line.len == 0) continue;
-                _ = arena.reset(.retain_capacity);
-                const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), line, .{}) catch continue;
-                if (parsed != .object) continue;
-                const type_val = parsed.object.get("type") orelse continue;
-                if (type_val != .string) continue;
-                if (!std.mem.eql(u8, type_val.string, "result")) continue;
-                // `continue` (not `return 0`) on a malformed result
-                // event so a stray "result with wrong shape" early
-                // in the stream doesn't suppress a later valid one.
-                const field_val = parsed.object.get(field) orelse continue;
-                if (field_val != .string) continue;
-                const n = @min(field_val.string.len, out.len);
-                @memcpy(out[0..n], field_val.string[0..n]);
-                return n;
-            }
-            return 0;
+            var unused: [0]u8 = undefined;
+            return parseStreamJson(body, field, "", out, &unused).result_len;
         }
 
         /// Extract a top-level string field from a JSON object by
@@ -977,24 +1003,12 @@ pub fn Module(comptime cfg: Config) type {
             };
             defer gpa.free(stdout);
 
-            // When session continuation is configured AND the
-            // output is stream-json, scan the body for the CLI's
-            // session id (typically the `session_id` on the first
-            // `type=system,subtype=init` event). The caller writes
-            // this into `rt.session_id` so future requests can
-            // resume the session via the configured argv flag.
-            switch (sub.session) {
-                .none => {},
-                .continuation => |c| switch (sub.output) {
-                    .json_stream => {
-                        session_id_len_out.* = extractStreamSessionId(stdout, c.id_field, session_id_out);
-                    },
-                    else => {}, // session capture only defined for stream-json today
-                },
-            }
-
             // Decode to the assistant content text per the
-            // configured output shape.
+            // configured output shape. For `.json_stream` we do a
+            // single body walk that captures both the result field
+            // AND (when session continuation is configured) the
+            // session id — avoids parsing the stream twice on the
+            // continuation path.
             var content_buf: [cfg.max_response_bytes]u8 = undefined;
             const content = switch (sub.output) {
                 .raw => blk: {
@@ -1011,11 +1025,16 @@ pub fn Module(comptime cfg: Config) type {
                     break :blk content_buf[0..n];
                 },
                 .json_stream => |js| blk: {
-                    const n = extractJsonStreamResult(stdout, js.field, &content_buf);
-                    if (n == 0) {
+                    const sid_field: []const u8 = switch (sub.session) {
+                        .continuation => |c| c.id_field,
+                        .none => "",
+                    };
+                    const p = parseStreamJson(stdout, js.field, sid_field, &content_buf, session_id_out);
+                    session_id_len_out.* = p.session_id_len;
+                    if (p.result_len == 0) {
                         return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "stream-json: no result event in subprocess output") };
                     }
-                    break :blk content_buf[0..n];
+                    break :blk content_buf[0..p.result_len];
                 },
             };
 
@@ -1065,16 +1084,6 @@ pub fn Module(comptime cfg: Config) type {
             };
             defer gpa.free(stdout);
 
-            switch (sub.session) {
-                .none => {},
-                .continuation => |c| switch (sub.output) {
-                    .json_stream => {
-                        session_id_len_out.* = extractStreamSessionId(stdout, c.id_field, session_id_out);
-                    },
-                    else => {},
-                },
-            }
-
             const content_n = switch (sub.output) {
                 .raw => blk: {
                     const trimmed = std.mem.trim(u8, stdout, " \t\r\n");
@@ -1083,7 +1092,18 @@ pub fn Module(comptime cfg: Config) type {
                     break :blk n;
                 },
                 .json_field => |fname| extractJsonStringField(stdout, fname, out),
-                .json_stream => |js| extractJsonStreamResult(stdout, js.field, out),
+                .json_stream => |js| blk: {
+                    // Same single-pass walk as the single-mode
+                    // path — captures result + session id in one
+                    // scan over the body.
+                    const sid_field: []const u8 = switch (sub.session) {
+                        .continuation => |c| c.id_field,
+                        .none => "",
+                    };
+                    const p = parseStreamJson(stdout, js.field, sid_field, out, session_id_out);
+                    session_id_len_out.* = p.session_id_len;
+                    break :blk p.result_len;
+                },
             };
             if (content_n == 0) {
                 return RequestResult{ .cmd_len = 0, .exp_len = 0, .err_len = writeStatic(error_out, "empty response from subprocess") };
