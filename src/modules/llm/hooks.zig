@@ -153,46 +153,94 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         else => .none,
                     };
                 }
-                // VT-style `ESC [ <num> ~` (Delete = 3~, Home = 1~/7~,
-                // End = 4~/8~). Need a fourth byte to know which.
-                if (c >= '0' and c <= '9') {
-                    // Incomplete VT-style CSI (chunk ended mid-
-                    // sequence, e.g. `ESC [ 3` waiting for `~`).
-                    // Drain to chunk end so the caller's
-                    // `while (i < input.len)` loop terminates —
-                    // returning .none without advancing would spin.
-                    if (i.* + 3 >= input.len) {
-                        i.* = input.len;
-                        return .none;
+                // Per ECMA-48: CSI = ESC `[` P* I* F where
+                //   P = 0x30..0x3F (digits, `;`, `?`, `<`/`>`/`=`)
+                //   I = 0x20..0x2F (intermediates: SP, `!`, `"`, … `/`)
+                //   F = 0x40..0x7E (final byte)
+                // Trigger the scan on any P or I byte (everything
+                // 0x20..0x3F) so a CSI starting with an intermediate
+                // (`ESC [ ! p` etc.) doesn't fall through to the
+                // unrecognized-intermediate arm below and leak its
+                // tail. Two finals carry meaning for chat input:
+                //   ~  → VT-style function keys (Home/End/Delete)
+                //   u  → kitty kbd "CSI-u" (Shift+Enter etc.)
+                // Anything else gets consumed silently.
+                if (c >= 0x20 and c <= 0x3F) {
+                    var scan: usize = i.* + 2;
+                    var p1: usize = 0;
+                    var p2: usize = 0;
+                    var have_p1 = false;
+                    var have_p2 = false;
+                    var saw_semi = false;
+                    var unknown_param = false;
+                    while (scan < input.len) : (scan += 1) {
+                        const x = input[scan];
+                        if (x >= '0' and x <= '9') {
+                            // Cap accumulation at 1M — realistic CSI
+                            // params fit in 16 bits; this guards
+                            // against malformed/adversarial input
+                            // running `p = p*10 + d` until usize
+                            // overflows + traps in safety builds.
+                            if (!saw_semi) {
+                                if (p1 < 0x100000) p1 = p1 * 10 + (x - '0');
+                                have_p1 = true;
+                            } else {
+                                if (p2 < 0x100000) p2 = p2 * 10 + (x - '0');
+                                have_p2 = true;
+                            }
+                        } else if (x == ';') {
+                            saw_semi = true;
+                        } else if (x >= 0x40 and x <= 0x7E) {
+                            i.* = scan + 1;
+                            if (x == '~' and have_p1) {
+                                return switch (p1) {
+                                    1, 7 => .move_home,
+                                    3 => .delete_forward,
+                                    4, 8 => .move_end,
+                                    else => .none,
+                                };
+                            }
+                            if (x == 'u' and have_p1 and !unknown_param) {
+                                // CSI-u: <codepoint>;<mod>u
+                                // mod value 1=none, 2=Shift, 3=Alt,
+                                // 4=Shift+Alt, 5=Ctrl, 6=Shift+Ctrl,
+                                // 7=Ctrl+Alt, 8=Shift+Alt+Ctrl, … —
+                                // shift-bit is `(mod - 1) & 1`.
+                                const mod: usize = if (have_p2) p2 else 1;
+                                const shift = ((mod -| 1) & 1) != 0;
+                                if (p1 == 13 and shift) return .{ .insert = '\n' };
+                                // Bare CSI-u (no modifier) for an
+                                // ASCII printable codepoint folds to
+                                // an insert — some terminals at
+                                // higher kitty progressive-enhance
+                                // levels send `\x1b[8226;1u` etc.
+                                // for typed chars instead of raw
+                                // bytes. Multi-byte codepoints
+                                // (p1 > 0x7E) need a state machine
+                                // to emit remaining UTF-8 bytes
+                                // across calls; left out for now —
+                                // atty pushes only flag 1, where
+                                // terminals emit raw UTF-8 for typed
+                                // non-ASCII.
+                                if (mod == 1 and p1 >= 0x20 and p1 <= 0x7E) return .{ .insert = @intCast(p1) };
+                            }
+                            return .none;
+                        } else {
+                            unknown_param = true;
+                        }
                     }
-                    const final = input[i.* + 3];
-                    if (final == '~') {
-                        i.* += 4;
-                        return switch (c) {
-                            '1', '7' => .move_home,
-                            '3' => .delete_forward,
-                            '4', '8' => .move_end,
-                            else => .none,
-                        };
-                    }
-                    // fall through to the param-scan recovery below
+                    // Incomplete CSI — drain to chunk end so the
+                    // caller's loop terminates; the continuation
+                    // bytes (the missing final) will arrive on the
+                    // next read and reparse cleanly because their
+                    // own first byte won't be 0x1B.
+                    i.* = input.len;
+                    return .none;
                 }
-                // Param/intermediate byte (0x20-0x3F) — including
-                // `?`/`>` private markers, `;` separator, and
-                // numeric params. Walk forward to the first byte
-                // in 0x40..0x7E (the CSI final) so everything past
-                // the sequence is left for the next loop iteration.
-                // Without this, sequences like `ESC [ ? 2 5 l` or
-                // `ESC [ ; 5 D` would only have `ESC [ <byte>`
-                // consumed and the rest leak as printables.
+                // Unrecognized intermediate (rare). Consume the
+                // 3-byte prefix so the loop terminates; the rest
+                // will reparse as best as the next iteration can.
                 i.* += 3;
-                while (i.* < input.len) : (i.* += 1) {
-                    const x = input[i.*];
-                    if (x >= 0x40 and x <= 0x7E) {
-                        i.* += 1;
-                        break;
-                    }
-                }
                 return .none;
             }
             i.* += 1;
@@ -207,7 +255,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 0x15 => .kill_to_start, // Ctrl+U
                 0x17 => .kill_word_back, // Ctrl+W
                 0x0D, 0x0A => .enter,
-                0x20...0x7E => .{ .insert = b },
+                // 0x80..0xFF lets multi-byte UTF-8 paste land in
+                // the buffer byte-by-byte — the terminal reassembles
+                // the codepoint on render. Without this, typing or
+                // pasting `•` (`0xE2 0x80 0xA2`) was silently
+                // dropped because every byte hit the `.none` arm.
+                0x20...0x7E, 0x80...0xFF => .{ .insert = b },
                 else => .none,
             };
         }
@@ -317,15 +370,28 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // post-Ctrl+D bytes don't land in the
                             // now-closed panel's buffer.
                             rt.chat_inline_open = false;
+                            rt.chat_inline_rows_override = null;
                             rt.chat_inline_paint_pending = true;
                             return .swallow;
                         },
                         .enter => {
-                            // Trim trailing whitespace before checking
-                            // empty — matches onLineCommit's semantics.
+                            // Trim trailing spaces/tabs from the
+                            // submitted line (preserves any embedded
+                            // newlines from Shift+Enter — those are
+                            // intentional content). Empty check looks
+                            // at all-whitespace including newlines so
+                            // a buffer of just `\n\n` from accidental
+                            // Shift+Enter strokes is treated as empty.
                             var trimmed_len = rt.chat_inline_input_len;
                             while (trimmed_len > 0 and (rt.chat_inline_input_buf[trimmed_len - 1] == ' ' or rt.chat_inline_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
-                            if (trimmed_len == 0) {
+                            var has_content = false;
+                            for (rt.chat_inline_input_buf[0..trimmed_len]) |bb| {
+                                if (bb != ' ' and bb != '\t' and bb != '\n' and bb != '\r') {
+                                    has_content = true;
+                                    break;
+                                }
+                            }
+                            if (!has_content) {
                                 rt.chat_inline_input_len = 0;
                                 rt.chat_inline_input_cursor = 0;
                                 rt.chat_inline_paint_pending = true;
@@ -821,6 +887,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // to zero. Mirror of the inline-toggle arm.
                         if (rt.chat_inline_open) {
                             rt.chat_inline_open = false;
+                            rt.chat_inline_rows_override = null;
                             rt.chat_inline_paint_pending = true;
                         }
                         rt.chat_overlay_open = true;
@@ -873,6 +940,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // armed snap doesn't override a fresh user
                     // focus choice on the next `;D`.
                     rt.chat_refocus_pending = false;
+                    if (!rt.chat_inline_open) {
+                        // Drop the live height override on close so
+                        // the next open starts at `cfg.inline_chat_rows`
+                        // again. The user opted into a bigger panel
+                        // for THIS session, not as a persistent
+                        // preference.
+                        rt.chat_inline_rows_override = null;
+                    }
                     if (rt.chat_inline_open) {
                         // Disarm the conclusion auto-emit latch so the
                         // banner doesn't fire while inline chat is
@@ -955,6 +1030,25 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (target_overlay) {
                         rt.chat_overlay_paint_pending = true;
                     } else {
+                        rt.chat_inline_paint_pending = true;
+                    }
+                    return true;
+                },
+                .llm_chat_inline_grow, .llm_chat_inline_shrink => {
+                    if (!rt.chat_inline_open) return false;
+                    const current: u16 = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
+                    // Upper bound is loose — proxy.zig's
+                    // `applyReserveRows` clamps against the live
+                    // terminal height. Hard-cap at u16/4 here just
+                    // so a stuck-key user can't push the override
+                    // into nonsensical territory.
+                    const next: u16 = switch (action) {
+                        .llm_chat_inline_grow => if (current < std.math.maxInt(u16) / 4) current + 1 else current,
+                        .llm_chat_inline_shrink => if (current > 3) current - 1 else current,
+                        else => unreachable,
+                    };
+                    if (next != current) {
+                        rt.chat_inline_rows_override = next;
                         rt.chat_inline_paint_pending = true;
                     }
                     return true;

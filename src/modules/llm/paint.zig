@@ -14,6 +14,7 @@ const std = @import("std");
 const m = @import("../../module.zig");
 const dialog = @import("dialog.zig");
 const types = @import("types.zig");
+const pw = @import("paint_width.zig");
 const pty_mod = @import("../../pty.zig");
 const Pty = pty_mod.Pty;
 
@@ -273,10 +274,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 c.len > 2 and
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
+            // Raw-fallback render: cap by VISIBLE columns, not bytes,
+            // so a multi-byte glyph (`•` U+2022, emoji, CJK) never gets
+            // sliced mid-sequence into an invalid prefix the terminal
+            // renders as `�`. 1024 cols is generous for "we couldn't
+            // parse the envelope, surface raw bytes" — content of
+            // pathological size hits the buffer/parse path first.
+            // Note: `truncateToCols` returns a byte slice that can be
+            // longer than 1024 bytes when the content carries many
+            // zero-width chars (combining marks, ZWJ); that's the
+            // intent — we cap by what the user SEES.
             if (!looks_like_envelope) {
-                const slice = if (c.len > 1024) c[0..1024] else c;
+                const slice = pw.truncateToCols(c, 1024);
                 try writeSanitized(w, slice);
-                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             }
             // Heap-arena off the runtime allocator so the stack
@@ -287,16 +298,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             defer arena.deinit();
             const R = dialog.Response(cfg.max_response_bytes);
             const parsed = arena.allocator().create(R) catch {
-                const slice = if (c.len > 1024) c[0..1024] else c;
+                const slice = pw.truncateToCols(c, 1024);
                 try writeSanitized(w, slice);
-                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             };
             parsed.* = .{};
             dialog.parseResponse(R, arena.allocator(), c, parsed) catch {
-                const slice = if (c.len > 1024) c[0..1024] else c;
+                const slice = pw.truncateToCols(c, 1024);
                 try writeSanitized(w, slice);
-                if (c.len > 1024) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
+                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             };
 
@@ -305,9 +316,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const desc = parsed.description();
                     const cmd = parsed.command();
                     if (desc.len > 0) {
-                        const dslice = if (desc.len > overlay_field_cap) desc[0..overlay_field_cap] else desc;
+                        const dslice = pw.truncateToCols(desc, overlay_field_cap);
                         try writeSanitized(w, dslice);
-                        if (desc.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                        if (dslice.len < desc.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                     }
                     // Always break to a new row before the command —
                     // otherwise an empty description would land the
@@ -315,18 +326,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // breaking the two-row layout invariant.
                     try w.writeAll("\r\n");
                     try w.writeAll("\x1B[2m      $ \x1B[0m\x1B[22;1;38;5;14m");
-                    const cslice = if (cmd.len > overlay_field_cap) cmd[0..overlay_field_cap] else cmd;
+                    const cslice = pw.truncateToCols(cmd, overlay_field_cap);
                     try writeSanitized(w, cslice);
                     try w.writeAll("\x1B[0m");
-                    if (cmd.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (cslice.len < cmd.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .question => {
                     const q = parsed.question();
-                    const qslice = if (q.len > overlay_field_cap) q[0..overlay_field_cap] else q;
+                    const qslice = pw.truncateToCols(q, overlay_field_cap);
                     try w.writeAll("\x1B[3m");
                     try writeSanitized(w, qslice);
                     try w.writeAll("\x1B[0m");
-                    if (q.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (qslice.len < q.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                     if (parsed.choices_count > 0) {
                         var i: usize = 0;
                         while (i < parsed.choices_count) : (i += 1) {
@@ -335,30 +346,33 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             const np = std.fmt.bufPrint(&num, "\x1B[2m   {d}.\x1B[0m ", .{i + 1}) catch unreachable;
                             try w.writeAll(np);
                             const choice = parsed.choice(i);
-                            const cslice2 = if (choice.len > overlay_field_cap) choice[0..overlay_field_cap] else choice;
+                            const cslice2 = pw.truncateToCols(choice, overlay_field_cap);
                             try writeSanitized(w, cslice2);
-                            if (choice.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                            if (cslice2.len < choice.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                         }
                     }
                 },
                 .done => {
                     const r = parsed.reason();
-                    const rslice = if (r.len > overlay_field_cap) r[0..overlay_field_cap] else r;
+                    const rslice = pw.truncateToCols(r, overlay_field_cap);
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m ");
                     try writeSanitized(w, rslice);
-                    if (r.len > overlay_field_cap) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (rslice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
             }
         }
 
-        /// Inline-panel single-row turn renderer — the panel's
-        /// scrollback rows are precious, so each turn gets exactly
-        /// one row. `max_visible` caps the visible cols; longer
-        /// content gets a "[…]" ellipsis. Parses the envelope when
-        /// the shape suggests one and falls back to raw content
-        /// otherwise. The caller positions the row (CUP + clear);
-        /// this function only emits content bytes (and SGR resets).
-        fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize) !void {
+        /// Returns rows used (>= 1) so the caller can advance its
+        /// row counter — wrap means raw prose turns can claim
+        /// multiple rows, and the scrollback loop's anchor math
+        /// depends on knowing exactly how many. Envelopes stay
+        /// single-row: their `desc → cmd` shape is already compact,
+        /// and wrapping would split structured fields across rows
+        /// for no readability win. `max_rows` exists because one
+        /// runaway reply would otherwise consume the whole panel;
+        /// overflow surfaces in the alt-screen overlay
+        /// (Alt+Shift+C) which has the full DECSTBM region.
+        fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize, max_rows: usize) !usize {
             const c = turn.content;
             // Quick shape check: assistant turns from the dialog
             // protocol always start with `{` and contain `"action"`.
@@ -369,10 +383,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
             if (!looks_like_envelope) {
-                const slice = if (c.len > max_visible) c[0..max_visible] else c;
-                try writeSanitized(w, slice);
-                if (c.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
-                return;
+                return try renderWrappedRaw(w, c, max_visible, max_rows);
             }
             // Parse with the dialog parser so any "open_chat as
             // separate object" or trailing-prose drift falls back
@@ -390,44 +401,117 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
-                const slice = if (c.len > max_visible) c[0..max_visible] else c;
-                try writeSanitized(w, slice);
-                if (c.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
-                return;
+                return try renderWrappedRaw(w, c, max_visible, max_rows);
             };
-            // Per-action rendering — keep it one row each.
+            // Per-action rendering — single row each. The envelope
+            // shape is already compact (description → command);
+            // wrap would just break the structured summary across
+            // rows for no readability win.
             switch (parsed.action) {
                 .exec => {
                     const cmd = parsed.command();
                     const desc = parsed.description();
                     if (desc.len > 0) {
-                        try writeSanitized(w, if (desc.len > max_visible / 2) desc[0..(max_visible / 2)] else desc);
+                        try writeSanitized(w, pw.truncateToCols(desc, max_visible / 2));
                         try w.writeAll(" \x1B[2m\u{2192}\x1B[0m ");
                     }
                     // Command in cyan-on-default to stand out as the
                     // actionable bit.
                     try w.writeAll("\x1B[22;38;5;14m");
                     const cmd_room: usize = if (max_visible > 20) max_visible - 20 else max_visible;
-                    try writeSanitized(w, if (cmd.len > cmd_room) cmd[0..cmd_room] else cmd);
+                    const cslice = pw.truncateToCols(cmd, cmd_room);
+                    try writeSanitized(w, cslice);
                     try w.writeAll("\x1B[0m");
-                    if (cmd.len > cmd_room) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (cslice.len < cmd.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .question => {
                     const q = parsed.question();
-                    const slice = if (q.len > max_visible) q[0..max_visible] else q;
+                    const slice = pw.truncateToCols(q, max_visible);
                     try w.writeAll("\x1B[3m"); // italic
                     try writeSanitized(w, slice);
                     try w.writeAll("\x1B[0m");
-                    if (q.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (slice.len < q.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .done => {
                     const r = parsed.reason();
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m "); // mauve check
-                    const slice = if (r.len > max_visible) r[0..max_visible] else r;
+                    const slice = pw.truncateToCols(r, max_visible);
                     try writeSanitized(w, slice);
-                    if (r.len > max_visible) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    if (slice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
             }
+            return 1;
+        }
+
+        /// Estimate how many panel rows a turn would consume if
+        /// rendered now. Mirrors `renderTurnContent`'s envelope-vs-
+        /// raw decision and the same wrap iterator so the back-walk
+        /// in `paintInlineChat` picks `start_turn` accurately
+        /// (newest-turn-anchored). Envelope turns always claim one
+        /// row; raw turns walk the wrap iterator counting chunks
+        /// up to `max_rows`. Cheap — no allocations.
+        fn countTurnRows(turn: dialog.Turn, cols: usize, max_rows: usize) usize {
+            const c = turn.content;
+            const looks_like_envelope = turn.kind == .assistant_exec and
+                c.len > 2 and
+                c[0] == '{' and
+                std.mem.indexOf(u8, c, "\"action\"") != null;
+            if (looks_like_envelope) return 1;
+            if (c.len == 0) return 1;
+            var it = pw.wrapIter(c, cols);
+            var rows: usize = 0;
+            while (it.next()) |_| {
+                rows += 1;
+                if (rows >= max_rows) break;
+            }
+            return if (rows == 0) 1 else rows;
+        }
+
+        /// Word-wrap a raw turn across up to `max_rows` rows of
+        /// `cols` cols each. Continuation rows emit CR+LF + clear
+        /// so the caller's CUP for the next turn paints onto a
+        /// known row. Returns the number of rows consumed (>= 1
+        /// — empty content still claims the prefix row so the
+        /// `prefix:` chrome doesn't visually orphan).
+        fn renderWrappedRaw(w: *std.Io.Writer, content: []const u8, cols: usize, max_rows: usize) !usize {
+            if (content.len == 0 or max_rows == 0) return 1;
+            var it = pw.wrapIter(content, cols);
+            var rows: usize = 0;
+            // " […]" = 5 visible cols (leading space + bracket +
+            // U+2026 + bracket). Reserve that on the last allowed
+            // row when more content follows so the marker lands
+            // inside the row instead of overflowing into the next
+            // — pre-emits the trimmed-to-`cols-5` last row.
+            const marker_cols: usize = 5;
+            const last_row_budget: usize = if (cols > marker_cols) cols - marker_cols else cols;
+            var pending: ?[]const u8 = null;
+            var overflowed = false;
+            while (it.next()) |chunk| {
+                if (pending) |p| {
+                    if (rows > 0) try w.writeAll("\r\n\x1B[2K");
+                    if (rows + 1 == max_rows) {
+                        // Last allowed row + more chunks pending →
+                        // overflow imminent; trim `p` so the marker
+                        // fits on the same row.
+                        try writeSanitized(w, pw.truncateToCols(p, last_row_budget));
+                        try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                        rows += 1;
+                        overflowed = true;
+                        break;
+                    }
+                    try writeSanitized(w, p);
+                    rows += 1;
+                }
+                pending = chunk;
+            }
+            if (!overflowed) {
+                if (pending) |p| {
+                    if (rows > 0) try w.writeAll("\r\n\x1B[2K");
+                    try writeSanitized(w, p);
+                    rows += 1;
+                }
+            }
+            return if (rows == 0) 1 else rows;
         }
 
         /// Compute the (row, col) position the real terminal cursor
@@ -450,6 +534,153 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// user's typing would resume — not col 1 (which would
         /// place the cursor at the start of the prompt row, on top
         /// of the PS1 chrome).
+        /// Render the chat input buffer across `input_top_row ..
+        /// input_row` (inclusive). One row per `\n`-separated line.
+        /// First row gets the `❯` prompt; continuation rows get a
+        /// dim `…` chrome glyph so the multi-line shape is visible.
+        /// Cursor glyph (reverse-video block when focused, dim cell
+        /// when parked) lands on whichever line contains the cursor
+        /// byte. Lines that exceed `input_row` get clipped — the
+        /// caller's `input_lines` math already accounts for the cap.
+        fn paintInputBlock(w: *std.Io.Writer, rt: *Runtime, input_top_row: u16, input_row: u16) !void {
+            const prompt_style: []const u8 = if (rt.chat_focus_in_panel)
+                "\x1B[22;1;38;5;14m"
+            else
+                "\x1B[2;38;5;14m";
+            const buf = rt.chat_inline_input_buf[0..rt.chat_inline_input_len];
+            const cur = rt.chat_inline_input_cursor;
+            const focus = rt.chat_focus_in_panel;
+
+            // Walk buffer, splitting at `\n`. Emit each segment on
+            // its own row.
+            var seg_start: usize = 0;
+            var line_idx: u16 = 0;
+            var current_row: u16 = input_top_row;
+            var pos: usize = 0;
+            while (pos <= buf.len) : (pos += 1) {
+                const at_end = pos == buf.len;
+                const is_nl = !at_end and buf[pos] == '\n';
+                if (!at_end and !is_nl) continue;
+
+                const seg = buf[seg_start..pos];
+                const seg_cur_local: ?usize = if (cur >= seg_start and cur <= pos) cur - seg_start else null;
+
+                try w.print("\x1B[{d};1H\x1B[2K", .{current_row});
+                if (line_idx == 0) {
+                    try w.writeAll(prompt_style);
+                    try w.writeAll("\u{276F}\x1B[0m ");
+                } else {
+                    try w.writeAll("\x1B[2m\u{2026}\x1B[0m ");
+                }
+
+                try paintInputLine(w, seg, seg_cur_local, focus);
+
+                if (is_nl) {
+                    line_idx += 1;
+                    current_row += 1;
+                    if (current_row > input_row) break;
+                    seg_start = pos + 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        /// Render a single line of input — text up to the cursor,
+        /// cursor glyph (or EOL block when `cur_local` lands at the
+        /// end), and the tail. Applies a 512-byte window around the
+        /// cursor so a long pasted prompt still surfaces context on
+        /// either side instead of dragging the tail off-screen.
+        fn paintInputLine(w: *std.Io.Writer, line: []const u8, cur_local: ?usize, focus: bool) !void {
+            const len = line.len;
+            const cur_pos: ?usize = if (cur_local) |cl| (if (cl <= len) cl else null) else null;
+
+            var win_start: usize = 0;
+            var win_end: usize = len;
+            if (len > 512) {
+                const visible_max: usize = 512;
+                const cur_for_window = cur_pos orelse len;
+                const half = visible_max / 2;
+                win_start = if (cur_for_window > half) cur_for_window - half else 0;
+                win_end = if (win_start + visible_max < len) win_start + visible_max else len;
+                if (win_end - win_start < visible_max and win_end >= visible_max) {
+                    win_start = win_end - visible_max;
+                }
+                // Snap both window edges to UTF-8 codepoint
+                // boundaries — a continuation byte (0x80..0xBF) at
+                // either edge would let `writeSanitized` slice a
+                // multi-byte sequence and the terminal would render
+                // `�`. Walk forward past any continuation byte.
+                while (win_start < len and (line[win_start] & 0xC0) == 0x80) {
+                    win_start += 1;
+                }
+                while (win_end < len and (line[win_end] & 0xC0) == 0x80) {
+                    win_end += 1;
+                }
+            }
+
+            const dim = !focus;
+            if (cur_pos) |c_abs| {
+                if (c_abs >= win_start) {
+                    // The "cell under the cursor" is the FULL UTF-8
+                    // sequence starting at c_abs, not just one byte
+                    // — slicing `line[c_abs..c_abs+1]` would emit a
+                    // half-codepoint when the user pasted multi-
+                    // byte chars (e.g. `•`) and rendered as `�`.
+                    // Cursor advancement is still byte-wise (the
+                    // edit ops in applyChatEdit work in bytes), so
+                    // a cursor parked mid-codepoint shows the bytes
+                    // starting at that offset and the terminal
+                    // handles the invalid prefix — uncommon path.
+                    const cell_advance: usize = blk: {
+                        if (c_abs >= len) break :blk 0;
+                        var iter = pw.utf8Iter(line[c_abs..]);
+                        if (iter.next()) |c| {
+                            const end = c_abs + c.byte_len;
+                            if (end <= len) break :blk c.byte_len;
+                        }
+                        break :blk 1;
+                    };
+                    if (dim) try w.writeAll("\x1B[2m");
+                    if (c_abs > win_start) try writeSanitized(w, line[win_start..c_abs]);
+                    if (dim) try w.writeAll("\x1B[0m");
+                    if (focus) {
+                        if (c_abs < len) {
+                            try w.writeAll("\x1B[7m");
+                            try writeSanitized(w, line[c_abs .. c_abs + cell_advance]);
+                            try w.writeAll("\x1B[0m");
+                        } else {
+                            try w.writeAll("\x1B[7m \x1B[0m");
+                        }
+                    } else {
+                        if (c_abs < len) {
+                            try w.writeAll("\x1B[2m");
+                            try writeSanitized(w, line[c_abs .. c_abs + cell_advance]);
+                            try w.writeAll("\x1B[0m");
+                        } else {
+                            try w.writeAll("\x1B[2m\u{2592}\x1B[0m");
+                        }
+                    }
+                    if (c_abs + cell_advance < win_end) {
+                        if (dim) try w.writeAll("\x1B[2m");
+                        try writeSanitized(w, line[c_abs + cell_advance .. win_end]);
+                        if (dim) try w.writeAll("\x1B[0m");
+                    }
+                } else {
+                    // Cursor is BEFORE the window — rare with the
+                    // window math above, but defensive: just render
+                    // the visible slice without a cursor glyph.
+                    if (dim) try w.writeAll("\x1B[2m");
+                    try writeSanitized(w, line[win_start..win_end]);
+                    if (dim) try w.writeAll("\x1B[0m");
+                }
+            } else {
+                if (dim) try w.writeAll("\x1B[2m");
+                try writeSanitized(w, line[win_start..win_end]);
+                if (dim) try w.writeAll("\x1B[0m");
+            }
+        }
+
         fn inlineRestorePos(rt: *Runtime, total_rows: u16, base_reserve: u16) struct { row: u16, col: u16 } {
             const shell_bottom: u16 = if (total_rows > base_reserve) total_rows - base_reserve else 1;
             const row: u16 = blk: {
@@ -526,8 +757,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // the terminal is too small for base + inline_chat_rows;
             // panel_rows = live - base derives the true (possibly
             // clamped) panel height.
+            // Effective panel height — `chat_inline_rows_override`
+            // (set by Ctrl+Alt+Up/Down on the live session) wins
+            // over the comptime `cfg.inline_chat_rows` default.
+            // `ctx.statusbar_reserve` reflects the proxy's clamped
+            // reservation; it tracks the override on the next tick
+            // after the grow/shrink action via the dispatcher's
+            // applyReserveRows path.
+            const effective_inline_rows: u16 = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
             const live_reserve: u16 = ctx.statusbar_reserve orelse
-                (base_reserve + cfg.inline_chat_rows + cfg.inline_chat_top_gap);
+                (base_reserve + effective_inline_rows + cfg.inline_chat_top_gap);
             // Panel needs at least 3 rows after the top gap is taken
             // out: divider + ≥1 scrollback + input. Below that, the
             // `scrollback_rows = panel_rows - 2` calc later in this
@@ -598,24 +837,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // long provider name doesn't squeeze the trailing
             // `Alt+C close · Enter send` shortcut hint off the row.
             // Trailing `…` (U+2026, 1 col) marks the cut so users
-            // know the full name is longer.
-            var label_buf: [128]u8 = undefined;
-            const label_cap: usize = @max(8, cols_usize / 3);
-            const provider_label: []const u8 = if (raw_label.len > label_cap and label_cap > 1) blk: {
-                const cut = @min(label_cap - 1, label_buf.len -| 3);
-                @memcpy(label_buf[0..cut], raw_label[0..cut]);
-                @memcpy(label_buf[cut .. cut + 3], "\u{2026}");
-                break :blk label_buf[0 .. cut + 3];
+            // know the full name is longer. Both the overflow check
+            // and the truncation walk codepoints so wide glyphs
+            // (CJK / emoji) bill 2 cols and multi-byte sequences
+            // can't get sliced mid-codepoint.
+            // 32-col cap on the label keeps `label_buf` sized for
+            // the worst-case all-4-byte-codepoint label (32 × 4 +
+            // 3 ellipsis bytes ≤ 256). Without the inner cap, a
+            // user on a very wide terminal could push label_cap
+            // past `label_buf.len - 3`; the previous `@min` re-cut
+            // the codepoint-aligned truncated slice mid-sequence
+            // (caught by Copilot review on #175).
+            var label_buf: [256]u8 = undefined;
+            const label_cap: usize = @min(32, @max(8, cols_usize / 3));
+            const raw_label_cols: usize = pw.measureCols(raw_label);
+            const provider_label: []const u8 = if (raw_label_cols > label_cap and label_cap > 1) blk: {
+                const truncated = pw.truncateToCols(raw_label, label_cap - 1);
+                @memcpy(label_buf[0..truncated.len], truncated);
+                @memcpy(label_buf[truncated.len .. truncated.len + 3], "\u{2026}");
+                break :blk label_buf[0 .. truncated.len + 3];
             } else raw_label;
             // Format: `<icon> <mode_word> · <provider_label> ─`
             w.print("\x1B[2m\x1B[22;38;5;141m{s}\x1B[39;2m {s} \u{00B7} \x1B[22;38;5;14m{s}\x1B[39;2m \u{2500}", .{ icon, mode_word, provider_label }) catch return false;
-            // Visible-col count for the trail-clearance math.
-            // Icon double-width (2) + space + mode_word + " · " (3)
-            // + provider_label (label_cap upper bound) + " ─" (2).
-            // mode_word + label counted as byte length (ASCII-ish
-            // — emoji in names would underestimate but the clamp
-            // gives slack).
-            const label_visible: usize = 2 + 1 + mode_word.len + 3 + provider_label.len + 2;
+            // Visible-col count for the trail-clearance math —
+            // icon (2 wide) + space + mode_word + " · " (3 cols:
+            // sp + U+00B7 + sp) + provider_label + " ─" (2).
+            const label_visible: usize =
+                pw.measureCols(icon) + 1 +
+                pw.measureCols(mode_word) + 3 +
+                pw.measureCols(provider_label) + 2;
             // " Alt+C close · Enter send" is 25 visible cols.
             const trail_min_clearance: usize = 25;
             const trail_target: usize = if (cols_usize > label_visible + trail_min_clearance)
@@ -634,12 +884,26 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // row budget so the MOST RECENT lines anchor at the
             // bottom (above input) and older turns scroll off the
             // top.
-            const scrollback_rows: u16 = panel_rows - 2; // reserve top divider + input row
+            // Multi-line input (Shift+Enter inserts `\n` into the
+            // buffer): grow the input area up from `input_row` by
+            // one row per embedded newline, capped at half the
+            // panel so scrollback isn't completely starved. Plain
+            // single-line typing keeps `input_lines = 1` and the
+            // layout matches the pre-multiline behaviour.
+            var buf_newlines: usize = 0;
+            for (rt.chat_inline_input_buf[0..rt.chat_inline_input_len]) |bb| {
+                if (bb == '\n') buf_newlines += 1;
+            }
+            const desired_input_lines: u16 = @intCast(1 + buf_newlines);
+            const input_lines_cap: u16 = if (panel_rows >= 4) @max(@as(u16, 1), panel_rows / 2) else 1;
+            const input_lines: u16 = @min(desired_input_lines, input_lines_cap);
+            const input_top_row: u16 = input_row - (input_lines - 1);
+            const scrollback_rows: u16 = if (input_top_row > top_row + 1) input_top_row - top_row - 1 else 0;
             var row: u16 = top_row + 1;
             // Blank-clear every scrollback row up front so prior
             // chat content doesn't leak when the turns shrink.
             var r: u16 = row;
-            while (r < input_row) : (r += 1) {
+            while (r < input_top_row) : (r += 1) {
                 w.print("\x1B[{d};1H\x1B[2K", .{r}) catch return false;
             }
 
@@ -664,9 +928,51 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 row += 1;
                 scrollback_budget -= 1;
             }
-            const start_turn: usize = if (visible_end > scrollback_budget) visible_end - scrollback_budget else 0;
+            // Per-turn wrap cap so a single long reply can't push
+            // the whole scrollback off-panel. 3 rows ≈ 240 chars at
+            // 80-col, plenty for a paragraph; longer turns end in
+            // a dim `[…]` and remain visible in the alt-screen
+            // overlay (Alt+Shift+C) which has the full DECSTBM
+            // scroll region.
+            const per_turn_max_rows: usize = 3;
+            // Pick `start_turn` by walking BACKWARDS from the newest
+            // visible turn and summing each candidate's rendered-row
+            // claim. Previously this was `visible_end -
+            // scrollback_budget` (one-row-per-turn assumption), which
+            // anchored the OLDEST turns at the panel top and let the
+            // newest turns get clipped — opposite of the intended
+            // tail-anchored layout. Pre-counting via the same wrap
+            // walk used at render time keeps the newest turn fully
+            // visible even when older neighbours each consume up to
+            // `per_turn_max_rows` rows.
+            var start_turn: usize = visible_end;
+            var rows_remaining: u16 = scrollback_budget;
+            var oldest_turn_cap: u16 = 0;
+            while (start_turn > 0 and rows_remaining > 0) {
+                const idx = start_turn - 1;
+                const turn_rows: u16 = @intCast(@min(
+                    countTurnRows(rt.turns[idx], max_inline_visible, per_turn_max_rows),
+                    @as(usize, std.math.maxInt(u16)),
+                ));
+                if (turn_rows >= rows_remaining) {
+                    // Include this turn as the OLDEST visible — its
+                    // render gets clipped to `rows_remaining` rows
+                    // so the newer turns each keep their full claim.
+                    // Without the per-oldest cap, the render loop's
+                    // generic `min(per_turn_max_rows, remaining)`
+                    // would let the newest turn eat the deficit
+                    // instead.
+                    start_turn = idx;
+                    oldest_turn_cap = rows_remaining;
+                    rows_remaining = 0;
+                    break;
+                }
+                rows_remaining -= turn_rows;
+                start_turn = idx;
+            }
+            var first_visible_turn = true;
             for (rt.turns[start_turn..visible_end]) |turn| {
-                if (row >= input_row) break;
+                if (row >= input_top_row) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
                 const prefix: []const u8 = switch (turn.kind) {
                     .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
@@ -674,88 +980,28 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     .observation => "\x1B[2mOutput:\x1B[0m ",
                 };
                 w.writeAll(prefix) catch return false;
-                renderTurnContent(&w, turn, max_inline_visible) catch return false;
-                row += 1;
+                const remaining_rows: usize = @intCast(input_top_row - row);
+                const turn_rows_cap: usize = if (first_visible_turn and oldest_turn_cap > 0)
+                    @min(@as(usize, oldest_turn_cap), remaining_rows)
+                else
+                    @min(per_turn_max_rows, remaining_rows);
+                const rows_used = renderTurnContent(&w, turn, max_inline_visible, turn_rows_cap) catch 1;
+                row += @intCast(rows_used);
+                first_visible_turn = false;
             }
-            if (rt.turns_len == 0) {
+            if (rt.turns_len == 0 and scrollback_rows > 0) {
                 w.print("\x1B[{d};1H\x1B[2K", .{top_row + 1}) catch return false;
                 w.writeAll("  \x1B[2m(empty \u{2014} type a prompt below \u{00B7} Enter to ask)\x1B[0m") catch return false;
             }
 
-            // Input row — `❯ <input>█` with reverse-video block
-            // cursor. Always painted last so the actual terminal
-            // cursor (positioned by the final CUP at the end of
-            // this paint) sits adjacent to it.
-            w.print("\x1B[{d};1H\x1B[2K", .{input_row}) catch return false;
-            // Chrome glyph dims when focus is parked on the shell —
-            // signals the panel is non-interactive at the moment.
-            const prompt_style: []const u8 = if (rt.chat_focus_in_panel)
-                "\x1B[22;1;38;5;14m"
-            else
-                "\x1B[2;38;5;14m";
-            w.writeAll(prompt_style) catch return false;
-            w.writeAll("\u{276F}\x1B[0m ") catch return false;
-            // Center the cursor in a 512-byte window so long
-            // prompts still show what's under the cursor instead
-            // of dragging the tail off-screen. Same windowing the
-            // overlay input uses.
-            {
-                const cur = rt.chat_inline_input_cursor;
-                const len = rt.chat_inline_input_len;
-                const visible_max: usize = 512;
-                var win_start: usize = 0;
-                var win_end: usize = len;
-                if (len > visible_max) {
-                    const half = visible_max / 2;
-                    win_start = if (cur > half) cur - half else 0;
-                    win_end = if (win_start + visible_max < len) win_start + visible_max else len;
-                    // Cursor near the tail: win_end got clipped to
-                    // len, so shift win_start back to fill the full
-                    // 512-byte window. Without this, end-of-buffer
-                    // cursors only see ~256 bytes of context.
-                    if (win_end - win_start < visible_max and win_end >= visible_max) {
-                        win_start = win_end - visible_max;
-                    }
-                }
-                const dim = !rt.chat_focus_in_panel;
-                if (dim) w.writeAll("\x1B[2m") catch return false;
-                if (cur > win_start) {
-                    writeSanitized(&w, rt.chat_inline_input_buf[win_start..cur]) catch return false;
-                }
-                if (dim) w.writeAll("\x1B[0m") catch return false;
-
-                // Cursor glyph at the insertion point. Focused →
-                // reverse-video block over the byte under the cursor
-                // (or a blank reverse-video space at EOL). Parked →
-                // dim the byte under the cursor in place so the
-                // tail render below doesn't duplicate it.
-                if (rt.chat_focus_in_panel) {
-                    if (cur < len) {
-                        w.writeAll("\x1B[7m") catch return false;
-                        writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
-                        w.writeAll("\x1B[0m") catch return false;
-                    } else {
-                        w.writeAll("\x1B[7m \x1B[0m") catch return false;
-                    }
-                } else {
-                    if (cur < len) {
-                        w.writeAll("\x1B[2m") catch return false;
-                        writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
-                        w.writeAll("\x1B[0m") catch return false;
-                    } else {
-                        w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
-                    }
-                }
-
-                // Tail: everything PAST the cursor byte (always
-                // `cur + 1`, never `cur`). Dim when parked so the
-                // unconsumed draft reads as inactive.
-                if (cur + 1 < win_end) {
-                    if (!rt.chat_focus_in_panel) w.writeAll("\x1B[2m") catch return false;
-                    writeSanitized(&w, rt.chat_inline_input_buf[cur + 1 .. win_end]) catch return false;
-                    if (!rt.chat_focus_in_panel) w.writeAll("\x1B[0m") catch return false;
-                }
-            }
+            // Input area — `❯ <input>█` with reverse-video block
+            // cursor on the first row; continuation rows (when the
+            // buffer contains `\n` from Shift+Enter) start with a
+            // dim `…` chrome glyph at col 1 so the user can see
+            // multiple lines and tell where the input area ends.
+            // Painted last so the final CUP parks the real cursor
+            // adjacent to the block-cursor glyph.
+            paintInputBlock(&w, rt, input_top_row, input_row) catch return false;
             // Park the real terminal cursor on the shell row — the
             // block-cursor glyph above is purely visual. See
             // inlineRestorePos for the row + col math.

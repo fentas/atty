@@ -1715,3 +1715,239 @@ test "Alt+M cycle: fires when dialog_persistent_mode is on (no chat surface)" {
     try testing.expect(consumed);
     try testing.expectEqual(@as(usize, 1), rt.current_provider_idx);
 }
+
+test "inline chat: Shift+Enter (CSI-u 13;2u) inserts a newline into the input buffer" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "hi");
+    _ = try L.onInput(&rt, &ctx, "\x1B[13;2u");
+    _ = try L.onInput(&rt, &ctx, "there");
+
+    try testing.expectEqualStrings("hi\nthere", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 8), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: Enter on all-whitespace buffer (incl. embedded newlines) is a no-op" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Two Shift+Enter presses then plain Enter — buffer is `\n\n`,
+    // empty of actual content. The .enter path should clear without
+    // pushing a turn.
+    _ = try L.onInput(&rt, &ctx, "\x1B[13;2u");
+    _ = try L.onInput(&rt, &ctx, "\x1B[13;2u");
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+
+    _ = try L.onInput(&rt, &ctx, "\r");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+}
+
+test "inline chat: Ctrl+Alt+Up grows panel height by one row" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // No-op when the panel is closed — action returns false so the
+    // keystroke can flow through to whatever else binds it.
+    try testing.expectEqual(false, try L.onAction(&rt, &ctx, .llm_chat_inline_grow));
+    try testing.expectEqual(@as(?u16, null), rt.chat_inline_rows_override);
+
+    rt.chat_inline_open = true;
+    // Grow once — override jumps from null (= cfg default, 10) to 11.
+    try testing.expectEqual(true, try L.onAction(&rt, &ctx, .llm_chat_inline_grow));
+    try testing.expect(rt.chat_inline_rows_override != null);
+    try testing.expectEqual(@as(u16, 11), rt.chat_inline_rows_override.?);
+
+    // Shrink twice — once back to 10, once to 9.
+    _ = try L.onAction(&rt, &ctx, .llm_chat_inline_shrink);
+    _ = try L.onAction(&rt, &ctx, .llm_chat_inline_shrink);
+    try testing.expectEqual(@as(u16, 9), rt.chat_inline_rows_override.?);
+}
+
+test "inline chat: shrink clamps at min height (3)" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_inline_rows_override = 3;
+    // Already at min — shrink is a no-op (still consumes the action).
+    try testing.expectEqual(true, try L.onAction(&rt, &ctx, .llm_chat_inline_shrink));
+    try testing.expectEqual(@as(u16, 3), rt.chat_inline_rows_override.?);
+}
+
+test "inline chat: closing the panel clears the height override" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_inline_rows_override = 12;
+    // Alt+C closes the panel — handler should drop the override.
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expectEqual(false, rt.chat_inline_open);
+    try testing.expectEqual(@as(?u16, null), rt.chat_inline_rows_override);
+}
+
+test "inline chat: pasted UTF-8 (e.g. `•` = 0xE2 0x80 0xA2) lands in the buffer" {
+    // Regression for Copilot review on #175 — parseChatKey's
+    // printable-insert arm previously only accepted 0x20..0x7E
+    // and dropped 0x80..0xFF as `.none`, so a paste of `•`
+    // (3 UTF-8 bytes, all in the high range) silently vanished.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "\u{2022} bullet");
+    try testing.expectEqualStrings("\u{2022} bullet", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
