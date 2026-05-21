@@ -1141,3 +1141,125 @@ test "inline chat scrollback: newest turn stays visible when prior turns wrap mu
     // cap mis-allocation) would have clipped it off.
     try testing.expect(std.mem.indexOf(u8, painted.?, "NEWEST-MARKER-D") != null);
 }
+
+test "inline chat: long turn renders in full, not capped at 3 rows" {
+    // Regression for "no wrap, it cuts of [...]" — a single long
+    // assistant reply was getting clipped at 3 rows because of a
+    // hardcoded `per_turn_max_rows = 3`. The per-turn cap is
+    // dropped entirely: each turn renders its full wrap count up
+    // to the scrollback budget; older turns scroll off the top
+    // and PageUp/PageDown walks history.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+
+    // 5+ wrap chunks of distinct content. Each tagged with a
+    // sentinel so we can assert the LAST chunk lands in the paint
+    // output — pre-fix, anything past the 3rd chunk got dropped
+    // and a `[…]` marker emitted instead.
+    const content =
+        "AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA " ++
+        "BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB BBBB " ++
+        "CCCC CCCC CCCC CCCC CCCC CCCC CCCC CCCC CCCC CCCC CCCC CCCC CCCC CCCC " ++
+        "DDDD DDDD DDDD DDDD DDDD DDDD DDDD DDDD DDDD DDDD DDDD DDDD DDDD DDDD " ++
+        "EEEE-LAST-CHUNK-MARKER";
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, content));
+    defer helpers.freeTurns(&rt);
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    // Marker at the END of the content MUST be visible — the
+    // hardcoded 3-row cap that used to drop it is gone.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "EEEE-LAST-CHUNK-MARKER") != null);
+}
+
+test "inline chat: em-dash and emoji survive writeSanitized (no `�` rendering)" {
+    // Regression for "espond — not the mai" rendering as
+    // "espond � not the mai" — the byte-level C1 filter in
+    // writeSanitized was dropping continuation bytes that
+    // happened to fall in 0x80..0x9F, corrupting any 3- or
+    // 4-byte UTF-8 sequence that needed those bytes. Em-dash
+    // (U+2014 = 0xE2 0x80 0x94) is the easiest trigger because
+    // its middle continuation byte is exactly 0x80. The fix
+    // walks codepoints and only drops C1 controls AFTER decode.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    // Em-dash, bullet, sparkle emoji, CJK — every one of these
+    // has at least one continuation byte in 0x80..0x9F.
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "respond \u{2014} not the main \u{2022} \u{2728} \u{4E2D}"));
+    defer helpers.freeTurns(&rt);
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    // Each multibyte glyph survives intact (full UTF-8 byte
+    // sequence present in the paint output, no replacement char).
+    try testing.expect(std.mem.indexOf(u8, painted.?, "\u{2014}") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "\u{2022}") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "\u{2728}") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "\u{4E2D}") != null);
+    // No replacement char in the output.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "\u{FFFD}") == null);
+}

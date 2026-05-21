@@ -52,34 +52,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     malformed UTF-8 on the user's terminal.
         ///   - Tab (0x09) and printable ASCII pass through.
         fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) !void {
-            var i: usize = 0;
-            while (i < bytes.len) : (i += 1) {
-                const b = bytes[i];
-                if (b == 0x1B or b == 0x7F or (b < 0x20 and b != 0x09)) {
-                    if (b == 0x0A or b == 0x0D) try w.writeAll(" ") else continue;
-                } else if (b >= 0x80 and b <= 0x9F) {
+            // Walk codepoints (not raw bytes) so multi-byte UTF-8
+            // sequences with continuation bytes in 0x80..0x9F (a `—`
+            // em-dash, an emoji, CJK glyph, etc.) survive intact.
+            // The previous byte-level filter dropped those
+            // continuation bytes as if they were C1 controls,
+            // leaving an orphan leading byte the terminal rendered
+            // as `�`. C1 controls are now checked AFTER decode
+            // (cp in 0x80..0x9F), not against raw bytes.
+            var it = pw.utf8Iter(bytes);
+            while (it.next()) |c| {
+                if (c.cp < 0x20 or c.cp == 0x7F) {
+                    if (c.cp == 0x09) {
+                        try w.writeAll("\t");
+                    } else if (c.cp == 0x0A or c.cp == 0x0D) {
+                        try w.writeAll(" ");
+                    }
                     continue;
-                } else if (b == 0xC2) {
-                    if (i + 1 >= bytes.len) continue; // lone 0xC2 → drop
-                    const next = bytes[i + 1];
-                    if (next >= 0x80 and next <= 0x9F) {
-                        // UTF-8 encoding of C1 control → drop pair.
-                        i += 1;
-                        continue;
-                    }
-                    if (next < 0x80 or next > 0xBF) {
-                        // Not a valid UTF-8 continuation — drop the
-                        // 0xC2; let `next` be re-examined on the
-                        // next iteration so its own gates apply.
-                        continue;
-                    }
-                    // 0xC2 + valid non-C1 continuation (e.g. NBSP).
-                    try w.writeByte(b);
-                    try w.writeByte(next);
-                    i += 1;
-                } else {
-                    try w.writeByte(b);
                 }
+                if (c.cp >= 0x80 and c.cp <= 0x9F) continue;
+                const start = it.i - c.byte_len;
+                try w.writeAll(bytes[start..it.i]);
             }
         }
 
@@ -928,13 +921,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 row += 1;
                 scrollback_budget -= 1;
             }
-            // Per-turn wrap cap so a single long reply can't push
-            // the whole scrollback off-panel. 3 rows ≈ 240 chars at
-            // 80-col, plenty for a paragraph; longer turns end in
-            // a dim `[…]` and remain visible in the alt-screen
-            // overlay (Alt+Shift+C) which has the full DECSTBM
-            // scroll region.
-            const per_turn_max_rows: usize = 3;
+            // No per-turn truncation: each turn renders its full
+            // wrap-chunk count, capped only by the scrollback
+            // budget. The OLDEST visible turn naturally gets
+            // clipped (via `oldest_turn_cap` in the back-walk
+            // below) when total demand exceeds budget; older
+            // turns scroll off the top. Use PageUp/PageDown to
+            // walk back through chat history.
+            const per_turn_max_rows: usize = scrollback_budget;
             // Pick `start_turn` by walking BACKWARDS from the newest
             // visible turn and summing each candidate's rendered-row
             // claim. Previously this was `visible_end -
