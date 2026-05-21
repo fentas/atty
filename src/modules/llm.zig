@@ -822,6 +822,50 @@ pub fn configure(comptime cfg: Config) type {
             /// transition so DECSTBM is updated before the first
             /// inline-panel paint.
             chat_inline_paint_pending: bool = false,
+            /// Fast-path latch — set when only `chat_inline_input_buf`
+            /// (the typed text) changed, so a full panel rewalk
+            /// (per-turn `countTurnRows`, scrollback render) would
+            /// be wasted work. `provideTermBytes` checks this AFTER
+            /// the full `chat_inline_paint_pending` path and falls
+            /// back to a full paint if the cached geometry doesn't
+            /// match: cols changed, incognito toggled, or the
+            /// CLAMPED input-line count (`min(1+newlines,
+            /// input_lines_cap)`) would shift the scrollback
+            /// boundary. Long multi-line prompts that are already
+            /// at the cap keep fast-pathing — extra `\n` strokes
+            /// don't move the geometry. Only the keystroke handler
+            /// sets this latch; every other state-change site arms
+            /// `chat_inline_paint_pending` for the full repaint.
+            chat_inline_input_dirty: bool = false,
+            /// Cached geometry from the last successful full
+            /// `paintInlineChat`. The fast-path replays
+            /// `paintInputBlock` against these coords without
+            /// re-deriving them. Invalidated implicitly: any state
+            /// change that warrants a full repaint sets
+            /// `chat_inline_paint_pending`, which runs first and
+            /// refreshes the cache.
+            chat_inline_paint_cache_valid: bool = false,
+            chat_inline_paint_input_top_row: u16 = 0,
+            chat_inline_paint_input_row: u16 = 0,
+            /// Clamped input-line count from the previous full paint
+            /// (`min(1 + newlines, panel_rows / 2)`). Compared
+            /// against the live equivalent — fast-path only bails
+            /// when the CLAMPED value would shift, not on raw
+            /// newline-count changes, so long multi-line prompts
+            /// that are already at the cap continue to fast-path
+            /// instead of re-rendering on every keystroke.
+            chat_inline_paint_input_lines: u16 = 0,
+            chat_inline_paint_input_lines_cap: u16 = 0,
+            chat_inline_paint_total_cols: u16 = 0,
+            /// Incognito state at the moment of the cached full
+            /// paint. The divider swaps the ✨ sparkle for 🕶 glasses
+            /// and re-labels the mode word when `ctx.incognito` is
+            /// set — those are CHROME changes the fast-path would
+            /// skip. Ctrl+Shift+I lives in the proxy (no per-module
+            /// notify hook), so this cache field is how the
+            /// fast-path detects the toggle and bails to a full
+            /// repaint.
+            chat_inline_paint_incognito: bool = false,
             /// Sized like the overlay's `chat_overlay_buf`. The
             /// inline panel is smaller (~8 rows × 200 cols) so 4 KB
             /// is plenty; matching the overlay's buffer keeps the

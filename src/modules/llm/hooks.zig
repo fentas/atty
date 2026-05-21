@@ -445,7 +445,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 &rt.chat_inline_input_cursor,
                                 key,
                             )) {
-                                rt.chat_inline_paint_pending = true;
+                                rt.chat_inline_input_dirty = true;
                             }
                         },
                     }

@@ -1022,7 +1022,96 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             w.print("\x1B[{d};{d}H", .{ restore_pos_open.row, restore_pos_open.col }) catch return false;
 
             rt.chat_inline_buf_len = w.end;
+            // Stash the input-block geometry so the typing fast-path
+            // (`paintInlineChatInputFast`) can replay
+            // `paintInputBlock` without re-deriving panel rows,
+            // top_gap, input_lines, etc. Cache invalidates on any
+            // event that arms `chat_inline_paint_pending` (resize,
+            // turn arrival, scroll, mode toggle) — those re-enter
+            // this full-paint path and refresh the values.
+            rt.chat_inline_paint_input_top_row = input_top_row;
+            rt.chat_inline_paint_input_row = input_row;
+            rt.chat_inline_paint_input_lines = input_lines;
+            rt.chat_inline_paint_input_lines_cap = input_lines_cap;
+            rt.chat_inline_paint_total_cols = total_cols;
+            rt.chat_inline_paint_incognito = ctx.incognito;
+            rt.chat_inline_paint_cache_valid = true;
+            rt.chat_inline_input_dirty = false;
             return true;
+        }
+
+        /// Fast-path repaint for the common case: user typed a
+        /// character (or backspace / arrow) while the chat panel
+        /// is open, nothing else changed. Skips the per-turn
+        /// `countTurnRows` walk and the scrollback render, emitting
+        /// only the input block + cursor restore.
+        ///
+        /// Bails (returns false → caller falls back to full paint)
+        /// when the cache is stale, the terminal cols changed
+        /// (cached coords no longer describe the same viewport),
+        /// the incognito flag changed (chrome would be wrong), or
+        /// the CLAMPED input-line count (`min(1+newlines,
+        /// input_lines_cap)`) would shift the scrollback boundary.
+        /// Newlines past the cap don't trigger a bail — at that
+        /// point the input area is at its ceiling and additional
+        /// `\n` strokes keep geometry stable.
+        fn paintInlineChatInputFast(rt: *Runtime, ctx: *m.Context) bool {
+            if (!rt.chat_inline_paint_cache_valid or !rt.chat_inline_open) return false;
+            const total_cols: u16 = ctx.terminal_cols orelse 80;
+            if (total_cols != rt.chat_inline_paint_total_cols) return false;
+            // Ctrl+Shift+I lives in the proxy and toggles
+            // `ctx.incognito` without a per-module notify hook. The
+            // divider chrome (icon + mode_word) depends on this
+            // flag, so a mismatch means the cached chrome is stale.
+            if (ctx.incognito != rt.chat_inline_paint_incognito) return false;
+
+            // Compare the CLAMPED input-line count (not the raw
+            // newline count). Once the input is already at
+            // `input_lines_cap`, additional newlines don't move
+            // `input_top_row` and the scrollback boundary is stable
+            // — fast-path can keep firing.
+            var buf_newlines: u16 = 0;
+            for (rt.chat_inline_input_buf[0..rt.chat_inline_input_len]) |bb| {
+                if (bb == '\n') buf_newlines += 1;
+            }
+            const desired_input_lines: u16 = 1 + buf_newlines;
+            const live_input_lines: u16 = @min(desired_input_lines, rt.chat_inline_paint_input_lines_cap);
+            if (live_input_lines != rt.chat_inline_paint_input_lines) return false;
+
+            var w: std.Io.Writer = .fixed(&rt.chat_inline_buf);
+            // Focus state isn't cached — every focus toggle arms
+            // `chat_inline_paint_pending`, which refreshes the cache
+            // before fast-path can see a stale value.
+            if (rt.chat_focus_in_panel) {
+                w.writeAll("\x1B[?25l\x1B[s") catch return false;
+            } else {
+                w.writeAll("\x1B[?25h\x1B[s") catch return false;
+            }
+            paintInputBlock(&w, rt, rt.chat_inline_paint_input_top_row, rt.chat_inline_paint_input_row) catch return false;
+
+            const total_rows: u16 = ctx.terminal_rows orelse 24;
+            const base_reserve: u16 = ctx.statusbar_base_reserve orelse 3;
+            const restore_pos = inlineRestorePos(rt, total_rows, base_reserve);
+            w.print("\x1B[{d};{d}H", .{ restore_pos.row, restore_pos.col }) catch return false;
+
+            rt.chat_inline_buf_len = w.end;
+            return true;
+        }
+
+        /// Shared cleanup when an inline-chat paint attempt fails
+        /// (terminal too small or paint-buffer overflow). Roll the
+        /// open flag back so the input swallow releases and the
+        /// proxy shrinks the reservation on the next tick; latch
+        /// the error hint and write a stderr line so the failure
+        /// isn't silent.
+        fn recoverInlineChatPaintFailure(rt: *Runtime) void {
+            rt.chat_inline_paint_cache_valid = false;
+            if (rt.chat_inline_open) {
+                rt.chat_inline_open = false;
+                latchErr(rt, "inline chat: terminal too small or paint buffer overflow");
+                const inline_overflow_msg = "atty: inline chat: terminal too small or paint buffer overflow\n";
+                _ = std.c.write(2, inline_overflow_msg, inline_overflow_msg.len);
+            }
         }
 
         pub fn provideTermBytes(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -1033,20 +1122,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // paint latch is set.
             if (rt.chat_inline_paint_pending) {
                 rt.chat_inline_paint_pending = false;
+                rt.chat_inline_input_dirty = false;
                 if (paintInlineChat(rt, ctx)) {
                     return rt.chat_inline_buf[0..rt.chat_inline_buf_len];
                 }
-                // Paint failed (terminal too small or buffer
-                // overflow). Roll the open flag back so the input
-                // swallow releases and the proxy shrinks the
-                // reservation on the next tick. Surface a hint so
-                // the failure isn't silent.
-                if (rt.chat_inline_open) {
-                    rt.chat_inline_open = false;
-                    latchErr(rt, "inline chat: terminal too small or paint buffer overflow");
-                    const inline_overflow_msg = "atty: inline chat: terminal too small or paint buffer overflow\n";
-                    _ = std.c.write(2, inline_overflow_msg, inline_overflow_msg.len);
+                recoverInlineChatPaintFailure(rt);
+            } else if (rt.chat_inline_input_dirty) {
+                rt.chat_inline_input_dirty = false;
+                if (paintInlineChatInputFast(rt, ctx)) {
+                    return rt.chat_inline_buf[0..rt.chat_inline_buf_len];
                 }
+                // Fast-path bailed (cache stale, geometry changed,
+                // chrome state changed). Fall through to a full
+                // repaint via the same buffer.
+                if (paintInlineChat(rt, ctx)) {
+                    return rt.chat_inline_buf[0..rt.chat_inline_buf_len];
+                }
+                recoverInlineChatPaintFailure(rt);
             }
             // Chat overlay paint (phase 2a) takes precedence over
             // the conclusion + cursor-colour paths. The overlay's
