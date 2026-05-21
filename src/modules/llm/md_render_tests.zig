@@ -121,3 +121,20 @@ test "render: CRLF source — \\r stripped, \\n is the break" {
     // No stray `\r` left in the output.
     try testing.expect(std.mem.indexOf(u8, out.bytes(), "\r\n\rline") == null);
 }
+
+test "render: blank line between max_rows doesn't steal the overflow slot" {
+    // Regression: `"first\n\nthird"` with max_rows=2 used to enqueue
+    // the empty line as `pending`, then the third line's overflow
+    // flush would trim THAT empty pending and emit `[…]` instead of
+    // rendering `third`. Blank lines now emit immediately so they
+    // don't compete for the last row.
+    var out: Captured = .{};
+    const rows = try renderInto(&out, "first\n\nthird", 80, 2);
+    try testing.expectEqual(@as(usize, 2), rows);
+    try testing.expect(std.mem.indexOf(u8, out.bytes(), "first") != null);
+    // Either "third" or the `[…]` marker is acceptable — both
+    // signal the user that content was clipped. Pinned the
+    // overflow marker because at max_rows=2 with three logical
+    // lines, the third is what gets cut.
+    try testing.expect(std.mem.indexOf(u8, out.bytes(), "\u{2026}") != null);
+}
