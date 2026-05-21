@@ -925,11 +925,20 @@ pub fn Module(comptime cfg: Config) type {
             }
 
             const want_stdin = sub.prompt_via == .stdin;
+            // `pgid = 0` makes the child its own process group
+            // leader. Without this, a timeout-driven kill of the
+            // direct child leaves any helpers / grandchildren it
+            // spawned with the SAME pgid as atty — they keep
+            // running unattributed. With its own pgid, the
+            // Watchdog can target the whole group via negative
+            // PID below (`kill(-pgid)`) so the timeout actually
+            // bounds the entire subtree.
             var child = std.process.spawn(io, .{
                 .argv = argv_list.items,
                 .stdin = if (want_stdin) .pipe else .ignore,
                 .stdout = .pipe,
                 .stderr = .pipe,
+                .pgid = 0,
             }) catch {
                 err_len_out.* = writeStatic(error_out, "subprocess spawn failed (binary on $PATH?)");
                 return error.SubprocessFailed;
@@ -960,17 +969,27 @@ pub fn Module(comptime cfg: Config) type {
                     // but belt-and-suspenders).
                     if (done.load(.acquire)) return;
                     expired.store(true, .release);
-                    // SIGTERM first — gives well-behaved CLIs a
-                    // chance to flush stderr / close files. SIGKILL
-                    // 200 ms later catches anything that didn't
-                    // exit. `std.posix.kill` instead of
-                    // `child.kill` because the latter mutates
-                    // `child.id` and races with the main thread's
-                    // read/wait.
-                    std.posix.kill(pid, .TERM) catch {};
+                    // Signal the whole PROCESS GROUP, not just the
+                    // direct child. `pid` is the child's PID and
+                    // also its pgid (we spawned with `pgid = 0`,
+                    // so the child is its own process group
+                    // leader). Negative PID to `kill(2)` means
+                    // "deliver to the process group |pid|" — any
+                    // helpers / grandchildren the child spawned
+                    // get the same signal. SIGTERM first for
+                    // graceful flush, SIGKILL 200ms later for
+                    // anything that didn't exit. Fall back to
+                    // direct-PID kill if group kill fails (e.g.
+                    // group already empty / child already exited).
+                    const neg_pid: std.posix.pid_t = -pid;
+                    std.posix.kill(neg_pid, .TERM) catch {
+                        std.posix.kill(pid, .TERM) catch {};
+                    };
                     var grace: std.c.timespec = .{ .sec = 0, .nsec = @intCast(200 * std.time.ns_per_ms) };
                     _ = std.c.nanosleep(&grace, null);
-                    std.posix.kill(pid, .KILL) catch {};
+                    std.posix.kill(neg_pid, .KILL) catch {
+                        std.posix.kill(pid, .KILL) catch {};
+                    };
                 }
             };
             // If the user asked for a timeout but we can't spawn
