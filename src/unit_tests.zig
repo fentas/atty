@@ -33,6 +33,7 @@ test {
     _ = @import("modules/llm.zig");
     _ = @import("modules/llm/dialog.zig");
     _ = @import("modules/llm/parse.zig");
+    _ = @import("modules/llm/prompts.zig");
     _ = @import("modules/llm/types.zig");
     _ = @import("modules/llm/worker.zig");
     _ = @import("modules/llm/env.zig");

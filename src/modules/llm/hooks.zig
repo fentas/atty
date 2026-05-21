@@ -56,7 +56,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             raw: []const u8,
             out: *DialogResponse,
         ) !void {
-            return dialog.parseResponse(DialogResponse, allocator, raw, out);
+            _ = allocator;
+            dialog.parseFencedResponse(DialogResponse, raw, out);
         }
         pub const buildDialogRequestBody = dialog.buildRequestBody;
 
@@ -66,6 +67,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const llm_consts = @import("consts.zig").Module(cfg);
         const inert_error_msg = llm_consts.inert_error_msg;
         const effective_dialog_system_prompt = llm_consts.effective_dialog_system_prompt;
+        const effective_auto_system_prompt = llm_consts.effective_auto_system_prompt;
+        const effective_chat_system_prompt = llm_consts.effective_chat_system_prompt;
 
         /// Parsed chat-input keystroke. Folds single-byte control
         /// codes (Ctrl+A/E/B/F/U/K/W, Backspace, DEL, Enter, Ctrl+D)
@@ -1693,6 +1696,36 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     return rt.pending_command[0..rt.pending_command_len];
                 },
                 .done => {
+                    // Chat mode: `done` from the LLM means "I've
+                    // said what I want to say." It's a turn, not a
+                    // conversation-end. Push the reason as an
+                    // assistant turn so the user sees the reply in
+                    // the chat scrollback, arm the paint latch, and
+                    // leave the surface open — the user closes the
+                    // panel themselves via Alt+C / Alt+Shift+C.
+                    // Suppresses the inline conclusion banner (the
+                    // panel IS the UI) and skips dialogReset (chat
+                    // is open-ended; future replies stay coherent).
+                    if (currentDispatchMode(rt) == .chat) {
+                        const reason = parsed.reason();
+                        if (reason.len > 0) {
+                            const reason_copy = rt.allocator.dupe(u8, reason) catch {
+                                latchErr(rt, "out of memory pushing chat reply");
+                                return null;
+                            };
+                            pushTurn(rt, .assistant_exec, reason_copy) catch {
+                                rt.allocator.free(reason_copy);
+                                latchErr(rt, "out of memory pushing chat reply");
+                                return null;
+                            };
+                        }
+                        if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                        if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+                        // Stay in chat-active state; next user turn
+                        // fires another dialog request.
+                        rt.dialog_state = .idle;
+                        return null;
+                    }
                     // Tally the conversation so the user gets a
                     // glance-able summary of what just happened —
                     // useful both for the loop they just exited
@@ -2185,11 +2218,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // potentially expensive). In fixture mode the worker
             // discards the body entirely, so skip the serialization
             // altogether.
+            // Pick the prompt by the LIVE dispatch mode so an open
+            // chat surface (`.chat`), an auto-exec persistent mode
+            // (`.auto`), or a regular dialog (`.dialog`) each get
+            // the matching atty-owned prompt instead of all routing
+            // through `effective_dialog_system_prompt` and missing
+            // the auto-mode refusal list / chat-mode prose default.
+            const live_mode = currentDispatchMode(rt);
+            const live_prompt: []const u8 = switch (live_mode) {
+                .single, .dialog => effective_dialog_system_prompt,
+                .auto => effective_auto_system_prompt,
+                .chat => effective_chat_system_prompt,
+            };
             const built_body: ?[]u8 = if (cfg.fixture_responses.len > 0) null else blk: {
                 const body = try buildDialogRequestBody(
                     rt.allocator,
                     model_for_request,
-                    effective_dialog_system_prompt,
+                    live_prompt,
                     rt.shell,
                     composed_context,
                     turn_slice,
