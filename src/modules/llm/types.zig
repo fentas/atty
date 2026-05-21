@@ -424,10 +424,38 @@ pub const Config = struct {
     /// Environment variables exposed to the model alongside the
     /// user's prompt. Each named var is read at attach time and
     /// (if set, non-empty) joined into a one-line `KEY=value`
-    /// context block appended to the user message. Empty default
-    /// = no context. `PATH_BASE` is the canonical example — a
-    /// project's "what does this user mean by 'here'" anchor.
-    context_env_vars: []const []const u8 = &.{},
+    /// context block appended to the user message.
+    ///
+    /// Defaults skew toward "shell-task essentials that don't
+    /// identify the user":
+    ///   - `EDITOR` / `VISUAL` — picks the right `:wq` vs
+    ///     `Ctrl+X` workflow for `git commit`, `crontab -e`, etc.
+    ///   - `LANG` — locale-aware `sort` / `date` / `grep` output.
+    ///   - `TERM` — terminal-capability awareness (kitty kbd,
+    ///     truecolor, alt-screen support).
+    ///   - `TZ` — timezone-aware date / scheduling suggestions.
+    ///
+    /// **The values land verbatim in the LLM request body** — so
+    /// privacy depends on what's in this list, not which modes
+    /// record locally (incognito only gates atuin/history, not
+    /// the LLM payload). Tune to taste:
+    ///   - Add `HOME` / `USER` / `PWD` for username- or path-aware
+    ///     suggestions (self-hosted models only — these leak the
+    ///     username to cloud endpoints).
+    ///   - Add project-anchor vars like `PATH_BASE`.
+    ///   - **Never list** credential-shaped vars (`*_API_KEY`,
+    ///     `*_TOKEN`, `AWS_*`, `OPENAI_*`, …). atty does not
+    ///     filter env-var contents — the responsibility is on the
+    ///     config.
+    ///
+    /// Set to `&.{}` to send no env context at all.
+    context_env_vars: []const []const u8 = &.{
+        "EDITOR",
+        "VISUAL",
+        "LANG",
+        "TERM",
+        "TZ",
+    },
     /// Auto-detected system context appended to the system prompt
     /// alongside `context_env_vars`. The shell's PS1 typically
     /// advertises this info (cwd, git branch, …) but the local
