@@ -329,6 +329,182 @@ fn print_compiled_features() {
     }
 }
 
+/// Lock-acquisition failure modes — distinguish "another daemon
+/// holds the lock" (operator-visible, exit cleanly) from generic
+/// I/O failure (open of the lock file failed for some other
+/// reason — permission, missing directory, etc.).
+#[derive(Debug)]
+enum LockError {
+    AlreadyRunning,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for LockError {
+    fn from(e: std::io::Error) -> Self {
+        LockError::Io(e)
+    }
+}
+
+/// Open (or create) a sibling `<socket>.lock` file and acquire
+/// a non-blocking exclusive BSD flock on it. Returns the open
+/// `File` whose lifetime carries the lock — caller must keep it
+/// alive for the daemon's lifetime. Drop = lock release.
+fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::File, LockError> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    // Lock file lives next to the socket (same parent dir, so
+    // it inherits the daemon's RuntimeDirectory permissions).
+    // Mode is `0600`, NOT the socket's `0660` — only the daemon
+    // ever opens this file. The socket itself is group-readable
+    // so `atty` group members can connect; the lock is purely
+    // internal to the daemon process.
+    let mut lock_path = socket.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock_path: std::path::PathBuf = lock_path.into();
+
+    // Open with `O_RDONLY | O_CREAT` via raw libc — Rust's
+    // `OpenOptions` refuses read-only + create. `flock` doesn't
+    // require write access, and forcing O_RDWR would block
+    // restart against a leftover `.lock` file created with
+    // 0644 perms by a previous run under a different umask.
+    // Contents are irrelevant — only the in-kernel flock state
+    // matters — and a concurrent O_CREAT race is safe (both
+    // processes see the same inode; only one wins the flock).
+    //
+    // Constants are pinned to Linux x86_64/aarch64 values — atty
+    // targets linux-{gnu,musl} per CLAUDE.md. The compile-error
+    // gate below makes the platform assumption explicit at build
+    // time rather than silently miscompiling on (e.g.) BSD where
+    // O_CLOEXEC has a different numeric value.
+    #[cfg(not(target_os = "linux"))]
+    compile_error!("atty-guard: lock-file helper hardcodes Linux O_* values");
+
+    // open(2) is C varargs (`int open(const char*, int, ...)`).
+    // Declaring it with a fixed 3-arg signature is technically
+    // UB — Rust's ABI distinguishes fixed from variadic, and on
+    // some platforms the calling conventions differ (e.g.
+    // floating-point regs on AArch64 hardfp). The variadic
+    // form is the portable correct shape.
+    extern "C" {
+        fn open(
+            path: *const std::os::raw::c_char,
+            flags: std::os::raw::c_int,
+            ...
+        ) -> std::os::raw::c_int;
+    }
+    const O_RDONLY: std::os::raw::c_int = 0;
+    const O_CREAT: std::os::raw::c_int = 0o100;
+    const O_CLOEXEC: std::os::raw::c_int = 0o2000000;
+
+    let mut path_z = lock_path.as_os_str().as_bytes().to_vec();
+    path_z.push(0);
+    // Retry on EINTR — symmetric with the flock loop below.
+    // Signal delivery (SIGCHLD during eBPF attach setup, etc.)
+    // can interrupt open(2); without the retry, startup dies on
+    // a transient kernel quirk.
+    let mut open_attempts: u32 = 0;
+    let fd = loop {
+        let rc = unsafe {
+            open(
+                path_z.as_ptr() as *const std::os::raw::c_char,
+                O_RDONLY | O_CREAT | O_CLOEXEC,
+                0o600,
+            )
+        };
+        if rc >= 0 {
+            break rc;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted && open_attempts < 8 {
+            open_attempts += 1;
+            continue;
+        }
+        return Err(LockError::Io(err));
+    };
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+
+    // flock with LOCK_EX | LOCK_NB. Linux constants:
+    //   LOCK_EX = 2, LOCK_NB = 4.
+    extern "C" {
+        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int)
+            -> std::os::raw::c_int;
+    }
+    const LOCK_EX: std::os::raw::c_int = 2;
+    const LOCK_NB: std::os::raw::c_int = 4;
+
+    // Retry on EINTR — a signal interruption isn't a real
+    // failure, just a kernel quirk that aborts the syscall.
+    // Loop bound prevents pathological signal storms from
+    // hanging startup forever (after N retries, give up).
+    let mut attempts: u32 = 0;
+    loop {
+        let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+        if rc == 0 {
+            return Ok(file);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted && attempts < 8 {
+            attempts += 1;
+            continue;
+        }
+        // EWOULDBLOCK / EAGAIN → contended.
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            return Err(LockError::AlreadyRunning);
+        }
+        return Err(LockError::Io(err));
+    }
+}
+
+/// Outcome of the pre-bind socket cleanup. `NotASocket` means
+/// the existing path is something the daemon shouldn't unlink —
+/// arbitrary regular file, directory, etc. — and the operator
+/// has likely misconfigured `--socket`.
+#[derive(Debug)]
+enum SocketRemoveError {
+    NotASocket,
+    Io(std::io::Error),
+}
+
+/// Remove `path` if and only if it points at (or symlinks to) a
+/// Unix socket. Non-existent paths return `Ok(())` (first-run /
+/// clean restart). Anything else (regular file, dir, FIFO,
+/// device) returns `NotASocket` — the caller decides whether to
+/// exit or surface the error.
+///
+/// Symlinks are followed: a legitimate operator setup may
+/// symlink `/run/atty-guard.sock` to a different path. The
+/// initial `symlink_metadata` is a fast-path check for
+/// `NotFound`; if the path exists we follow via `metadata` so
+/// the type check sees the link target.
+fn remove_socket_if_safe(path: &std::path::Path) -> Result<(), SocketRemoveError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    // Fast-path NotFound (first run / clean restart) without
+    // following symlinks.
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(SocketRemoveError::Io(e)),
+        Ok(_) => {}
+    }
+    // Path exists. Resolve symlinks for the type check so a
+    // legitimate operator setup (e.g. `/run/atty-guard.sock`
+    // symlinked to `/var/run/atty/guard.sock`) isn't rejected.
+    // `canonicalize` follows the chain to a real existing path
+    // (fails with ENOENT only if the link is broken).
+    let resolved = std::fs::canonicalize(path).map_err(SocketRemoveError::Io)?;
+    let md = std::fs::metadata(&resolved).map_err(SocketRemoveError::Io)?;
+    if !md.file_type().is_socket() {
+        return Err(SocketRemoveError::NotASocket);
+    }
+    // Remove the RESOLVED path (the actual socket inode), not
+    // the symlink. Keeps the operator's symlink intact so a
+    // subsequent `bind(path)` follows it and recreates the
+    // socket at the same target — the canonical setup keeps
+    // working across restarts.
+    std::fs::remove_file(&resolved).map_err(SocketRemoveError::Io)
+}
+
 fn main() -> std::io::Result<()> {
     let mut cli = Cli::parse();
 
@@ -407,12 +583,63 @@ fn main() -> std::io::Result<()> {
         None => config::Config::default(),
     };
 
-    // SO_REUSEADDR equivalent for UDS: unlink stale socket file first.
-    // On restart after a crash the previous socket file may linger and
-    // bind would otherwise fail with EADDRINUSE. We're not protecting
-    // against a concurrent live daemon — that would clobber, which
-    // is the wrong outcome, so guard with a flock TODO.
-    let _ = std::fs::remove_file(&socket);
+    // Single-instance guard via flock on a sibling `.lock` file.
+    // Holding the file alive for the daemon's lifetime keeps the
+    // lock; on process exit (crash or clean), the kernel releases
+    // it. A second `atty-guard` against the same socket path will
+    // see EWOULDBLOCK and refuse to start — avoids the old race
+    // where unconditional `remove_file` could clobber a live
+    // daemon's socket and let new clients connect to the wrong
+    // process. The `.lock` file itself stays on disk across
+    // restarts (its presence is meaningless without the kernel
+    // lock state); only the in-kernel BSD lock matters.
+    //
+    // Bound `_lock` to a name (not `_`) so it survives to the end
+    // of `main`; an underscore-only binding would drop
+    // immediately, releasing the lock before `server::serve` even
+    // starts.
+    let _lock = match acquire_single_instance_lock(&socket) {
+        Ok(file) => file,
+        Err(LockError::AlreadyRunning) => {
+            eprintln!(
+                "atty-guard: another instance is already running on {} — refusing to start",
+                socket.display()
+            );
+            std::process::exit(1);
+        }
+        Err(LockError::Io(e)) => {
+            eprintln!(
+                "atty-guard: cannot acquire single-instance lock for {}: {e}",
+                socket.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    // Lock acquired — safe to unlink any STALE SOCKET left by a
+    // previous crashed instance (the kernel already cleared its
+    // flock, so no live owner). Guarded against `--socket`
+    // pointing at a non-socket regular file: silently unlinking
+    // would delete arbitrary data the operator didn't expect.
+    match remove_socket_if_safe(&socket) {
+        Ok(()) => {}
+        Err(SocketRemoveError::NotASocket) => {
+            eprintln!(
+                "atty-guard: --socket {} exists and is not a Unix socket — refusing to overwrite",
+                socket.display()
+            );
+            std::process::exit(1);
+        }
+        Err(SocketRemoveError::Io(e)) => {
+            // Io can come from symlink_metadata, canonicalize,
+            // metadata, OR remove_file. Use a generic phrasing
+            // that doesn't lie about which step failed.
+            eprintln!(
+                "atty-guard: cannot prepare --socket {}: {e}",
+                socket.display()
+            );
+            std::process::exit(1);
+        }
+    }
 
     if cli.verbosity >= 1 {
         eprintln!(
@@ -550,4 +777,127 @@ fn main() -> std::io::Result<()> {
         osv_client,
         trust_store,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_socket_path() -> std::path::PathBuf {
+        // pid + monotonic counter — pid alone risks colliding
+        // across cargo's parallel test threads (same PID), and
+        // SystemTime nanos can repeat on coarse-resolution
+        // clocks or fast machines within the same tick.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let pid = std::process::id();
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::path::PathBuf::from(format!("/tmp/atty-guard-lock-test-{pid}-{n}.sock"))
+    }
+
+    #[test]
+    fn lock_is_exclusive() {
+        let socket = unique_socket_path();
+        // Cleanup any leftover .lock from a previous run.
+        let lock_path = {
+            let mut p = socket.as_os_str().to_owned();
+            p.push(".lock");
+            std::path::PathBuf::from(p)
+        };
+        let _ = std::fs::remove_file(&lock_path);
+
+        let first = acquire_single_instance_lock(&socket).expect("first lock should succeed");
+        match acquire_single_instance_lock(&socket) {
+            Err(LockError::AlreadyRunning) => {}
+            Ok(_) => panic!("second lock should NOT succeed while first holds it"),
+            Err(other) => panic!("expected AlreadyRunning, got {other:?}"),
+        }
+        // Drop first → kernel releases the flock.
+        drop(first);
+        let _second = acquire_single_instance_lock(&socket)
+            .expect("lock should be re-acquirable after first dropped");
+        // Cleanup so /tmp doesn't accumulate stale .lock files.
+        let _ = std::fs::remove_file(&lock_path);
+    }
+
+    #[test]
+    fn remove_socket_if_safe_missing_path_is_ok() {
+        let p = unique_socket_path();
+        // No file at this path — should succeed silently.
+        assert!(matches!(remove_socket_if_safe(&p), Ok(())));
+    }
+
+    #[test]
+    fn remove_socket_if_safe_regular_file_refused() {
+        // If `--socket` points at an existing regular file (operator
+        // misconfig), the daemon must NOT silently delete it.
+        let p = unique_socket_path();
+        std::fs::write(&p, b"important data").expect("write fixture");
+        let result = remove_socket_if_safe(&p);
+        assert!(matches!(result, Err(SocketRemoveError::NotASocket)));
+        assert!(p.exists(), "regular file should NOT have been removed");
+        // Cleanup
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn remove_socket_if_safe_actual_socket_is_removed() {
+        // Stale socket from a previous run should be removed.
+        let p = unique_socket_path();
+        let _ = std::fs::remove_file(&p);
+        let _listener = std::os::unix::net::UnixListener::bind(&p).expect("bind fixture");
+        // listener drops at scope end; binding the socket leaves
+        // the inode on disk until we unlink — perfect stale socket
+        // simulation. drop the listener so its fd is closed but
+        // the inode remains.
+        drop(_listener);
+        assert!(p.exists(), "socket file should exist after bind");
+        assert!(matches!(remove_socket_if_safe(&p), Ok(())));
+        assert!(!p.exists(), "socket file should be removed");
+    }
+
+    #[test]
+    fn remove_socket_if_safe_symlink_to_socket_removes_target() {
+        // Operator setup: socket-path is a symlink to a different
+        // location. The target socket (stale) must be removed; the
+        // symlink itself must survive so `bind(symlink_path)` still
+        // resolves correctly.
+        let target = unique_socket_path();
+        let mut link_buf = unique_socket_path();
+        link_buf.set_extension("link");
+        let link = link_buf;
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&link);
+
+        let _listener = std::os::unix::net::UnixListener::bind(&target).expect("bind fixture");
+        drop(_listener);
+        std::os::unix::fs::symlink(&target, &link).expect("symlink fixture");
+
+        assert!(matches!(remove_socket_if_safe(&link), Ok(())));
+        assert!(!target.exists(), "target socket should be removed");
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "symlink should still exist (operator setup preserved)"
+        );
+        // Cleanup the dangling symlink.
+        let _ = std::fs::remove_file(&link);
+    }
+
+    #[test]
+    fn lock_path_is_socket_sibling() {
+        // Belt-and-braces: the lock path must be `<socket>.lock`,
+        // not e.g. moved into /var/lock or /tmp. Operators rely
+        // on it living next to the socket.
+        let socket = unique_socket_path();
+        let lock_path = {
+            let mut p = socket.as_os_str().to_owned();
+            p.push(".lock");
+            std::path::PathBuf::from(p)
+        };
+        let _ = std::fs::remove_file(&lock_path);
+
+        let _lock = acquire_single_instance_lock(&socket).expect("lock should succeed");
+        assert!(lock_path.exists(), "lock file at {lock_path:?} should exist");
+        drop(_lock);
+        let _ = std::fs::remove_file(&lock_path);
+    }
 }
