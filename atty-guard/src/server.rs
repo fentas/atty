@@ -424,7 +424,30 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // starttime alongside the level so a later `get` can
             // detect recycled PIDs and evict the stale entry — see
             // `ThreatMap::set` / `get`.
-            if !peer.is_root {
+            if !peer.is_root && !matches!(level, ThreatLevel::Low) {
+                // TOCTOU defense: read starttime BEFORE the
+                // ownership check and AGAIN AFTER, and reject if
+                // they differ. Otherwise an attacker could win
+                // the race between `pid_owner_uid` (sees the old
+                // process, owned by attacker's UID) and
+                // `ThreatMap::set`'s starttime read (sees a
+                // recycled PID now owned by a different user) —
+                // installing a non-Low mark + BPF entry against
+                // someone else's process. Identity = (pid,
+                // starttime) on Linux within one boot.
+                let start1 = match crate::threat_map::pid_starttime(pid) {
+                    crate::threat_map::ProcRead::Found(t) => t,
+                    crate::threat_map::ProcRead::NotFound => {
+                        return ResponseBody::Error {
+                            message: format!(
+                                "pid {pid} no longer exists — cannot set non-Low threat level"
+                            ),
+                        };
+                    }
+                    crate::threat_map::ProcRead::Error(msg) => {
+                        return ResponseBody::Error { message: msg };
+                    }
+                };
                 match pid_owner_uid(pid) {
                     OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
                         return ResponseBody::Error {
@@ -434,12 +457,7 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                             ),
                         };
                     }
-                    OwnerLookup::NotFound if !matches!(level, ThreatLevel::Low) => {
-                        // Non-root + non-Low + PID gone: reject.
-                        // We can't verify ownership of a dead PID,
-                        // so refuse to install a NEW mark on it
-                        // (could otherwise mark a soon-to-be-reused
-                        // PID that lands on a different user).
+                    OwnerLookup::NotFound => {
                         return ResponseBody::Error {
                             message: format!(
                                 "pid {pid} no longer exists — cannot set non-Low threat level"
@@ -449,12 +467,42 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                     OwnerLookup::Error(msg) => {
                         return ResponseBody::Error { message: msg };
                     }
-                    // OwnerLookup::Owner(_) where uid matches, OR
-                    // OwnerLookup::NotFound + Low (pure eviction is
-                    // safe even when the PID is gone — leaving a
-                    // stale in-mem/BPF entry behind would be the
-                    // worse outcome): proceed.
-                    _ => {}
+                    OwnerLookup::Owner(_) => {}
+                }
+                let start2 = match crate::threat_map::pid_starttime(pid) {
+                    crate::threat_map::ProcRead::Found(t) => t,
+                    _ => {
+                        return ResponseBody::Error {
+                            message: format!("pid {pid} disappeared mid-request"),
+                        };
+                    }
+                };
+                if start1 != start2 {
+                    return ResponseBody::Error {
+                        message: format!(
+                            "pid {pid} was recycled mid-request — refusing to set threat level"
+                        ),
+                    };
+                }
+            } else if !peer.is_root {
+                // Non-root + Low: pure eviction. Permit even when
+                // the PID is gone; reject only when the ownership
+                // lookup itself fails or returns a different live
+                // UID (clearing someone else's live mark would
+                // still be a cross-user policy violation).
+                match pid_owner_uid(pid) {
+                    OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+                        return ResponseBody::Error {
+                            message: format!(
+                                "non-root caller (uid {}) cannot clear threat level for pid {pid} (owned by uid {owner_uid})",
+                                peer.uid
+                            ),
+                        };
+                    }
+                    OwnerLookup::Error(msg) => {
+                        return ResponseBody::Error { message: msg };
+                    }
+                    OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
                 }
             }
             if !state.threat.set(pid, level) {
