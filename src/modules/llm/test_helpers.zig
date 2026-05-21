@@ -20,6 +20,7 @@ pub fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
         }
         t.join();
     }
+    if (rt.shared.res_buf) |slice| rt.allocator.free(slice);
     rt.allocator.destroy(rt.shared);
     rt.allocator.free(rt.api_base);
     rt.allocator.free(rt.api_key);

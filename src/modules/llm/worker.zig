@@ -1299,11 +1299,15 @@ pub fn Module(comptime cfg: Config) type {
                     shared.fixture_idx = (fi + 1) % fixture_n;
                     const canned = cfg.fixture_responses[fi];
                     const copy_n = @min(canned.len, cfg.max_response_bytes);
+                    var fixture_err: usize = 0;
                     storeResponse(gpa, shared, canned[0..copy_n]) catch {
                         clearResBuf(gpa, shared);
+                        const oom_msg = "out of memory staging fixture response";
+                        fixture_err = @min(oom_msg.len, shared.error_buf.len);
+                        @memcpy(shared.error_buf[0..fixture_err], oom_msg[0..fixture_err]);
                     };
                     shared.explanation_len = 0;
-                    shared.error_len = 0;
+                    shared.error_len = fixture_err;
                     shared.res_gen = serving_gen;
                     shared.res_kind = req_kind;
                     shared.res_done = true;
