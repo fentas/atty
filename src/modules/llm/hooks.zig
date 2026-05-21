@@ -1492,7 +1492,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     rt.inject_len = 0;
                     n = 0;
                 }
-                rt.shared.res_len = 0;
 
                 // Capture the CLI's session id (dialog mode only —
                 // single-mode is one-shot and intentionally
