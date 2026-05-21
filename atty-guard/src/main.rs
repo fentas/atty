@@ -422,6 +422,55 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     }
 }
 
+/// Outcome of the pre-bind socket cleanup. `NotASocket` means
+/// the existing path is something the daemon shouldn't unlink —
+/// arbitrary regular file, directory, etc. — and the operator
+/// has likely misconfigured `--socket`.
+#[derive(Debug)]
+enum SocketRemoveError {
+    NotASocket,
+    Io(std::io::Error),
+}
+
+/// Remove `path` if and only if it points at (or symlinks to) a
+/// Unix socket. Non-existent paths return `Ok(())` (first-run /
+/// clean restart). Anything else (regular file, dir, FIFO,
+/// device) returns `NotASocket` — the caller decides whether to
+/// exit or surface the error.
+///
+/// Symlinks are followed: a legitimate operator setup may
+/// symlink `/run/atty-guard.sock` to a different path. The
+/// initial `symlink_metadata` is a fast-path check for
+/// `NotFound`; if the path exists we follow via `metadata` so
+/// the type check sees the link target.
+fn remove_socket_if_safe(path: &std::path::Path) -> Result<(), SocketRemoveError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    // Fast-path NotFound (first run / clean restart) without
+    // following symlinks.
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(SocketRemoveError::Io(e)),
+        Ok(_) => {}
+    }
+    // Path exists. Resolve symlinks for the type check so a
+    // legitimate operator setup (e.g. `/run/atty-guard.sock`
+    // symlinked to `/var/run/atty/guard.sock`) isn't rejected.
+    // `canonicalize` follows the chain to a real existing path
+    // (fails with ENOENT only if the link is broken).
+    let resolved = std::fs::canonicalize(path).map_err(SocketRemoveError::Io)?;
+    let md = std::fs::metadata(&resolved).map_err(SocketRemoveError::Io)?;
+    if !md.file_type().is_socket() {
+        return Err(SocketRemoveError::NotASocket);
+    }
+    // Remove the RESOLVED path (the actual socket inode), not
+    // the symlink. Keeps the operator's symlink intact so a
+    // subsequent `bind(path)` follows it and recreates the
+    // socket at the same target — the canonical setup keeps
+    // working across restarts.
+    std::fs::remove_file(&resolved).map_err(SocketRemoveError::Io)
+}
+
 fn main() -> std::io::Result<()> {
     let mut cli = Cli::parse();
 
@@ -534,28 +583,19 @@ fn main() -> std::io::Result<()> {
     };
     // Lock acquired — safe to unlink any STALE SOCKET left by a
     // previous crashed instance (the kernel already cleared its
-    // flock, so no live owner). Guard against `--socket`
+    // flock, so no live owner). Guarded against `--socket`
     // pointing at a non-socket regular file: silently unlinking
     // would delete arbitrary data the operator didn't expect.
-    // Only unlink when `symlink_metadata` confirms a socket type.
-    match std::fs::symlink_metadata(&socket) {
-        Ok(md) => {
-            use std::os::unix::fs::FileTypeExt;
-            if md.file_type().is_socket() {
-                let _ = std::fs::remove_file(&socket);
-            } else {
-                eprintln!(
-                    "atty-guard: --socket {} exists and is not a Unix socket — refusing to overwrite",
-                    socket.display()
-                );
-                std::process::exit(1);
-            }
+    match remove_socket_if_safe(&socket) {
+        Ok(()) => {}
+        Err(SocketRemoveError::NotASocket) => {
+            eprintln!(
+                "atty-guard: --socket {} exists and is not a Unix socket — refusing to overwrite",
+                socket.display()
+            );
+            std::process::exit(1);
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Common case on first run / clean restart: no
-            // stale file to remove. Bind below will create it.
-        }
-        Err(e) => {
+        Err(SocketRemoveError::Io(e)) => {
             eprintln!(
                 "atty-guard: cannot stat --socket {}: {e}",
                 socket.display()
@@ -738,6 +778,69 @@ mod tests {
             .expect("lock should be re-acquirable after first dropped");
         // Cleanup so /tmp doesn't accumulate stale .lock files.
         let _ = std::fs::remove_file(&lock_path);
+    }
+
+    #[test]
+    fn remove_socket_if_safe_missing_path_is_ok() {
+        let p = unique_socket_path();
+        // No file at this path — should succeed silently.
+        assert!(matches!(remove_socket_if_safe(&p), Ok(())));
+    }
+
+    #[test]
+    fn remove_socket_if_safe_regular_file_refused() {
+        // If `--socket` points at an existing regular file (operator
+        // misconfig), the daemon must NOT silently delete it.
+        let p = unique_socket_path();
+        std::fs::write(&p, b"important data").expect("write fixture");
+        let result = remove_socket_if_safe(&p);
+        assert!(matches!(result, Err(SocketRemoveError::NotASocket)));
+        assert!(p.exists(), "regular file should NOT have been removed");
+        // Cleanup
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn remove_socket_if_safe_actual_socket_is_removed() {
+        // Stale socket from a previous run should be removed.
+        let p = unique_socket_path();
+        let _ = std::fs::remove_file(&p);
+        let _listener = std::os::unix::net::UnixListener::bind(&p).expect("bind fixture");
+        // listener drops at scope end; binding the socket leaves
+        // the inode on disk until we unlink — perfect stale socket
+        // simulation. drop the listener so its fd is closed but
+        // the inode remains.
+        drop(_listener);
+        assert!(p.exists(), "socket file should exist after bind");
+        assert!(matches!(remove_socket_if_safe(&p), Ok(())));
+        assert!(!p.exists(), "socket file should be removed");
+    }
+
+    #[test]
+    fn remove_socket_if_safe_symlink_to_socket_removes_target() {
+        // Operator setup: socket-path is a symlink to a different
+        // location. The target socket (stale) must be removed; the
+        // symlink itself must survive so `bind(symlink_path)` still
+        // resolves correctly.
+        let target = unique_socket_path();
+        let mut link_buf = unique_socket_path();
+        link_buf.set_extension("link");
+        let link = link_buf;
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&link);
+
+        let _listener = std::os::unix::net::UnixListener::bind(&target).expect("bind fixture");
+        drop(_listener);
+        std::os::unix::fs::symlink(&target, &link).expect("symlink fixture");
+
+        assert!(matches!(remove_socket_if_safe(&link), Ok(())));
+        assert!(!target.exists(), "target socket should be removed");
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "symlink should still exist (operator setup preserved)"
+        );
+        // Cleanup the dangling symlink.
+        let _ = std::fs::remove_file(&link);
     }
 
     #[test]
