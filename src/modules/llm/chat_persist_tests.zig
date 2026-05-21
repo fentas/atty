@@ -155,19 +155,20 @@ test "loadLastTurns: seek landing on line boundary keeps the first tail line" {
     defer _ = std.c.unlink(name_z.ptr);
 
     // Build a file shaped so we can compute the exact boundary.
-    // Padding line = 100 bytes (99 X + \n). Then two tail lines
-    // exactly 35 bytes each = 70 bytes. Total = 170 bytes.
-    // max_bytes = 70 → seek offset = 170 - 70 = 100. Byte 99 is
-    // the padding's `\n`, byte 100 starts the first JSON line —
-    // boundary case.
+    // Padding line = 100 bytes (99 X + \n at byte 99). Then two
+    // tail lines exactly 36 bytes each = 72 bytes. Total = 172
+    // bytes. max_bytes = 72 → seek offset = 172 - 72 = 100.
+    // Byte 99 is the padding's `\n`, byte 100 starts the first
+    // JSON line — boundary case.
     const fd = open(name_z.ptr, O_WRONLY | O_CREAT, @as(c_uint, 0o600));
     try testing.expect(fd >= 0);
     var pad: [100]u8 = undefined;
     @memset(&pad, 'X');
     pad[99] = '\n';
     _ = write(fd, &pad, pad.len);
-    // Two minimal-shape JSON turns, padded with whitespace in
-    // the content to make each line exactly 35 bytes.
+    // Two minimal-shape JSON turns padded with whitespace in
+    // the content to make each line exactly 36 bytes (including
+    // the trailing `\n`).
     const line1 = "{\"kind\":\"user\",\"content\":\"first  \"}\n";
     const line2 = "{\"kind\":\"user\",\"content\":\"second \"}\n";
     try testing.expectEqual(@as(usize, 36), line1.len);
