@@ -9,7 +9,7 @@ Status: **V1 + V2 baseline shipped (atty side + sidecar + ONNX SLM + eBPF + OSV)
 | V1     | `src/modules/security_guard.zig` — Tier-1 in-proc patterns + trust cache + confirm UX. | #104  | ✅ merged       |
 | V2-A   | `atty-guard/` Rust sidecar — UDS server, JSON-line protocol, Tier-1 mirror, threat map. | #105  | ✅ merged       |
 | V2-D   | `src/modules/security_guard/uds_client.zig` — atty queries the sidecar before in-proc.  | #106  | ✅ merged       |
-| V2-E   | Hardened systemd-user unit + idempotent installer.                                       | #108  | ✅ merged       |
+| V2-E   | Hardened system-daemon unit (`atty:atty`) + idempotent installer.                       | #108  | ✅ merged       |
 | V2-C-trait | `Tier2Backend` trait + `StubBackend` + `HeuristicBackend` (+ `--tier2` flag).        | #109  | ✅ merged       |
 | V2-B-skel | eBPF LSM + execve tracepoint kernel C + Rust loader skeleton.                         | #110  | ✅ merged       |
 | atty-side | PID-tree threat marking + 🛡 statusbar indicator (`Context.shell_pid`).               | #112  | ✅ merged       |
