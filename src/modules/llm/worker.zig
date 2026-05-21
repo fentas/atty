@@ -531,25 +531,6 @@ pub fn Module(comptime cfg: Config) type {
         const STATUS_DONE: u8 = 1;
         const STATUS_ABANDONED: u8 = 2;
 
-        /// Run `std.http.Client.fetch` on a sub-thread with a
-        /// deadline (`timeout_ms` from config; `0` = no deadline).
-        /// On timely completion: returns the fetched result;
-        /// caller owns `response_buf` and must free it. On
-        /// timeout: returns `.timed_out`; the sub-thread is
-        /// detached and frees its own state when it eventually
-        /// completes. The worker can return and start a new
-        /// request immediately, so repeated requests against a
-        /// blackholed endpoint accumulate several orphaned tasks
-        /// in parallel until each one's `client.fetch` returns
-        /// (typically when the OS TCP timeout fires). Each
-        /// orphan holds ~`response_cap` bytes plus url/body/auth
-        /// dupes; users tuning `timeout_ms` should size with
-        /// retry behavior in mind. Spawn-failures and OOM are
-        /// reported via their own `FetchKind` variants.
-        ///
-        /// `url`, `body`, `auth_header` are copied into task-owned
-        /// heap so the worker can return without holding caller
-        /// storage alive across the timeout window.
         /// Init the heap-owned task. Returns an error union so
         /// `errdefer` chains fire correctly on partial OOM — a
         /// plain `catch return .{...}` form (returning a value, not
@@ -609,6 +590,13 @@ pub fn Module(comptime cfg: Config) type {
             var client: std.http.Client = .{ .allocator = gpa, .io = io };
             defer client.deinit();
 
+            // NOTE: the headers + client.fetch invocation below
+            // mirrors `HttpFetchTask.run` deliberately — extracting
+            // a shared helper would have to take ownership of the
+            // headers buffer and the client, which would defeat
+            // the inline path's "no heap state besides response_buf"
+            // contract. Any future header change MUST be applied
+            // to both sites.
             var headers_buf: [2]std.http.Header = undefined;
             var headers_len: usize = 0;
             headers_buf[headers_len] = .{ .name = "Content-Type", .value = "application/json" };
@@ -638,6 +626,29 @@ pub fn Module(comptime cfg: Config) type {
             };
         }
 
+        /// Run `std.http.Client.fetch` with an optional deadline.
+        /// `timeout_ms = 0` short-circuits to `runHttpFetchInline`
+        /// (single inline fetch, no thread).
+        ///
+        /// With a deadline: spawn a sub-thread that runs
+        /// `client.fetch` and watch it with a nanosleep-poll loop.
+        /// On timely completion: returns the fetched result;
+        /// caller owns `response_buf` and must free it. On
+        /// timeout: returns `.timed_out`; the sub-thread is
+        /// detached and frees its own state when it eventually
+        /// completes. The worker can return and start a new
+        /// request immediately, so repeated requests against a
+        /// blackholed endpoint accumulate several orphaned tasks
+        /// in parallel until each one's `client.fetch` returns
+        /// (typically when the OS TCP timeout fires). Each
+        /// orphan holds ~`response_cap` bytes plus url/body/auth
+        /// dupes; users tuning `timeout_ms` should size with
+        /// retry behavior in mind. Spawn-failures and OOM are
+        /// reported via their own `FetchKind` variants.
+        ///
+        /// `url`, `body`, `auth_header` are copied into task-owned
+        /// heap so the worker can return without holding caller
+        /// storage alive across the timeout window.
         pub fn runHttpFetchWithDeadline(
             gpa: std.mem.Allocator,
             io: std.Io,
