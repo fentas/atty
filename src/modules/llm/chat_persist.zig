@@ -199,10 +199,12 @@ pub fn appendTurn(allocator: std.mem.Allocator, path: []const u8, kind: dialog.T
 /// (allocated via `allocator`). Returns an empty list when the file
 /// is missing / unreadable / empty.
 ///
-/// Implementation: read the whole file (capped at `max_bytes` to
-/// avoid pathological growth), split into lines from the END,
-/// reverse-walk taking the last N parseable lines, then re-reverse
-/// the result.
+/// Implementation: when the file is larger than `max_bytes`, seek
+/// to `size - max_bytes` and discard the (necessarily-partial)
+/// first line — that gives a clean tail window onto the newest
+/// content. Then split into lines, reverse-walk taking the last N
+/// parseable entries, and re-reverse so the caller sees them in
+/// chronological order.
 pub fn loadLastTurns(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -224,6 +226,29 @@ pub fn loadLastTurns(
     if (fd < 0) return result; // missing / unreadable → no history
     defer _ = close(fd);
 
+    // For files larger than the cap, seek to size - max_bytes
+    // so we read the TAIL — the most recent turns. The previous
+    // implementation read from offset 0, which for >max_bytes
+    // files restored the oldest turns from the first chunk
+    // instead of the newest. `fstat` returns size; lseek + skip
+    // the partial first line gives a clean window onto the tail.
+    var stat: Stat = undefined;
+    var skip_partial_line = false;
+    if (fstat(fd, &stat) == 0) {
+        const size: u64 = if (stat.size > 0) @intCast(stat.size) else 0;
+        if (size > max_bytes) {
+            const off: i64 = @intCast(size - max_bytes);
+            if (lseek(fd, off, 0) >= 0) {
+                // SEEK_SET landed inside an arbitrary line; the
+                // bytes before the next \n are a fragment.
+                // Discarding them avoids a parseLine failure on
+                // the truncated head (and the bytes are duplicated
+                // in older history we're intentionally dropping).
+                skip_partial_line = true;
+            }
+        }
+    }
+
     // Read in chunks until EOF or cap. Conservative because the
     // file may have grown unboundedly.
     var raw: std.ArrayList(u8) = .empty;
@@ -236,6 +261,21 @@ pub fn loadLastTurns(
         try raw.appendSlice(allocator, chunk[0..@as(usize, @intCast(got))]);
     }
     if (raw.items.len == 0) return result;
+
+    if (skip_partial_line) {
+        if (std.mem.indexOfScalar(u8, raw.items, '\n')) |nl| {
+            // Drop everything up to and including the first \n —
+            // that's the truncated fragment plus its terminator.
+            const drop_n = nl + 1;
+            const remaining = raw.items.len - drop_n;
+            std.mem.copyForwards(u8, raw.items[0..remaining], raw.items[drop_n..]);
+            raw.shrinkRetainingCapacity(remaining);
+        } else {
+            // No newline in the read window — the entire window
+            // is a single overlong line; nothing parseable.
+            return result;
+        }
+    }
 
     // Walk newest → oldest (reverse over LF-delimited lines),
     // collect up to max_turns parseable entries, then reverse.

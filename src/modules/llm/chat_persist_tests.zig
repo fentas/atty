@@ -87,6 +87,45 @@ test "appendTurn + loadLastTurns: round-trip a few turns" {
     try testing.expectEqualStrings("out: 42", loaded.items[2].content);
 }
 
+test "loadLastTurns: file larger than max_bytes loads TAIL (not head)" {
+    // Regression for #187 finding 005: before the fix, loadLastTurns
+    // read from offset 0 until max_bytes then reverse-walked that
+    // HEAD prefix. For files larger than max_bytes that returned
+    // the NEWEST turns IN THE FIRST CHUNK — i.e., stale older
+    // turns, not the actual most-recent ones. The fix seeks to
+    // `size - max_bytes` and parses the tail window.
+    var name_buf: [64]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-seek-test-{x}.jsonl", .{seed});
+    const name_z = try testing.allocator.dupeZ(u8, name);
+    defer testing.allocator.free(name_z);
+    defer _ = std.c.unlink(name_z.ptr);
+
+    // Write 100 turns. Each line is ~30 bytes after JSON wrapping,
+    // so a tiny max_bytes (256) reads only the LAST ~8 lines.
+    var i: usize = 0;
+    var content_buf: [16]u8 = undefined;
+    while (i < 100) : (i += 1) {
+        const content = try std.fmt.bufPrint(&content_buf, "turn-{d:0>3}", .{i});
+        _ = appendTurn(testing.allocator, name, .user, content);
+    }
+
+    // With max_bytes=256, the head-reading bug would load turn-000
+    // through turn-007 or so. The tail-seek fix loads the LAST
+    // turns. We ask for 3 — they MUST be the most-recent ones.
+    var loaded = try loadLastTurns(testing.allocator, name, 3, 256);
+    defer {
+        for (loaded.items) |t| testing.allocator.free(t.content);
+        loaded.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 3), loaded.items.len);
+    try testing.expectEqualStrings("turn-097", loaded.items[0].content);
+    try testing.expectEqualStrings("turn-098", loaded.items[1].content);
+    try testing.expectEqualStrings("turn-099", loaded.items[2].content);
+}
+
 test "loadLastTurns: caps at max_turns (keeps newest)" {
     var name_buf: [64]u8 = undefined;
     // Test-fixture uniqueness — pid + ts via clock_gettime. Tests
