@@ -274,10 +274,25 @@ NETWORK_DROPIN_FILE="$EBPF_DROPIN_DIR/network.conf"
 # was added in #145; older binaries silently skip the detection (we
 # can't tell what they were built with).
 NEEDS_NETWORK=0
+PROBE_UNSUPPORTED=0
 if "$BIN_DST" --print-features >/dev/null 2>&1; then
     if "$BIN_DST" --print-features 2>/dev/null | grep -qxE 'osv-live|atoms-fetch'; then
         NEEDS_NETWORK=1
     fi
+else
+    PROBE_UNSUPPORTED=1
+fi
+
+# Hint operators when the auto-detect can't run: the network
+# drop-in won't be installed, but if their old binary IS a
+# network build they'll see silent "endpoint unreachable" at
+# runtime. The note is suppressed when the operator has
+# explicitly opted in or out via flags — they've already
+# decided.
+if [[ $PROBE_UNSUPPORTED -eq 1 && $WITH_NETWORK -eq 0 && $WITHOUT_NETWORK -eq 0 ]]; then
+    echo "note: $BIN_DST is older than the --print-features probe (#145)." >&2
+    echo "      auto-detect cannot tell whether osv-live/atoms-fetch are built in." >&2
+    echo "      if either feature IS present, re-run with --with-network." >&2
 fi
 
 if [[ $WITH_NETWORK -eq 1 || ($NEEDS_NETWORK -eq 1 && $WITHOUT_NETWORK -ne 1) ]]; then
@@ -333,6 +348,13 @@ fi
 
 systemctl daemon-reload
 systemctl enable --now atty-guard.service
+# `enable --now` doesn't restart an already-active service, so a
+# drop-in change (ebpf.conf or network.conf added / removed)
+# wouldn't take effect until the next manual restart. `try-restart`
+# is a no-op when the unit is inactive and a clean restart when
+# it's running — re-running the installer now applies any drop-in
+# changes immediately.
+systemctl try-restart atty-guard.service
 echo
 systemctl --no-pager --lines=5 status atty-guard.service || true
 echo
