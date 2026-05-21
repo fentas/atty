@@ -371,6 +371,15 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     // Contents are irrelevant — only the in-kernel flock state
     // matters — and a concurrent O_CREAT race is safe (both
     // processes see the same inode; only one wins the flock).
+    //
+    // Constants are pinned to Linux x86_64/aarch64 values — atty
+    // targets linux-{gnu,musl} per CLAUDE.md. The compile-error
+    // gate below makes the platform assumption explicit at build
+    // time rather than silently miscompiling on (e.g.) BSD where
+    // O_CLOEXEC has a different numeric value.
+    #[cfg(not(target_os = "linux"))]
+    compile_error!("atty-guard: lock-file helper hardcodes Linux O_* values");
+
     extern "C" {
         fn open(path: *const std::os::raw::c_char, flags: std::os::raw::c_int, mode: std::os::raw::c_uint)
             -> std::os::raw::c_int;
@@ -381,16 +390,29 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
 
     let mut path_z = lock_path.as_os_str().as_bytes().to_vec();
     path_z.push(0);
-    let fd = unsafe {
-        open(
-            path_z.as_ptr() as *const std::os::raw::c_char,
-            O_RDONLY | O_CREAT | O_CLOEXEC,
-            0o600,
-        )
+    // Retry on EINTR — symmetric with the flock loop below.
+    // Signal delivery (SIGCHLD during eBPF attach setup, etc.)
+    // can interrupt open(2); without the retry, startup dies on
+    // a transient kernel quirk.
+    let mut open_attempts: u32 = 0;
+    let fd = loop {
+        let rc = unsafe {
+            open(
+                path_z.as_ptr() as *const std::os::raw::c_char,
+                O_RDONLY | O_CREAT | O_CLOEXEC,
+                0o600,
+            )
+        };
+        if rc >= 0 {
+            break rc;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted && open_attempts < 8 {
+            open_attempts += 1;
+            continue;
+        }
+        return Err(LockError::Io(err));
     };
-    if fd < 0 {
-        return Err(LockError::Io(std::io::Error::last_os_error()));
-    }
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
 
     // flock with LOCK_EX | LOCK_NB. Linux constants:
@@ -599,8 +621,11 @@ fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
         Err(SocketRemoveError::Io(e)) => {
+            // Io can come from symlink_metadata, canonicalize,
+            // metadata, OR remove_file. Use a generic phrasing
+            // that doesn't lie about which step failed.
             eprintln!(
-                "atty-guard: cannot stat --socket {}: {e}",
+                "atty-guard: cannot prepare --socket {}: {e}",
                 socket.display()
             );
             std::process::exit(1);
