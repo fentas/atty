@@ -501,7 +501,7 @@ A second module in the guardrail family. Where `guardrail` matches a comptime li
 | V1     | In-proc Tier-1 patterns + per-user SHA-256 trust cache. `[y]es / [t]rust / cancel`.  |
 | V2-A   | `atty-guard` Rust sidecar mirrors Tier-1; gains in-mem PID → ThreatLevel map.        |
 | V2-D   | atty queries the sidecar over UDS before its own in-proc patterns. Graceful fallback.|
-| V2-E   | `atty-guard/contrib/install.sh` + hardened `atty-guard.service` user unit.           |
+| V2-E   | `atty-guard/contrib/install.sh` + hardened `atty-guard.service` system daemon.       |
 | V2-C   | Pluggable Tier-2: `--tier2 stub|heuristic` (4 extra regex rules); `onnx` follows.   |
 | V2-B   | eBPF LSM hook + execve tracepoint backstop (skeleton landed; impl ahead).            |
 | V2-G/H/I | AtomMatcher (Aho-Corasick) + sliding window + atom fetcher (GTFOBins/Sigma/LOLBAS).|
@@ -523,8 +523,16 @@ Optional sidecar (after `atty-guard/contrib/install.sh`):
 ```zig
 .security_guard.configure(.{
     .enabled = true,
-    .daemon_socket_path = "/run/user/1000/atty-guard.sock",
+    .daemon_socket_path = "/run/atty-guard/atty-guard.sock",
 }),
+```
+
+The daemon runs as a system service under `atty:atty`. Your user
+account must be in the `atty` group to connect:
+
+```sh
+sudo usermod -aG atty $USER
+# log out + back in (or `newgrp atty` for a single shell)
 ```
 
 **Block-refuse path (V2-J-2).** When the daemon returns `Verdict::Block` — either via the auto-Block escalation knob (`[accumulator] block_threshold = 0.95` in TOML) or because the PID-tree threat map says this PID is already Critical — atty does NOT prompt. It writes a one-shot `REFUSED — <reason>` line styled by `Config.refused_style` (bold red 8-color default), marks the shell PID Critical, and clears readline (Ctrl+U). Trust-cache hits short-circuit BOTH the Warn-prompt path and the Block-refuse path so prior `[t]rust` choices survive.
