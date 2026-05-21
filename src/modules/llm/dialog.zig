@@ -964,9 +964,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{line}) catch {};
                         first = false;
                     } else {
-                        // Continuation rows indent 2 cols past the
-                        // ✓ marker so the prose aligns under the
-                        // first row's reason text.
+                        // Skip empty continuation lines — a reason
+                        // ending in `\n` (or with consecutive `\n`s)
+                        // would otherwise emit a stray blank `│`
+                        // row inside the banner.
+                        if (line.len == 0) continue;
+                        // Continuation rows: `│` + 3 spaces aligns
+                        // the prose at col 5, matching the first
+                        // row's text position (col 1 vbar + space +
+                        // `✓` glyph + space → text starts col 5).
                         w.print("\x1B[2m\u{2502}\x1B[0m   {s}\r\n", .{line}) catch {};
                     }
                 }
@@ -1130,14 +1136,41 @@ test "Module.captureConclusion wraps multi-line reason — every row keeps the `
     try testing.expect(std.mem.indexOf(u8, out, "- Shell: bash") != null);
     try testing.expect(std.mem.indexOf(u8, out, "- PWD: /home/user") != null);
 
-    // Three reason rows (split by `\n`) each prefixed with `│`.
+    // Exactly four `│` rows in the buffer: three reason lines
+    // (split on `\n`) + one counts line. A loose lower bound
+    // would let regressions (stray empty `│` row from a trailing
+    // newline) slip through.
     var vbar_count: usize = 0;
     var j: usize = 0;
     while (j + 2 < out.len) : (j += 1) {
         if (out[j] == 0xE2 and out[j + 1] == 0x94 and out[j + 2] == 0x82) vbar_count += 1;
     }
-    // 3 reason rows + 1 counts row = 4 vertical bars at minimum.
-    try testing.expect(vbar_count >= 4);
+    try testing.expectEqual(@as(usize, 4), vbar_count);
+}
+
+test "Module.captureConclusion drops empty trailing line from `reason\\n`" {
+    // Regression: `splitScalar(\"a\\nb\\n\", '\\n')` yields
+    // `[\"a\", \"b\", \"\"]`. The empty final segment was emitting a
+    // bare `│   \\r\\n` blank continuation row inside the banner.
+    // Skip the emit when the (trimmed) line is empty AND it's a
+    // continuation (first row always emits to carry the ✓).
+    const FakeRuntime = struct {
+        conclusion_buf: [2048]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    M.captureConclusion(&rt, "first\nsecond\n", 0, 0, 1);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    // 2 reason rows + 1 counts row = exactly 3 `│` glyphs.
+    var vbar_count: usize = 0;
+    var j: usize = 0;
+    while (j + 2 < out.len) : (j += 1) {
+        if (out[j] == 0xE2 and out[j + 1] == 0x94 and out[j + 2] == 0x82) vbar_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), vbar_count);
 }
 
 test "Module.captureConclusion falls back to 'done' when reason is empty" {
