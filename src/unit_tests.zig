@@ -32,6 +32,7 @@ test {
     _ = @import("modules/atuin.zig");
     _ = @import("modules/llm.zig");
     _ = @import("modules/llm/dialog.zig");
+    _ = @import("modules/llm/md_render.zig");
     _ = @import("modules/llm/parse.zig");
     _ = @import("modules/llm/prompts.zig");
     _ = @import("modules/llm/types.zig");

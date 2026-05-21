@@ -15,6 +15,7 @@ const m = @import("../../module.zig");
 const dialog = @import("dialog.zig");
 const types = @import("types.zig");
 const pw = @import("paint_width.zig");
+const md_render = @import("md_render.zig");
 const pty_mod = @import("../../pty.zig");
 const Pty = pty_mod.Pty;
 
@@ -51,7 +52,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     also dropped — emitting it alone would land
         ///     malformed UTF-8 on the user's terminal.
         ///   - Tab (0x09) and printable ASCII pass through.
-        fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) !void {
+        fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) anyerror!void {
             // Walk codepoints (not raw bytes) so multi-byte UTF-8
             // sequences with continuation bytes in 0x80..0x9F (a `—`
             // em-dash, an emoji, CJK glyph, etc.) survive intact.
@@ -460,51 +461,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return if (rows == 0) 1 else rows;
         }
 
-        /// Word-wrap a raw turn across up to `max_rows` rows of
-        /// `cols` cols each. Continuation rows emit CR+LF + clear
-        /// so the caller's CUP for the next turn paints onto a
-        /// known row. Returns the number of rows consumed (>= 1
-        /// — empty content still claims the prefix row so the
-        /// `prefix:` chrome doesn't visually orphan).
-        fn renderWrappedRaw(w: *std.Io.Writer, content: []const u8, cols: usize, max_rows: usize) !usize {
-            if (content.len == 0 or max_rows == 0) return 1;
-            var it = pw.wrapIter(content, cols);
-            var rows: usize = 0;
-            // " […]" = 5 visible cols (leading space + bracket +
-            // U+2026 + bracket). Reserve that on the last allowed
-            // row when more content follows so the marker lands
-            // inside the row instead of overflowing into the next
-            // — pre-emits the trimmed-to-`cols-5` last row.
-            const marker_cols: usize = 5;
-            const last_row_budget: usize = if (cols > marker_cols) cols - marker_cols else cols;
-            var pending: ?[]const u8 = null;
-            var overflowed = false;
-            while (it.next()) |chunk| {
-                if (pending) |p| {
-                    if (rows > 0) try w.writeAll("\r\n\x1B[2K");
-                    if (rows + 1 == max_rows) {
-                        // Last allowed row + more chunks pending →
-                        // overflow imminent; trim `p` so the marker
-                        // fits on the same row.
-                        try writeSanitized(w, pw.truncateToCols(p, last_row_budget));
-                        try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
-                        rows += 1;
-                        overflowed = true;
-                        break;
-                    }
-                    try writeSanitized(w, p);
-                    rows += 1;
-                }
-                pending = chunk;
-            }
-            if (!overflowed) {
-                if (pending) |p| {
-                    if (rows > 0) try w.writeAll("\r\n\x1B[2K");
-                    try writeSanitized(w, p);
-                    rows += 1;
-                }
-            }
-            return if (rows == 0) 1 else rows;
+        /// Render a raw (non-envelope) turn via the markdown-aware
+        /// renderer: hard breaks at `\n`, SGR styling for
+        /// `**bold**` and `` `code` `` spans, per-line wrap to
+        /// `cols` with the overflow `[…]` marker at `max_rows`.
+        /// Delegates to `md_render.render` so the per-row state
+        /// machine + SGR span handling lives in one place.
+        fn renderWrappedRaw(w: *std.Io.Writer, content: []const u8, cols: usize, max_rows: usize) anyerror!usize {
+            return md_render.render(w, content, cols, max_rows, &writeSanitized);
         }
 
         /// Compute the (row, col) position the real terminal cursor
