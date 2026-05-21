@@ -105,11 +105,13 @@ test "loadLastTurns: file larger than max_bytes loads TAIL (not head)" {
 
     // Write 100 turns. Each line is ~30 bytes after JSON wrapping,
     // so a tiny max_bytes (256) reads only the LAST ~8 lines.
+    // Assert each append succeeds so a disk-full or permission
+    // failure can't make the test pass against a partial file.
     var i: usize = 0;
     var content_buf: [16]u8 = undefined;
     while (i < 100) : (i += 1) {
         const content = try std.fmt.bufPrint(&content_buf, "turn-{d:0>3}", .{i});
-        _ = appendTurn(testing.allocator, name, .user, content);
+        try testing.expect(appendTurn(testing.allocator, name, .user, content));
     }
 
     // With max_bytes=256 against ~38-byte lines, the tail window

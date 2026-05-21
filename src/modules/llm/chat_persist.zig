@@ -283,11 +283,15 @@ pub fn loadLastTurns(
             const remaining = raw.items.len - drop_n;
             std.mem.copyForwards(u8, raw.items[0..remaining], raw.items[drop_n..]);
             raw.shrinkRetainingCapacity(remaining);
-        } else {
-            // No newline in the read window — the entire window
-            // is a single overlong line; nothing parseable.
-            return result;
         }
+        // No newline in the read window means one of two things:
+        //   (a) the seek landed at the start of a line and the
+        //       file's last line has no trailing \n;
+        //   (b) a single JSON line is longer than `max_bytes`.
+        // Either way, fall through to the parse loop below — if
+        // the buffer parses as a single valid line we keep it;
+        // if not, we return empty as before. The fall-through is
+        // cheap and the only path that gains a valid turn from it.
     }
 
     // Walk newest → oldest (reverse over LF-delimited lines),
