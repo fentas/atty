@@ -138,6 +138,49 @@ test "loadLastTurns: file larger than max_bytes loads TAIL (not head)" {
     try testing.expect(std.mem.startsWith(u8, first, "turn-09"));
 }
 
+test "loadLastTurns: oversized single line with no trailing newline still parses" {
+    // The seek-path's fall-through-when-no-\n branch is only
+    // exercisable with a manually-constructed file (appendTurn
+    // always writes \n). Build a file with garbage padding +
+    // one valid JSON line at the tail, NO trailing \n. With
+    // max_bytes sized to seek INTO the JSON line's start byte,
+    // the partial-line skip would normally bail; the fall-
+    // through must instead parse the whole window as one line.
+    var name_buf: [80]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-fallthrough-{x}.jsonl", .{seed});
+    const name_z = try testing.allocator.dupeZ(u8, name);
+    defer testing.allocator.free(name_z);
+    defer _ = std.c.unlink(name_z.ptr);
+
+    // 600 bytes of padding (one long "old" line + \n) followed
+    // by 40 bytes of NDJSON without trailing newline. max_bytes
+    // = 50 → seek to size - 50 lands inside the padding, the
+    // partial-line skip discards up to the \n at the start of
+    // the JSON line. After the skip, the window is the 40-byte
+    // JSON line WITH no trailing \n — exactly the fall-through
+    // case.
+    const fd = open(name_z.ptr, O_WRONLY | O_CREAT, @as(c_uint, 0o600));
+    try testing.expect(fd >= 0);
+    var pad: [600]u8 = undefined;
+    @memset(&pad, 'X');
+    pad[599] = '\n'; // line terminator for the padding "line"
+    _ = write(fd, &pad, pad.len);
+    const tail = "{\"kind\":\"user\",\"content\":\"final\"}";
+    _ = write(fd, tail.ptr, tail.len);
+    _ = close(fd);
+
+    var loaded = try loadLastTurns(testing.allocator, name, 5, 50);
+    defer {
+        for (loaded.items) |t| testing.allocator.free(t.content);
+        loaded.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 1), loaded.items.len);
+    try testing.expectEqualStrings("final", loaded.items[0].content);
+}
+
 test "loadLastTurns: caps at max_turns (keeps newest)" {
     var name_buf: [64]u8 = undefined;
     // Test-fixture uniqueness — pid + ts via clock_gettime. Tests
