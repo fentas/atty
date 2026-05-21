@@ -487,6 +487,134 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// user's typing would resume — not col 1 (which would
         /// place the cursor at the start of the prompt row, on top
         /// of the PS1 chrome).
+        /// Render the chat input buffer across `input_top_row ..
+        /// input_row` (inclusive). One row per `\n`-separated line.
+        /// First row gets the `❯` prompt; continuation rows get a
+        /// dim `…` chrome glyph so the multi-line shape is visible.
+        /// Cursor glyph (reverse-video block when focused, dim cell
+        /// when parked) lands on whichever line contains the cursor
+        /// byte. Lines that exceed `input_row` get clipped — the
+        /// caller's `input_lines` math already accounts for the cap.
+        fn paintInputBlock(w: *std.Io.Writer, rt: *Runtime, input_top_row: u16, input_row: u16) !void {
+            const prompt_style: []const u8 = if (rt.chat_focus_in_panel)
+                "\x1B[22;1;38;5;14m"
+            else
+                "\x1B[2;38;5;14m";
+            const buf = rt.chat_inline_input_buf[0..rt.chat_inline_input_len];
+            const cur = rt.chat_inline_input_cursor;
+            const focus = rt.chat_focus_in_panel;
+
+            // Walk buffer, splitting at `\n`. Emit each segment on
+            // its own row.
+            var seg_start: usize = 0;
+            var line_idx: u16 = 0;
+            var current_row: u16 = input_top_row;
+            var pos: usize = 0;
+            while (pos <= buf.len) : (pos += 1) {
+                const at_end = pos == buf.len;
+                const is_nl = !at_end and buf[pos] == '\n';
+                if (!at_end and !is_nl) continue;
+
+                const seg = buf[seg_start..pos];
+                const seg_cur_local: ?usize = if (cur >= seg_start and cur <= pos) cur - seg_start else null;
+
+                try w.print("\x1B[{d};1H\x1B[2K", .{current_row});
+                if (line_idx == 0) {
+                    try w.writeAll(prompt_style);
+                    try w.writeAll("\u{276F}\x1B[0m ");
+                } else {
+                    try w.writeAll("\x1B[2m\u{2026}\x1B[0m ");
+                }
+
+                try paintInputLine(w, seg, seg_cur_local, focus, line_idx == 0);
+
+                if (is_nl) {
+                    line_idx += 1;
+                    current_row += 1;
+                    if (current_row > input_row) break;
+                    seg_start = pos + 1;
+                } else {
+                    break;
+                }
+            }
+            // Edge case: buf was empty and the while-loop body
+            // didn't run beyond `pos == 0 == buf.len`. Ensure the
+            // first input row at least gets the prompt.
+            if (buf.len == 0) {
+                try w.print("\x1B[{d};1H\x1B[2K", .{input_top_row});
+                try w.writeAll(prompt_style);
+                try w.writeAll("\u{276F}\x1B[0m ");
+                if (focus) try w.writeAll("\x1B[7m \x1B[0m") else try w.writeAll("\x1B[2m\u{2592}\x1B[0m");
+            }
+        }
+
+        /// Render a single line of input — text up to the cursor,
+        /// cursor glyph (or EOL block when `cur_local` lands at the
+        /// end), and the tail. `is_first` keeps the 512-byte
+        /// windowing only on the first line so a long pasted prompt
+        /// still surfaces context around the cursor; subsequent
+        /// lines render without windowing because multi-line
+        /// buffers are typically short.
+        fn paintInputLine(w: *std.Io.Writer, line: []const u8, cur_local: ?usize, focus: bool, is_first: bool) !void {
+            const len = line.len;
+            const cur_pos: ?usize = if (cur_local) |cl| (if (cl <= len) cl else null) else null;
+
+            var win_start: usize = 0;
+            var win_end: usize = len;
+            if (is_first and len > 512) {
+                const visible_max: usize = 512;
+                const cur_for_window = cur_pos orelse len;
+                const half = visible_max / 2;
+                win_start = if (cur_for_window > half) cur_for_window - half else 0;
+                win_end = if (win_start + visible_max < len) win_start + visible_max else len;
+                if (win_end - win_start < visible_max and win_end >= visible_max) {
+                    win_start = win_end - visible_max;
+                }
+            }
+
+            const dim = !focus;
+            if (cur_pos) |c_abs| {
+                if (c_abs >= win_start) {
+                    if (dim) try w.writeAll("\x1B[2m");
+                    if (c_abs > win_start) try writeSanitized(w, line[win_start..c_abs]);
+                    if (dim) try w.writeAll("\x1B[0m");
+                    if (focus) {
+                        if (c_abs < len) {
+                            try w.writeAll("\x1B[7m");
+                            try writeSanitized(w, line[c_abs .. c_abs + 1]);
+                            try w.writeAll("\x1B[0m");
+                        } else {
+                            try w.writeAll("\x1B[7m \x1B[0m");
+                        }
+                    } else {
+                        if (c_abs < len) {
+                            try w.writeAll("\x1B[2m");
+                            try writeSanitized(w, line[c_abs .. c_abs + 1]);
+                            try w.writeAll("\x1B[0m");
+                        } else {
+                            try w.writeAll("\x1B[2m\u{2592}\x1B[0m");
+                        }
+                    }
+                    if (c_abs + 1 < win_end) {
+                        if (dim) try w.writeAll("\x1B[2m");
+                        try writeSanitized(w, line[c_abs + 1 .. win_end]);
+                        if (dim) try w.writeAll("\x1B[0m");
+                    }
+                } else {
+                    // Cursor is BEFORE the window — rare with the
+                    // window math above, but defensive: just render
+                    // the visible slice without a cursor glyph.
+                    if (dim) try w.writeAll("\x1B[2m");
+                    try writeSanitized(w, line[win_start..win_end]);
+                    if (dim) try w.writeAll("\x1B[0m");
+                }
+            } else {
+                if (dim) try w.writeAll("\x1B[2m");
+                try writeSanitized(w, line[win_start..win_end]);
+                if (dim) try w.writeAll("\x1B[0m");
+            }
+        }
+
         fn inlineRestorePos(rt: *Runtime, total_rows: u16, base_reserve: u16) struct { row: u16, col: u16 } {
             const shell_bottom: u16 = if (total_rows > base_reserve) total_rows - base_reserve else 1;
             const row: u16 = blk: {
@@ -676,12 +804,26 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // row budget so the MOST RECENT lines anchor at the
             // bottom (above input) and older turns scroll off the
             // top.
-            const scrollback_rows: u16 = panel_rows - 2; // reserve top divider + input row
+            // Multi-line input (Shift+Enter inserts `\n` into the
+            // buffer): grow the input area up from `input_row` by
+            // one row per embedded newline, capped at half the
+            // panel so scrollback isn't completely starved. Plain
+            // single-line typing keeps `input_lines = 1` and the
+            // layout matches the pre-multiline behaviour.
+            var buf_newlines: usize = 0;
+            for (rt.chat_inline_input_buf[0..rt.chat_inline_input_len]) |bb| {
+                if (bb == '\n') buf_newlines += 1;
+            }
+            const desired_input_lines: u16 = @intCast(1 + buf_newlines);
+            const input_lines_cap: u16 = if (panel_rows >= 4) @max(@as(u16, 1), panel_rows / 2) else 1;
+            const input_lines: u16 = @min(desired_input_lines, input_lines_cap);
+            const input_top_row: u16 = input_row - (input_lines - 1);
+            const scrollback_rows: u16 = if (input_top_row > top_row + 1) input_top_row - top_row - 1 else 0;
             var row: u16 = top_row + 1;
             // Blank-clear every scrollback row up front so prior
             // chat content doesn't leak when the turns shrink.
             var r: u16 = row;
-            while (r < input_row) : (r += 1) {
+            while (r < input_top_row) : (r += 1) {
                 w.print("\x1B[{d};1H\x1B[2K", .{r}) catch return false;
             }
 
@@ -715,7 +857,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // scroll region.
             const per_turn_max_rows: usize = 3;
             for (rt.turns[start_turn..visible_end]) |turn| {
-                if (row >= input_row) break;
+                if (row >= input_top_row) break;
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
                 const prefix: []const u8 = switch (turn.kind) {
                     .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
@@ -723,90 +865,24 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     .observation => "\x1B[2mOutput:\x1B[0m ",
                 };
                 w.writeAll(prefix) catch return false;
-                const remaining_rows: usize = @intCast(input_row - row);
+                const remaining_rows: usize = @intCast(input_top_row - row);
                 const turn_rows_cap: usize = @min(per_turn_max_rows, remaining_rows);
                 const rows_used = renderTurnContent(&w, turn, max_inline_visible, turn_rows_cap) catch 1;
                 row += @intCast(rows_used);
             }
-            if (rt.turns_len == 0) {
+            if (rt.turns_len == 0 and scrollback_rows > 0) {
                 w.print("\x1B[{d};1H\x1B[2K", .{top_row + 1}) catch return false;
                 w.writeAll("  \x1B[2m(empty \u{2014} type a prompt below \u{00B7} Enter to ask)\x1B[0m") catch return false;
             }
 
-            // Input row — `❯ <input>█` with reverse-video block
-            // cursor. Always painted last so the actual terminal
-            // cursor (positioned by the final CUP at the end of
-            // this paint) sits adjacent to it.
-            w.print("\x1B[{d};1H\x1B[2K", .{input_row}) catch return false;
-            // Chrome glyph dims when focus is parked on the shell —
-            // signals the panel is non-interactive at the moment.
-            const prompt_style: []const u8 = if (rt.chat_focus_in_panel)
-                "\x1B[22;1;38;5;14m"
-            else
-                "\x1B[2;38;5;14m";
-            w.writeAll(prompt_style) catch return false;
-            w.writeAll("\u{276F}\x1B[0m ") catch return false;
-            // Center the cursor in a 512-byte window so long
-            // prompts still show what's under the cursor instead
-            // of dragging the tail off-screen. Same windowing the
-            // overlay input uses.
-            {
-                const cur = rt.chat_inline_input_cursor;
-                const len = rt.chat_inline_input_len;
-                const visible_max: usize = 512;
-                var win_start: usize = 0;
-                var win_end: usize = len;
-                if (len > visible_max) {
-                    const half = visible_max / 2;
-                    win_start = if (cur > half) cur - half else 0;
-                    win_end = if (win_start + visible_max < len) win_start + visible_max else len;
-                    // Cursor near the tail: win_end got clipped to
-                    // len, so shift win_start back to fill the full
-                    // 512-byte window. Without this, end-of-buffer
-                    // cursors only see ~256 bytes of context.
-                    if (win_end - win_start < visible_max and win_end >= visible_max) {
-                        win_start = win_end - visible_max;
-                    }
-                }
-                const dim = !rt.chat_focus_in_panel;
-                if (dim) w.writeAll("\x1B[2m") catch return false;
-                if (cur > win_start) {
-                    writeSanitized(&w, rt.chat_inline_input_buf[win_start..cur]) catch return false;
-                }
-                if (dim) w.writeAll("\x1B[0m") catch return false;
-
-                // Cursor glyph at the insertion point. Focused →
-                // reverse-video block over the byte under the cursor
-                // (or a blank reverse-video space at EOL). Parked →
-                // dim the byte under the cursor in place so the
-                // tail render below doesn't duplicate it.
-                if (rt.chat_focus_in_panel) {
-                    if (cur < len) {
-                        w.writeAll("\x1B[7m") catch return false;
-                        writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
-                        w.writeAll("\x1B[0m") catch return false;
-                    } else {
-                        w.writeAll("\x1B[7m \x1B[0m") catch return false;
-                    }
-                } else {
-                    if (cur < len) {
-                        w.writeAll("\x1B[2m") catch return false;
-                        writeSanitized(&w, rt.chat_inline_input_buf[cur .. cur + 1]) catch return false;
-                        w.writeAll("\x1B[0m") catch return false;
-                    } else {
-                        w.writeAll("\x1B[2m\u{2592}\x1B[0m") catch return false;
-                    }
-                }
-
-                // Tail: everything PAST the cursor byte (always
-                // `cur + 1`, never `cur`). Dim when parked so the
-                // unconsumed draft reads as inactive.
-                if (cur + 1 < win_end) {
-                    if (!rt.chat_focus_in_panel) w.writeAll("\x1B[2m") catch return false;
-                    writeSanitized(&w, rt.chat_inline_input_buf[cur + 1 .. win_end]) catch return false;
-                    if (!rt.chat_focus_in_panel) w.writeAll("\x1B[0m") catch return false;
-                }
-            }
+            // Input area — `❯ <input>█` with reverse-video block
+            // cursor on the first row; continuation rows (when the
+            // buffer contains `\n` from Shift+Enter) start with a
+            // dim `…` chrome glyph at col 1 so the user can see
+            // multiple lines and tell where the input area ends.
+            // Painted last so the final CUP parks the real cursor
+            // adjacent to the block-cursor glyph.
+            paintInputBlock(&w, rt, input_top_row, input_row) catch return false;
             // Park the real terminal cursor on the shell row — the
             // block-cursor glyph above is purely visual. See
             // inlineRestorePos for the row + col math.

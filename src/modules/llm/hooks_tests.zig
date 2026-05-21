@@ -1715,3 +1715,84 @@ test "Alt+M cycle: fires when dialog_persistent_mode is on (no chat surface)" {
     try testing.expect(consumed);
     try testing.expectEqual(@as(usize, 1), rt.current_provider_idx);
 }
+
+test "inline chat: Shift+Enter (CSI-u 13;2u) inserts a newline into the input buffer" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "hi");
+    _ = try L.onInput(&rt, &ctx, "\x1B[13;2u");
+    _ = try L.onInput(&rt, &ctx, "there");
+
+    try testing.expectEqualStrings("hi\nthere", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expectEqual(@as(usize, 8), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: Enter on all-whitespace buffer (incl. embedded newlines) is a no-op" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Two Shift+Enter presses then plain Enter — buffer is `\n\n`,
+    // empty of actual content. The .enter path should clear without
+    // pushing a turn.
+    _ = try L.onInput(&rt, &ctx, "\x1B[13;2u");
+    _ = try L.onInput(&rt, &ctx, "\x1B[13;2u");
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+
+    _ = try L.onInput(&rt, &ctx, "\r");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+}

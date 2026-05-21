@@ -153,46 +153,72 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         else => .none,
                     };
                 }
-                // VT-style `ESC [ <num> ~` (Delete = 3~, Home = 1~/7~,
-                // End = 4~/8~). Need a fourth byte to know which.
-                if (c >= '0' and c <= '9') {
-                    // Incomplete VT-style CSI (chunk ended mid-
-                    // sequence, e.g. `ESC [ 3` waiting for `~`).
-                    // Drain to chunk end so the caller's
-                    // `while (i < input.len)` loop terminates —
-                    // returning .none without advancing would spin.
-                    if (i.* + 3 >= input.len) {
-                        i.* = input.len;
-                        return .none;
+                // Param/intermediate byte (0x20-0x3F) — digits,
+                // `;` separator, `?`/`>` private markers. Walk
+                // forward collecting `<p1>[;<p2>]` until the CSI
+                // final (0x40..0x7E). Two finals carry meaning for
+                // chat input:
+                //   ~  → VT-style function keys (Home/End/Delete)
+                //   u  → kitty kbd "CSI-u" (Shift+Enter etc.)
+                // Anything else gets consumed silently so private/
+                // unknown sequences don't leak as printables.
+                if ((c >= '0' and c <= '9') or c == ';' or c == '?' or c == '>') {
+                    var scan: usize = i.* + 2;
+                    var p1: usize = 0;
+                    var p2: usize = 0;
+                    var have_p1 = false;
+                    var have_p2 = false;
+                    var saw_semi = false;
+                    var unknown_param = false;
+                    while (scan < input.len) : (scan += 1) {
+                        const x = input[scan];
+                        if (x >= '0' and x <= '9') {
+                            if (!saw_semi) {
+                                p1 = p1 * 10 + (x - '0');
+                                have_p1 = true;
+                            } else {
+                                p2 = p2 * 10 + (x - '0');
+                                have_p2 = true;
+                            }
+                        } else if (x == ';') {
+                            saw_semi = true;
+                        } else if (x >= 0x40 and x <= 0x7E) {
+                            i.* = scan + 1;
+                            if (x == '~' and have_p1) {
+                                return switch (p1) {
+                                    1, 7 => .move_home,
+                                    3 => .delete_forward,
+                                    4, 8 => .move_end,
+                                    else => .none,
+                                };
+                            }
+                            if (x == 'u' and have_p1 and !unknown_param) {
+                                // CSI-u: <codepoint>;<mod>u
+                                // mod value 1=none, 2=Shift, 3=Alt,
+                                // 4=Shift+Alt, 5=Ctrl, 6=Shift+Ctrl,
+                                // 7=Shift+Alt+Ctrl, 8=Super, … —
+                                // shift-bit is `(mod - 1) & 1`.
+                                const mod: usize = if (have_p2) p2 else 1;
+                                const shift = ((mod -| 1) & 1) != 0;
+                                if (p1 == 13 and shift) return .{ .insert = '\n' };
+                            }
+                            return .none;
+                        } else {
+                            unknown_param = true;
+                        }
                     }
-                    const final = input[i.* + 3];
-                    if (final == '~') {
-                        i.* += 4;
-                        return switch (c) {
-                            '1', '7' => .move_home,
-                            '3' => .delete_forward,
-                            '4', '8' => .move_end,
-                            else => .none,
-                        };
-                    }
-                    // fall through to the param-scan recovery below
+                    // Incomplete CSI — drain to chunk end so the
+                    // caller's loop terminates; the continuation
+                    // bytes (the missing final) will arrive on the
+                    // next read and reparse cleanly because their
+                    // own first byte won't be 0x1B.
+                    i.* = input.len;
+                    return .none;
                 }
-                // Param/intermediate byte (0x20-0x3F) — including
-                // `?`/`>` private markers, `;` separator, and
-                // numeric params. Walk forward to the first byte
-                // in 0x40..0x7E (the CSI final) so everything past
-                // the sequence is left for the next loop iteration.
-                // Without this, sequences like `ESC [ ? 2 5 l` or
-                // `ESC [ ; 5 D` would only have `ESC [ <byte>`
-                // consumed and the rest leak as printables.
+                // Unrecognized intermediate (rare). Consume the
+                // 3-byte prefix so the loop terminates; the rest
+                // will reparse as best as the next iteration can.
                 i.* += 3;
-                while (i.* < input.len) : (i.* += 1) {
-                    const x = input[i.*];
-                    if (x >= 0x40 and x <= 0x7E) {
-                        i.* += 1;
-                        break;
-                    }
-                }
                 return .none;
             }
             i.* += 1;
@@ -321,11 +347,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             return .swallow;
                         },
                         .enter => {
-                            // Trim trailing whitespace before checking
-                            // empty — matches onLineCommit's semantics.
+                            // Trim trailing spaces/tabs from the
+                            // submitted line (preserves any embedded
+                            // newlines from Shift+Enter — those are
+                            // intentional content). Empty check looks
+                            // at all-whitespace including newlines so
+                            // a buffer of just `\n\n` from accidental
+                            // Shift+Enter strokes is treated as empty.
                             var trimmed_len = rt.chat_inline_input_len;
                             while (trimmed_len > 0 and (rt.chat_inline_input_buf[trimmed_len - 1] == ' ' or rt.chat_inline_input_buf[trimmed_len - 1] == '\t')) : (trimmed_len -= 1) {}
-                            if (trimmed_len == 0) {
+                            var has_content = false;
+                            for (rt.chat_inline_input_buf[0..trimmed_len]) |bb| {
+                                if (bb != ' ' and bb != '\t' and bb != '\n' and bb != '\r') {
+                                    has_content = true;
+                                    break;
+                                }
+                            }
+                            if (!has_content) {
                                 rt.chat_inline_input_len = 0;
                                 rt.chat_inline_input_cursor = 0;
                                 rt.chat_inline_paint_pending = true;
