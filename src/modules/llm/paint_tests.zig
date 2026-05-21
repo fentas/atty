@@ -264,6 +264,66 @@ test "inline chat fast-path: keystroke replays only the input block, not the div
     try testing.expect(std.mem.indexOf(u8, after_incognito.?, "incognito") != null);
 }
 
+test "inline chat fast-path: once input is at the cap, more newlines keep fast-pathing" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // Pre-seed buffer with enough newlines to saturate
+    // `input_lines_cap` (panel_rows / 2). Default `inline_chat_rows=10`
+    // + `inline_chat_top_gap=1` → live_reserve=14, panel_rows=10 →
+    // cap=5. So 5 newlines push desired=6 → clamped to 5 (the cap);
+    // 6 newlines push desired=7 → still clamped to 5.
+    @memcpy(rt.chat_inline_input_buf[0..7], "h\n\n\n\n\n\n");
+    rt.chat_inline_input_len = 7;
+    rt.chat_inline_input_cursor = 7;
+    _ = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(rt.chat_inline_paint_cache_valid);
+    try testing.expectEqual(@as(u16, 5), rt.chat_inline_paint_input_lines);
+    try testing.expectEqual(@as(u16, 5), rt.chat_inline_paint_input_lines_cap);
+
+    // Add another newline — desired=8 → clamped to 5 → no shift.
+    // Fast-path must STAY engaged (this is the whole point of the
+    // clamp-aware comparison from round 2 review). Output should
+    // lack the divider chrome.
+    rt.chat_inline_input_buf[7] = '\n';
+    rt.chat_inline_input_len = 8;
+    rt.chat_inline_input_cursor = 8;
+    rt.chat_inline_input_dirty = true;
+    const after_cap_newline = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(after_cap_newline != null);
+    try testing.expect(std.mem.indexOf(u8, after_cap_newline.?, "atty chat") == null);
+}
+
 test "inline chat (Alt+C): open paint CUP-restores to the cursor_row snapshot captured at first paint" {
     // Invariant: the first paint after toggle-open snapshots
     // `ctx.cursor_row` into the Runtime; every subsequent paint
