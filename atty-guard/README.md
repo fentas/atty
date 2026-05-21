@@ -181,18 +181,25 @@ Current shape (post-#140 system-daemon install):
 - **Socket**: `/run/atty-guard/atty-guard.sock`, mode `0660`,
   owned `atty:atty`. Users connect by joining the `atty` group
   (`sudo usermod -aG atty $USER` + re-login). Per-connection
-  authorization via SO_PEERCRED reads the connecting UID at
-  accept-time — root mutations land in `commands.trusted.txt`,
-  non-root in `users/<uid>/`.
+  authorization via SO_PEERCRED reads the connecting peer's
+  EUID at accept-time. Mutating RPCs that touch persistent
+  state (`atoms add/remove`, `urls allow/block`, etc.) require
+  EUID=0 — operators reach them via `sudo atty-guard ...`,
+  which re-execs the CLI and connects back over the same
+  socket with root credentials. Per-UID writes are scoped to
+  the target UID's state directory regardless of who's root.
 - **State**: persisted under `/var/lib/atty-guard/` —
-  `commands.trusted.txt` (sudo-mediated atom + URL trust),
-  `users/<uid>/atoms.user.txt` and `urls.user.txt` (per-user
-  overlays). The system atom corpus (`atoms.system.txt`) is
-  ownership-gated at load: the daemon refuses to read it when
-  metadata doesn't show `atty:atty`. Other state files rely on
-  filesystem permissions + SO_PEERCRED on the write path. State
-  survives daemon restarts; PID-based threat marks do not (held
-  in-memory only).
+  `commands.trusted.txt` (atom + URL trust hashes), plus
+  per-UID `users/<uid>/atoms.user.txt` and
+  `urls.decisions.txt`. All mutations go through the
+  sudo-mediated CLI; the daemon itself enforces EUID=0 on
+  the writes via SO_PEERCRED. The system atom corpus
+  (`atoms.system.txt`) is ownership-gated at load: the daemon
+  refuses to read it when metadata doesn't show `atty:atty`.
+  Other state files rely on `0640` perms (atty:atty owned)
+  plus SO_PEERCRED on the write path. State survives daemon
+  restarts; PID-based threat marks do not (held in-memory
+  only).
 - **Network**: opt-in. Default build features `osv-live` +
   `atoms-fetch` need outbound HTTPS. The shipped systemd unit
   hard-locks the daemon out of the network (`PrivateNetwork=yes`,
