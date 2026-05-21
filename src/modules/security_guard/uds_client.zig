@@ -443,10 +443,7 @@ pub fn buildClassifyJson(
     try writeEscaped(w, command);
     try w.writeAll("\",\"context\":{");
     // Field order is incidental — the daemon parses by name
-    // (serde_json on the Rust side, ignores field order). Tests
-    // assert specific byte sequences for stability; if the order
-    // changes the tests must update in lock-step but wire
-    // compatibility stays intact.
+    // (serde_json on the Rust side ignores field order).
     var first = true;
     if (ctx.pid) |pid| {
         try w.print("\"pid\":{d}", .{pid});
