@@ -1,6 +1,13 @@
 # atty-guard
 
-Sidecar daemon for atty's `security_guard` module. **Shipping today (V2-A + V2-D):** UDS RPC server, JSON-line protocol, Tier-1 regex classifier mirroring atty's in-proc patterns, in-memory PID → threat-level map. **Coming next:** V2-B adds the eBPF LSM hook backstop (replaces the in-memory map with a `BPF_MAP_TYPE_HASH`), V2-C wires the encoder-SLM Tier-2 classifier (SecureBERT-class, ONNX-INT8, ≤15 ms/inference).
+Sidecar daemon for atty's `security_guard` module. **What's shipped today:**
+
+- **V2-A** UDS RPC server, JSON-line protocol, atty:atty system-user post-#140.
+- **V2-D** Tier-1 regex classifier mirroring atty's in-proc patterns, with multi-hit V2-J threat accumulator + opt-in V2-J-2 auto-Block escalation.
+- **V2-B** eBPF LSM hook + execve/AF_ALG tracepoints (opt-in via `--features ebpf` + `install.sh --with-ebpf`). Replaces the in-memory PID map with a `BPF_MAP_TYPE_HASH` so kernel-side checks see the same threat state.
+- **V2-C** Tier-2 ONNX SLM classifier (opt-in via `--features tier2-onnx`, pure-Rust `tract-onnx` backend, SecureBERT 2.0 / Qwen2.5-Coder INT8).
+- **V2-F** Live OSV.dev lookup for `npm install <pkg>` (opt-in via `--features osv-live`).
+- **V2-I** Atom corpus auto-update from GTFOBins + SigmaHQ (opt-in via `--features atoms-fetch`, with opt-in operator pinning at `/etc/atty-guard/atoms.pins.toml` — see [docs/security-guard-updates.md](../docs/security-guard-updates.md)).
 
 See [docs/security-guard-design.md](../docs/security-guard-design.md) in the atty repo for the three-component architecture.
 
@@ -160,9 +167,9 @@ Adds rules that don't fit Tier-1's "obvious shapes" surface:
 
 All produce `Verdict::Warn` — atty's user still has the `[y]/[t]/cancel` choice, so a false positive only costs one keystroke. Pure CPU, ~µs latency, zero deps beyond `regex`.
 
-### `onnx` (V2-C, not in this PR)
+### `onnx` (V2-C — shipped, opt-in via `--features tier2-onnx`)
 
-Encoder SLM (SecureBERT-class quantized INT8) via the `ort` crate. Latency target ≤ 15 ms/inference. Will be feature-gated behind a Cargo feature so the default build stays small.
+Encoder-SLM Tier-2 classifier (SecureBERT 2.0 / Qwen2.5-Coder INT8) via pure-Rust `tract-onnx`. Latency target ≤ 15 ms/inference. Feature-gated so default builds skip the dep weight; see [docs/security-guard-slm.md](../docs/security-guard-slm.md) for the model loadout + config TOML shape.
 
 ## Tests
 

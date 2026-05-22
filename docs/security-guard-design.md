@@ -36,14 +36,14 @@ The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable t
 - Runs AFTER the precise regex Tier-1 as a broad-signal fallback: high-confidence verdicts (curl|sh = 1.0, flagged-URLs = 0.9, npm = 1.0, bash -c base64 = 1.0) win; the AtomMatcher's medium-confidence 0.6 Warn only fires when nothing more specific matched. Inverting this would silently demote the strongest signals we have.
 - Same data-file pattern as `flagged_npm.txt` / `flagged_urls.txt` on the Rust side (`include_str!`). The Zig in-proc security_guard reads its own pattern set today; a Zig-side AtomMatcher reading the same `flagged_atoms.txt` via `@embedFile` is queued for V2-J when the in-proc corpus grows past linear-scan range.
 
-### What V2-H brings (next)
+### V2-H — Tier-2 SLM hint-windowing (shipped, `tier2-onnx` feature)
 
 - `OnnxBackend::classify` accepts an optional hint offset (the AC match position from V2-G).
 - When set, extracts `[-64, +256]` chars around the hit, tokenises ONLY that window, dropping the prompt-chrome prefix.
 - ~3-5× token reduction on long pipeline-stuffed commands; brings Qwen2.5-Coder-1.5B inference comfortably under the 50 ms UDS-client timeout.
 - No-hint fallback path keeps the existing whole-command tokenisation for clean commands.
 
-### What V2-I brings (after V2-H)
+### V2-I — atom corpus auto-update (shipped, `atoms-fetch` feature)
 
 - Daemon CLI surface: `atty-guard --update-atoms-now` (one-shot
   refresh + exit) + `atty-guard --atoms-update-interval 6h`
