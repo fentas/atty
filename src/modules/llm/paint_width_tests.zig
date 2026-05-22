@@ -180,3 +180,77 @@ test "wrapIter: cols=0 falls back to 1-col, still terminates" {
     defer testing.allocator.free(out);
     try testing.expectEqual(@as(usize, 2), out.len);
 }
+
+test "writeSanitized: strips C0 controls (incl. ESC) and emits no escape sequences" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    // Mixed input: plain text + ESC + a faux ANSI color escape +
+    // BEL + DEL. Everything in the C0 range (except tab/CR/LF
+    // which collapse to space or pass through) must be dropped.
+    const input = "hello\x1B[31mworld\x07!\x7Fend";
+    try mod.writeSanitized(&w, input);
+    const out = buf[0..w.end];
+    // No ESC byte (0x1B) survives.
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x1B) == null);
+    // No BEL (0x07).
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null);
+    // No DEL (0x7F).
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x7F) == null);
+    // The text content (minus controls) survives in order.
+    try testing.expect(std.mem.indexOf(u8, out, "hello") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "world") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "end") != null);
+}
+
+test "writeSanitized: preserves multi-byte UTF-8 sequences" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    // Em-dash (—, U+2014, 3 bytes: 0xE2 0x80 0x94), continuation
+    // bytes are in 0x80..0x9F range which is C1-shaped at the
+    // byte level. The codepoint-aware filter must let these
+    // through.
+    const input = "before \u{2014} after";
+    try mod.writeSanitized(&w, input);
+    const out = buf[0..w.end];
+    try testing.expectEqualStrings("before \u{2014} after", out);
+}
+
+test "writeSanitized: \\t passes through; \\n and \\r collapse to space" {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try mod.writeSanitized(&w, "a\tb\nc\rd");
+    const out = buf[0..w.end];
+    try testing.expectEqualStrings("a\tb c d", out);
+}
+
+test "writeSanitized: invalid UTF-8 + raw C1 bytes are dropped, not pass-through" {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    // Inputs covering each invalid-UTF-8 shape utf8Iter can yield
+    // U+FFFD for:
+    //   - 0x9B: bare 8-bit CSI byte (was leaking pre-fix because
+    //     decoded cp=U+FFFD bypasses the 0x80..0x9F C1 check)
+    //   - 0xC2 alone: incomplete 2-byte start
+    //   - 0xE2 0x80: truncated 3-byte sequence (em-dash leading
+    //     2 bytes, missing the 0x94 trailer)
+    //   - 0xFF: unmappable start byte
+    const input = "before\x9B[31m\xC2_\xE2\x80_\xFFafter";
+    try mod.writeSanitized(&w, input);
+    const out = buf[0..w.end];
+    // Output must not carry any byte ≥ 0x80 that came from the
+    // mid-string invalid sequences. The surrounding ASCII text
+    // ("before"/"after"/"_"/"_" + the `[31m` chunk that follows
+    // the 0x9B) DOES survive — the filter only drops the
+    // malformed bytes themselves, not their neighbours.
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x9B) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0xC2) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0xE2) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0xFF) == null);
+    // U+FFFD itself (the replacement glyph) must NOT appear —
+    // we drop it entirely rather than emit its 3-byte UTF-8
+    // encoding (ef bf bd).
+    try testing.expect(std.mem.indexOf(u8, out, "\u{FFFD}") == null);
+    // ASCII context survives.
+    try testing.expect(std.mem.indexOf(u8, out, "before") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "after") != null);
+}

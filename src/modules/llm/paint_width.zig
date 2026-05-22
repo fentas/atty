@@ -243,6 +243,52 @@ pub fn wrapIter(bytes: []const u8, cols: usize) WrapIterator {
     return .{ .bytes = bytes, .cols = if (cols == 0) 1 else cols };
 }
 
+/// Write `bytes` to `w` with C0 / C1 control characters
+/// stripped (or, for `\t` / `\n` / `\r`, replaced with a space).
+/// Preserves valid UTF-8 multi-byte sequences whose continuation
+/// bytes happen to fall in the 0x80..0xBF range (em-dash,
+/// emoji, CJK glyphs all survive).
+///
+/// Used everywhere ATTACKER- or MODEL-controlled text reaches
+/// the terminal: chat overlay turn content, inline panel turn
+/// content, and the LLM session-conclusion banner's reason
+/// field. Without this, a `ESC[31m` JSON escape in an LLM
+/// reply could re-colour the user's prompt, hide arbitrary
+/// rows behind ANSI cursor-up sequences, or worse.
+///
+/// `\t` passes through; `\n` and `\r` collapse to a single
+/// space so a multi-line value can't introduce a hard break
+/// where the chrome doesn't expect one.
+pub fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) anyerror!void {
+    var it = utf8Iter(bytes);
+    while (it.next()) |c| {
+        // Drop the Unicode replacement codepoint (U+FFFD).
+        // `utf8Iter` yields this for any invalid sequence:
+        // bare continuation byte, truncated multi-byte sequence,
+        // overlong encoding, or an unmappable start byte. Without
+        // this filter, the original raw byte gets emitted —
+        // which lets a raw 0x9B (8-bit CSI) or other C1-range
+        // byte slip through despite the explicit C1 check
+        // below (which compares the DECODED codepoint, not the
+        // raw byte). Dropping U+FFFD also tightens the contract:
+        // "this filter emits only well-formed, printable
+        // codepoints" — the terminal never sees malformed
+        // UTF-8 bytes via this path.
+        if (c.cp == 0xFFFD) continue;
+        if (c.cp < 0x20 or c.cp == 0x7F) {
+            if (c.cp == 0x09) {
+                try w.writeAll("\t");
+            } else if (c.cp == 0x0A or c.cp == 0x0D) {
+                try w.writeAll(" ");
+            }
+            continue;
+        }
+        if (c.cp >= 0x80 and c.cp <= 0x9F) continue;
+        const start = it.i - c.byte_len;
+        try w.writeAll(bytes[start..it.i]);
+    }
+}
+
 test {
     _ = @import("paint_width_tests.zig");
 }

@@ -52,30 +52,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     also dropped — emitting it alone would land
         ///     malformed UTF-8 on the user's terminal.
         ///   - Tab (0x09) and printable ASCII pass through.
-        fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) anyerror!void {
-            // Walk codepoints (not raw bytes) so multi-byte UTF-8
-            // sequences with continuation bytes in 0x80..0x9F (a `—`
-            // em-dash, an emoji, CJK glyph, etc.) survive intact.
-            // The previous byte-level filter dropped those
-            // continuation bytes as if they were C1 controls,
-            // leaving an orphan leading byte the terminal rendered
-            // as `�`. C1 controls are now checked AFTER decode
-            // (cp in 0x80..0x9F), not against raw bytes.
-            var it = pw.utf8Iter(bytes);
-            while (it.next()) |c| {
-                if (c.cp < 0x20 or c.cp == 0x7F) {
-                    if (c.cp == 0x09) {
-                        try w.writeAll("\t");
-                    } else if (c.cp == 0x0A or c.cp == 0x0D) {
-                        try w.writeAll(" ");
-                    }
-                    continue;
-                }
-                if (c.cp >= 0x80 and c.cp <= 0x9F) continue;
-                const start = it.i - c.byte_len;
-                try w.writeAll(bytes[start..it.i]);
-            }
-        }
+        const writeSanitized = pw.writeSanitized;
 
         /// Render the chat overlay's open or close sequence into
         /// `rt.chat_overlay_buf`. Returns false when the content
@@ -165,7 +142,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const tail_end: usize = rt.turns_len - overlay_offset;
 
             const has_turns = rt.turns_len > 0;
-            const has_conclusion = rt.conclusion_len > 0;
+            const has_conclusion = rt.conclusion_formatted != null;
             if (!has_turns and !has_conclusion) {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
@@ -188,8 +165,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // conclusion banner survived, surface it as
                     // the overlay's content. Conclusion was built
                     // by atty so it's safe to write unsanitized.
-                    w.writeAll(rt.conclusion_buf[0..rt.conclusion_len]) catch return false;
-                    w.writeAll("\r\n") catch return false;
+                    if (rt.conclusion_formatted) |formatted| {
+                        w.writeAll(formatted) catch return false;
+                        w.writeAll("\r\n") catch return false;
+                    }
                 }
             }
 
@@ -360,11 +339,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                 },
                 .done => {
+                    // Reason is free-form prose, often multi-paragraph
+                    // (the LLM's actual answer to the user's question).
+                    // Unlike `exec.command` or `question.text` where a
+                    // tight col cap defends against runaway sizes, the
+                    // done reason WANTS to wrap across many rows — the
+                    // overlay has the full DECSTBM region to scroll
+                    // within. Render unsanitized-but-write-sanitized so
+                    // the terminal handles wrap naturally. Caps that
+                    // were copy-pasted from the exec branch were
+                    // cutting 600-word LLM responses at ~480 chars
+                    // with a `[…]` marker — exactly what the user
+                    // can't tolerate.
                     const r = parsed.reason();
-                    const rslice = pw.truncateToCols(r, overlay_field_cap);
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m ");
-                    try writeSanitized(w, rslice);
-                    if (rslice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    try writeSanitized(w, r);
                 },
             }
         }
@@ -440,11 +429,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (slice.len < q.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .done => {
-                    const r = parsed.reason();
+                    // Reason is free-form prose. Pre-fix shape capped
+                    // at `max_visible` cols → a 600-word LLM reply
+                    // got clipped to one row's worth (~74 chars on an
+                    // 80-col terminal). Inline panel has rows to
+                    // spare; render via the markdown-aware wrap path
+                    // so multi-paragraph reasons span multiple rows.
+                    // Same `\u{2026}` overflow marker, but applied
+                    // per-row by md_render when content exceeds
+                    // `max_rows`, not per-byte.
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m "); // mauve check
-                    const slice = pw.truncateToCols(r, max_visible);
-                    try writeSanitized(w, slice);
-                    if (slice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    const r = parsed.reason();
+                    // The `✓ ` prefix took 2 visible cols on the first
+                    // row; subsequent wrap rows have the full
+                    // `max_visible` budget. md_render handles per-row
+                    // wrap + the `[…]` overflow marker only when
+                    // content actually exceeds max_rows.
+                    return md_render.render(w, r, max_visible, max_rows, &writeSanitized);
                 },
             }
             return 1;
@@ -454,16 +455,140 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// rendered now. Mirrors `renderTurnContent`'s envelope-vs-
         /// raw decision and the same wrap iterator so the back-walk
         /// in `paintInlineChat` picks `start_turn` accurately
-        /// (newest-turn-anchored). Envelope turns always claim one
-        /// row; raw turns walk the wrap iterator counting chunks
-        /// up to `max_rows`. Cheap — no allocations.
+        /// (newest-turn-anchored).
+        ///
+        /// Envelope rows:
+        ///   - `exec` / `question` always claim 1 row (compact
+        ///     single-line summary in the render path).
+        ///   - `done` claims multiple rows — its free-prose reason
+        ///     renders via md_render which hard-breaks on `\n`.
+        ///     Estimator walks the wrap iter over the raw envelope
+        ///     bytes + adds the count of `\n` JSON escapes (the
+        ///     wrap iter misses these because the JSON encoding
+        ///     puts them as 2-char `\n` literals). Over-estimates
+        ///     slightly but stays safe vs the actual render —
+        ///     under-counting would clip the newest turn's tail
+        ///     under back-walk pressure.
+        ///
+        /// Raw turns walk the wrap iterator counting chunks up to
+        /// `max_rows`. Cheap — no allocations.
+        /// Whitespace-tolerant check for an envelope whose action
+        /// value is `"done"`. The full JSON parser at the render
+        /// path handles this fine; `countTurnRows` only needs a
+        /// cheap shape probe for the back-walk row-count estimate.
+        ///
+        /// Matches: `"action":"done"`, `"action": "done"`,
+        /// `"action" : "done"` (any ASCII whitespace around the
+        /// colon). Skips matches whose opening `"` is backslash-
+        /// escaped so an LLM emitting `\"action\":` literally
+        /// inside a reason string can't shadow the real top-level
+        /// `"action"` key further on in the envelope.
+        fn envelopeActionIsDone(c: []const u8) bool {
+            const key_lit = "\"action\"";
+            var search_start: usize = 0;
+            while (search_start < c.len) {
+                const rel = std.mem.indexOf(u8, c[search_start..], key_lit) orelse return false;
+                const key_pos = search_start + rel;
+                // Skip a `"action"` whose opening quote is escaped
+                // (preceded by a backslash that isn't itself
+                // escaped). Common shape: `"reason":"... \"action\":
+                // \"done\" ..."` — the first `"action"` is inside
+                // a JSON string value, not the top-level key.
+                if (key_pos > 0 and c[key_pos - 1] == '\\') {
+                    // Could be `\"` (escape) or `\\"` (literal
+                    // backslash + opening quote). Walk back to
+                    // count consecutive backslashes; an odd count
+                    // means the quote is escaped.
+                    var bs: usize = 0;
+                    var k = key_pos;
+                    while (k > 0 and c[k - 1] == '\\') : (k -= 1) bs += 1;
+                    if (bs % 2 == 1) {
+                        search_start = key_pos + 1;
+                        continue;
+                    }
+                }
+                var i = key_pos + key_lit.len;
+                while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
+                if (i >= c.len or c[i] != ':') {
+                    search_start = key_pos + 1;
+                    continue;
+                }
+                i += 1;
+                while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
+                const done_lit = "\"done\"";
+                if (i + done_lit.len > c.len) return false;
+                return std.mem.eql(u8, c[i..(i + done_lit.len)], done_lit);
+            }
+            return false;
+        }
+
         fn countTurnRows(turn: dialog.Turn, cols: usize, max_rows: usize) usize {
             const c = turn.content;
             const looks_like_envelope = turn.kind == .assistant_exec and
                 c.len > 2 and
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
-            if (looks_like_envelope) return 1;
+            if (looks_like_envelope) {
+                // `done` envelopes' free-prose reason renders via
+                // md_render and can span many rows; exec + question
+                // still take exactly one row (compact summary).
+                // Cheap shape-check via `envelopeActionIsDone`
+                // rather than a full JSON parse — back-walk anchor
+                // math only needs a row-count estimate.
+                if (envelopeActionIsDone(c)) {
+                    // Estimate row count by walking the wrap iterator
+                    // over the WHOLE envelope content. Two corrections
+                    // applied so the estimate stays a safe upper bound
+                    // for what the render path actually emits:
+                    //
+                    //   1. The wrap iterator sees JSON `\n` escapes
+                    //      as two literal chars; the render path
+                    //      parses the JSON value and feeds md_render
+                    //      which hard-breaks on real newlines. Each
+                    //      escape corresponds to AT LEAST one extra
+                    //      rendered row that the raw wrap count
+                    //      would miss. Adding `escapes_n` to the
+                    //      row total bounds this — over-counts
+                    //      slightly (the escape's 2 bytes are also
+                    //      counted in the wrap rows) but the
+                    //      direction is safe: the back-walk anchor
+                    //      reserves enough room for the newest turn
+                    //      rather than letting it get clipped.
+                    //   2. Min 1 row for empty content (matches the
+                    //      existing fallthrough at the bottom).
+                    var it = pw.wrapIter(c, cols);
+                    var rows: usize = 0;
+                    while (it.next()) |_| {
+                        rows += 1;
+                        if (rows >= max_rows) break;
+                    }
+                    if (rows < max_rows) {
+                        var escapes_n: usize = 0;
+                        var i: usize = 0;
+                        while (i + 1 < c.len) : (i += 1) {
+                            if (c[i] == '\\' and c[i + 1] == 'n') {
+                                escapes_n += 1;
+                                i += 1; // skip past the `n`
+                            }
+                        }
+                        rows = @min(max_rows, rows + escapes_n);
+                    }
+                    return if (rows == 0) 1 else rows;
+                }
+                // Envelope-shaped but NOT confidently `done`. Two
+                // cases this path needs to cover:
+                //   - Real exec/question envelopes: `renderTurnContent`
+                //     emits 1 row each.
+                //   - Malformed / trailing-prose envelopes that fail
+                //     to parse: `renderTurnContent` falls through to
+                //     `renderWrappedRaw` which can span MULTIPLE rows.
+                // Returning 1 here under-counts the malformed case,
+                // which under back-walk pressure clips the newest
+                // turn. Fall through to the wrap-iter estimate
+                // instead: slight over-count for valid exec/question
+                // (1-2 extra rows reserved per turn) but safe for
+                // malformed.
+            }
             if (c.len == 0) return 1;
             var it = pw.wrapIter(c, cols);
             var rows: usize = 0;
@@ -1172,13 +1297,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
             // Conclusion banner emission takes precedence over the
             // cursor-colour edge logic — the banner is one-shot
-            // multi-line output that scrolls into shell history;
-            // cursor-colour OSC sequences are infinitely retriable
-            // on the next tick. Drains the latch (one-shot
-            // semantics).
-            if (rt.conclusion_pending and rt.conclusion_len > 0) {
+            // multi-line output that scrolls into shell history.
+            // The proxy's `writeAll` on the returned slice handles
+            // arbitrary sizes via posix-level looping, so single-
+            // emission is correct even for multi-KiB banners.
+            // Per-tick chunking would interleave the conclusion
+            // bytes with cursor + statusbar events between ticks,
+            // breaking the terminal's "follow new output to the
+            // bottom" heuristic and leaving the new shell prompt
+            // off-screen below the user's viewport.
+            if (rt.conclusion_pending) {
+                if (rt.conclusion_formatted) |formatted| {
+                    rt.conclusion_pending = false;
+                    return formatted;
+                }
                 rt.conclusion_pending = false;
-                return rt.conclusion_buf[0..rt.conclusion_len];
             }
             if (!cfg.prefix_signal_cursor) return null;
             // Cursor colour fires when EITHER the prefix is matched

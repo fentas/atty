@@ -452,6 +452,7 @@ pub fn configure(comptime cfg: Config) type {
             }
         }
         const freeTurns = dialog_helpers.freeTurns;
+        const freeConclusion = dialog_helpers.freeConclusion;
         const appendCaptured = dialog_helpers.appendCaptured;
         const advancePastMarker = dialog_helpers.advancePastMarker;
         const captureConclusion = dialog_helpers.captureConclusion;
@@ -701,21 +702,22 @@ pub fn configure(comptime cfg: Config) type {
             /// callers see a stable snapshot for the duration of
             /// the hook.
             question_choices_slices: [dialog.max_choices][]const u8 = undefined,
-            /// Captured conclusion text from the most recent
-            /// `action=done`. Formatted as a multi-line block
-            /// suitable for inline emission via the term-bytes
-            /// hook (`provideTermBytes`). Persists across the
-            /// dialog reset so `Alt+Shift+C` can re-emit it. Cleared
-            /// only on `detach` and on a fresh `action=done`
-            /// (which overwrites). Empty `conclusion_len == 0`
-            /// means no completed dialog yet this session.
-            conclusion_buf: [1024]u8 = undefined,
-            conclusion_len: usize = 0,
+            /// Captured conclusion banner from the most recent
+            /// `action=done`. Heap-allocated (via `Runtime.allocator`)
+            /// so the buffer can grow to the size of the formatted
+            /// banner without a static cap — earlier shapes used a
+            /// fixed `[1024]u8` array that silently truncated
+            /// realistic LLM replies past ~280 visible chars (#211).
+            ///
+            /// Owned by the Runtime: replaced (free + alloc) on
+            /// each fresh `action=done`, freed on `detach`. Persists
+            /// across `dialogReset` so `Alt+Shift+C` can re-emit.
+            /// `null` means no completed dialog yet this session.
+            conclusion_formatted: ?[]u8 = null,
             /// Latched flag — set by `handleDialogResponse` on
             /// `action=done` so the next `provideTermBytes` tick
             /// emits the conclusion banner (auto-show behaviour).
-            /// Cleared after emission. The `Alt+Shift+C` action
-            /// re-arms this flag for an explicit re-emit.
+            /// Cleared after the banner emits.
             conclusion_pending: bool = false,
 
             // ── Chat overlay (phase 2a — Alt+Shift+C) ───────────
@@ -1019,6 +1021,7 @@ pub fn configure(comptime cfg: Config) type {
                 _ = std.c.write(1, "\x1B[?25h", 6);
             }
             freeTurns(rt);
+            freeConclusion(rt);
             rt.osc133_capture.deinit();
             // Heap-promoted Runtime buffers are owned by the main
             // thread alone — the worker reaches into `Shared`, not

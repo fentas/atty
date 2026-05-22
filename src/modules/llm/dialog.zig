@@ -113,7 +113,16 @@ pub fn Response(comptime max_response_bytes: comptime_int) type {
         command_len: usize = 0,
         description_buf: [256]u8 = undefined,
         description_len: usize = 0,
-        reason_buf: [256]u8 = undefined,
+        /// Sized like `command_buf` because a `done`-action reason
+        /// is the LLM's actual answer text — often multi-paragraph
+        /// prose (essays, code generations, long explanations) that
+        /// has the same upper bound as the body of an `exec`
+        /// command. The previous 256-byte cap was inherited from
+        /// `description_buf` where it makes sense (description is
+        /// a short accompanying note) but is wrong here. Realistic
+        /// LLM replies > 256 bytes were silently truncated at
+        /// parse time with no marker.
+        reason_buf: [max_response_bytes]u8 = undefined,
         reason_len: usize = 0,
         /// `action=question` payload — the prompt text. Surfaced
         /// in the hint row; the user's free-form answer at the
@@ -569,7 +578,10 @@ test "Response factory: sizes follow the comptime param" {
     try testing.expectEqual(@as(usize, 4096), r.command_buf.len);
     try testing.expectEqual(@as(usize, 4096), r.question_buf.len);
     try testing.expectEqual(@as(usize, 256), r.description_buf.len);
-    try testing.expectEqual(@as(usize, 256), r.reason_buf.len);
+    // reason_buf follows the comptime param — the LLM's done-
+    // action answer can be multi-paragraph prose, sized like
+    // command_buf rather than the short description_buf.
+    try testing.expectEqual(@as(usize, 4096), r.reason_buf.len);
     // Default action — `done` is the safe default (stops the
     // dialog loop) if a caller forgets to overwrite.
     try testing.expectEqual(Action.done, r.action);
@@ -736,6 +748,7 @@ test "buildRequestBody: assistant_exec turn uses assistant role" {
 // purely buffer-shaped.
 
 const types = @import("types.zig");
+const paint_width = @import("paint_width.zig");
 
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {
@@ -896,11 +909,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         }
 
         /// Format the LLM session conclusion into a multi-line
-        /// banner stored in `conclusion_buf`. Re-emittable via Alt+C
-        /// (`llm_chat_overlay_toggle`). Surfaced via
-        /// `provideTermBytes`; the banner scrolls into the shell's
-        /// normal history above the next prompt — no DECSTBM resize
-        /// needed.
+        /// banner stored in `conclusion_formatted`. Re-emittable
+        /// via Alt+Shift+C (`llm_chat_overlay_toggle`). Surfaced
+        /// via `provideTermBytes` in a single-shot emission — the
+        /// proxy's `writeAll(STDOUT, ...)` handles arbitrary slice
+        /// sizes via posix-level looping, so the banner scrolls
+        /// into the shell's normal history above the next prompt
+        /// in one terminal frame.
         ///
         /// Format (statusbar-style palette: mauve brand + cyan
         /// accent + dim chrome). Leading `\r\n` so the banner never
@@ -912,10 +927,44 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     │ <N> execs / <N> obs / <N> turns
         ///     ╰──────────────────────────────────────────────
         ///
-        /// Reason truncates to fit within `conclusion_buf` (1024
-        /// bytes); realistic reasons are 100-200 bytes.
+        /// Allocates a heap buffer sized to the full formatted
+        /// content — no fixed cap, no truncation. Frees any
+        /// previous capture first (re-capture / new dialog).
+        /// Allocation failure is logged to stderr and leaves
+        /// `conclusion_formatted = null`. The caller (action=done
+        /// handler in hooks.zig) unconditionally arms
+        /// `conclusion_pending = true` after this returns; the
+        /// paint hook (provideTermBytes) clears the latch when
+        /// it sees `formatted == null`, so a banner-skip on alloc
+        /// failure recovers cleanly without polling.
         pub fn captureConclusion(rt: *Runtime, reason: []const u8, execs: usize, obs: usize, turns: usize) void {
-            var w: std.Io.Writer = .fixed(&rt.conclusion_buf);
+            // Free any prior capture (re-capture path: same session,
+            // second LLM dialog). Lives across `dialogReset` for
+            // Alt+Shift+C re-emit, so the only frees are here on
+            // overwrite + on detach.
+            if (rt.conclusion_formatted) |old| {
+                rt.allocator.free(old);
+                rt.conclusion_formatted = null;
+            }
+
+            // Worst-case sizing: every byte of reason ends up as a
+            // separate single-byte line, each taking ~22 bytes of
+            // continuation chrome (`│   <byte>\r\n` + dim ANSI), or
+            // ~37 bytes for the first row. Plus a fixed ~250 bytes
+            // of header chrome, ~110 bytes of counts row, ~190
+            // bytes of bottom border + reset. A linear `reason.len
+            // * 23 + 1024` is a comfortable upper bound; realistic
+            // multi-paragraph reasons stay well under it because
+            // the per-line chrome cost is amortised across the
+            // line's content.
+            const cap = reason.len * 23 + 1024;
+            const buf = rt.allocator.alloc(u8, cap) catch {
+                const msg = "atty: captureConclusion alloc failed — banner skipped\n";
+                _ = std.c.write(2, msg, msg.len);
+                return;
+            };
+            var w: std.Io.Writer = .fixed(buf);
+
             // Single `\r\n` so the banner starts at column 1 on the
             // row immediately under the shell's prompt redraw — no
             // visible blank rows between the prompt and the banner.
@@ -967,14 +1016,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // non-empty line claims the checkmark.
                     if (line.len == 0) continue;
                     if (first) {
-                        w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{line}) catch {};
+                        w.writeAll("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m ") catch {};
+                        // Sanitize: the reason is LLM-controlled,
+                        // can contain ESC/C0 bytes from JSON `ESC`
+                        // escapes. Without filtering, the model could
+                        // emit `ESC[31m` and recolour the user's
+                        // prompt or `ESC[2J` and wipe the screen.
+                        // writeSanitized strips C0/C1 + collapses
+                        // CR/LF (the splitScalar above already split
+                        // on `\n`, so any residual control chars are
+                        // attacker injection).
+                        paint_width.writeSanitized(&w, line) catch {};
+                        w.writeAll("\r\n") catch {};
                         first = false;
                     } else {
                         // Continuation rows: `│` + 3 spaces aligns
                         // the prose at col 5, matching the first
                         // row's text position (col 1 vbar + space +
                         // `✓` glyph + space → text starts col 5).
-                        w.print("\x1B[2m\u{2502}\x1B[0m   {s}\r\n", .{line}) catch {};
+                        w.writeAll("\x1B[2m\u{2502}\x1B[0m   ") catch {};
+                        paint_width.writeSanitized(&w, line) catch {};
+                        w.writeAll("\r\n") catch {};
                     }
                 }
                 // All-whitespace reason → no row emitted above. Fall
@@ -996,7 +1058,39 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             w.writeAll("\x1B[2m\u{2570}") catch {};
             w.writeAll(conclusion_border_dashes[0..(58 * 3)]) catch {};
             w.writeAll("\x1B[0m\r\n") catch {};
-            rt.conclusion_len = w.end;
+            // Shrink the allocation down to the used size. realloc
+            // guarantees the returned slice's length matches `used`
+            // (either in-place shrink, or a fresh smaller allocation
+            // + free of the old) — that's what we need so the
+            // matching `allocator.free` in freeConclusion sees the
+            // right size. The over-allocation cap is a conservative
+            // upper bound; realistic banners shrink by 10-50x.
+            //
+            // Shrink can theoretically fail (testing allocator with
+            // a tight memory regime); on failure we free the
+            // original allocation and skip the banner rather than
+            // hold an over-sized slice that would mis-match on
+            // free(). Banner skipped is preferable to a heap-canary
+            // panic.
+            const used = w.end;
+            if (rt.allocator.realloc(buf, used)) |shrunk| {
+                rt.conclusion_formatted = shrunk;
+            } else |_| {
+                rt.allocator.free(buf);
+                const msg = "atty: captureConclusion realloc failed — banner skipped\n";
+                _ = std.c.write(2, msg, msg.len);
+                return;
+            }
+        }
+
+        /// Free the heap-owned conclusion buffer. Called from
+        /// `detach`. Idempotent — null-buffer is fine.
+        pub fn freeConclusion(rt: *Runtime) void {
+            if (rt.conclusion_formatted) |buf| {
+                rt.allocator.free(buf);
+                rt.conclusion_formatted = null;
+            }
+            rt.conclusion_pending = false;
         }
 
         /// Reset all dialog state — used by both `abortDialog` and
@@ -1038,10 +1132,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.dialog_parse_retry_count = 0;
             rt.question_choices_count = 0;
             // Disarm the conclusion auto-emit latch — but keep the
-            // captured `conclusion_buf` so `Alt+C` can still recall
-            // the LAST completed session even if this reset was a
-            // cancel. The `.done` path explicitly RE-arms the latch
-            // AFTER calling dialogReset (see the captureConclusion
+            // captured `conclusion_formatted` so `Alt+Shift+C` can
+            // still recall the LAST completed session even if this
+            // reset was a cancel. The `.done` path explicitly RE-arms
+            // the latch AFTER calling dialogReset (see captureConclusion
             // site).
             rt.conclusion_pending = false;
             rt.in_flight = false;
@@ -1072,14 +1166,16 @@ test "Module.captureConclusion writes reason + counts into the buffer" {
     // these two fields, so we don't need to spin up the full
     // module Runtime for a snapshot test.
     const FakeRuntime = struct {
-        conclusion_buf: [1024]u8 = undefined,
-        conclusion_len: usize = 0,
+        allocator: std.mem.Allocator,
+        conclusion_formatted: ?[]u8 = null,
+        conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
 
-    var rt: FakeRuntime = .{};
+    var rt: FakeRuntime = .{ .allocator = testing.allocator };
+    defer M.freeConclusion(&rt);
     M.captureConclusion(&rt, "stopped at user request", 3, 2, 7);
-    const out = rt.conclusion_buf[0..rt.conclusion_len];
+    const out = rt.conclusion_formatted.?;
 
     try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
     try testing.expect(std.mem.indexOf(u8, out, "LLM session complete") != null);
@@ -1115,19 +1211,21 @@ test "Module.captureConclusion wraps multi-line reason — every row keeps the `
     // landed mid-text. Now each line gets its own `│ ` prefix +
     // `\r\n`.
     const FakeRuntime = struct {
-        conclusion_buf: [2048]u8 = undefined,
-        conclusion_len: usize = 0,
+        allocator: std.mem.Allocator,
+        conclusion_formatted: ?[]u8 = null,
+        conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
 
-    var rt: FakeRuntime = .{};
+    var rt: FakeRuntime = .{ .allocator = testing.allocator };
+    defer M.freeConclusion(&rt);
     const multiline =
         \\Here's what I can see:
         \\- Shell: bash
         \\- PWD: /home/user
     ;
     M.captureConclusion(&rt, multiline, 0, 0, 1);
-    const out = rt.conclusion_buf[0..rt.conclusion_len];
+    const out = rt.conclusion_formatted.?;
 
     // No raw LF inside the banner (every newline must be `\r\n`).
     // The opening `\r\n` IS preceded by `\r`, so a pure LF would
@@ -1163,14 +1261,16 @@ test "Module.captureConclusion two-line reason with trailing newline → 2 reaso
     // `["first", "second", ""]`. The empty trailing element gets
     // skipped — no stray blank `│` row inside the banner.
     const FakeRuntime = struct {
-        conclusion_buf: [2048]u8 = undefined,
-        conclusion_len: usize = 0,
+        allocator: std.mem.Allocator,
+        conclusion_formatted: ?[]u8 = null,
+        conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
 
-    var rt: FakeRuntime = .{};
+    var rt: FakeRuntime = .{ .allocator = testing.allocator };
+    defer M.freeConclusion(&rt);
     M.captureConclusion(&rt, "first\nsecond\n", 0, 0, 1);
-    const out = rt.conclusion_buf[0..rt.conclusion_len];
+    const out = rt.conclusion_formatted.?;
 
     // 2 reason rows + 1 counts row = exactly 3 `│` glyphs.
     var vbar_count: usize = 0;
@@ -1187,14 +1287,16 @@ test "Module.captureConclusion all-whitespace reason → falls back to bare ✓ 
     // `│ ✓ done` row so the banner still has its required
     // checkmark line.
     const FakeRuntime = struct {
-        conclusion_buf: [1024]u8 = undefined,
-        conclusion_len: usize = 0,
+        allocator: std.mem.Allocator,
+        conclusion_formatted: ?[]u8 = null,
+        conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
 
-    var rt: FakeRuntime = .{};
+    var rt: FakeRuntime = .{ .allocator = testing.allocator };
+    defer M.freeConclusion(&rt);
     M.captureConclusion(&rt, "\n\n\n", 0, 0, 0);
-    const out = rt.conclusion_buf[0..rt.conclusion_len];
+    const out = rt.conclusion_formatted.?;
 
     // Exactly two `│` rows (✓ done + counts) — no stray blanks.
     var vbar_count: usize = 0;
@@ -1208,14 +1310,16 @@ test "Module.captureConclusion all-whitespace reason → falls back to bare ✓ 
 
 test "Module.captureConclusion falls back to 'done' when reason is empty" {
     const FakeRuntime = struct {
-        conclusion_buf: [1024]u8 = undefined,
-        conclusion_len: usize = 0,
+        allocator: std.mem.Allocator,
+        conclusion_formatted: ?[]u8 = null,
+        conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
 
-    var rt: FakeRuntime = .{};
+    var rt: FakeRuntime = .{ .allocator = testing.allocator };
+    defer M.freeConclusion(&rt);
     M.captureConclusion(&rt, "", 1, 0, 2);
-    const out = rt.conclusion_buf[0..rt.conclusion_len];
+    const out = rt.conclusion_formatted.?;
 
     // ✓ glyph + "done" appear separately because cyan-accent SGR
     // wraps the glyph only.
@@ -1223,6 +1327,94 @@ test "Module.captureConclusion falls back to 'done' when reason is empty" {
     try testing.expect(std.mem.indexOf(u8, out, "done") != null);
     try testing.expect(std.mem.indexOf(u8, out, "1") != null);
     try testing.expect(std.mem.indexOf(u8, out, "execs") != null);
+}
+
+test "Module.captureConclusion: 32 KiB reason allocates the full content (no truncation)" {
+    // Locks in the heap-allocated `conclusion_formatted` buffer
+    // semantics: there is NO cap on the reason size; the proxy's
+    // writeAll handles arbitrary slice sizes via posix-level
+    // looping, so a single `provideTermBytes` return is correct.
+    // Earlier shapes used a fixed-size array that silently
+    // truncated realistic LLM replies; this regression test
+    // ensures we never re-introduce one.
+    const FakeRuntime = struct {
+        allocator: std.mem.Allocator,
+        conclusion_formatted: ?[]u8 = null,
+        conclusion_pending: bool = false,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{ .allocator = testing.allocator };
+    defer M.freeConclusion(&rt);
+
+    var reason_buf: [32 * 1024]u8 = undefined;
+    @memset(&reason_buf, 'x');
+    M.captureConclusion(&rt, reason_buf[0..], 2, 1, 3);
+
+    // The whole reason landed in conclusion_formatted contiguously.
+    const formatted = rt.conclusion_formatted.?;
+    try testing.expect(formatted.len > reason_buf.len); // chrome adds bytes
+    try testing.expect(std.mem.indexOf(u8, formatted, reason_buf[0..]) != null);
+
+    // Footer still emits — counts + bottom border are in the
+    // formatted slice regardless of reason size.
+    try testing.expect(std.mem.indexOf(u8, formatted, "execs") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "turns") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "\u{2570}") != null); // ╰
+}
+
+test "Module.captureConclusion replaces previous capture (re-capture)" {
+    // Two consecutive LLM dialogs in the same session — second
+    // captureConclusion must free the previous buffer (no leak,
+    // testing.allocator catches double-frees and leaks).
+    const FakeRuntime = struct {
+        allocator: std.mem.Allocator,
+        conclusion_formatted: ?[]u8 = null,
+        conclusion_pending: bool = false,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{ .allocator = testing.allocator };
+    defer M.freeConclusion(&rt);
+
+    M.captureConclusion(&rt, "first dialog", 1, 0, 1);
+    M.captureConclusion(&rt, "second dialog with longer reason for fun", 2, 1, 2);
+    // Second capture wins; first dialog text is gone from buffer.
+    // `testing.allocator` catches a missing free of the first
+    // buffer (the leak detector flags it at test teardown); the
+    // assertion below catches the data-replacement bug (where we
+    // freed the first but didn't write the second). Pointer
+    // identity isn't a useful assertion — GPA may reuse the
+    // same address for the realloc of equivalent sizes.
+    const formatted = rt.conclusion_formatted.?;
+    try testing.expect(std.mem.indexOf(u8, formatted, "second dialog") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "first dialog") == null);
+}
+
+test "Module.freeConclusion is idempotent and safe on null capture" {
+    const FakeRuntime = struct {
+        allocator: std.mem.Allocator,
+        conclusion_formatted: ?[]u8 = null,
+        conclusion_pending: bool = false,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{ .allocator = testing.allocator };
+    // No capture — freeConclusion must be a no-op (no panic, no
+    // double-free).
+    M.freeConclusion(&rt);
+    M.freeConclusion(&rt);
+    try testing.expect(rt.conclusion_formatted == null);
+
+    // After a capture, freeConclusion clears + frees; second call
+    // is still safe.
+    M.captureConclusion(&rt, "x", 0, 0, 0);
+    try testing.expect(rt.conclusion_formatted != null);
+    M.freeConclusion(&rt);
+    try testing.expect(rt.conclusion_formatted == null);
+    try testing.expect(!rt.conclusion_pending);
+    // Idempotent.
+    M.freeConclusion(&rt);
 }
 
 // Tiny config + FakeRuntime fixture for pushTurn / freeTurns tests.
