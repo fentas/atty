@@ -51,9 +51,15 @@ The asymmetry between startup-hard-error and mid-run-keep-last-known is intentio
 
 A drift-detection follow-up will land soon: the daemon will probe upstream's `refs/heads/master` SHA per source, write the result to `/var/lib/atty-guard/atoms.drift.json`, and surface "N commits behind" warnings via `atty doctor` + journald. Until that ships, operators audit drift by hand.
 
-## Original signed-bundle design (NOT shipped)
+---
 
-Status: **design only.** The rest of this document describes a more complete trust model that has not been implemented. Treat it as a roadmap, not a description of current behavior.
+# ⚠️ Original signed-bundle design — NOT IMPLEMENTED
+
+> **Treat this entire section as historical design notes, not as a description of current behavior.**
+>
+> The shipped code does NOT verify Ed25519 signatures, NOT fetch from `fentas/atty-guard-data`, and DOES poll GitHub directly (codeload tarballs via `atoms-fetch`). Live OSV.dev lookups are also direct (when `osv-live` is enabled). The actual trust model is described in the section above.
+>
+> This roadmap text is retained for future work that may revive the signed-bundle approach.
 
 ## Goals
 
@@ -130,6 +136,8 @@ Initial: GitHub Releases on `fentas/atty-guard-data` (separate repo for clean si
 - **Maintainer-curated** for IOC URLs (exploit PoC hosting, malicious CDN domains, copy.fail-class incident pages).
 
 The aggregation lives in `fentas/atty-guard-data`'s CI; output is the signed bundle. atty-guard doesn't poll OSV/GitHub directly — it just consumes the merged feed.
+
+> **Reality check (not implemented):** the shipped code DOES poll GitHub directly via the V2-I atom fetcher (`atoms-fetch` feature → codeload tarballs) and DOES poll OSV directly via the V2-F live lookup (`osv-live` feature). The signed-feed indirection described here was the original plan but was never built.
 
 ## Schedule
 
