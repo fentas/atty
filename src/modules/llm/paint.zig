@@ -74,7 +74,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// within the same tick (`proxy.zig`'s `prev_overlay_active`
         /// edge handler).
         fn paintChatOverlay(rt: *Runtime, ctx: *m.Context) bool {
-            var w: std.Io.Writer = .fixed(&rt.chat_overlay_buf);
+            // Allocating writer — grows the underlying buffer as
+            // content lands. Free any previous frame; on success
+            // `toOwnedSlice` transfers ownership to
+            // `rt.chat_overlay_buf`. Initial 8 KiB capacity covers
+            // the open/close chrome and small turn rings; the
+            // writer doubles as content grows past the initial
+            // allocation.
+            if (rt.chat_overlay_buf) |old| {
+                rt.allocator.free(old);
+                rt.chat_overlay_buf = null;
+            }
+            var aw = std.Io.Writer.Allocating.initCapacity(rt.allocator, 8 * 1024) catch return false;
+            const w = &aw.writer;
             if (!rt.chat_overlay_open) {
                 // Close: reset scroll region (the alt-screen had its
                 // own DECSTBM but resetting before exit is defensive
@@ -84,8 +96,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // cursor back; doing it after the alt-screen exit
                 // would briefly flash the cursor on the underlying
                 // screen at row/col (1,1) before the shell repaints.
-                w.writeAll("\x1B[r\x1B[?25h\x1B[?1049l") catch return false;
-                rt.chat_overlay_buf_len = w.end;
+                w.writeAll("\x1B[r\x1B[?25h\x1B[?1049l") catch {
+                    aw.deinit();
+                    return false;
+                };
+                rt.chat_overlay_buf = aw.toOwnedSlice() catch {
+                    aw.deinit();
+                    return false;
+                };
                 return true;
             }
 
@@ -156,7 +174,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         .observation => "\x1B[2mOutput:\x1B[0m ",
                     };
                     w.writeAll(prefix) catch return false;
-                    renderOverlayTurnContent(&w, rt.allocator, turn) catch return false;
+                    renderOverlayTurnContent(w, rt.allocator, turn) catch return false;
                     w.writeAll("\r\n\r\n") catch return false;
                 }
                 if (has_conclusion and !has_turns) {
@@ -206,14 +224,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                 }
                 if (cur > win_start) {
-                    writeSanitized(&w, rt.chat_input_buf[win_start..cur]) catch return false;
+                    writeSanitized(w, rt.chat_input_buf[win_start..cur]) catch return false;
                 }
                 if (cur < len) {
                     w.writeAll("\x1B[7m") catch return false;
-                    writeSanitized(&w, rt.chat_input_buf[cur .. cur + 1]) catch return false;
+                    writeSanitized(w, rt.chat_input_buf[cur .. cur + 1]) catch return false;
                     w.writeAll("\x1B[0m") catch return false;
                     if (cur + 1 < win_end) {
-                        writeSanitized(&w, rt.chat_input_buf[cur + 1 .. win_end]) catch return false;
+                        writeSanitized(w, rt.chat_input_buf[cur + 1 .. win_end]) catch return false;
                     }
                 } else {
                     w.writeAll("\x1B[7m \x1B[0m") catch return false;
@@ -230,7 +248,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 w.writeAll(ind) catch return false;
             }
             w.writeAll("\x1B[2m[Alt+T auto \u{00B7} Alt+M model \u{00B7} Alt+Shift+C close \u{00B7} Enter send \u{00B7} PgUp/PgDn]\x1B[0m") catch return false;
-            rt.chat_overlay_buf_len = w.end;
+            // Transfer ownership of the formatted buffer to the
+            // Runtime so the provideTermBytes consumer gets a
+            // stable slice that survives until the next paint.
+            rt.chat_overlay_buf = aw.toOwnedSlice() catch {
+                aw.deinit();
+                return false;
+            };
             return true;
         }
 
@@ -1275,7 +1299,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (rt.chat_overlay_paint_pending) {
                 rt.chat_overlay_paint_pending = false;
                 if (paintChatOverlay(rt, ctx)) {
-                    return rt.chat_overlay_buf[0..rt.chat_overlay_buf_len];
+                    if (rt.chat_overlay_buf) |slice| return slice;
                 }
                 // Paint overran the buffer. The close path can't
                 // overflow (single `?1049l` byte sequence), so this

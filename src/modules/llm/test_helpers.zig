@@ -28,4 +28,8 @@ pub fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
     rt.allocator.free(rt.context_blob);
     rt.allocator.free(rt.os_info);
     rt.allocator.destroy(rt.captured_output);
+    // Heap-owned overlay paint buffer — allocated by
+    // paintChatOverlay; freed here so tests don't leak when they
+    // exercise the open/close cycle without running detach.
+    if (rt.chat_overlay_buf) |slice| rt.allocator.free(slice);
 }
