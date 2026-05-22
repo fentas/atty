@@ -343,6 +343,52 @@ impl From<std::io::Error> for LockError {
     }
 }
 
+/// Compute the lock-file path for a given socket path. Resolves
+/// symlinks via canonicalization so two aliases to the same target
+/// socket derive the SAME lock path — without this, a daemon
+/// running with `/run/atty-guard/real.sock` and another started
+/// with `/run/atty-guard/link.sock` (where `link.sock -> real.sock`)
+/// would lock DIFFERENT sibling files, both succeed, and the
+/// second would unlink the live target via `remove_socket_if_safe`
+/// (which already canonicalizes for its own check).
+///
+/// Strategy:
+///   - If the socket already exists: canonicalize the full path,
+///     use it directly.
+///   - If the socket doesn't exist yet (first startup): canonicalize
+///     the parent directory (must exist), keep the basename literal.
+///     The parent is the load-bearing piece for alias collision
+///     since two paths that resolve to the same socket also share
+///     the same canonical parent.
+///   - If even the parent can't be canonicalized: fall back to the
+///     literal path. The flock still works against the literal
+///     name; we just lose the alias-collision guarantee.
+fn lock_path_for_socket(socket: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    if let Ok(canon) = std::fs::canonicalize(socket) {
+        let mut p = canon.into_os_string();
+        p.push(".lock");
+        return p.into();
+    }
+    if let Some(parent) = socket.parent() {
+        if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+            if let Some(name) = socket.file_name() {
+                let mut p = canon_parent.into_os_string();
+                p.push(std::path::MAIN_SEPARATOR.to_string());
+                p.push(name);
+                p.push(".lock");
+                return p.into();
+            }
+        }
+    }
+    // Final fallback — literal path. Less robust but still locks
+    // SOMETHING; alias-collision protection is best-effort.
+    let mut lock_path = socket.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let _ = OsStrExt::as_bytes(&*lock_path); // satisfy unused-import lint
+    lock_path.into()
+}
+
 /// Open (or create) a sibling `<socket>.lock` file and acquire
 /// a non-blocking exclusive BSD flock on it. Returns the open
 /// `File` whose lifetime carries the lock — caller must keep it
@@ -357,9 +403,7 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     // ever opens this file. The socket itself is group-readable
     // so `atty` group members can connect; the lock is purely
     // internal to the daemon process.
-    let mut lock_path = socket.as_os_str().to_owned();
-    lock_path.push(".lock");
-    let lock_path: std::path::PathBuf = lock_path.into();
+    let lock_path = lock_path_for_socket(socket);
 
     // Open with `O_RDONLY | O_CREAT` via raw libc — Rust's
     // `OpenOptions` refuses read-only + create. `flock` doesn't
@@ -904,6 +948,44 @@ mod tests {
         );
         // Cleanup the dangling symlink.
         let _ = std::fs::remove_file(&link);
+    }
+
+    #[test]
+    fn acquire_single_instance_lock_blocks_symlink_alias() {
+        // Regression for finding 017. Two paths that resolve to
+        // the same target (one direct, one via symlink) must
+        // contend on the SAME lock file. Pre-fix the lock path
+        // was derived literally from the supplied socket path,
+        // so two aliases ended up with DIFFERENT sibling lock
+        // files — both flocks would succeed and the second
+        // daemon's cleanup path would unlink the live target.
+        let target = unique_socket_path();
+        let mut link_buf = unique_socket_path();
+        link_buf.set_extension("link");
+        let link = link_buf;
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&link);
+
+        // Bind a real socket so canonicalize() works on both
+        // paths (canonicalize requires the path to exist).
+        let _listener = std::os::unix::net::UnixListener::bind(&target).expect("bind fixture");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink fixture");
+
+        let _lock_a = acquire_single_instance_lock(&target).expect("lock target should succeed");
+        // Second acquisition via the symlink alias MUST fail —
+        // both paths resolve to the same canonical lock file.
+        let alias_result = acquire_single_instance_lock(&link);
+        assert!(
+            matches!(alias_result, Err(LockError::AlreadyRunning)),
+            "alias lock should have been blocked by existing lock, got {alias_result:?}"
+        );
+        // Cleanup.
+        drop(_lock_a);
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&link);
+        let mut lock_path = target.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let _ = std::fs::remove_file(std::path::PathBuf::from(lock_path));
     }
 
     #[test]
