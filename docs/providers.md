@@ -228,11 +228,23 @@ is `.{ .dim = true, .italic = true }`.
 
 ### Limitations
 
-- The match runs against our line model, which approximates what the
-  user typed. Vi-mode users navigating with `hjkl` flip the buffer
-  into `uncertain` state — in that case the guardrail doesn't fire.
-  Reasonable default: if we can't tell what the user typed, we don't
-  try to second-guess them.
+- The match runs against our line model, which approximates what
+  the user typed. **Vi-mode `hjkl` navigation desyncs the model
+  silently** — atty doesn't see the vi-mode/insert-mode distinction
+  on stdin (`hjkl` are plain printable bytes), so the line model
+  appends them while the shell's readline treats them as cursor
+  moves and emits `\x1b[D` / `\x1b[B` / `\x1b[A` / `\x1b[C` back
+  through the master fd. OSC 133 sync doesn't recover this either
+  because the `syncFromCapture` gate requires either the line
+  model to be `uncertain` or the captured input to be at least
+  as long as the model — neither holds in this case.
+  Practical consequence: in vi-normal navigation, the guardrail's
+  matcher reads a partially-wrong buffer; pathological typed
+  content (substring matching a tripwire pattern that the user
+  never actually executed) could trigger a false positive on
+  Enter. The conservative fix would be probing `set -o` at attach
+  to detect vi-mode + short-circuit guardrail there; currently
+  it's a documented edge case.
 - Substring matches are literal — there's no regex engine. If you
   need one, write a new module; do **not** add it here. A
   pathological regex on the input hot path would be a strict
