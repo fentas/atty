@@ -165,7 +165,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const tail_end: usize = rt.turns_len - overlay_offset;
 
             const has_turns = rt.turns_len > 0;
-            const has_conclusion = rt.conclusion_len > 0;
+            const has_conclusion = rt.conclusion_formatted != null;
             if (!has_turns and !has_conclusion) {
                 w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
             } else {
@@ -188,8 +188,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // conclusion banner survived, surface it as
                     // the overlay's content. Conclusion was built
                     // by atty so it's safe to write unsanitized.
-                    w.writeAll(rt.conclusion_buf[0..rt.conclusion_len]) catch return false;
-                    w.writeAll("\r\n") catch return false;
+                    if (rt.conclusion_formatted) |formatted| {
+                        w.writeAll(formatted) catch return false;
+                        w.writeAll("\r\n") catch return false;
+                    }
                 }
             }
 
@@ -1171,14 +1173,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
             }
             // Conclusion banner emission takes precedence over the
-            // cursor-colour edge logic — the banner is one-shot
-            // multi-line output that scrolls into shell history;
-            // cursor-colour OSC sequences are infinitely retriable
-            // on the next tick. Drains the latch (one-shot
-            // semantics).
-            if (rt.conclusion_pending and rt.conclusion_len > 0) {
-                rt.conclusion_pending = false;
-                return rt.conclusion_buf[0..rt.conclusion_len];
+            // cursor-colour edge logic — the banner is multi-tick
+            // output that scrolls into shell history; cursor-colour
+            // OSC sequences are infinitely retriable on the next
+            // tick. Chunked across multiple ticks because the heap-
+            // allocated `conclusion_formatted` buffer can exceed
+            // any single-write size for long LLM replies (#211).
+            // Each chunk is up to `dialog.conclusion_chunk_size`
+            // bytes; `nextConclusionChunk` clears the `pending`
+            // latch when the final chunk goes out.
+            if (rt.conclusion_pending) {
+                if (dialog_helpers.nextConclusionChunk(rt)) |chunk| {
+                    return chunk;
+                }
             }
             if (!cfg.prefix_signal_cursor) return null;
             // Cursor colour fires when EITHER the prefix is matched

@@ -882,7 +882,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // text view; close exits the alt screen and
                     // restores the underlying shell.
                     if (!rt.chat_overlay_open) {
-                        const has_content = rt.turns_len > 0 or rt.conclusion_len > 0;
+                        const has_content = rt.turns_len > 0 or rt.conclusion_formatted != null;
                         if (!has_content) {
                             // Nothing to show yet — refuse to open
                             // (avoids an empty alt-screen that the
@@ -1831,11 +1831,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 // Refuse `.always` when the overlay
                                 // would open empty — `dialogReset`
                                 // wiped the turn ring and an empty
-                                // reason leaves `conclusion_len` at
-                                // zero. Better to surface the notify-
+                                // reason leaves `conclusion_formatted`
+                                // null. Better to surface the notify-
                                 // shape hint than open an overlay
                                 // saying "no conversation yet".
-                                if (rt.conclusion_len > 0) {
+                                if (rt.conclusion_formatted != null) {
                                     rt.chat_overlay_open = true;
                                     rt.chat_overlay_paint_pending = true;
                                     // Suppress the inline banner
