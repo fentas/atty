@@ -748,6 +748,7 @@ test "buildRequestBody: assistant_exec turn uses assistant role" {
 // purely buffer-shaped.
 
 const types = @import("types.zig");
+const paint_width = @import("paint_width.zig");
 
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {
@@ -1015,14 +1016,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // non-empty line claims the checkmark.
                     if (line.len == 0) continue;
                     if (first) {
-                        w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{line}) catch {};
+                        w.writeAll("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m ") catch {};
+                        // Sanitize: the reason is LLM-controlled,
+                        // can contain ESC/C0 bytes from JSON `ESC`
+                        // escapes. Without filtering, the model could
+                        // emit `ESC[31m` and recolour the user's
+                        // prompt or `ESC[2J` and wipe the screen.
+                        // writeSanitized strips C0/C1 + collapses
+                        // CR/LF (the splitScalar above already split
+                        // on `\n`, so any residual control chars are
+                        // attacker injection).
+                        paint_width.writeSanitized(&w, line) catch {};
+                        w.writeAll("\r\n") catch {};
                         first = false;
                     } else {
                         // Continuation rows: `│` + 3 spaces aligns
                         // the prose at col 5, matching the first
                         // row's text position (col 1 vbar + space +
                         // `✓` glyph + space → text starts col 5).
-                        w.print("\x1B[2m\u{2502}\x1B[0m   {s}\r\n", .{line}) catch {};
+                        w.writeAll("\x1B[2m\u{2502}\x1B[0m   ") catch {};
+                        paint_width.writeSanitized(&w, line) catch {};
+                        w.writeAll("\r\n") catch {};
                     }
                 }
                 // All-whitespace reason → no row emitted above. Fall

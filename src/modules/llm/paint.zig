@@ -52,30 +52,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     also dropped — emitting it alone would land
         ///     malformed UTF-8 on the user's terminal.
         ///   - Tab (0x09) and printable ASCII pass through.
-        fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) anyerror!void {
-            // Walk codepoints (not raw bytes) so multi-byte UTF-8
-            // sequences with continuation bytes in 0x80..0x9F (a `—`
-            // em-dash, an emoji, CJK glyph, etc.) survive intact.
-            // The previous byte-level filter dropped those
-            // continuation bytes as if they were C1 controls,
-            // leaving an orphan leading byte the terminal rendered
-            // as `�`. C1 controls are now checked AFTER decode
-            // (cp in 0x80..0x9F), not against raw bytes.
-            var it = pw.utf8Iter(bytes);
-            while (it.next()) |c| {
-                if (c.cp < 0x20 or c.cp == 0x7F) {
-                    if (c.cp == 0x09) {
-                        try w.writeAll("\t");
-                    } else if (c.cp == 0x0A or c.cp == 0x0D) {
-                        try w.writeAll(" ");
-                    }
-                    continue;
-                }
-                if (c.cp >= 0x80 and c.cp <= 0x9F) continue;
-                const start = it.i - c.byte_len;
-                try w.writeAll(bytes[start..it.i]);
-            }
-        }
+        const writeSanitized = pw.writeSanitized;
 
         /// Render the chat overlay's open or close sequence into
         /// `rt.chat_overlay_buf`. Returns false when the content
@@ -598,7 +575,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                     return if (rows == 0) 1 else rows;
                 }
-                return 1;
+                // Envelope-shaped but NOT confidently `done`. Two
+                // cases this path needs to cover:
+                //   - Real exec/question envelopes: `renderTurnContent`
+                //     emits 1 row each.
+                //   - Malformed / trailing-prose envelopes that fail
+                //     to parse: `renderTurnContent` falls through to
+                //     `renderWrappedRaw` which can span MULTIPLE rows.
+                // Returning 1 here under-counts the malformed case,
+                // which under back-walk pressure clips the newest
+                // turn. Fall through to the wrap-iter estimate
+                // instead: slight over-count for valid exec/question
+                // (1-2 extra rows reserved per turn) but safe for
+                // malformed.
             }
             if (c.len == 0) return 1;
             var it = pw.wrapIter(c, cols);
