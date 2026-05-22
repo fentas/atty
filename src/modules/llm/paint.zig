@@ -481,6 +481,29 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// (newest-turn-anchored). Envelope turns always claim one
         /// row; raw turns walk the wrap iterator counting chunks
         /// up to `max_rows`. Cheap — no allocations.
+        /// Whitespace-tolerant check for an envelope whose action
+        /// value is `"done"`. The full JSON parser at the render
+        /// path handles this fine; `countTurnRows` only needs a
+        /// cheap shape probe for the back-walk row-count estimate.
+        ///
+        /// Matches: `"action":"done"`, `"action": "done"`,
+        /// `"action" : "done"`, `"action" :"done"`, etc.
+        ///
+        /// Skips ASCII whitespace (space/tab/CR/LF) between the
+        /// key, colon, and value — sufficient for JSON output from
+        /// the LLM (no Unicode whitespace in the protocol envelope).
+        fn envelopeActionIsDone(c: []const u8) bool {
+            const key_pos = std.mem.indexOf(u8, c, "\"action\"") orelse return false;
+            var i = key_pos + "\"action\"".len;
+            while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
+            if (i >= c.len or c[i] != ':') return false;
+            i += 1;
+            while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
+            const done_lit = "\"done\"";
+            if (i + done_lit.len > c.len) return false;
+            return std.mem.eql(u8, c[i..(i + done_lit.len)], done_lit);
+        }
+
         fn countTurnRows(turn: dialog.Turn, cols: usize, max_rows: usize) usize {
             const c = turn.content;
             const looks_like_envelope = turn.kind == .assistant_exec and
@@ -491,10 +514,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // `done` envelopes' free-prose reason renders via
                 // md_render and can span many rows; exec + question
                 // still take exactly one row (compact summary).
-                // Cheap shape-check via substring rather than a
-                // full JSON parse — back-walk anchor math only
-                // needs a row-count estimate.
-                if (std.mem.indexOf(u8, c, "\"action\":\"done\"") != null) {
+                // Cheap shape-check rather than a full JSON parse —
+                // back-walk anchor math only needs a row-count
+                // estimate.
+                //
+                // Whitespace-tolerant: `"action":"done"`,
+                // `"action": "done"`, `"action" : "done"` — LLMs
+                // emit either form. The earlier exact-literal scan
+                // (Copilot round-2 finding on PR #212) missed the
+                // pretty-printed variants and the done turn's
+                // multi-row claim got under-counted, clipping the
+                // newest turn.
+                if (envelopeActionIsDone(c)) {
                     // Estimate row count by walking the wrap iterator
                     // over the WHOLE envelope content. Two corrections
                     // applied so the estimate stays a safe upper bound

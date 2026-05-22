@@ -1785,3 +1785,74 @@ test "inline chat: multi-newline done reason — back-walk anchor reserves enoug
     // enough room.
     try testing.expect(std.mem.indexOf(u8, painted.?, "TAIL-SENTINEL") != null);
 }
+
+test "inline chat: pretty-printed `action`: `done` JSON still triggers multi-row estimate" {
+    // Round-2 Copilot regression: `countTurnRows` used a literal
+    // `"action":"done"` substring match that missed whitespace-
+    // tolerant JSON like `"action": "done"` (with space) that LLMs
+    // commonly emit. The whitespace-tolerant variant fell back to
+    // returning 1 row, under-counting the assistant turn's row
+    // claim and clipping its tail — same regression as the bare
+    // envelope case, just gated on JSON formatting style.
+    //
+    // Fixture envelope uses `"action": "done"` (with space) and
+    // multi-newline reason. Asserts the TAIL-SENTINEL still
+    // appears post-fix (when the back-walk anchor correctly
+    // reserves rows for the multi-line done turn).
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(
+        u8,
+        "tell me about something",
+    ));
+
+    // `"action": "done"` with whitespace — Copilot's reported
+    // failure case. Also uses pretty-printed `"reason":` with a
+    // space, exercising the same whitespace tolerance for the
+    // value side.
+    const envelope =
+        "{ \"action\": \"done\", \"reason\": \"" ++
+        "Para1 FRONT-SENTINEL\\n" ++
+        "Para2 middle\\n" ++
+        "Para3 body\\n" ++
+        "Para4 more\\n" ++
+        "Para5 tail TAIL-SENTINEL\" }";
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
+    defer helpers.freeTurns(&rt);
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    try testing.expect(std.mem.indexOf(u8, painted.?, "TAIL-SENTINEL") != null);
+}
