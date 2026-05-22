@@ -1316,12 +1316,13 @@ test "Module.captureConclusion falls back to 'done' when reason is empty" {
 }
 
 test "Module.captureConclusion: 32 KiB reason allocates the full content (no truncation)" {
-    // Repro for #211 — earlier shapes truncated past ~280 visible
-    // chars (1 KiB fixed buf with chrome) or ~7.5 KiB (8 KiB fixed
-    // buf bandaid). The heap-allocated buffer has no cap on the
-    // reason; the proxy's writeAll handles arbitrary slice sizes
-    // via posix-level looping, so a single provideTermBytes return
-    // is correct.
+    // Locks in the heap-allocated `conclusion_formatted` buffer
+    // semantics: there is NO cap on the reason size; the proxy's
+    // writeAll handles arbitrary slice sizes via posix-level
+    // looping, so a single `provideTermBytes` return is correct.
+    // Earlier shapes used a fixed-size array that silently
+    // truncated realistic LLM replies; this regression test
+    // ensures we never re-introduce one.
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,

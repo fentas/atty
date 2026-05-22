@@ -1544,17 +1544,13 @@ test "inline chat chrome: progressive trailing-hint shrinks on narrow terminal" 
 }
 
 test "inline chat: long done-action reason renders in full, not capped at one row's cols" {
-    // Regression for user bug after #212 landed — a `done`-action
-    // envelope with a multi-paragraph reason was getting clipped
-    // at `max_inline_visible` cols (~74 for 80-col terminal) by
-    // `truncateToCols(r, max_visible)` in `renderTurnContent`'s
-    // .done arm. The cap was designed for short exec commands
-    // (where 74 cols of cmd is plenty) but is far too tight for
-    // a long-form LLM reply — the user's 520-word essay cut at
-    // ~700 chars with NO truncation marker (because the inline
-    // path's marker is appended but the user's terminal is
-    // small enough the cut happens before any marker would show
-    // anyway).
+    // Locks in the inline-panel render path for a multi-paragraph
+    // `done`-action reason. An earlier shape capped the reason at
+    // `max_inline_visible` cols (~74 for 80-col terminal) via
+    // `truncateToCols`, designed for short exec commands but far
+    // too tight for a long-form LLM reply — a multi-paragraph
+    // essay would clip silently at the cap with no truncation
+    // marker visible on a typical terminal.
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -1695,28 +1691,28 @@ test "chat overlay: long done-action reason renders in full, not capped at 480 c
 }
 
 test "inline chat: multi-newline done reason — back-walk anchor reserves enough rows" {
-    // Regression for the countTurnRows under-count bug Copilot caught
-    // in round 1 of PR #212. Previously: WrapIter over the raw JSON
-    // envelope counted `\n` JSON escapes as 2 literal chars on a
-    // single line. The actual render parses the envelope, feeds the
-    // reason to md_render which hard-breaks on each `\n` —
-    // emitting more rows than the estimator predicted. The back-
-    // walk then picked `start_turn` thinking the newest turn took
-    // FEWER rows than it actually does, and the older neighbour
-    // ate scrollback that should have gone to the newest turn.
+    // Locks in the countTurnRows row-estimate behaviour for done
+    // envelopes whose reason contains embedded `\n` (JSON-encoded
+    // as `\\n`). The wrap iterator over the raw envelope sees `\n`
+    // as two literal chars on the same wrapped line — under-
+    // counting the actual rendered rows because the render path
+    // parses the JSON value and md_render hard-breaks on each
+    // real newline.
     //
-    // EXERCISE THE BACK-WALK PRESSURE: round-3 review noticed the
-    // earlier shape of this test had so much budget that even an
-    // under-counted assistant turn rendered to completion. To
-    // actually trip the bug requires several older turns competing
-    // for scrollback budget — 6 user turns × 1 row each below.
-    // Under-count: back-walk thinks assistant claims 1 row, sums
-    // 6 + 1 = 7 ≤ 8 budget, picks all 6 older + assistant. Render
-    // then gives assistant only `8 - 6 = 2` rows of cap → 4 of 6
-    // reason rows clipped → TAIL-SENTINEL falls off.
-    // Over-count (fix): back-walk says assistant claims 6 rows, 6
-    // + 1 (one older) = 7 ≤ 8 budget. Render gives assistant 6
-    // rows → TAIL-SENTINEL visible.
+    // Under back-walk pressure (many older turns competing for
+    // scrollback budget), the under-count makes the anchor pick
+    // too many older turns, leaving the newest turn with too
+    // small a row cap → its tail gets clipped.
+    //
+    // Fixture below: 6 older user turns (1 row each) + a newer
+    // assistant done envelope whose reason has 5 `\n` escapes
+    // (rendering to 6 paragraph rows). With under-count → all
+    // 6 older + assistant fit the back-walk's view of the
+    // budget, but the actual render gives assistant only
+    // `budget - 6 = 2` rows → 4 paragraphs (including the tail
+    // sentinel) drop. With the escape-adjusted estimate →
+    // back-walk reserves 6 rows for the assistant, picks 1-2
+    // older turns, full reason renders.
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -1794,18 +1790,17 @@ test "inline chat: multi-newline done reason — back-walk anchor reserves enoug
 }
 
 test "inline chat: pretty-printed `action`: `done` JSON still triggers multi-row estimate" {
-    // Round-2 Copilot regression: `countTurnRows` used a literal
-    // `"action":"done"` substring match that missed whitespace-
-    // tolerant JSON like `"action": "done"` (with space) that LLMs
-    // commonly emit. The whitespace-tolerant variant fell back to
-    // returning 1 row, under-counting the assistant turn's row
-    // claim and clipping its tail — same regression as the bare
-    // envelope case, just gated on JSON formatting style.
+    // Locks in whitespace tolerance of the done-action detector.
+    // LLMs commonly pretty-print JSON envelopes with a space
+    // between key and value (`"action": "done"`). A literal-only
+    // substring scan misses this form and falls back to a 1-row
+    // row-count estimate, which under back-walk pressure produces
+    // the same tail-clipping failure as the no-escape-counting
+    // case in the sibling test.
     //
-    // Fixture envelope uses `"action": "done"` (with space) and
-    // multi-newline reason. Asserts the TAIL-SENTINEL still
-    // appears post-fix (when the back-walk anchor correctly
-    // reserves rows for the multi-line done turn).
+    // Same fixture shape (6 older user turns + multi-newline
+    // assistant done envelope) but with pretty-printed JSON for
+    // both the action key and the reason key.
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -1838,10 +1833,10 @@ test "inline chat: pretty-printed `action`: `done` JSON still triggers multi-row
 
     const helpers = dialog.Module(L.config, L.Runtime);
     // Same back-walk pressure as the sibling test: six older user
-    // turns of 1 row each. With a pretty-printed `"action":` that
-    // fails the literal-substring detector (pre-round-2), the
-    // back-walk falls back to a 1-row estimate and clips the
-    // assistant tail.
+    // turns of 1 row each. A pretty-printed `"action":` that
+    // fails the whitespace-intolerant detector falls back to a
+    // 1-row estimate and clips the assistant tail under this
+    // budget pressure.
     const olds = [_][]const u8{
         "older turn 1",
         "older turn 2",
@@ -1854,10 +1849,9 @@ test "inline chat: pretty-printed `action`: `done` JSON still triggers multi-row
         try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, s));
     }
 
-    // `"action": "done"` with whitespace — Copilot's reported
-    // failure case. Also uses pretty-printed `"reason":` with a
-    // space, exercising the same whitespace tolerance for the
-    // value side.
+    // Pretty-printed envelope: spaces around `:`, including before
+    // the value of both `"action"` and `"reason"`. Exercises the
+    // whitespace tolerance for both sides of the key.
     const envelope =
         "{ \"action\": \"done\", \"reason\": \"" ++
         "Para1 FRONT-SENTINEL\\n" ++
@@ -1865,6 +1859,75 @@ test "inline chat: pretty-printed `action`: `done` JSON still triggers multi-row
         "Para3 body\\n" ++
         "Para4 more\\n" ++
         "Para5 tail TAIL-SENTINEL\" }";
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
+    defer helpers.freeTurns(&rt);
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    try testing.expect(std.mem.indexOf(u8, painted.?, "TAIL-SENTINEL") != null);
+}
+
+test "inline chat: adversarial escaped `\\\"action\\\":` in reason doesn't shadow top-level key" {
+    // The done-action detector scans for `"action"` substrings.
+    // If a reason value contains the literal text `\"action\":`
+    // (a JSON-escaped quote pair around the key name), the
+    // first occurrence is INSIDE a string value, not the real
+    // top-level key. The detector must skip escaped-quote
+    // matches so it still finds the genuine top-level
+    // `"action":"done"` and applies the multi-row row-count
+    // estimate.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    const olds = [_][]const u8{
+        "older turn 1",
+        "older turn 2",
+        "older turn 3",
+        "older turn 4",
+        "older turn 5",
+        "older turn 6",
+    };
+    for (olds) |s| {
+        try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, s));
+    }
+
+    // Envelope: reason value contains escaped `\"action\":` then
+    // the real top-level `"action":"done"` follows. Detector must
+    // walk past the escaped match and find the real key.
+    const envelope =
+        "{\"reason\":\"see \\\"action\\\": \\\"escape\\\" inside FRONT-SENTINEL\\nP2\\nP3\\nP4\\nP5\\nTAIL-SENTINEL\"," ++
+        "\"action\":\"done\"}";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
     defer helpers.freeTurns(&rt);
 

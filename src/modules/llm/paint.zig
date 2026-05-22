@@ -501,21 +501,48 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// cheap shape probe for the back-walk row-count estimate.
         ///
         /// Matches: `"action":"done"`, `"action": "done"`,
-        /// `"action" : "done"`, `"action" :"done"`, etc.
-        ///
-        /// Skips ASCII whitespace (space/tab/CR/LF) between the
-        /// key, colon, and value — sufficient for JSON output from
-        /// the LLM (no Unicode whitespace in the protocol envelope).
+        /// `"action" : "done"` (any ASCII whitespace around the
+        /// colon). Skips matches whose opening `"` is backslash-
+        /// escaped so an LLM emitting `\"action\":` literally
+        /// inside a reason string can't shadow the real top-level
+        /// `"action"` key further on in the envelope.
         fn envelopeActionIsDone(c: []const u8) bool {
-            const key_pos = std.mem.indexOf(u8, c, "\"action\"") orelse return false;
-            var i = key_pos + "\"action\"".len;
-            while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
-            if (i >= c.len or c[i] != ':') return false;
-            i += 1;
-            while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
-            const done_lit = "\"done\"";
-            if (i + done_lit.len > c.len) return false;
-            return std.mem.eql(u8, c[i..(i + done_lit.len)], done_lit);
+            const key_lit = "\"action\"";
+            var search_start: usize = 0;
+            while (search_start < c.len) {
+                const rel = std.mem.indexOf(u8, c[search_start..], key_lit) orelse return false;
+                const key_pos = search_start + rel;
+                // Skip a `"action"` whose opening quote is escaped
+                // (preceded by a backslash that isn't itself
+                // escaped). Common shape: `"reason":"... \"action\":
+                // \"done\" ..."` — the first `"action"` is inside
+                // a JSON string value, not the top-level key.
+                if (key_pos > 0 and c[key_pos - 1] == '\\') {
+                    // Could be `\"` (escape) or `\\"` (literal
+                    // backslash + opening quote). Walk back to
+                    // count consecutive backslashes; an odd count
+                    // means the quote is escaped.
+                    var bs: usize = 0;
+                    var k = key_pos;
+                    while (k > 0 and c[k - 1] == '\\') : (k -= 1) bs += 1;
+                    if (bs % 2 == 1) {
+                        search_start = key_pos + 1;
+                        continue;
+                    }
+                }
+                var i = key_pos + key_lit.len;
+                while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
+                if (i >= c.len or c[i] != ':') {
+                    search_start = key_pos + 1;
+                    continue;
+                }
+                i += 1;
+                while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
+                const done_lit = "\"done\"";
+                if (i + done_lit.len > c.len) return false;
+                return std.mem.eql(u8, c[i..(i + done_lit.len)], done_lit);
+            }
+            return false;
         }
 
         fn countTurnRows(turn: dialog.Turn, cols: usize, max_rows: usize) usize {
@@ -528,31 +555,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // `done` envelopes' free-prose reason renders via
                 // md_render and can span many rows; exec + question
                 // still take exactly one row (compact summary).
-                // Cheap shape-check rather than a full JSON parse —
-                // back-walk anchor math only needs a row-count
-                // estimate.
-                //
-                // Whitespace-tolerant: `"action":"done"`,
-                // `"action": "done"`, `"action" : "done"` — LLMs
-                // emit either form. The earlier exact-literal scan
-                // (Copilot round-2 finding on PR #212) missed the
-                // pretty-printed variants and the done turn's
-                // multi-row claim got under-counted, clipping the
-                // newest turn.
+                // Cheap shape-check via `envelopeActionIsDone`
+                // rather than a full JSON parse — back-walk anchor
+                // math only needs a row-count estimate.
                 if (envelopeActionIsDone(c)) {
                     // Estimate row count by walking the wrap iterator
                     // over the WHOLE envelope content. Two corrections
                     // applied so the estimate stays a safe upper bound
                     // for what the render path actually emits:
                     //
-                    //   1. The wrap iterator sees JSON escapes (`\n`)
-                    //      as two literal chars; the actual render
+                    //   1. The wrap iterator sees JSON `\n` escapes
+                    //      as two literal chars; the render path
                     //      parses the JSON value and feeds md_render
-                    //      which hard-breaks on `\n`. Each escaped
-                    //      newline in the source corresponds to AT
-                    //      LEAST one extra rendered row that the raw
-                    //      wrap count would miss. Adding `escapes_n`
-                    //      to the row total bounds this — over-counts
+                    //      which hard-breaks on real newlines. Each
+                    //      escape corresponds to AT LEAST one extra
+                    //      rendered row that the raw wrap count
+                    //      would miss. Adding `escapes_n` to the
+                    //      row total bounds this — over-counts
                     //      slightly (the escape's 2 bytes are also
                     //      counted in the wrap rows) but the
                     //      direction is safe: the back-walk anchor
@@ -1291,13 +1310,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // cursor-colour edge logic — the banner is one-shot
             // multi-line output that scrolls into shell history.
             // The proxy's `writeAll` on the returned slice handles
-            // arbitrary sizes via posix-level looping, so a single
-            // emission is correct even for the multi-KiB banners
-            // produced by long LLM replies (#211 / #212). Earlier
-            // shapes chunked across ticks; that caused visible
-            // stutter + broke the terminal's auto-scroll because
-            // the conclusion was interleaved with cursor/statusbar
-            // events between chunks.
+            // arbitrary sizes via posix-level looping, so single-
+            // emission is correct even for multi-KiB banners.
+            // Per-tick chunking would interleave the conclusion
+            // bytes with cursor + statusbar events between ticks,
+            // breaking the terminal's "follow new output to the
+            // bottom" heuristic and leaving the new shell prompt
+            // off-screen below the user's viewport.
             if (rt.conclusion_pending) {
                 if (rt.conclusion_formatted) |formatted| {
                     rt.conclusion_pending = false;
