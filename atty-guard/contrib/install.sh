@@ -120,6 +120,9 @@ BIN_DST="/usr/local/bin/atty-guard"
 UNIT_SRC="$REPO_ROOT/contrib/atty-guard.service"
 UNIT_DST="/etc/systemd/system/atty-guard.service"
 STATE_DIR="/var/lib/atty-guard"
+CONFIG_DIR="/etc/atty-guard"
+PINS_EXAMPLE_SRC="$REPO_ROOT/contrib/atoms.pins.toml.example"
+PINS_EXAMPLE_DST="$CONFIG_DIR/atoms.pins.toml.example"
 
 if [[ ! -x "$BIN_SRC" ]]; then
     echo "error: $BIN_SRC not found." >&2
@@ -158,6 +161,18 @@ echo "installed $BIN_DST"
 # match this ownership at startup.
 install -d -o atty -g atty -m 0750 "$STATE_DIR"
 echo "ensured $STATE_DIR (atty:atty 0750)"
+
+# Admin policy directory — operator-set commit pins for the atom
+# corpus live here. Owned root:root 0755 so admins write via sudo;
+# daemon reads via ProtectSystem=strict's default /etc read-only
+# exposure (no bind-mount needed). Pin file itself absent by
+# default — operators opt in by copying the example and editing it.
+install -d -o root -g root -m 0755 "$CONFIG_DIR"
+echo "ensured $CONFIG_DIR (root:root 0755)"
+if [[ -f "$PINS_EXAMPLE_SRC" ]]; then
+    install -o root -g root -m 0644 "$PINS_EXAMPLE_SRC" "$PINS_EXAMPLE_DST"
+    echo "installed $PINS_EXAMPLE_DST"
+fi
 
 # Service unit.
 install -o root -g root -m 0644 "$UNIT_SRC" "$UNIT_DST"

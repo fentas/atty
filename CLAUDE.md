@@ -70,6 +70,11 @@ atty-guard/                  Rust sidecar daemon — system service running
 │                            Install: `sudo make install-guard
 │                            [GUARD_FEATURES=...,ebpf]` — the ebpf flag
 │                            triggers the systemd drop-in auto-install.
+│                            Opt-in commit pinning for the atom corpus
+│                            via /etc/atty-guard/atoms.pins.toml
+│                            (root:root, deny_unknown_fields, hard fail
+│                            on typos; example template ships next to
+│                            it; drop the file to opt out).
 ├── Cargo.toml               feature flags: ebpf, tier2-onnx, osv-live, atoms-fetch
 ├── README.md
 ├── contrib/                 system unit + install.sh (re-execs sudo;

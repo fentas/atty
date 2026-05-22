@@ -173,13 +173,9 @@ enum Subcommand {
 #[derive(clap::Subcommand, Debug)]
 enum AtomsOp {
     /// Add `<pattern>` to the per-user atom list. Requires sudo.
-    Add {
-        pattern: String,
-    },
+    Add { pattern: String },
     /// Remove `<pattern>` from the per-user atom list. Requires sudo.
-    Remove {
-        pattern: String,
-    },
+    Remove { pattern: String },
     /// List atoms. Defaults to `--user`; pass `--system` for the
     /// bundled corpus or `--session` for the in-memory overlay.
     List {
@@ -287,7 +283,9 @@ fn parse_atom_sources(s: &str) -> Vec<atom_fetcher::SourceId> {
         }
         match atom_fetcher::SourceId::parse(name) {
             Some(sid) => out.push(sid),
-            None => eprintln!("atty-guard: unknown atom source `{name}` — ignoring (valid: gtfobins, sigma)"),
+            None => eprintln!(
+                "atty-guard: unknown atom source `{name}` — ignoring (valid: gtfobins, sigma)"
+            ),
         }
     }
     out
@@ -427,8 +425,7 @@ fn acquire_single_instance_lock(socket: &std::path::Path) -> Result<std::fs::Fil
     // flock with LOCK_EX | LOCK_NB. Linux constants:
     //   LOCK_EX = 2, LOCK_NB = 4.
     extern "C" {
-        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int)
-            -> std::os::raw::c_int;
+        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
     }
     const LOCK_EX: std::os::raw::c_int = 2;
     const LOCK_NB: std::os::raw::c_int = 4;
@@ -525,7 +522,16 @@ fn main() -> std::io::Result<()> {
     // Useful for `atty-guard --update-atoms-now` invocations from
     // systemd timers / pre-commit hooks / CI atom-bundle builders.
     if cli.update_atoms_now {
-        let cfg = atom_fetcher::FetcherConfig::default();
+        let cfg = match atom_fetcher::FetcherConfig::default_with_pins() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("atty-guard: pin file rejected — {e}");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    e.to_string(),
+                ));
+            }
+        };
         return match atom_fetcher::fetch_all(&cfg, &sources) {
             Ok(report) => {
                 eprintln!(
@@ -729,15 +735,32 @@ fn main() -> std::io::Result<()> {
 
     if let Some(iv) = interval {
         if cfg!(feature = "atoms-fetch") {
-            let cfg = atom_fetcher::FetcherConfig::default();
-            if cli.verbosity >= 1 {
-                eprintln!(
-                    "atty-guard: atom refresh cron enabled — every {}s, sources={:?}",
-                    iv.as_secs(),
-                    sources
-                );
+            // Pin-file rejection MUST NOT kill the daemon. The
+            // classifier (server::serve below) is the load-bearing
+            // service; atom refresh is an auxiliary cron. If the
+            // operator's `/etc/atty-guard/atoms.pins.toml` is
+            // malformed, log loudly and skip starting the refresh
+            // thread — but keep the classifier alive. systemd's
+            // Restart=on-failure would see exit(0) as success and
+            // not restart us, so a typo in /etc would brick the
+            // host's command classification entirely.
+            match atom_fetcher::FetcherConfig::default_with_pins() {
+                Ok(cfg) => {
+                    if cli.verbosity >= 1 {
+                        eprintln!(
+                            "atty-guard: atom refresh cron enabled — every {}s, sources={:?}",
+                            iv.as_secs(),
+                            sources
+                        );
+                    }
+                    atom_fetcher::spawn_periodic_refresh(cfg, sources, iv, trust_store.clone());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "atty-guard: pin file rejected — atom refresh cron disabled, classifier continues — {e}"
+                    );
+                }
             }
-            atom_fetcher::spawn_periodic_refresh(cfg, sources, iv, trust_store.clone());
         } else {
             // Without the feature, `spawn_periodic_refresh` is a
             // no-op. Loud warn so the operator knows their cron
@@ -897,7 +920,10 @@ mod tests {
         let _ = std::fs::remove_file(&lock_path);
 
         let _lock = acquire_single_instance_lock(&socket).expect("lock should succeed");
-        assert!(lock_path.exists(), "lock file at {lock_path:?} should exist");
+        assert!(
+            lock_path.exists(),
+            "lock file at {lock_path:?} should exist"
+        );
         drop(_lock);
         let _ = std::fs::remove_file(&lock_path);
     }

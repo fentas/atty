@@ -40,6 +40,11 @@ ureq = { version = "2.10", optional = true, default-features = false, features =
 flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4", optional = true, default-features = false }
 serde_yaml = { version = "0.9", optional = true }
+# V2-I tarball integrity. Pinned-SHA verification of upstream
+# tarballs before we let any bytes reach the classifier. sha2
+# is pure-Rust + ~40 KB compiled; gated behind atoms-fetch so
+# default builds don't pay it.
+sha2 = { version = "0.10", optional = true, default-features = false }
 
 [features]
 default = []
@@ -57,7 +62,7 @@ osv-live = ["dep:ureq"]
 # `--atoms-update-interval` cron-style background refresh.
 # Reuses ureq for HTTPS; adds flate2 + tar + serde_yaml for
 # tarball + YAML parsing. See `docs/security-guard-updates.md`.
-atoms-fetch = ["dep:ureq", "dep:flate2", "dep:tar", "dep:serde_yaml"]
+atoms-fetch = ["dep:ureq", "dep:flate2", "dep:tar", "dep:serde_yaml", "dep:sha2", "dep:toml"]
 
 [dev-dependencies]
 # trust_store tests use tempdir-rooted file ops; no global env mutation.
