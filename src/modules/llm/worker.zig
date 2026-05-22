@@ -436,7 +436,40 @@ pub fn Module(comptime cfg: Config) type {
         ///   - `err`: `response_buf` already freed (or never owned
         ///     in the spawn-failed case); caller just reports the
         ///     error and moves on.
-        pub const FetchKind = enum { ok, fetch_failed, timed_out, spawn_failed, oom };
+        pub const FetchKind = enum { ok, fetch_failed, timed_out, spawn_failed, oom, orphan_cap_hit };
+
+        /// Hard cap on concurrent ABANDONED (post-timeout, still-running)
+        /// fetch sub-threads. Each orphan holds a thread stack, the
+        /// task's heap dupes (url+body+auth+response_buf), and HTTP
+        /// client state until `client.fetch` returns naturally (OS
+        /// TCP timeout for blackholed endpoints — often minutes).
+        ///
+        /// Without a cap, a misconfigured or blackholed `LLM_API_BASE`
+        /// + the user retrying repeatedly accumulates orphans linearly.
+        /// With `cfg.max_response_bytes` default 16 KiB, response_cap
+        /// is `max_response_bytes * 16` = 256 KiB per orphan, plus
+        /// thread overhead. 4 orphans ≈ 1 MiB resident; refuse new
+        /// fetches past that.
+        ///
+        /// 4 is generous for the realistic user pattern (one stuck
+        /// request, retry a few times before noticing) and small
+        /// enough to bound the worst case.
+        pub const MAX_ORPHAN_FETCHES: usize = 4;
+
+        /// Live count of ABANDONED fetch tasks — sub-threads that
+        /// outlasted their deadline + are still running. Incremented
+        /// by `runHttpFetchWithDeadline` when it detaches; decremented
+        /// by `HttpFetchTask.publishDone` when an abandoned task
+        /// finishes its `client.fetch` and self-cleans.
+        ///
+        /// Module-scoped (not Runtime-scoped) so the same counter
+        /// bounds orphans across the worker thread's full lifetime
+        /// without threading a pointer through every call site. The
+        /// counter has Module factory scope, so each comptime
+        /// instantiation has its own independent counter — fine
+        /// because typical atty has exactly one LLM Module
+        /// configured.
+        var orphan_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
         pub const FetchOutcome = struct {
             kind: FetchKind,
             status: u16 = 0,
@@ -527,9 +560,14 @@ pub fn Module(comptime cfg: Config) type {
                 //     via consumeTask + thread.join().
                 //   prev == ABANDONED: worker hit the deadline,
                 //     detached us, and moved on. We own cleanup —
-                //     call self.deinit() to free the heap state.
+                //     call self.deinit() to free the heap state
+                //     AND release our slot in the orphan counter so
+                //     future fetches can proceed.
                 const prev = self.status.swap(STATUS_DONE, .acq_rel);
-                if (prev == STATUS_ABANDONED) self.deinit();
+                if (prev == STATUS_ABANDONED) {
+                    _ = orphan_count.fetchSub(1, .acq_rel);
+                    self.deinit();
+                }
             }
         };
 
@@ -673,6 +711,17 @@ pub fn Module(comptime cfg: Config) type {
                 return runHttpFetchInline(gpa, io, url_in, body_in, auth_header_in, response_cap);
             }
 
+            // Orphan-cap pre-check. If MAX_ORPHAN_FETCHES sub-threads
+            // are still running past their deadline, refuse this
+            // request rather than start another that'll likely
+            // accumulate. Operator-visible via the `orphan_cap_hit`
+            // FetchKind — they get a clear "previous request still
+            // in flight" indication and can wait for the OS TCP
+            // timeout to drain the queue before retrying.
+            if (orphan_count.load(.acquire) >= MAX_ORPHAN_FETCHES) {
+                return .{ .kind = .orphan_cap_hit };
+            }
+
             const task = initHttpFetchTask(gpa, io, url_in, body_in, auth_header_in, response_cap) catch
                 return .{ .kind = .oom };
 
@@ -709,12 +758,12 @@ pub fn Module(comptime cfg: Config) type {
 
             // True timeout. Detach: the sub-thread will eventually
             // complete and `publishDone` will see ABANDONED and
-            // call `deinit` on the task (freeing everything we
-            // allocated above). The worker returns and can start
-            // another request immediately, so concurrent orphans
-            // can accumulate against a blackholed endpoint —
-            // bounded only by the OS TCP timeout under which
-            // each orphan's `client.fetch` eventually returns.
+            // call `deinit` on the task. Bump the orphan counter
+            // so the next call's pre-check sees the in-flight
+            // count; the counter decrements when this thread's
+            // `client.fetch` finally returns (OS TCP timeout for
+            // blackholed endpoints — often minutes).
+            _ = orphan_count.fetchAdd(1, .acq_rel);
             thread.detach();
             return .{ .kind = .timed_out };
         }
@@ -799,6 +848,11 @@ pub fn Module(comptime cfg: Config) type {
                     .exp_len = 0,
                     .err_len = writeStatic(error_out, "out of memory allocating HTTP fetch state"),
                 },
+                .orphan_cap_hit => return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "previous LLM request still hanging — wait for OS TCP timeout to drain before retrying (check `$LLM_API_BASE` is reachable)"),
+                },
             }
             const response_buf = outcome.response_buf.?;
             defer gpa.free(response_buf);
@@ -871,6 +925,11 @@ pub fn Module(comptime cfg: Config) type {
                     .cmd_len = 0,
                     .exp_len = 0,
                     .err_len = writeStatic(error_out, "out of memory allocating HTTP fetch state"),
+                },
+                .orphan_cap_hit => return RequestResult{
+                    .cmd_len = 0,
+                    .exp_len = 0,
+                    .err_len = writeStatic(error_out, "previous LLM request still hanging — wait for OS TCP timeout to drain before retrying (check `$LLM_API_BASE` is reachable)"),
                 },
             }
             const response_buf = outcome.response_buf.?;
