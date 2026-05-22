@@ -69,6 +69,12 @@ ProtectHostname=yes
 # RestrictAddressFamilies, etc.) stays intact — only the
 # /proc visibility restriction was incompatible with the
 # auth path's design.
+#
+# Re-hardening path (deferred): on kernel >= 6.9, `pidfd_open()`
+# + `fstat()` on the resulting pidfd returns the owner UID via
+# `st_uid` — that sidesteps /proc entirely and would let us
+# re-add ProtectProc=invisible without breaking auth. Tracked
+# as a follow-up; not blocking this fix.
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallFilter=@system-service
