@@ -1,0 +1,42 @@
+# /etc/atty-guard/atoms.pins.toml — operator-set commit pins for
+# the atom corpus fetcher. Off by default. Copy this file to
+# `/etc/atty-guard/atoms.pins.toml` (drop the `.example`) and edit
+# to opt in.
+#
+# When this file is present, `atty-guard --update-atoms-now` and
+# the cron tick (`--atoms-update-interval`) ignore each pinned
+# source's `refs/heads/master` and fetch the specific commit
+# listed below. The fetcher computes the SHA-256 of the downloaded
+# tarball and refuses to overwrite `atoms.system.txt` unless it
+# matches the `sha256` value here.
+#
+# A pin's `sha256` is the load-bearing check; the `commit` is for
+# human auditability (so a reviewer can see "we're locked to
+# 7382261… from <date>" without diffing binaries).
+#
+# When upstream pushes a new commit you trust, refresh the pin:
+#
+#   gh api /repos/<owner>/<repo>/commits/master --jq .sha
+#   curl -fsSL "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>" \
+#     | sha256sum
+#
+# Paste the new commit + digest, reload (the cron picks it up at
+# the next tick; `--update-atoms-now` picks it up immediately).
+#
+# Missing per-source entries fall back to live tracking for that
+# source — partial pinning is supported.
+#
+# A follow-up release adds drift detection: the daemon will write
+# `/var/lib/atty-guard/atoms.drift.json` after each tick and
+# `atty doctor` will surface a yellow warning when your pin is N
+# commits behind upstream. Until that lands, audit by hand.
+
+# Example (uncomment and update with real values):
+
+# [gtfobins]
+# commit = "7382261ef936e35896ba70e7a6b833352ffb9a22"
+# sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
+
+# [sigma]
+# commit = "994da16651194500b607a3007186c29779e1f961"
+# sha256 = "cfbf8b6adae659af15dc147e6d8497c10d48e87dafd584efcfd729f7f9f8d505"

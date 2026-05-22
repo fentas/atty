@@ -2,7 +2,46 @@
 
 How atty/atty-guard get fresh threat data **between releases**. Driven by incidents like Shai-Hulud (npm worm, hundreds of compromised packages) and CVE-2026-31431 / copy.fail (kernel LPE with a tiny, easily-renamed PoC) — both of which we'd want to flag the day disclosure lands, not on the next atty cargo-release cadence.
 
-Status: **design, fetcher impl ahead.** This document describes the bundle format + verification protocol; PR series that lands the fetcher tracks under V2-F.
+## What's actually shipped today (atom fetcher)
+
+The signed-bundle design described in the rest of this doc was never built. What ships today is **V2-I — the atom fetcher** (`atty-guard/src/atom_fetcher.rs`, feature-gated behind `atoms-fetch`). It pulls the GTFOBins and SigmaHQ Linux rule corpora directly from GitHub `codeload`, walks the tarballs, extracts atom strings, and writes the merged corpus to `/var/lib/atty-guard/atoms.system.txt`. Run via `atty-guard --update-atoms-now` (one-shot) or `--atoms-update-interval 6h` (background cron).
+
+### Trust model (what we actually verify)
+
+The fetcher's trust posture as of this PR:
+
+| Layer | What it bounds | What it doesn't |
+|-------|----------------|-----------------|
+| HTTPS to codeload.github.com (rustls) | Transport tampering, passive MITM | Doesn't authenticate the *content* — anyone with push access to upstream can change what `refs/heads/master` resolves to between fetches. |
+| Tarball size cap (32 MiB hard ceiling in `download_tarball`) | An upstream pushing a multi-GB blob (intentional or accidental) can't exhaust daemon memory. | Doesn't catch a 30 MiB tarball stuffed with attacker-friendly atoms — only the gross-blowup case. |
+| Atom count cap (`MAX_ATOMS_TOTAL = 10_000` in `fetch_all`) | A parser bug or a tarball that *somehow* yields a huge atom set can't balloon the in-memory aho-corasick DFA. Refuses the write, keeps the last-good `atoms.system.txt`. | Doesn't reject a 9 999-atom corpus that's mostly attacker-controlled noise. |
+| Per-atom length cap (`ATOM_MAX_LEN = 200` in `atom_from_code`) | YAML parser swallows that produce 4 KiB "atoms" get dropped. | Doesn't reject a well-formed 100-char malicious atom. |
+| Placeholder filter (`is_placeholder_atom_public`) | Sigma `/path/to/`, LOLBAS `{PATH:.ext}`, angle-bracket templates filtered out. | Doesn't validate atom *content* beyond shape. |
+
+**The trust root is "we trust GitHub + the GTFOBins/SigmaHQ maintainers."** That's a substantial trust assumption. The signed-bundle design below was the originally-planned hardening; it never landed because the operational cost of running a signing infrastructure didn't survive contact with the maintainer's time budget.
+
+### Opt-in commit pinning (`/etc/atty-guard/atoms.pins.toml`)
+
+For sites that want a review gate before upstream changes reach the running daemon:
+
+1. Copy `/etc/atty-guard/atoms.pins.toml.example` to `/etc/atty-guard/atoms.pins.toml`.
+2. Uncomment per-source blocks and set `commit` (40-char SHA-1) + `sha256` (64-char SHA-256 of the tarball at that commit).
+3. The fetcher hits the pinned commit URL instead of `refs/heads/master`, computes SHA-256, refuses to overwrite `atoms.system.txt` on mismatch. Last-good file stays in place.
+
+Pin refresh procedure when bumping:
+
+```sh
+gh api /repos/<owner>/<repo>/commits/master --jq .sha
+curl -fsSL "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>" | sha256sum
+```
+
+Paste both values into the pin file. The next cron tick (or `--update-atoms-now`) picks up the new pin. Malformed pin file is a HARD error — the daemon refuses to fall back to live tracking, since the operator opted in for a reason.
+
+A drift-detection follow-up will land soon: the daemon will probe upstream's `refs/heads/master` SHA per source, write the result to `/var/lib/atty-guard/atoms.drift.json`, and surface "N commits behind" warnings via `atty doctor` + journald. Until that ships, operators audit drift by hand.
+
+## Original signed-bundle design (NOT shipped)
+
+Status: **design only.** The rest of this document describes a more complete trust model that has not been implemented. Treat it as a roadmap, not a description of current behavior.
 
 ## Goals
 
