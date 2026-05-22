@@ -122,6 +122,20 @@ test "parseMutationResponse — empty body → DaemonError" {
     try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(""));
 }
 
+test "parseMutationResponse — error envelope with embedded `\"type\":\"ok\"` text still rejects" {
+    // Confusable: a daemon error whose `message` field happens
+    // to echo the literal `"type":"ok"` (e.g. quoting a buggy
+    // client request) MUST still classify as DaemonError. The
+    // pre-tightening substring scan would have returned success
+    // because both "type":"error" and "type":"ok" appear; the
+    // first-occurrence anchor ensures the envelope's own type
+    // field wins.
+    const buf =
+        \\{"id":1,"type":"error","message":"rejected request: \"type\":\"ok\""}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf));
+}
+
 test "Client.init constructs without connecting" {
     var c = mod.Client.init("/nonexistent.sock");
     defer c.deinit();

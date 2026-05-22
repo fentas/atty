@@ -467,7 +467,20 @@ pub fn configure(comptime cfg: Config) type {
                             _ = rt.trust.add(a, hash) catch {};
                         }
                         if (rt.daemon) |*client| {
-                            client.trustAdd(hash) catch {};
+                            client.trustAdd(hash) catch |err| switch (err) {
+                                error.DaemonError => {
+                                    // Daemon-side rejection (auth /
+                                    // perm / disk-full) means the
+                                    // hash never landed in
+                                    // commands.trusted.txt — a
+                                    // fresh atty session won't see
+                                    // this trust. Local rt.trust
+                                    // still works for THIS session.
+                                    const msg = "atty: daemon rejected trustAdd — `[t]rust permanently` won't persist across sessions\n";
+                                    _ = std.c.write(2, msg, msg.len);
+                                },
+                                else => {},
+                            };
                         }
                     }
                     markShellThreat(rt, ctx, pending);
@@ -509,7 +522,13 @@ pub fn configure(comptime cfg: Config) type {
                 _ = rt.session_trust.add(a, hash) catch {};
             }
             if (rt.daemon) |*client| {
-                client.sessionAddTrust(hash) catch {};
+                client.sessionAddTrust(hash) catch |err| switch (err) {
+                    error.DaemonError => {
+                        const msg = "atty: daemon rejected sessionAddTrust — entry won't appear in `atty-guard session list`\n";
+                        _ = std.c.write(2, msg, msg.len);
+                    },
+                    else => {},
+                };
             }
         }
 
@@ -551,7 +570,13 @@ pub fn configure(comptime cfg: Config) type {
             rt.session_blocked_hosts_lens[slot] = @intCast(host.len);
             rt.session_blocked_hosts_count += 1;
             if (rt.daemon) |*client| {
-                client.sessionAddUrlBlock(host) catch {};
+                client.sessionAddUrlBlock(host) catch |err| switch (err) {
+                    error.DaemonError => {
+                        const msg = "atty: daemon rejected sessionAddUrlBlock — entry won't appear in `atty-guard session list`\n";
+                        _ = std.c.write(2, msg, msg.len);
+                    },
+                    else => {},
+                };
             }
             // Cancel the current command too — `[B]lock` implies
             // "don't run this one either."
