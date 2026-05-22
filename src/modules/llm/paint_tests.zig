@@ -1705,18 +1705,18 @@ test "inline chat: multi-newline done reason — back-walk anchor reserves enoug
     // FEWER rows than it actually does, and the older neighbour
     // ate scrollback that should have gone to the newest turn.
     //
-    // Worked example: a reason with 4 embedded `\n` characters
-    // becomes 5 hard-broken rows after parsing. WrapIter on the raw
-    // envelope (which has `\\n` as the 2-char JSON encoding) sees
-    // those as inline chars on ~1-2 wrap rows. Estimator was off
-    // by ~3-4 rows; with limited scrollback the newest turn's
-    // tail got clipped.
-    //
-    // Test setup: an OLDER user turn (small) + a newer assistant
-    // done envelope with 5 embedded `\n` separators. Asserts the
-    // TAIL sentinel of the newest reason still appears in the
-    // paint output — proving the back-walk reserved enough rows
-    // for it.
+    // EXERCISE THE BACK-WALK PRESSURE: round-3 review noticed the
+    // earlier shape of this test had so much budget that even an
+    // under-counted assistant turn rendered to completion. To
+    // actually trip the bug requires several older turns competing
+    // for scrollback budget — 6 user turns × 1 row each below.
+    // Under-count: back-walk thinks assistant claims 1 row, sums
+    // 6 + 1 = 7 ≤ 8 budget, picks all 6 older + assistant. Render
+    // then gives assistant only `8 - 6 = 2` rows of cap → 4 of 6
+    // reason rows clipped → TAIL-SENTINEL falls off.
+    // Over-count (fix): back-walk says assistant claims 6 rows, 6
+    // + 1 (one older) = 7 ≤ 8 budget. Render gives assistant 6
+    // rows → TAIL-SENTINEL visible.
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -1749,26 +1749,32 @@ test "inline chat: multi-newline done reason — back-walk anchor reserves enoug
 
     const helpers = dialog.Module(L.config, L.Runtime);
 
-    // Older user turn — small. The assistant turn that follows is
-    // the newest; back-walk should reserve enough rows for it.
-    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(
-        u8,
-        "tell me about something with multiple paragraphs",
-    ));
+    // Six older user turns (1 row each) putting the scrollback
+    // budget under real pressure. Each is short so it claims
+    // exactly 1 row in countTurnRows.
+    const olds = [_][]const u8{
+        "older turn 1",
+        "older turn 2",
+        "older turn 3",
+        "older turn 4",
+        "older turn 5",
+        "older turn 6",
+    };
+    for (olds) |s| {
+        try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, s));
+    }
 
-    // Assistant done envelope with 5 `\n` escapes — JSON-encoded.
-    // Each `\\n` in the source string is a literal `\n` JSON escape
-    // (two bytes in the envelope content), which the parser
-    // converts to a real newline. md_render then hard-breaks on
-    // each newline → 6 separate rows of content.
+    // Newest turn: assistant done envelope with 5 `\n` escapes
+    // (JSON-encoded). Each `\\n` becomes a real newline after parse;
+    // md_render hard-breaks on each → 6 rows of content.
     const envelope =
         "{\"action\":\"done\",\"reason\":\"" ++
-        "Para1 head FRONT-SENTINEL\\n" ++
+        "Para1 FRONT-SENTINEL\\n" ++
         "Para2 middle\\n" ++
         "Para3 body content\\n" ++
         "Para4 more body\\n" ++
         "Para5 nearing end\\n" ++
-        "Para6 tail TAIL-SENTINEL\"}";
+        "Para6 TAIL-SENTINEL\"}";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
     defer helpers.freeTurns(&rt);
 
@@ -1778,11 +1784,12 @@ test "inline chat: multi-newline done reason — back-walk anchor reserves enoug
     try testing.expect(painted != null);
 
     // TAIL-SENTINEL is on the LAST row of the newest turn. Pre-fix
-    // (under-count), the back-walk thought the assistant turn fit
-    // in ~2 rows, gave the older user turn too many, and clipped
-    // off the tail of the assistant turn. Post-fix, the escape
-    // count adds 5 rows to the estimate so back-walk reserves
-    // enough room.
+    // (under-count): back-walk includes all 6 older turns + the
+    // assistant; assistant gets only `budget - 6 = 2` row cap →
+    // 4 of 6 reason rows clipped including TAIL.
+    // Post-fix (over-count via escape adjustment): back-walk
+    // includes 1-2 older + assistant with its full 6-row claim →
+    // TAIL renders.
     try testing.expect(std.mem.indexOf(u8, painted.?, "TAIL-SENTINEL") != null);
 }
 
@@ -1830,10 +1837,22 @@ test "inline chat: pretty-printed `action`: `done` JSON still triggers multi-row
     };
 
     const helpers = dialog.Module(L.config, L.Runtime);
-    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(
-        u8,
-        "tell me about something",
-    ));
+    // Same back-walk pressure as the sibling test: six older user
+    // turns of 1 row each. With a pretty-printed `"action":` that
+    // fails the literal-substring detector (pre-round-2), the
+    // back-walk falls back to a 1-row estimate and clips the
+    // assistant tail.
+    const olds = [_][]const u8{
+        "older turn 1",
+        "older turn 2",
+        "older turn 3",
+        "older turn 4",
+        "older turn 5",
+        "older turn 6",
+    };
+    for (olds) |s| {
+        try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, s));
+    }
 
     // `"action": "done"` with whitespace — Copilot's reported
     // failure case. Also uses pretty-printed `"reason":` with a
