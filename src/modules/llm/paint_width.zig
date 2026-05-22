@@ -262,6 +262,19 @@ pub fn wrapIter(bytes: []const u8, cols: usize) WrapIterator {
 pub fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) anyerror!void {
     var it = utf8Iter(bytes);
     while (it.next()) |c| {
+        // Drop the Unicode replacement codepoint (U+FFFD).
+        // `utf8Iter` yields this for any invalid sequence:
+        // bare continuation byte, truncated multi-byte sequence,
+        // overlong encoding, or an unmappable start byte. Without
+        // this filter, the original raw byte gets emitted —
+        // which lets a raw 0x9B (8-bit CSI) or other C1-range
+        // byte slip through despite the explicit C1 check
+        // below (which compares the DECODED codepoint, not the
+        // raw byte). Dropping U+FFFD also tightens the contract:
+        // "this filter emits only well-formed, printable
+        // codepoints" — the terminal never sees malformed
+        // UTF-8 bytes via this path.
+        if (c.cp == 0xFFFD) continue;
         if (c.cp < 0x20 or c.cp == 0x7F) {
             if (c.cp == 0x09) {
                 try w.writeAll("\t");
