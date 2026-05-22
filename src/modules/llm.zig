@@ -747,8 +747,18 @@ pub fn configure(comptime cfg: Config) type {
             /// alt-screen chrome (title bar, footer, input row,
             /// status hints). Overflow falls back to skip-the-paint,
             /// so it stays safe even past the worst case.
-            chat_overlay_buf: [cfg.history_turns_max * 3584 + 8192]u8 = undefined,
-            chat_overlay_buf_len: usize = 0,
+            /// Last rendered overlay payload — heap-allocated each
+            /// paint via `std.Io.Writer.Allocating`, replaced on
+            /// subsequent paints, freed on `detach`. Earlier shape
+            /// was a fixed `[history_turns_max * 3584 + 8192]u8`
+            /// array that capped each turn's content at ~3.5 KB.
+            /// Long LLM done-action replies that landed in the
+            /// turn ring could overflow the buffer — paint then
+            /// returned false and the overlay refused to open.
+            /// Heap allocation removes the cap entirely; the
+            /// allocator grows the buffer to whatever the actual
+            /// content needs.
+            chat_overlay_buf: ?[]u8 = null,
             /// Chat input buffer — keystrokes accumulated while
             /// the overlay is open. Enter submits as a new
             /// `.user` turn and fires a dialog request; the
@@ -1022,6 +1032,10 @@ pub fn configure(comptime cfg: Config) type {
             }
             freeTurns(rt);
             freeConclusion(rt);
+            if (rt.chat_overlay_buf) |slice| {
+                rt.allocator.free(slice);
+                rt.chat_overlay_buf = null;
+            }
             rt.osc133_capture.deinit();
             // Heap-promoted Runtime buffers are owned by the main
             // thread alone — the worker reaches into `Shared`, not
