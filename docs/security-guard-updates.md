@@ -35,9 +35,19 @@ gh api /repos/<owner>/<repo>/commits/master --jq .sha
 curl -fsSL "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>" | sha256sum
 ```
 
-Paste both values into the pin file. The next cron tick (or `--update-atoms-now`) picks up the new pin — `spawn_periodic_refresh` re-reads `atoms.pins.toml` every tick, so no daemon restart is needed for a pin bump. Malformed pin file is a HARD error: the operator opted in for a reason and silent fall-back to live tracking would defeat the point. If the pin file is malformed at startup with `--atoms-update-interval`, the cron thread is skipped but the classifier (UDS server) keeps running — the auxiliary refresh path can fail without taking the whole classifier down.
+Paste both values into the pin file. The next cron tick (or `--update-atoms-now`) picks up the new pin — `spawn_periodic_refresh` re-reads `atoms.pins.toml` every tick, so no daemon restart is needed for a pin bump.
 
-Pin-state transitions during the daemon's lifetime (operator removes or re-creates the pin file mid-life) are logged to journald as one-line breadcrumbs: `pin file removed — switching to live tracking` or `pin file detected — switching to pinned-commit tracking`. Removal is treated as an explicit opt-out per the documented "remove the file to opt out" guidance — the daemon respects it but logs the transition so an accidental `rm` is recoverable from the log.
+**Failure handling differs between startup and mid-run by design:**
+
+| When | Pin file state | Behavior |
+|------|----------------|----------|
+| At startup (`--update-atoms-now` one-shot) | Malformed / unreadable | HARD error: exit non-zero. Surfaces to CI / systemd timer / pre-commit hook. |
+| At startup (`--atoms-update-interval` cron daemon) | Malformed / unreadable | Cron thread is skipped, classifier (UDS server) keeps running. The auxiliary refresh path can fail without taking the whole classifier down. |
+| Mid-run (operator mid-edit) | Suddenly malformed | Keeps the last successfully-loaded pins in memory, logs the parse error, retries on the next tick. The cron is *fail-safe* rather than fail-closed for this auxiliary path. |
+| Mid-run (operator `rm`'d the file) | ENOENT | Treated as explicit opt-out per the documented "remove the file" guidance — daemon switches to live tracking, logs a `pin file removed` breadcrumb so accidental `rm` is recoverable from journald. |
+| Mid-run (operator created the file fresh) | Newly present | Switches to pinned tracking, logs a `pin file detected` breadcrumb. |
+
+The asymmetry between startup-hard-error and mid-run-keep-last-known is intentional: at startup the operator has had a chance to verify, so we trust their intent literally; mid-run we treat a transient parse failure as more likely to be an edit-in-progress than a deliberate downgrade.
 
 A drift-detection follow-up will land soon: the daemon will probe upstream's `refs/heads/master` SHA per source, write the result to `/var/lib/atty-guard/atoms.drift.json`, and surface "N commits behind" warnings via `atty doctor` + journald. Until that ships, operators audit drift by hand.
 

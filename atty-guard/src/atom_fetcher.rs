@@ -452,14 +452,18 @@ pub enum FetchError {
     DecompressError(String),
     ParseError(String),
     WriteError(String),
-    /// Pinned commit SHA + expected SHA-256 of the tarball
-    /// didn't match what we downloaded. Could be: upstream
-    /// force-pushed the pinned commit (unlikely on GitHub),
-    /// the maintainer-set pin in this binary is stale (more
-    /// likely), or a MITM tampered with the download (rare
-    /// with HTTPS+rustls but the digest is the actual proof).
-    /// Either way: refuse to use the tarball; keep the
-    /// existing atoms.system.txt intact.
+    /// Operator-pinned commit SHA + expected SHA-256 of the
+    /// tarball didn't match what we downloaded. Could be:
+    /// upstream force-pushed the pinned commit (unlikely on
+    /// GitHub), the operator's pin in
+    /// `/etc/atty-guard/atoms.pins.toml` is for a commit whose
+    /// tarball codeload now serves differently (rare — codeload
+    /// is byte-stable per commit), or a MITM tampered with the
+    /// download (rare with HTTPS+rustls but the digest is the
+    /// actual proof). Either way: refuse to use the tarball;
+    /// keep the existing atoms.system.txt intact. Resolve by
+    /// re-running the pin-bump procedure in
+    /// `atoms.pins.toml.example`.
     DigestMismatch {
         url: String,
         expected: String,
@@ -1023,71 +1027,82 @@ mod imp {
         trust_store: std::sync::Arc<crate::trust_store::TrustStore>,
     ) {
         let builder = std::thread::Builder::new().name("atty-guard-atoms-refresh".into());
-        // Track whether the previous tick had pins loaded so we can
-        // emit a one-time transition log when the operator removes
-        // or re-creates the pin file mid-life. Without this the
-        // ENOENT path silently downgrades pinned → live tracking
-        // and operators get no journald breadcrumb.
-        let mut had_pins = cfg.pins.is_some();
-        let spawn_result = builder.spawn(move || loop {
-            // Re-read /etc/atty-guard/atoms.pins.toml every tick so
-            // an operator bumping pins doesn't need to restart the
-            // daemon to get a fresh fetch under the new pin. A
-            // newly-broken pin file (operator mid-edit) keeps the
-            // last-good cfg.pins — the cron is fail-safe rather
-            // than fail-closed for this auxiliary path. An ENOENT
-            // (operator removed the file) is treated as a state
-            // transition to live tracking, but we log it so the
-            // operator sees the downgrade in journald.
-            let cfg = match load_pins(Path::new(DEFAULT_PIN_FILE)) {
-                Ok(pins) => {
-                    let now_pinned = pins.is_some();
-                    if had_pins && !now_pinned {
+        // `cfg` is mutable inside the loop so successful pin
+        // reloads stick across ticks. Earlier shape used
+        // `cfg.clone()` per iteration, which always cloned the
+        // STARTUP cfg — meaning a mid-life pin bump that loaded
+        // successfully at tick N would be silently reverted by
+        // ANY error at tick N+1 (parse fail, transient FS
+        // hiccup, etc.). The mutable form preserves the last
+        // successful state across the error arm.
+        //
+        // Tracks pin-state transitions for journald breadcrumbs
+        // when the operator removes/re-creates the file.
+        let spawn_result = builder.spawn(move || {
+            let mut cfg = cfg;
+            let mut had_pins = cfg.pins.is_some();
+            loop {
+                // Re-read /etc/atty-guard/atoms.pins.toml every tick so
+                // an operator bumping pins doesn't need to restart the
+                // daemon to get a fresh fetch under the new pin. A
+                // newly-broken pin file (operator mid-edit) keeps the
+                // last-good cfg.pins — the cron is fail-safe rather
+                // than fail-closed for this auxiliary path. An ENOENT
+                // (operator removed the file) is treated as a state
+                // transition to live tracking, but we log it so the
+                // operator sees the downgrade in journald.
+                match load_pins(Path::new(DEFAULT_PIN_FILE)) {
+                    Ok(pins) => {
+                        let now_pinned = pins.is_some();
+                        if had_pins && !now_pinned {
+                            eprintln!(
+                                "atty-guard: pin file removed — switching to live tracking (refs/heads/master). Restore /etc/atty-guard/atoms.pins.toml if this was unintentional."
+                            );
+                        } else if !had_pins && now_pinned {
+                            eprintln!(
+                                "atty-guard: pin file detected — switching to pinned-commit tracking."
+                            );
+                        }
+                        had_pins = now_pinned;
+                        cfg.pins = pins;
+                    }
+                    Err(e) => {
+                        // Keep the last-known cfg.pins unchanged —
+                        // mid-edit truncation shouldn't revert a
+                        // previously-successful pin reload.
                         eprintln!(
-                            "atty-guard: pin file removed — switching to live tracking (refs/heads/master). Restore /etc/atty-guard/atoms.pins.toml if this was unintentional."
-                        );
-                    } else if !had_pins && now_pinned {
-                        eprintln!(
-                            "atty-guard: pin file detected — switching to pinned-commit tracking."
+                            "atty-guard: pin reload failed (keeping last-known) — {e}"
                         );
                     }
-                    had_pins = now_pinned;
-                    FetcherConfig { pins, ..cfg.clone() }
                 }
-                Err(e) => {
-                    eprintln!(
-                        "atty-guard: pin reload failed (keeping last-known) — {e}"
-                    );
-                    cfg.clone()
-                }
-            };
-            match fetch_all(&cfg, &sources) {
-                Ok(report) => {
-                    eprintln!(
-                        "atty-guard: atom refresh ok — {} atoms across {} sources",
-                        report.atoms_total,
-                        report.per_source.len()
-                    );
-                    // Reload the in-memory corpus from the file we
-                    // just wrote so classify dispatch picks up the
-                    // new entries without waiting for daemon restart.
-                    // Failure here is non-fatal: the next refresh
-                    // tick gets another shot, and the perm-gate error
-                    // (if any) already went to journald.
-                    match trust_store.reload_system_fetched() {
-                        Ok(n) => {
-                            eprintln!("atty-guard: atoms.system.txt reloaded ({n} atoms in memory)")
-                        }
-                        Err(e) => {
-                            eprintln!("atty-guard: atoms.system.txt reload failed — {e}");
+                match fetch_all(&cfg, &sources) {
+                    Ok(report) => {
+                        eprintln!(
+                            "atty-guard: atom refresh ok — {} atoms across {} sources",
+                            report.atoms_total,
+                            report.per_source.len()
+                        );
+                        // Reload the in-memory corpus from the file we
+                        // just wrote so classify dispatch picks up the
+                        // new entries without waiting for daemon restart.
+                        // Failure here is non-fatal: the next refresh
+                        // tick gets another shot, and the perm-gate error
+                        // (if any) already went to journald.
+                        match trust_store.reload_system_fetched() {
+                            Ok(n) => eprintln!(
+                                "atty-guard: atoms.system.txt reloaded ({n} atoms in memory)"
+                            ),
+                            Err(e) => {
+                                eprintln!("atty-guard: atoms.system.txt reload failed — {e}");
+                            }
                         }
                     }
+                    Err(e) => {
+                        eprintln!("atty-guard: atom refresh failed — {e}");
+                    }
                 }
-                Err(e) => {
-                    eprintln!("atty-guard: atom refresh failed — {e}");
-                }
+                std::thread::sleep(interval);
             }
-            std::thread::sleep(interval);
         });
         if let Err(e) = spawn_result {
             eprintln!(
