@@ -198,7 +198,14 @@ impl FetcherConfig {
 ///
 /// Off-by-default. Operators copy `atoms.pins.toml.example` and
 /// edit. Removed/missing keys revert that source to live tracking.
+///
+/// `deny_unknown_fields`: a typo'd section header (`[gtfobin]`
+/// instead of `[gtfobins]`) would otherwise parse silently into
+/// `AtomPins{None, None}` — operator opted in, got opt-out
+/// behaviour, no warning. Hard error matches the stated posture
+/// for the rest of pin-file parsing.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AtomPins {
     pub gtfobins: Option<PinEntry>,
     pub sigma: Option<PinEntry>,
@@ -206,9 +213,12 @@ pub struct AtomPins {
 
 /// Per-source pin. `commit` is the git SHA the operator has
 /// reviewed; `sha256` is the SHA-256 of the codeload tarball at
-/// that commit. Both must be lowercase hex; serde_yaml /toml
-/// give us String → we lowercase + validate on use.
+/// that commit. Both are validated case-insensitively as hex.
+///
+/// `deny_unknown_fields`: typo'd key (`comit = "..."`) would
+/// otherwise drop the operator's pin silently.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PinEntry {
     pub commit: String,
     pub sha256: String,
@@ -228,34 +238,111 @@ impl PinEntry {
 pub const DEFAULT_PIN_FILE: &str = "/etc/atty-guard/atoms.pins.toml";
 
 /// Load operator pin overrides from `path`. Absent file → Ok(None)
-/// (live tracking — the common case). Present file → parse it.
-/// Malformed TOML or bad hex is a hard error: the daemon must not
-/// silently fall back to live tracking when the operator has
-/// asked for pinning but typed something wrong.
+/// (live tracking — the common case). Present file → check perms
+/// (root-owned, no group/world-write), parse, validate. Any
+/// failure on a present file is a HARD error: the operator opted
+/// in, silent fall-back to live tracking would defeat the point.
 #[cfg(feature = "atoms-fetch")]
 pub fn load_pins(path: &Path) -> Result<Option<AtomPins>, FetchError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    load_pins_with_owner(path, 0)
+}
+
+/// Test seam — the prod call always passes `expected_uid = 0`
+/// (root). Tests run as the user's UID and can't chown a file to
+/// root without sudo, so we let them pass their own UID through.
+/// The parse + validate logic exercised here is identical; only
+/// the owner check changes.
+#[cfg(feature = "atoms-fetch")]
+pub fn load_pins_with_owner(path: &Path, expected_uid: u32) -> Result<Option<AtomPins>, FetchError> {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(FetchError::ParseError(format!(
-                "read {}: {}",
+                "stat {}: {}",
                 path.display(),
                 e
             )))
         }
     };
+    check_pin_file_perms(path, &meta, expected_uid)?;
+    let bytes = std::fs::read(path).map_err(|e| {
+        FetchError::ParseError(format!("read {}: {}", path.display(), e))
+    })?;
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Err(FetchError::ParseError(format!(
+            "pin file {} is empty — remove the file to opt out of pinning, \
+             or add at least one [gtfobins] / [sigma] entry",
+            path.display(),
+        )));
+    }
     let text = std::str::from_utf8(&bytes).map_err(|e| {
         FetchError::ParseError(format!("pin file {} not utf-8: {}", path.display(), e))
     })?;
     let pins: AtomPins = toml::from_str(text)
         .map_err(|e| FetchError::ParseError(format!("pin file {} parse: {}", path.display(), e)))?;
     validate_pins(&pins)?;
+    if pins.gtfobins.is_none() && pins.sigma.is_none() {
+        return Err(FetchError::ParseError(format!(
+            "pin file {} has no [gtfobins] or [sigma] entry — remove the file \
+             to opt out of pinning, or add at least one entry",
+            path.display(),
+        )));
+    }
     Ok(Some(pins))
 }
 
+/// Refuse a pin file that isn't admin-owned-only-writable. Parallel
+/// to `trust_store::read_system_atoms_file_checked`'s posture but
+/// for the *config* surface: the pin file lives under `/etc/`,
+/// must be root-owned (uid 0), and must not be group- or world-
+/// writable. A local attacker who finds the file world-writable
+/// can swap in a pin pointing at a tarball they control (with a
+/// pre-computed SHA). Refusing here matches `atoms.system.txt`.
+///
+/// Permission gate only — readability bits are intentionally not
+/// checked. The daemon needs only `O_RDONLY`; if `/etc/atty-guard/`
+/// keeps the file world-readable (the common case) that's fine.
+#[cfg(all(feature = "atoms-fetch", unix))]
+fn check_pin_file_perms(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    expected_uid: u32,
+) -> Result<(), FetchError> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    if meta.uid() != expected_uid {
+        return Err(FetchError::ParseError(format!(
+            "pin file {} has owner uid {} (expected {}) — `sudo chown root:root {}`",
+            path.display(),
+            meta.uid(),
+            expected_uid,
+            path.display(),
+        )));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o022 != 0 {
+        return Err(FetchError::ParseError(format!(
+            "pin file {} has mode 0{:o} with group/world write (chmod g-w,o-w {})",
+            path.display(),
+            mode,
+            path.display(),
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "atoms-fetch", not(unix)))]
+fn check_pin_file_perms(
+    _path: &Path,
+    _meta: &std::fs::Metadata,
+    _expected_uid: u32,
+) -> Result<(), FetchError> {
+    Ok(())
+}
+
 /// Reject obviously-malformed pin entries early. Both fields must
-/// be lowercase hex of the expected length (40 for git SHA-1, 64
+/// be hex (case-insensitive) of the expected length (40 for git SHA-1, 64
 /// for SHA-256). We don't bother with SHA-256 git commits yet —
 /// when GitHub flips, bump the length check.
 #[cfg(feature = "atoms-fetch")]
@@ -390,7 +477,7 @@ impl std::fmt::Display for FetchError {
                 actual,
             } => write!(
                 f,
-                "digest mismatch for {url}: expected sha256={expected}, got sha256={actual} — refusing to overwrite atoms.system.txt; check pinned commit is reachable and bump it (with the new digest) in atom_fetcher.rs"
+                "digest mismatch for {url}: expected sha256={expected}, got sha256={actual} — refusing to overwrite atoms.system.txt; check the pinned commit + sha256 in /etc/atty-guard/atoms.pins.toml (bump per the refresh procedure in atoms.pins.toml.example if the pin is intentionally behind)"
             ),
         }
     }
@@ -446,6 +533,39 @@ mod imp {
     /// Hit means we refuse to write and keep the last-good file.
     pub(super) const MAX_ATOMS_TOTAL: usize = 10_000;
 
+    /// Defense-in-depth atom cap. Refuse to overwrite
+    /// `atoms.system.txt` if the parsed corpus exceeds the cap —
+    /// a parser bug or compromised upstream that somehow slipped
+    /// a wildly inflated corpus past every other gate keeps the
+    /// last-good file in place. Lifted into its own function so
+    /// the behavioral test can hit the error path without going
+    /// through fetch_all's network step.
+    pub(super) fn enforce_atom_count_cap(count: usize) -> Result<(), FetchError> {
+        if count > MAX_ATOMS_TOTAL {
+            return Err(FetchError::ParseError(format!(
+                "atom count {} exceeds cap {} — refusing to overwrite atoms.system.txt",
+                count, MAX_ATOMS_TOTAL,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Defense-in-depth tarball size check. Same posture as
+    /// `enforce_atom_count_cap` — extracted so a test can hit the
+    /// reject path without spinning up a fake codeload.
+    pub(super) fn enforce_tarball_size_cap(
+        url: &str,
+        len: usize,
+    ) -> Result<(), FetchError> {
+        if len > MAX_TARBALL_BYTES {
+            return Err(FetchError::NetworkError(format!(
+                "tarball from {url} ({len} bytes) exceeds {} MiB cap — refusing to parse",
+                MAX_TARBALL_BYTES / (1024 * 1024)
+            )));
+        }
+        Ok(())
+    }
+
     /// Hard ceiling on raw tarball bytes pulled from upstream. Sigma
     /// is ~15 MB and GTFOBins is < 2 MB as of 2026-05; 32 MiB is
     /// ~2x headroom for organic growth without giving a compromised
@@ -494,18 +614,7 @@ mod imp {
                     .to_owned(),
             ));
         }
-        // Defense-in-depth: if a parser bug (or a downstream-of-pin
-        // upstream compromise that somehow slipped a digest-matching
-        // tarball with a wildly expanded corpus) ballooned the atom
-        // set past sanity, refuse the write so the last-good file
-        // stays. Same posture as the all-failed branch above.
-        if all_atoms.len() > MAX_ATOMS_TOTAL {
-            return Err(FetchError::ParseError(format!(
-                "atom count {} exceeds cap {} — refusing to overwrite atoms.system.txt",
-                all_atoms.len(),
-                MAX_ATOMS_TOTAL,
-            )));
-        }
+        enforce_atom_count_cap(all_atoms.len())?;
         write_atoms(&cfg.output_path, &all_atoms)?;
         Ok(report)
     }
@@ -575,21 +684,18 @@ mod imp {
             .map_err(|e| FetchError::NetworkError(e.to_string()))?;
         // Sigma's tarball is ~15 MB; GTFOBins is < 2 MB. Cap at
         // MAX_TARBALL_BYTES so a hostile or runaway upstream can't
-        // exhaust memory. take() returns EOF at the limit; if the
-        // limit was reached exactly we don't know whether more bytes
-        // existed — refuse rather than silently truncate.
+        // exhaust memory. We request MAX+1 bytes so that "saw
+        // exactly cap many bytes" is unambiguous from "saw cap
+        // bytes and there were more" — buf.len() > MAX iff the
+        // upstream was over the limit, buf.len() <= MAX means we
+        // got the whole tarball.
         let mut buf = Vec::with_capacity(4 * 1024 * 1024);
         let limit = MAX_TARBALL_BYTES as u64 + 1;
         resp.into_reader()
             .take(limit)
             .read_to_end(&mut buf)
             .map_err(|e| FetchError::NetworkError(e.to_string()))?;
-        if buf.len() > MAX_TARBALL_BYTES {
-            return Err(FetchError::NetworkError(format!(
-                "tarball from {url} exceeds {} MiB cap — refusing to parse",
-                MAX_TARBALL_BYTES / (1024 * 1024)
-            )));
-        }
+        enforce_tarball_size_cap(url, buf.len())?;
         if let Some(expected) = expected_sha256 {
             verify_digest(url, &buf, expected)?;
         }
@@ -911,6 +1017,21 @@ mod imp {
     ) {
         let builder = std::thread::Builder::new().name("atty-guard-atoms-refresh".into());
         let spawn_result = builder.spawn(move || loop {
+            // Re-read /etc/atty-guard/atoms.pins.toml every tick so
+            // an operator bumping pins doesn't need to restart the
+            // daemon to get a fresh fetch under the new pin. A
+            // newly-broken pin file (operator mid-edit) keeps the
+            // last-good cfg.pins — the cron is fail-safe rather
+            // than fail-closed for this auxiliary path.
+            let cfg = match load_pins(Path::new(DEFAULT_PIN_FILE)) {
+                Ok(pins) => FetcherConfig { pins, ..cfg.clone() },
+                Err(e) => {
+                    eprintln!(
+                        "atty-guard: pin reload failed (keeping last-known) — {e}"
+                    );
+                    cfg.clone()
+                }
+            };
             match fetch_all(&cfg, &sources) {
                 Ok(report) => {
                     eprintln!(
@@ -1238,36 +1359,39 @@ commit = "7382261ef936e35896ba70e7a6b833352ffb9a22"
 sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
 "#;
             std::fs::write(&path, body).unwrap();
-            let pins = load_pins(&path).unwrap().expect("file present → Some");
+            let pins = load_pins_with_owner(&path, current_uid())
+                .unwrap()
+                .expect("file present → Some");
             let g = pins.gtfobins.expect("gtfobins entry");
             assert_eq!(g.commit, "7382261ef936e35896ba70e7a6b833352ffb9a22");
             assert!(pins.sigma.is_none(), "missing entry = partial pin");
             assert_eq!(
                 g.tarball_url("GTFOBins/GTFOBins.github.io"),
-                "https://codeload.github.com/GTFOBins/GTFOBins.github.io/tar.gz/\
-                 7382261ef936e35896ba70e7a6b833352ffb9a22"
-                    .replace(' ', "")
+                "https://codeload.github.com/GTFOBins/GTFOBins.github.io/tar.gz/7382261ef936e35896ba70e7a6b833352ffb9a22"
             );
             std::fs::remove_dir_all(&dir).ok();
         }
 
         #[test]
         fn pin_file_rejects_short_commit_hash() {
+            // Bad commit, valid sha256 — proves the commit-length
+            // check fires independently. Operators who paste an
+            // abbreviated SHA need to learn this is a hard error.
             let dir = std::env::temp_dir()
                 .join(format!("atty-guard-pin-shortsha-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("atoms.pins.toml");
-            // 8-char abbreviated sha — must be rejected. Operators
-            // who paste an abbreviated SHA need to learn this is a
-            // hard error, not a silent acceptance.
             std::fs::write(
                 &path,
-                "[gtfobins]\ncommit = \"7382261e\"\nsha256 = \"31\"\n",
+                "[gtfobins]\ncommit = \"7382261e\"\nsha256 = \"3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca\"\n",
             )
             .unwrap();
-            match load_pins(&path) {
+            match load_pins_with_owner(&path, current_uid()) {
                 Err(FetchError::ParseError(s)) => {
-                    assert!(s.contains("40 hex"), "msg should hint at length: {s}");
+                    assert!(
+                        s.contains("commit") && s.contains("40 hex"),
+                        "msg should fault the commit specifically: {s}"
+                    );
                 }
                 other => panic!("expected ParseError, got {other:?}"),
             }
@@ -1286,7 +1410,33 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
                 "[gtfobins]\ncommit = \"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\nsha256 = \"3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca\"\n",
             )
             .unwrap();
-            assert!(matches!(load_pins(&path), Err(FetchError::ParseError(_))));
+            assert!(matches!(load_pins_with_owner(&path, current_uid()), Err(FetchError::ParseError(_))));
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn pin_file_rejects_short_sha256() {
+            // Valid commit, bad sha256 — independent of the commit
+            // check. Confirms BOTH validators fire, not just the
+            // first one in evaluation order.
+            let dir = std::env::temp_dir()
+                .join(format!("atty-guard-pin-shortsha256-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("atoms.pins.toml");
+            std::fs::write(
+                &path,
+                "[gtfobins]\ncommit = \"7382261ef936e35896ba70e7a6b833352ffb9a22\"\nsha256 = \"3121cb8f\"\n",
+            )
+            .unwrap();
+            match load_pins_with_owner(&path, current_uid()) {
+                Err(FetchError::ParseError(s)) => {
+                    assert!(
+                        s.contains("sha256") && s.contains("64 hex"),
+                        "msg should fault the sha256 specifically: {s}"
+                    );
+                }
+                other => panic!("expected ParseError, got {other:?}"),
+            }
             std::fs::remove_dir_all(&dir).ok();
         }
 
@@ -1297,7 +1447,7 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("atoms.pins.toml");
             std::fs::write(&path, "this is = not [ toml\n").unwrap();
-            assert!(matches!(load_pins(&path), Err(FetchError::ParseError(_))));
+            assert!(matches!(load_pins_with_owner(&path, current_uid()), Err(FetchError::ParseError(_))));
             std::fs::remove_dir_all(&dir).ok();
         }
 
@@ -1315,29 +1465,220 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
         }
 
         #[test]
-        fn atom_count_cap_keeps_last_good() {
-            // Synthesize a corpus larger than MAX_ATOMS_TOTAL via
-            // direct write_atoms — fetch_all's cap predates the
-            // network step. The contract is: if all_atoms.len() >
-            // MAX_ATOMS_TOTAL, fetch_all errors out BEFORE writing.
-            // We can't exercise that exactly without mocking the
-            // fetcher, but we can verify the constant + check that
-            // a "would write huge corpus" path returns ParseError.
-            // Since fetch_all needs sources to run, we instead test
-            // the cap indirectly: build a huge BTreeSet and check
-            // the threshold value is what the code uses.
-            assert_eq!(MAX_ATOMS_TOTAL, 10_000);
-            // The behavioral path is exercised by the wider
-            // fetch_all_with_zero_atoms_does_not_overwrite test —
-            // same posture (refuse to overwrite on error).
+        fn atom_count_cap_accepts_at_limit() {
+            // At-cap (== MAX_ATOMS_TOTAL) is fine — the check is strictly `>`.
+            // Operators with a legitimately large corpus shouldn't trip
+            // exactly-at-cap.
+            assert!(enforce_atom_count_cap(MAX_ATOMS_TOTAL).is_ok());
         }
 
         #[test]
-        fn tarball_size_cap_constant_is_sane() {
-            // Sanity: cap is above both upstream sizes (Sigma ~15
-            // MB, GTFOBins ~2 MB) with headroom but not unbounded.
+        fn atom_count_cap_rejects_over_limit() {
+            // Over-cap returns a ParseError that mentions both the
+            // count and the cap. This is the behaviour fetch_all relies
+            // on to skip the write_atoms call and keep last-good.
+            match enforce_atom_count_cap(MAX_ATOMS_TOTAL + 1) {
+                Err(FetchError::ParseError(msg)) => {
+                    assert!(msg.contains(&MAX_ATOMS_TOTAL.to_string()));
+                    assert!(msg.contains("refusing to overwrite"));
+                }
+                other => panic!("expected ParseError, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn tarball_size_cap_accepts_at_limit() {
+            assert!(enforce_tarball_size_cap("u", MAX_TARBALL_BYTES).is_ok());
+            assert!(enforce_tarball_size_cap("u", 0).is_ok());
+        }
+
+        #[test]
+        fn tarball_size_cap_rejects_over_limit() {
+            match enforce_tarball_size_cap("https://x/y", MAX_TARBALL_BYTES + 1) {
+                Err(FetchError::NetworkError(msg)) => {
+                    assert!(msg.contains("https://x/y"));
+                    assert!(msg.contains("32 MiB"));
+                }
+                other => panic!("expected NetworkError, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn fetch_all_caps_constants_are_within_documented_bounds() {
+            // Lightweight sanity: cap is above both upstream sizes
+            // (Sigma ~15 MB, GTFOBins ~2 MB) with headroom but not
+            // unbounded. Catches anyone bumping MAX_TARBALL_BYTES to
+            // a runaway value like usize::MAX.
             assert!(MAX_TARBALL_BYTES >= 16 * 1024 * 1024);
             assert!(MAX_TARBALL_BYTES <= 128 * 1024 * 1024);
+            assert_eq!(MAX_ATOMS_TOTAL, 10_000);
+        }
+
+        #[test]
+        fn pin_file_rejects_unknown_section() {
+            // Operator typo: `[gtfobin]` instead of `[gtfobins]`.
+            // Without `deny_unknown_fields`, serde parses this as
+            // `AtomPins{None,None}` and the source falls back to
+            // live tracking silently — defeating the whole point
+            // of opting in. The reject path is the security
+            // guarantee, not a nicety.
+            let dir = std::env::temp_dir().join(format!(
+                "atty-guard-pin-unknownsec-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("atoms.pins.toml");
+            let body = r#"
+[gtfobin]
+commit = "7382261ef936e35896ba70e7a6b833352ffb9a22"
+sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
+"#;
+            std::fs::write(&path, body).unwrap();
+            assert!(matches!(
+                load_pins_with_owner(&path, current_uid()),
+                Err(FetchError::ParseError(_))
+            ));
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn pin_file_rejects_unknown_key() {
+            // Operator typo: `comit` instead of `commit`. Same
+            // posture as the section-name test.
+            let dir = std::env::temp_dir().join(format!(
+                "atty-guard-pin-unknownkey-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("atoms.pins.toml");
+            let body = r#"
+[gtfobins]
+comit = "7382261ef936e35896ba70e7a6b833352ffb9a22"
+sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
+"#;
+            std::fs::write(&path, body).unwrap();
+            assert!(matches!(
+                load_pins_with_owner(&path, current_uid()),
+                Err(FetchError::ParseError(_))
+            ));
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn pin_file_rejects_empty() {
+            // Zero-byte file means "operator opted in with nothing".
+            // Without this check it parses to AtomPins{None,None}
+            // and silently disables pinning. Hard error matches the
+            // rest of the pin-file parse posture.
+            let dir = std::env::temp_dir()
+                .join(format!("atty-guard-pin-empty-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("atoms.pins.toml");
+            std::fs::write(&path, "").unwrap();
+            match load_pins_with_owner(&path, current_uid()) {
+                Err(FetchError::ParseError(msg)) => {
+                    assert!(msg.contains("empty"));
+                }
+                other => panic!("expected ParseError, got {other:?}"),
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn pin_file_rejects_whitespace_only() {
+            // Comments-only file (newlines + `# ...`) — operator
+            // pasted the example template but never uncommented a
+            // section. Without this check, all-comment TOML parses
+            // to AtomPins{None,None} which we treat as opt-out.
+            let dir = std::env::temp_dir().join(format!(
+                "atty-guard-pin-comments-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("atoms.pins.toml");
+            std::fs::write(&path, "   \n  \n\t\n").unwrap();
+            match load_pins_with_owner(&path, current_uid()) {
+                Err(FetchError::ParseError(msg)) => {
+                    assert!(msg.contains("empty"));
+                }
+                other => panic!("expected ParseError, got {other:?}"),
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn pin_file_rejects_perms_wrong_owner() {
+            // Pin file's contract is "root-owned only". Anything
+            // else means a local attacker (or a fat-finger
+            // `chown $user`) could swap pins to point at attacker-
+            // controlled commits. Refuse to load.
+            let dir = std::env::temp_dir().join(format!(
+                "atty-guard-pin-badowner-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("atoms.pins.toml");
+            // Valid content — only the owner check should fire.
+            std::fs::write(
+                &path,
+                "[gtfobins]\ncommit = \"7382261ef936e35896ba70e7a6b833352ffb9a22\"\nsha256 = \"3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca\"\n",
+            )
+            .unwrap();
+            // Pass an expected_uid that the file ISN'T owned by.
+            // current_uid()+1 is guaranteed not to match (and not
+            // be zero, so the message format is still meaningful).
+            let bad_uid = current_uid().wrapping_add(1);
+            match load_pins_with_owner(&path, bad_uid) {
+                Err(FetchError::ParseError(msg)) => {
+                    assert!(
+                        msg.contains("owner uid"),
+                        "msg should mention owner: {msg}"
+                    );
+                }
+                other => panic!("expected ParseError, got {other:?}"),
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn pin_file_rejects_world_writable() {
+            // 0666 means anyone on the box can edit pins. Trust
+            // model says "admin-managed via sudo only" — refuse.
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!(
+                "atty-guard-pin-worldwrite-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("atoms.pins.toml");
+            std::fs::write(
+                &path,
+                "[gtfobins]\ncommit = \"7382261ef936e35896ba70e7a6b833352ffb9a22\"\nsha256 = \"3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca\"\n",
+            )
+            .unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o666);
+            std::fs::set_permissions(&path, perms).unwrap();
+            match load_pins_with_owner(&path, current_uid()) {
+                Err(FetchError::ParseError(msg)) => {
+                    assert!(msg.contains("group/world write"));
+                }
+                other => panic!("expected ParseError, got {other:?}"),
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// Resolve the current EUID for tests — pin file perm
+        /// checks compare against this so a test running as a
+        /// regular user can still exercise the parse path. Prod
+        /// callers (`load_pins`) always pass 0.
+        fn current_uid() -> u32 {
+            unsafe {
+                extern "C" {
+                    fn geteuid() -> u32;
+                }
+                geteuid()
+            }
         }
     }
 }

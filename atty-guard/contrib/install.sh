@@ -164,9 +164,9 @@ echo "ensured $STATE_DIR (atty:atty 0750)"
 
 # Admin policy directory — operator-set commit pins for the atom
 # corpus live here. Owned root:root 0755 so admins write via sudo;
-# daemon reads via the systemd unit's bind-mount. Pin file itself
-# is absent by default — operators opt in by copying the example
-# and editing it.
+# daemon reads via ProtectSystem=strict's default /etc read-only
+# exposure (no bind-mount needed). Pin file itself absent by
+# default — operators opt in by copying the example and editing it.
 install -d -o root -g root -m 0755 "$CONFIG_DIR"
 echo "ensured $CONFIG_DIR (root:root 0755)"
 if [[ -f "$PINS_EXAMPLE_SRC" ]]; then

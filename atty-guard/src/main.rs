@@ -735,21 +735,32 @@ fn main() -> std::io::Result<()> {
 
     if let Some(iv) = interval {
         if cfg!(feature = "atoms-fetch") {
-            let cfg = match atom_fetcher::FetcherConfig::default_with_pins() {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("atty-guard: pin file rejected — atom refresh cron disabled — {e}");
-                    return Ok(());
+            // Pin-file rejection MUST NOT kill the daemon. The
+            // classifier (server::serve below) is the load-bearing
+            // service; atom refresh is an auxiliary cron. If the
+            // operator's `/etc/atty-guard/atoms.pins.toml` is
+            // malformed, log loudly and skip starting the refresh
+            // thread — but keep the classifier alive. systemd's
+            // Restart=on-failure would see exit(0) as success and
+            // not restart us, so a typo in /etc would brick the
+            // host's command classification entirely.
+            match atom_fetcher::FetcherConfig::default_with_pins() {
+                Ok(cfg) => {
+                    if cli.verbosity >= 1 {
+                        eprintln!(
+                            "atty-guard: atom refresh cron enabled — every {}s, sources={:?}",
+                            iv.as_secs(),
+                            sources
+                        );
+                    }
+                    atom_fetcher::spawn_periodic_refresh(cfg, sources, iv, trust_store.clone());
                 }
-            };
-            if cli.verbosity >= 1 {
-                eprintln!(
-                    "atty-guard: atom refresh cron enabled — every {}s, sources={:?}",
-                    iv.as_secs(),
-                    sources
-                );
+                Err(e) => {
+                    eprintln!(
+                        "atty-guard: pin file rejected — atom refresh cron disabled, classifier continues — {e}"
+                    );
+                }
             }
-            atom_fetcher::spawn_periodic_refresh(cfg, sources, iv, trust_store.clone());
         } else {
             // Without the feature, `spawn_periodic_refresh` is a
             // no-op. Loud warn so the operator knows their cron

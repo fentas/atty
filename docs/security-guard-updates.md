@@ -35,7 +35,7 @@ gh api /repos/<owner>/<repo>/commits/master --jq .sha
 curl -fsSL "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>" | sha256sum
 ```
 
-Paste both values into the pin file. The next cron tick (or `--update-atoms-now`) picks up the new pin. Malformed pin file is a HARD error — the daemon refuses to fall back to live tracking, since the operator opted in for a reason.
+Paste both values into the pin file. The next cron tick (or `--update-atoms-now`) picks up the new pin — `spawn_periodic_refresh` re-reads `atoms.pins.toml` every tick, so no daemon restart is needed for a pin bump. Malformed pin file is a HARD error: the operator opted in for a reason and silent fall-back to live tracking would defeat the point. If the pin file is malformed at startup with `--atoms-update-interval`, the cron thread is skipped but the classifier (UDS server) keeps running — the auxiliary refresh path can fail without taking the whole classifier down.
 
 A drift-detection follow-up will land soon: the daemon will probe upstream's `refs/heads/master` SHA per source, write the result to `/var/lib/atty-guard/atoms.drift.json`, and surface "N commits behind" warnings via `atty doctor` + journald. Until that ships, operators audit drift by hand.
 
