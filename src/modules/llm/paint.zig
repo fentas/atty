@@ -495,17 +495,42 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // full JSON parse — back-walk anchor math only
                 // needs a row-count estimate.
                 if (std.mem.indexOf(u8, c, "\"action\":\"done\"") != null) {
-                    // Estimate row count by walking the wrap
-                    // iterator over the WHOLE envelope content.
-                    // That's a slight over-estimate (the JSON
-                    // chrome inflates the row count by a row or
-                    // two), but it's safe: the back-walk
-                    // anchor stays accurate-or-conservative.
+                    // Estimate row count by walking the wrap iterator
+                    // over the WHOLE envelope content. Two corrections
+                    // applied so the estimate stays a safe upper bound
+                    // for what the render path actually emits:
+                    //
+                    //   1. The wrap iterator sees JSON escapes (`\n`)
+                    //      as two literal chars; the actual render
+                    //      parses the JSON value and feeds md_render
+                    //      which hard-breaks on `\n`. Each escaped
+                    //      newline in the source corresponds to AT
+                    //      LEAST one extra rendered row that the raw
+                    //      wrap count would miss. Adding `escapes_n`
+                    //      to the row total bounds this — over-counts
+                    //      slightly (the escape's 2 bytes are also
+                    //      counted in the wrap rows) but the
+                    //      direction is safe: the back-walk anchor
+                    //      reserves enough room for the newest turn
+                    //      rather than letting it get clipped.
+                    //   2. Min 1 row for empty content (matches the
+                    //      existing fallthrough at the bottom).
                     var it = pw.wrapIter(c, cols);
                     var rows: usize = 0;
                     while (it.next()) |_| {
                         rows += 1;
                         if (rows >= max_rows) break;
+                    }
+                    if (rows < max_rows) {
+                        var escapes_n: usize = 0;
+                        var i: usize = 0;
+                        while (i + 1 < c.len) : (i += 1) {
+                            if (c[i] == '\\' and c[i + 1] == 'n') {
+                                escapes_n += 1;
+                                i += 1; // skip past the `n`
+                            }
+                        }
+                        rows = @min(max_rows, rows + escapes_n);
                     }
                     return if (rows == 0) 1 else rows;
                 }
