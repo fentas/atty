@@ -30,6 +30,14 @@
 # `/var/lib/atty-guard/atoms.drift.json` after each tick and
 # `atty doctor` will surface a yellow warning when your pin is N
 # commits behind upstream. Until that lands, audit by hand.
+#
+# IMPORTANT: a file with no uncommented sections is treated as
+# "operator opted in with nothing" and rejected as a hard error.
+# Either uncomment at least one [gtfobins] / [sigma] block below
+# or rm the file to opt out of pinning entirely. Unknown sections
+# or unknown keys (typo'd `[gtfobin]` or `comit = ...`) are also
+# hard errors — the daemon won't silently fall back to live
+# tracking when you've asked for a pin.
 
 # Example (uncomment and update with real values):
 

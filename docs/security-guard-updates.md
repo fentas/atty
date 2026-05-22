@@ -37,6 +37,8 @@ curl -fsSL "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>" | sha256sum
 
 Paste both values into the pin file. The next cron tick (or `--update-atoms-now`) picks up the new pin — `spawn_periodic_refresh` re-reads `atoms.pins.toml` every tick, so no daemon restart is needed for a pin bump. Malformed pin file is a HARD error: the operator opted in for a reason and silent fall-back to live tracking would defeat the point. If the pin file is malformed at startup with `--atoms-update-interval`, the cron thread is skipped but the classifier (UDS server) keeps running — the auxiliary refresh path can fail without taking the whole classifier down.
 
+Pin-state transitions during the daemon's lifetime (operator removes or re-creates the pin file mid-life) are logged to journald as one-line breadcrumbs: `pin file removed — switching to live tracking` or `pin file detected — switching to pinned-commit tracking`. Removal is treated as an explicit opt-out per the documented "remove the file to opt out" guidance — the daemon respects it but logs the transition so an accidental `rm` is recoverable from the log.
+
 A drift-detection follow-up will land soon: the daemon will probe upstream's `refs/heads/master` SHA per source, write the result to `/var/lib/atty-guard/atoms.drift.json`, and surface "N commits behind" warnings via `atty doctor` + journald. Until that ships, operators audit drift by hand.
 
 ## Original signed-bundle design (NOT shipped)

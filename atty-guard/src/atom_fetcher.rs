@@ -265,6 +265,13 @@ pub fn load_pins_with_owner(path: &Path, expected_uid: u32) -> Result<Option<Ato
             )))
         }
     };
+    if !meta.is_file() {
+        return Err(FetchError::ParseError(format!(
+            "pin file {} is not a regular file (directory, socket, or fifo \
+             at this path is almost certainly a misconfiguration)",
+            path.display(),
+        )));
+    }
     check_pin_file_perms(path, &meta, expected_uid)?;
     let bytes = std::fs::read(path).map_err(|e| {
         FetchError::ParseError(format!("read {}: {}", path.display(), e))
@@ -1016,15 +1023,37 @@ mod imp {
         trust_store: std::sync::Arc<crate::trust_store::TrustStore>,
     ) {
         let builder = std::thread::Builder::new().name("atty-guard-atoms-refresh".into());
+        // Track whether the previous tick had pins loaded so we can
+        // emit a one-time transition log when the operator removes
+        // or re-creates the pin file mid-life. Without this the
+        // ENOENT path silently downgrades pinned → live tracking
+        // and operators get no journald breadcrumb.
+        let mut had_pins = cfg.pins.is_some();
         let spawn_result = builder.spawn(move || loop {
             // Re-read /etc/atty-guard/atoms.pins.toml every tick so
             // an operator bumping pins doesn't need to restart the
             // daemon to get a fresh fetch under the new pin. A
             // newly-broken pin file (operator mid-edit) keeps the
             // last-good cfg.pins — the cron is fail-safe rather
-            // than fail-closed for this auxiliary path.
+            // than fail-closed for this auxiliary path. An ENOENT
+            // (operator removed the file) is treated as a state
+            // transition to live tracking, but we log it so the
+            // operator sees the downgrade in journald.
             let cfg = match load_pins(Path::new(DEFAULT_PIN_FILE)) {
-                Ok(pins) => FetcherConfig { pins, ..cfg.clone() },
+                Ok(pins) => {
+                    let now_pinned = pins.is_some();
+                    if had_pins && !now_pinned {
+                        eprintln!(
+                            "atty-guard: pin file removed — switching to live tracking (refs/heads/master). Restore /etc/atty-guard/atoms.pins.toml if this was unintentional."
+                        );
+                    } else if !had_pins && now_pinned {
+                        eprintln!(
+                            "atty-guard: pin file detected — switching to pinned-commit tracking."
+                        );
+                    }
+                    had_pins = now_pinned;
+                    FetcherConfig { pins, ..cfg.clone() }
+                }
                 Err(e) => {
                     eprintln!(
                         "atty-guard: pin reload failed (keeping last-known) — {e}"
@@ -1543,8 +1572,14 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
 
         #[test]
         fn pin_file_rejects_unknown_key() {
-            // Operator typo: `comit` instead of `commit`. Same
-            // posture as the section-name test.
+            // Operator added an unrecognised key (`branch = ...`)
+            // alongside valid commit + sha256. Without
+            // `#[serde(deny_unknown_fields)]` this would parse
+            // successfully (extra fields silently ignored) and the
+            // operator's expectation (e.g. "I want master branch")
+            // would be silently violated. We keep BOTH required
+            // fields valid so the test fails for the right reason
+            // — the `branch` key — not because `commit` was missing.
             let dir = std::env::temp_dir().join(format!(
                 "atty-guard-pin-unknownkey-{}",
                 std::process::id()
@@ -1553,14 +1588,20 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
             let path = dir.join("atoms.pins.toml");
             let body = r#"
 [gtfobins]
-comit = "7382261ef936e35896ba70e7a6b833352ffb9a22"
+commit = "7382261ef936e35896ba70e7a6b833352ffb9a22"
 sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
+branch = "main"
 "#;
             std::fs::write(&path, body).unwrap();
-            assert!(matches!(
-                load_pins_with_owner(&path, current_uid()),
-                Err(FetchError::ParseError(_))
-            ));
+            match load_pins_with_owner(&path, current_uid()) {
+                Err(FetchError::ParseError(msg)) => {
+                    assert!(
+                        msg.contains("branch") || msg.contains("unknown"),
+                        "error should fault the unknown key, not the parse generically: {msg}"
+                    );
+                }
+                other => panic!("expected ParseError, got {other:?}"),
+            }
             std::fs::remove_dir_all(&dir).ok();
         }
 
