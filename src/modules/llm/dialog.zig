@@ -1062,6 +1062,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         const fit = truncateAtUtf8Boundary(line, max_line_bytes);
                         if (first) {
                             w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{fit}) catch {};
+                            // Inert today (we `break` next), but
+                            // keeping the flag honest defends
+                            // against future refactors that
+                            // un-break this path.
+                            first = false;
                         } else {
                             w.print("\x1B[2m\u{2502}\x1B[0m   {s}\r\n", .{fit}) catch {};
                         }
@@ -1342,13 +1347,13 @@ test "Module.captureConclusion: 1500-char single-paragraph reason fits without t
     var rt: FakeRuntime = .{};
     var reason_buf: [1500]u8 = undefined;
     @memset(&reason_buf, 'x');
-    M.captureConclusion(&rt, &reason_buf, 0, 0, 1);
+    M.captureConclusion(&rt, reason_buf[0..], 0, 0, 1);
     const out = rt.conclusion_buf[0..rt.conclusion_len];
 
     // Truncation marker must NOT appear — the budget should not trip.
     try testing.expect(std.mem.indexOf(u8, out, "truncated") == null);
     // The full 1500-char content must appear contiguously.
-    try testing.expect(std.mem.indexOf(u8, out, &reason_buf) != null);
+    try testing.expect(std.mem.indexOf(u8, out, reason_buf[0..]) != null);
     // Footer (counts + bottom border) must emit. The bottom border
     // glyph `╰` (UTF-8 e2 95 b0) survives even when prose is long.
     try testing.expect(std.mem.indexOf(u8, out, "\u{2570}") != null);
@@ -1395,7 +1400,7 @@ test "Module.captureConclusion: overflow past 8 KiB emits truncation marker AND 
     var rt: FakeRuntime = .{};
     var reason_buf: [12 * 1024]u8 = undefined;
     @memset(&reason_buf, 'x');
-    M.captureConclusion(&rt, &reason_buf, 7, 4, 3);
+    M.captureConclusion(&rt, reason_buf[0..], 7, 4, 3);
     const out = rt.conclusion_buf[0..rt.conclusion_len];
 
     // Truncation marker must appear, naming the buffer budget so
