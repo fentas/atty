@@ -720,6 +720,48 @@ pub fn configure(comptime cfg: Config) type {
             /// Cleared after the banner emits.
             conclusion_pending: bool = false,
 
+            // ── Chat-mode question UX (#214) ────────────────────
+            //
+            // When the LLM emits an `action=question` envelope
+            // while the chat panel or overlay is open, render
+            // a pick-list with arrow-key navigation. Up/Down
+            // walks the choices + a permanent free-text input
+            // row at the bottom (last in the list). Enter sends
+            // the highlighted choice (or the typed text if the
+            // free-text row is focused). Esc clears the UI and
+            // returns to plain free-typing.
+            //
+            // Semantics:
+            //   selected_idx in 0 .. choice_count-1  → choice
+            //   selected_idx == choice_count         → free-text row
+            //
+            // The free-text row uses the existing chat_input_buf
+            // — no separate input state.
+
+            /// True while a chat-mode `question` is awaiting a
+            /// pick or free-text answer. Set by the action=question
+            /// handler when chat_inline_open OR chat_overlay_open
+            /// is true at the time the envelope arrives. Cleared
+            /// on answer (Enter on choice or free-text), on Esc,
+            /// or on dialogReset (new dialog supersedes the
+            /// question).
+            chat_question_active: bool = false,
+            /// Number of choices the LLM offered. Snapshot of
+            /// `question_choices_count` at the time the question
+            /// became active in the chat panel — kept here so
+            /// the paint + input dispatch don't have to recheck
+            /// the parser state.
+            chat_question_choice_count: u8 = 0,
+            /// Currently-highlighted row. `0 .. choice_count-1`
+            /// = a choice; `choice_count` = the free-text input
+            /// row (last in the list).
+            chat_question_selected_idx: u8 = 0,
+            /// Which turn carries the active question. Tracked
+            /// so a later `pushTurn` (e.g. an observation pushed
+            /// after the user picked) doesn't re-activate the
+            /// question UI on a stale turn.
+            chat_question_turn_idx: usize = 0,
+
             // ── Chat overlay (phase 2a — Alt+Shift+C) ───────────
             //
             // Persistent alt-screen overlay showing the LLM

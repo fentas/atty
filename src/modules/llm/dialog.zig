@@ -1131,6 +1131,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.pending_description_len = 0;
             rt.dialog_parse_retry_count = 0;
             rt.question_choices_count = 0;
+            // Chat-mode question pick-list state (#214) clears too —
+            // a fresh dialog supersedes any pending question UI.
+            rt.chat_question_active = false;
+            rt.chat_question_choice_count = 0;
+            rt.chat_question_selected_idx = 0;
             // Disarm the conclusion auto-emit latch — but keep the
             // captured `conclusion_formatted` so `Alt+Shift+C` can
             // still recall the LAST completed session even if this

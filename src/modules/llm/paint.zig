@@ -121,7 +121,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const size = Pty.querySize(std.posix.STDOUT_FILENO) catch
                 pty_mod.WinSize{ .rows = 24, .cols = 80, .xpixel = 0, .ypixel = 0 };
             const rows: u16 = if (size.rows > 4) size.rows else 4;
-            const content_bottom: u16 = rows - 2;
+            // Chat-mode question pick-list (#214) — when active,
+            // reserve `choice_count` rows above the input row for
+            // the choice list. The scroll region shrinks
+            // accordingly so turn content can't scroll into the
+            // choice list area.
+            const question_rows: u16 = if (rt.chat_question_active) @intCast(rt.chat_question_choice_count) else 0;
+            const content_bottom: u16 = if (rows > 2 + question_rows) rows - 2 - question_rows else 1;
             // `size.cols` available but unused — wrap calculations
             // are a future follow-up (codepoint-level turn rendering
             // instead of relying on the terminal's auto-wrap inside
@@ -200,8 +206,51 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Each absolute-positioned + line-cleared so any
             // pre-existing terminal state on those rows can't
             // bleed through.
+            // Chat-mode question pick-list (#214). Renders the
+            // choice list in the rows reserved above the input row.
+            // Selected choice gets reverse video + `▶ ` arrow;
+            // others get dim `  ` prefix. Free-text row (selected
+            // when selected_idx == choice_count) inherits the
+            // reverse-video block-cursor styling on the input row
+            // below — already handled by the existing input-paint
+            // code.
+            if (rt.chat_question_active and rt.chat_question_choice_count > 0) {
+                const sel = rt.chat_question_selected_idx;
+                const cc: u8 = rt.chat_question_choice_count;
+                const first_choice_row: u16 = rows - 1 - cc;
+                var i: u8 = 0;
+                while (i < cc) : (i += 1) {
+                    const row_y: u16 = first_choice_row + i;
+                    w.print("\x1B[{d};1H\x1B[2K", .{row_y}) catch return false;
+                    const is_sel = (sel == i);
+                    if (is_sel) {
+                        w.writeAll("\x1B[22;38;5;141m\u{25B6}\x1B[0m ") catch return false; // ▶ mauve
+                    } else {
+                        w.writeAll("  ") catch return false;
+                    }
+                    const choice_slice = rt.question_choices_storage[i][0..rt.question_choices_lens[i]];
+                    if (is_sel) w.writeAll("\x1B[1m") catch return false; // bold selected
+                    var num_buf: [8]u8 = undefined;
+                    const num_str = std.fmt.bufPrint(&num_buf, "{d}. ", .{i + 1}) catch unreachable;
+                    w.writeAll("\x1B[22;1;38;5;14m") catch return false;
+                    w.writeAll(num_str) catch return false;
+                    w.writeAll("\x1B[0m") catch return false;
+                    if (is_sel) w.writeAll("\x1B[1m") catch return false;
+                    writeSanitized(w, choice_slice) catch return false;
+                    if (is_sel) w.writeAll("\x1B[0m") catch return false;
+                }
+            }
+
             w.print("\x1B[{d};1H\x1B[2K", .{rows - 1}) catch return false;
-            w.writeAll("\x1B[22;1;38;5;14m\u{276F}\x1B[0m ") catch return false;
+            // Free-text row marker when it's the selected option in
+            // the question pick-list — mauve `▶` instead of cyan `❯`.
+            const free_text_selected = rt.chat_question_active and
+                rt.chat_question_selected_idx == rt.chat_question_choice_count;
+            if (free_text_selected) {
+                w.writeAll("\x1B[22;1;38;5;141m\u{25B6}\x1B[0m ") catch return false;
+            } else {
+                w.writeAll("\x1B[22;1;38;5;14m\u{276F}\x1B[0m ") catch return false;
+            }
             // Center the cursor in a 512-byte window so long
             // prompts still show what's under the cursor instead
             // of dragging the tail off-screen.
