@@ -674,7 +674,25 @@ pub fn configure(comptime cfg: Config) type {
             // of a missed kernel-side mark is "no kernel
             // enforcement this time", which is the V2-A
             // fallback semantics anyway.
-            rt.daemon.?.setThreatLevel(pid, lvl) catch {};
+            //
+            // DaemonError specifically means the daemon SAID NO
+            // (auth gate rejected, sandbox blocked /proc, rate
+            // limit, etc.) — pre-fix the four mutation RPCs
+            // swallowed the daemon's error envelope, so a
+            // broken auth path looked like success while the
+            // kernel map silently never updated. Log to stderr
+            // so the failure surfaces during dev/debug runs and
+            // in systemd journal capture; no in-band UI for
+            // now since security_guard has no error-latch
+            // channel and aborting the proxy on every daemon
+            // hiccup would be worse than the silent failure.
+            rt.daemon.?.setThreatLevel(pid, lvl) catch |err| switch (err) {
+                error.DaemonError => {
+                    const msg = "atty: daemon rejected setThreatLevel — kernel enforcement may be inactive\n";
+                    _ = std.c.write(2, msg, msg.len);
+                },
+                else => {},
+            };
         }
 
         /// Statusbar segment — emits a brief threat-level icon

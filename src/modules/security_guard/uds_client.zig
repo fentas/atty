@@ -190,15 +190,41 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
+        try self.readMutationResponse();
+    }
+
+    /// Parse the daemon's `{"type":"ok"}` vs
+    /// `{"type":"error","message":...}` response envelope for
+    /// mutation RPCs. Pre-fix the four mutation RPCs
+    /// (setThreatLevel, sessionAddTrust, trustAdd,
+    /// sessionAddUrlBlock) read the line and silently treated
+    /// any well-formed response as success — daemon rejections
+    /// (rate limit, auth, malformed input, sandbox /proc blocked)
+    /// all landed atty-side as "success". `classifyOrErr` always
+    /// parsed; the mutation paths now match.
+    fn readMutationResponse(self: *Client) Error!void {
         const line_len = self.readLine() catch {
             self.close();
             return Error.Unavailable;
         };
-        // We don't parse the body — daemon returns `{"type":"ok"}`
-        // on success. Any well-formed line is treated as success
-        // here; the in-proc fallback handles cases where the daemon
-        // closed mid-write.
-        _ = line_len;
+        return parseMutationResponse(self.read_buf[0..line_len]);
+    }
+
+    /// Pure-function variant of `readMutationResponse`'s parse —
+    /// split out so tests can exercise the envelope handling
+    /// without spinning up a real socket. Treats:
+    ///   - `"type":"ok"`    → success (no-op return)
+    ///   - `"type":"error"` → `Error.DaemonError`
+    ///   - other shapes     → `Error.DaemonError` (daemon should
+    ///                        emit one of those two; anything
+    ///                        else is a protocol violation).
+    pub fn parseMutationResponse(body: []const u8) Error!void {
+        if (std.mem.indexOf(u8, body, "\"type\":\"error\"") != null) {
+            return Error.DaemonError;
+        }
+        if (std.mem.indexOf(u8, body, "\"type\":\"ok\"") == null) {
+            return Error.DaemonError;
+        }
     }
 
     pub const ThreatLevel = enum { low, high, critical };
@@ -222,10 +248,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        _ = self.readLine() catch {
-            self.close();
-            return Error.Unavailable;
-        };
+        try self.readMutationResponse();
     }
 
     /// Canonical persistence path for `[t]rust permanently`.
@@ -255,10 +278,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        _ = self.readLine() catch {
-            self.close();
-            return Error.Unavailable;
-        };
+        try self.readMutationResponse();
     }
 
     /// Fetch the caller's persistent trust hashes from the daemon
@@ -332,10 +352,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        _ = self.readLine() catch {
-            self.close();
-            return Error.Unavailable;
-        };
+        try self.readMutationResponse();
     }
 
     /// RFC 8259 minimal JSON-string escaper: `"`, `\`, control
