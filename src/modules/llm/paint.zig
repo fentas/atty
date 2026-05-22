@@ -362,11 +362,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                 },
                 .done => {
+                    // Reason is free-form prose, often multi-paragraph
+                    // (the LLM's actual answer to the user's question).
+                    // Unlike `exec.command` or `question.text` where a
+                    // tight col cap defends against runaway sizes, the
+                    // done reason WANTS to wrap across many rows — the
+                    // overlay has the full DECSTBM region to scroll
+                    // within. Render unsanitized-but-write-sanitized so
+                    // the terminal handles wrap naturally. Caps that
+                    // were copy-pasted from the exec branch were
+                    // cutting 600-word LLM responses at ~480 chars
+                    // with a `[…]` marker — exactly what the user
+                    // can't tolerate.
                     const r = parsed.reason();
-                    const rslice = pw.truncateToCols(r, overlay_field_cap);
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m ");
-                    try writeSanitized(w, rslice);
-                    if (rslice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    try writeSanitized(w, r);
                 },
             }
         }
@@ -442,11 +452,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (slice.len < q.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .done => {
-                    const r = parsed.reason();
+                    // Reason is free-form prose. Pre-fix shape capped
+                    // at `max_visible` cols → a 600-word LLM reply
+                    // got clipped to one row's worth (~74 chars on an
+                    // 80-col terminal). Inline panel has rows to
+                    // spare; render via the markdown-aware wrap path
+                    // so multi-paragraph reasons span multiple rows.
+                    // Same `\u{2026}` overflow marker, but applied
+                    // per-row by md_render when content exceeds
+                    // `max_rows`, not per-byte.
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m "); // mauve check
-                    const slice = pw.truncateToCols(r, max_visible);
-                    try writeSanitized(w, slice);
-                    if (slice.len < r.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    const r = parsed.reason();
+                    // The `✓ ` prefix took 2 visible cols on the first
+                    // row; subsequent wrap rows have the full
+                    // `max_visible` budget. md_render handles per-row
+                    // wrap + the `[…]` overflow marker only when
+                    // content actually exceeds max_rows.
+                    return md_render.render(w, r, max_visible, max_rows, &writeSanitized);
                 },
             }
             return 1;
@@ -465,7 +487,30 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 c.len > 2 and
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
-            if (looks_like_envelope) return 1;
+            if (looks_like_envelope) {
+                // `done` envelopes' free-prose reason renders via
+                // md_render and can span many rows; exec + question
+                // still take exactly one row (compact summary).
+                // Cheap shape-check via substring rather than a
+                // full JSON parse — back-walk anchor math only
+                // needs a row-count estimate.
+                if (std.mem.indexOf(u8, c, "\"action\":\"done\"") != null) {
+                    // Estimate row count by walking the wrap
+                    // iterator over the WHOLE envelope content.
+                    // That's a slight over-estimate (the JSON
+                    // chrome inflates the row count by a row or
+                    // two), but it's safe: the back-walk
+                    // anchor stays accurate-or-conservative.
+                    var it = pw.wrapIter(c, cols);
+                    var rows: usize = 0;
+                    while (it.next()) |_| {
+                        rows += 1;
+                        if (rows >= max_rows) break;
+                    }
+                    return if (rows == 0) 1 else rows;
+                }
+                return 1;
+            }
             if (c.len == 0) return 1;
             var it = pw.wrapIter(c, cols);
             var rows: usize = 0;

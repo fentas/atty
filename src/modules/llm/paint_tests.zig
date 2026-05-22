@@ -1542,3 +1542,154 @@ test "inline chat chrome: progressive trailing-hint shrinks on narrow terminal" 
     // Divider trailing hint still has the structural shortcuts.
     try testing.expect(std.mem.indexOf(u8, painted.?, "Alt+C") != null);
 }
+
+test "inline chat: long done-action reason renders in full, not capped at one row's cols" {
+    // Regression for user bug after #212 landed — a `done`-action
+    // envelope with a multi-paragraph reason was getting clipped
+    // at `max_inline_visible` cols (~74 for 80-col terminal) by
+    // `truncateToCols(r, max_visible)` in `renderTurnContent`'s
+    // .done arm. The cap was designed for short exec commands
+    // (where 74 cols of cmd is plenty) but is far too tight for
+    // a long-form LLM reply — the user's 520-word essay cut at
+    // ~700 chars with NO truncation marker (because the inline
+    // path's marker is appended but the user's terminal is
+    // small enough the cut happens before any marker would show
+    // anyway).
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+
+    // 800-char done reason — well past the ~74-col inline cap.
+    // Mid-text sentinel proves the WHOLE reason rendered. End-of-
+    // text sentinel locks down the final chars. Single line (no
+    // \n) is the worst case for column-truncation.
+    const long_reason =
+        "The terminal has always been more than a utility - it is a philosophy made manifest. " ++
+        "In the early days of computing, the interface between human and machine was purely textual: " ++
+        "a blinking cursor, a prompt, MID-SENTINEL a conversation conducted in commands. " ++
+        "There is a particular pleasure in software that knows exactly what it is. " ++
+        "Not the sprawling framework that promises to solve every problem if you only learn its idioms " ++
+        "deeply enough, but the small tool, the one that does one thing and refuses to do anything else. END-SENTINEL";
+    var envelope_buf: [2048]u8 = undefined;
+    const envelope = try std.fmt.bufPrint(
+        &envelope_buf,
+        "{{\"action\":\"done\",\"reason\":\"{s}\"}}",
+        .{long_reason},
+    );
+
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
+    defer helpers.freeTurns(&rt);
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    // Both sentinels must appear — the cap that clipped at ~74
+    // cols would drop MID-SENTINEL too. The whole reason wraps
+    // across multiple rows; the terminal handles wrap naturally.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "MID-SENTINEL") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, "END-SENTINEL") != null);
+    // The dim "[…]" truncation marker MUST NOT appear — that
+    // would mean truncateToCols clipped the content.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "\u{2026}]") == null);
+}
+
+test "chat overlay: long done-action reason renders in full, not capped at 480 cols" {
+    // Sibling test for the overlay path. `renderOverlayTurnContent`
+    // capped done reasons at `overlay_field_cap = 480` cols. 480
+    // is much wider than the inline cap but still hits realistic
+    // LLM reply lengths (a 600-word reply is ~3500 chars).
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 40,
+        .terminal_cols = 100,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+
+    // 1500-char reason — well past 480-col overlay cap. Sentinels
+    // span the front, middle, and tail so any clip is detected.
+    var long_buf: [1500]u8 = undefined;
+    @memset(&long_buf, 'x');
+    const front_marker = "FRONT-SENTINEL";
+    const mid_marker = "MIDDLE-SENTINEL";
+    const tail_marker = "TAIL-SENTINEL";
+    std.mem.copyForwards(u8, long_buf[0..front_marker.len], front_marker);
+    std.mem.copyForwards(u8, long_buf[700..(700 + mid_marker.len)], mid_marker);
+    std.mem.copyForwards(u8, long_buf[(long_buf.len - tail_marker.len)..], tail_marker);
+
+    var envelope_buf: [2048]u8 = undefined;
+    const envelope = try std.fmt.bufPrint(
+        &envelope_buf,
+        "{{\"action\":\"done\",\"reason\":\"{s}\"}}",
+        .{long_buf[0..]},
+    );
+
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
+    defer helpers.freeTurns(&rt);
+
+    // Open the chat overlay (Alt+Shift+C). Paint via provideTermBytes.
+    _ = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    // All three sentinels must appear in the rendered overlay.
+    try testing.expect(std.mem.indexOf(u8, painted.?, front_marker) != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, mid_marker) != null);
+    try testing.expect(std.mem.indexOf(u8, painted.?, tail_marker) != null);
+    // Truncation marker must NOT appear.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "\u{2026}]") == null);
+}

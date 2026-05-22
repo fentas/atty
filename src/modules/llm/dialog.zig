@@ -113,7 +113,16 @@ pub fn Response(comptime max_response_bytes: comptime_int) type {
         command_len: usize = 0,
         description_buf: [256]u8 = undefined,
         description_len: usize = 0,
-        reason_buf: [256]u8 = undefined,
+        /// Sized like `command_buf` because a `done`-action reason
+        /// is the LLM's actual answer text — often multi-paragraph
+        /// prose (essays, code generations, long explanations) that
+        /// has the same upper bound as the body of an `exec`
+        /// command. The previous 256-byte cap was inherited from
+        /// `description_buf` where it makes sense (description is
+        /// a short accompanying note) but is wrong here. Realistic
+        /// LLM replies > 256 bytes were silently truncated at
+        /// parse time with no marker.
+        reason_buf: [max_response_bytes]u8 = undefined,
         reason_len: usize = 0,
         /// `action=question` payload — the prompt text. Surfaced
         /// in the hint row; the user's free-form answer at the
@@ -569,7 +578,10 @@ test "Response factory: sizes follow the comptime param" {
     try testing.expectEqual(@as(usize, 4096), r.command_buf.len);
     try testing.expectEqual(@as(usize, 4096), r.question_buf.len);
     try testing.expectEqual(@as(usize, 256), r.description_buf.len);
-    try testing.expectEqual(@as(usize, 256), r.reason_buf.len);
+    // reason_buf follows the comptime param — the LLM's done-
+    // action answer can be multi-paragraph prose, sized like
+    // command_buf rather than the short description_buf.
+    try testing.expectEqual(@as(usize, 4096), r.reason_buf.len);
     // Default action — `done` is the safe default (stops the
     // dialog loop) if a caller forgets to overwrite.
     try testing.expectEqual(Action.done, r.action);
