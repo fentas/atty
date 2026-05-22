@@ -408,16 +408,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Parse with the dialog parser so any "open_chat as
             // separate object" or trailing-prose drift falls back
             // to the raw render (which at least surfaces what the
-            // model emitted instead of vanishing). Allocator: a
-            // local fixed-buffer stream avoids touching the
-            // dialog allocator from a paint hook.
+            // model emitted instead of vanishing).
             const R = dialog.Response(cfg.max_response_bytes);
             var parsed: R = .{};
             // `parseResponse` needs an allocator — the JSON parser
-            // walks the tree once. The paint hook doesn't have a
-            // long-lived allocator handy; use a heap fallback for
-            // the typical small envelope. On any parse error,
-            // fall through to raw rendering.
+            // walks the tree once. Use a page-allocator-backed
+            // arena deinit'd at function exit. The arena is cheap
+            // (one mmap per page; freed in one syscall on deinit)
+            // and parse failure cleans up via the same path. On
+            // any parse error, fall through to raw rendering.
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
