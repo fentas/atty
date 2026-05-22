@@ -901,4 +901,35 @@ mod tests {
         drop(_lock);
         let _ = std::fs::remove_file(&lock_path);
     }
+
+    #[test]
+    fn service_unit_does_not_set_protect_proc_invisible() {
+        // Regression test for the second review's finding 012:
+        // `ProtectProc=invisible` mount-namespaces other UIDs'
+        // /proc entries out of the daemon's view, which makes
+        // the `/proc`-based `set_threat_level` auth gate
+        // (shipped by PR #188) silently reject every cross-UID
+        // request. Unit tests pass either way because they run
+        // outside the sandbox; the only mechanical guard is to
+        // pin the service file's contract here. If a future
+        // contributor re-adds the directive without realizing
+        // it breaks auth in production, this test fails.
+        let service =
+            std::fs::read_to_string("contrib/atty-guard.service").expect("read service file");
+        // Walk lines so a commented-out occurrence doesn't false-positive.
+        for line in service.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            assert!(
+                !trimmed.eq_ignore_ascii_case("ProtectProc=invisible"),
+                "atty-guard.service must NOT set ProtectProc=invisible — \
+                 it hides other UIDs' /proc entries from the `atty`-user \
+                 daemon and breaks the set_threat_level auth gate. \
+                 If you need to re-add directory hardening, prefer a \
+                 pidfd-based ownership check (kernel >= 6.9) instead."
+            );
+        }
+    }
 }

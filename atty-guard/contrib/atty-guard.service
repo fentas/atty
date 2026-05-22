@@ -54,7 +54,27 @@ ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectClock=yes
 ProtectHostname=yes
-ProtectProc=invisible
+# Intentionally NOT setting ProtectProc=invisible. The
+# `set_threat_level` authorization gate in `server.rs` reads
+# `/proc/<pid>/stat` + `/proc/<pid>/status` to verify the
+# caller's UID owns the target PID (the auth check shipped in
+# the #187 finding 011 fix). The daemon runs as the `atty`
+# system user, but the PIDs it needs to read belong to
+# regular users' shells — `ProtectProc=invisible` under a
+# non-root daemon mount-namespaces those /proc entries out of
+# view, so the auth gate would reject every cross-UID
+# request with `cannot read /proc/<pid>/status` and the
+# threat map / eBPF map never updates. The rest of the
+# sandbox (PrivateTmp, PrivateDevices, ProtectSystem=strict,
+# RestrictAddressFamilies, etc.) stays intact — only the
+# /proc visibility restriction was incompatible with the
+# auth path's design.
+#
+# Re-hardening path (deferred): on kernel >= 6.9, `pidfd_open()`
+# + `fstat()` on the resulting pidfd returns the owner UID via
+# `st_uid` — that sidesteps /proc entirely and would let us
+# re-add ProtectProc=invisible without breaking auth. Tracked
+# as a follow-up; not blocking this fix.
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallFilter=@system-service
