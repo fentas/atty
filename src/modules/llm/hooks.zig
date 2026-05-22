@@ -84,8 +84,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             delete_forward,
             move_left,
             move_right,
+            move_up, // chat-mode question pick-list (#214)
+            move_down,
             move_home,
             move_end,
+            escape, // chat-mode question cancel (#214)
             kill_to_start,
             kill_to_end,
             kill_word_back,
@@ -108,11 +111,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         fn parseChatKey(input: []const u8, i: *usize) ChatKey {
             const b = input[i.*];
             // Incomplete escape tail (chunk ends with `ESC`, `ESC [`,
-            // or `ESC O`). Drain to chunk end so the partial bytes
-            // don't get reparsed as printables on the next pass.
+            // or `ESC O`). Treat as a standalone Esc keystroke when
+            // the chat-mode question UI consumer wants to react to
+            // it; the partial-CSI risk is small because terminals
+            // emit cursor-key sequences atomically. Caller can
+            // discriminate by checking remaining input.len.
             if (b == 0x1B and i.* + 1 >= input.len) {
                 i.* = input.len;
-                return .none;
+                return .escape;
             }
             if (b == 0x1B and (input[i.* + 1] == '[' or input[i.* + 1] == 'O') and i.* + 2 >= input.len) {
                 i.* = input.len;
@@ -130,6 +136,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 return switch (c) {
                     'D' => .move_left,
                     'C' => .move_right,
+                    'A' => .move_up,
+                    'B' => .move_down,
                     'H' => .move_home,
                     'F' => .move_end,
                     else => .none,
@@ -365,6 +373,78 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 var i: usize = 0;
                 while (i < input.len) {
                     const key = parseChatKey(input, &i);
+                    // Chat-mode question pick-list (#214) intercept.
+                    // Up/Down navigate the choices + free-text row.
+                    // Enter on a choice submits the choice text;
+                    // Enter on the free-text row falls through to
+                    // the normal `.enter` arm below. Esc cancels
+                    // the pick-list (lets the user free-type).
+                    if (rt.chat_question_active and rt.chat_question_choice_count > 0) {
+                        switch (key) {
+                            .move_up => {
+                                if (rt.chat_question_selected_idx > 0) {
+                                    rt.chat_question_selected_idx -= 1;
+                                    rt.chat_inline_paint_pending = true;
+                                }
+                                continue;
+                            },
+                            .move_down => {
+                                if (rt.chat_question_selected_idx < rt.chat_question_choice_count) {
+                                    rt.chat_question_selected_idx += 1;
+                                    rt.chat_inline_paint_pending = true;
+                                }
+                                continue;
+                            },
+                            .escape => {
+                                rt.chat_question_active = false;
+                                rt.chat_inline_paint_pending = true;
+                                continue;
+                            },
+                            .enter => {
+                                const sel = rt.chat_question_selected_idx;
+                                if (sel < rt.chat_question_choice_count) {
+                                    // Submit the picked choice as the
+                                    // user's answer. Same submission
+                                    // path as a typed answer.
+                                    const choice = rt.question_choices_storage[sel][0..rt.question_choices_lens[sel]];
+                                    const copy = rt.allocator.dupe(u8, choice) catch {
+                                        latchErr(rt, "out of memory submitting pick");
+                                        continue;
+                                    };
+                                    pushTurn(rt, .user, copy) catch {
+                                        rt.allocator.free(copy);
+                                        latchErr(rt, "out of memory submitting pick");
+                                        continue;
+                                    };
+                                    rt.chat_question_active = false;
+                                    rt.chat_inline_input_len = 0;
+                                    rt.chat_inline_input_cursor = 0;
+                                    fireDialogRequest(rt, ctx) catch {
+                                        latchErr(rt, "couldn't send pick — see status");
+                                    };
+                                    rt.chat_inline_paint_pending = true;
+                                    continue;
+                                }
+                                // selected_idx == choice_count → free-text;
+                                // fall through to the normal .enter arm below.
+                            },
+                            else => {
+                                // Any insert / edit keystroke flips
+                                // focus to the free-text row + falls
+                                // through to the editor below. Matches
+                                // Claude Code's "start typing →
+                                // free-text" pattern.
+                                const is_edit = switch (key) {
+                                    .insert, .backspace, .delete_forward, .move_left, .move_right, .move_home, .move_end => true,
+                                    else => false,
+                                };
+                                if (is_edit and rt.chat_question_selected_idx != rt.chat_question_choice_count) {
+                                    rt.chat_question_selected_idx = rt.chat_question_choice_count;
+                                    rt.chat_inline_paint_pending = true;
+                                }
+                            },
+                        }
+                    }
                     switch (key) {
                         .close => {
                             // Ctrl+D — close the panel. Stop
@@ -457,6 +537,65 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 var i: usize = 0;
                 while (i < input.len) {
                     const key = parseChatKey(input, &i);
+                    // Chat-mode question pick-list (#214) — same
+                    // shape as the inline panel handler above.
+                    if (rt.chat_question_active and rt.chat_question_choice_count > 0) {
+                        switch (key) {
+                            .move_up => {
+                                if (rt.chat_question_selected_idx > 0) {
+                                    rt.chat_question_selected_idx -= 1;
+                                    rt.chat_overlay_paint_pending = true;
+                                }
+                                continue;
+                            },
+                            .move_down => {
+                                if (rt.chat_question_selected_idx < rt.chat_question_choice_count) {
+                                    rt.chat_question_selected_idx += 1;
+                                    rt.chat_overlay_paint_pending = true;
+                                }
+                                continue;
+                            },
+                            .escape => {
+                                rt.chat_question_active = false;
+                                rt.chat_overlay_paint_pending = true;
+                                continue;
+                            },
+                            .enter => {
+                                const sel = rt.chat_question_selected_idx;
+                                if (sel < rt.chat_question_choice_count) {
+                                    const choice = rt.question_choices_storage[sel][0..rt.question_choices_lens[sel]];
+                                    const copy = rt.allocator.dupe(u8, choice) catch {
+                                        latchErr(rt, "out of memory submitting pick");
+                                        continue;
+                                    };
+                                    pushTurn(rt, .user, copy) catch {
+                                        rt.allocator.free(copy);
+                                        latchErr(rt, "out of memory submitting pick");
+                                        continue;
+                                    };
+                                    rt.chat_question_active = false;
+                                    rt.chat_input_len = 0;
+                                    rt.chat_input_cursor = 0;
+                                    fireDialogRequest(rt, ctx) catch {
+                                        latchErr(rt, "couldn't send pick — see status");
+                                    };
+                                    rt.chat_overlay_paint_pending = true;
+                                    continue;
+                                }
+                                // selected_idx == choice_count → fall through
+                            },
+                            else => {
+                                const is_edit = switch (key) {
+                                    .insert, .backspace, .delete_forward, .move_left, .move_right, .move_home, .move_end => true,
+                                    else => false,
+                                };
+                                if (is_edit and rt.chat_question_selected_idx != rt.chat_question_choice_count) {
+                                    rt.chat_question_selected_idx = rt.chat_question_choice_count;
+                                    rt.chat_overlay_paint_pending = true;
+                                }
+                            },
+                        }
+                    }
                     switch (key) {
                         .close => {
                             // Ctrl+D closes the overlay. Stop the
@@ -1886,6 +2025,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         const copy_len = @min(choice.len, rt.question_choices_storage[i].len);
                         @memcpy(rt.question_choices_storage[i][0..copy_len], choice[0..copy_len]);
                         rt.question_choices_lens[i] = copy_len;
+                    }
+                    // Chat-mode question pick-list (#214): if either
+                    // chat surface is open at the time the question
+                    // arrives, latch the pick-list UI state. The
+                    // paint hook renders an arrow-key-navigable list
+                    // of choices + a free-text input row.
+                    if ((rt.chat_inline_open or rt.chat_overlay_open) and parsed.choices_count > 0) {
+                        rt.chat_question_active = true;
+                        rt.chat_question_choice_count = @intCast(parsed.choices_count);
+                        rt.chat_question_selected_idx = 0;
+                        rt.chat_question_turn_idx = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
+                        if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                        if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
                     }
                     if (q.len > 0) {
                         // When choices are present, append a
