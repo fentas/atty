@@ -478,9 +478,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// rendered now. Mirrors `renderTurnContent`'s envelope-vs-
         /// raw decision and the same wrap iterator so the back-walk
         /// in `paintInlineChat` picks `start_turn` accurately
-        /// (newest-turn-anchored). Envelope turns always claim one
-        /// row; raw turns walk the wrap iterator counting chunks
-        /// up to `max_rows`. Cheap — no allocations.
+        /// (newest-turn-anchored).
+        ///
+        /// Envelope rows:
+        ///   - `exec` / `question` always claim 1 row (compact
+        ///     single-line summary in the render path).
+        ///   - `done` claims multiple rows — its free-prose reason
+        ///     renders via md_render which hard-breaks on `\n`.
+        ///     Estimator walks the wrap iter over the raw envelope
+        ///     bytes + adds the count of `\n` JSON escapes (the
+        ///     wrap iter misses these because the JSON encoding
+        ///     puts them as 2-char `\n` literals). Over-estimates
+        ///     slightly but stays safe vs the actual render —
+        ///     under-counting would clip the newest turn's tail
+        ///     under back-walk pressure.
+        ///
+        /// Raw turns walk the wrap iterator counting chunks up to
+        /// `max_rows`. Cheap — no allocations.
         /// Whitespace-tolerant check for an envelope whose action
         /// value is `"done"`. The full JSON parser at the render
         /// path handles this fine; `countTurnRows` only needs a
