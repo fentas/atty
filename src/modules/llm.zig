@@ -709,7 +709,19 @@ pub fn configure(comptime cfg: Config) type {
             /// only on `detach` and on a fresh `action=done`
             /// (which overwrites). Empty `conclusion_len == 0`
             /// means no completed dialog yet this session.
-            conclusion_buf: [1024]u8 = undefined,
+            ///
+            /// 8 KiB sized so a multi-paragraph reply (the LLM's
+            /// "I generated this 1200-char text" kind of response)
+            /// fits without the chrome devouring the buffer. The
+            /// per-line `│ ` prefix + ANSI sequences cost ~20 bytes
+            /// per source-line and the surrounding banner chrome
+            /// (header + counts + bottom border) costs ~370 bytes,
+            /// so 8 KiB gives ~7.5 KiB of usable prose. Replies
+            /// past that still get truncated, but `captureConclusion`
+            /// emits a visible `[…truncated; Alt+Shift+C for full
+            /// conversation]` marker so the user knows to recall
+            /// via the chat overlay (where the full turn lives).
+            conclusion_buf: [8 * 1024]u8 = undefined,
             conclusion_len: usize = 0,
             /// Latched flag — set by `handleDialogResponse` on
             /// `action=done` so the next `provideTermBytes` tick

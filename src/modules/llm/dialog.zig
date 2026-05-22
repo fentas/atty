@@ -744,6 +744,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// banner width stays a single source of truth.
         const conclusion_border_dashes: []const u8 = "\u{2500}" ** 58;
 
+        /// Truncate `s` to at most `max_bytes` while never splitting
+        /// a UTF-8 codepoint. UTF-8 continuation bytes have the top
+        /// two bits set to `10`; walk back from `max_bytes` until
+        /// we find a non-continuation byte (start of a codepoint).
+        /// Used by `captureConclusion` when a single reason line is
+        /// longer than the buffer's remaining prose budget — without
+        /// this guard a hard byte-slice could leave a partial UTF-8
+        /// sequence in the conclusion banner that the terminal would
+        /// render as `?` or worse.
+        fn truncateAtUtf8Boundary(s: []const u8, max_bytes: usize) []const u8 {
+            if (s.len <= max_bytes) return s;
+            var end = max_bytes;
+            while (end > 0 and (s[end] & 0b1100_0000) == 0b1000_0000) end -= 1;
+            return s[0..end];
+        }
+
         /// Push a turn onto the conversation history. `content` must
         /// be heap-allocated by the caller and is OWNED by the
         /// runtime after this call (freed in `freeTurns`). At
@@ -912,9 +928,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     │ <N> execs / <N> obs / <N> turns
         ///     ╰──────────────────────────────────────────────
         ///
-        /// Reason truncates to fit within `conclusion_buf` (1024
-        /// bytes); realistic reasons are 100-200 bytes.
+        /// Reason fits within `conclusion_buf` (8 KiB as of #211 —
+        /// see `src/modules/llm.zig` `conclusion_buf` decl for the
+        /// sizing rationale). Past that, a dim `[…truncated;
+        /// Alt+Shift+C for full conversation]` marker replaces the
+        /// remaining reason lines so the operator can see the cut
+        /// happened and knows to recall via the chat overlay (where
+        /// the full turn lives in the in-memory ring buffer).
+        ///
+        /// Counts row + bottom border ALWAYS emit — the reserve is
+        /// computed so they fit even when prose overflows. The
+        /// pre-#211 shape silently dropped them too on overflow,
+        /// which left the banner without a closing border + counts
+        /// (visible "broken banner" failure mode).
         pub fn captureConclusion(rt: *Runtime, reason: []const u8, execs: usize, obs: usize, turns: usize) void {
+            // Footer reservation. Sized for: truncation marker
+            // (~80 bytes), counts row (`│ <d> execs / <d> obs /
+            // <d> turns\r\n` with bold/dim ANSI; ~110 bytes for
+            // realistic counts up to 5 digits), bottom border
+            // (`╰` + 58*3 UTF-8 dashes + reset + CRLF ≈ 184
+            // bytes). Total ~374; round up to 512 for headroom
+            // against rebrand / count-width drift.
+            const footer_reserve: usize = 512;
+            // Banner row emitted in place of the next reason line
+            // once we've consumed the prose budget. Dim styling +
+            // ellipsis matches the rest of the chrome palette;
+            // refers the user to Alt+Shift+C so they have a
+            // specific recovery action rather than "content was
+            // cut off, sorry."
+            const truncation_marker = "\x1B[2m\u{2502}\x1B[0m   \x1B[2m[\u{2026}truncated; Alt+Shift+C for full conversation]\x1B[0m\r\n";
             var w: std.Io.Writer = .fixed(&rt.conclusion_buf);
             // Single `\r\n` so the banner starts at column 1 on the
             // row immediately under the shell's prompt redraw — no
@@ -966,6 +1008,45 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // starts with `\n`. `first` stays true until a
                     // non-empty line claims the checkmark.
                     if (line.len == 0) continue;
+                    // Budget check: leave room for footer (counts +
+                    // bottom border + the truncation marker if we
+                    // need it). The pre-#211 shape relied on
+                    // `w.print(...) catch {}` silently dropping
+                    // overflow, which also dropped the closing
+                    // chrome → visible "broken banner" failure.
+                    //
+                    // Per-line chrome cost (`│   ` prefix + CRLF +
+                    // ANSI) ≈ 22 bytes. If the line itself is so
+                    // long that even truncated-to-fit it won't
+                    // leave any prose, emit the marker and stop.
+                    // Otherwise truncate to what fits (at a UTF-8
+                    // boundary so we never split a multibyte
+                    // codepoint), write it, then emit the marker
+                    // — that way ONE long line still surfaces its
+                    // opening prose instead of being silently
+                    // replaced by the marker alone.
+                    const prefix_cost: usize = 22;
+                    const used = w.end;
+                    const remaining = if (rt.conclusion_buf.len > used + footer_reserve)
+                        rt.conclusion_buf.len - used - footer_reserve
+                    else
+                        0;
+                    if (remaining <= prefix_cost) {
+                        // No room for even the prefix — emit marker, stop.
+                        w.writeAll(truncation_marker) catch {};
+                        break;
+                    }
+                    const max_line_bytes = remaining - prefix_cost;
+                    if (line.len > max_line_bytes) {
+                        const fit = truncateAtUtf8Boundary(line, max_line_bytes);
+                        if (first) {
+                            w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{fit}) catch {};
+                        } else {
+                            w.print("\x1B[2m\u{2502}\x1B[0m   {s}\r\n", .{fit}) catch {};
+                        }
+                        w.writeAll(truncation_marker) catch {};
+                        break;
+                    }
                     if (first) {
                         w.print("\x1B[2m\u{2502}\x1B[0m \x1B[22;1;38;5;14m\u{2713}\x1B[0m {s}\r\n", .{line}) catch {};
                         first = false;
@@ -1223,6 +1304,94 @@ test "Module.captureConclusion falls back to 'done' when reason is empty" {
     try testing.expect(std.mem.indexOf(u8, out, "done") != null);
     try testing.expect(std.mem.indexOf(u8, out, "1") != null);
     try testing.expect(std.mem.indexOf(u8, out, "execs") != null);
+}
+
+test "Module.captureConclusion: 1500-char single-paragraph reason fits without truncation in 8 KiB buffer" {
+    // Repro for the bug report (~1247 chars truncated to ~280 visible
+    // chars in the original 1024-byte buffer). With the 8 KiB buffer
+    // a realistic-length single-paragraph LLM response renders in
+    // full, the truncation marker doesn't fire, and the footer
+    // (counts + bottom border) still emits cleanly.
+    const FakeRuntime = struct {
+        conclusion_buf: [8 * 1024]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    var reason_buf: [1500]u8 = undefined;
+    @memset(&reason_buf, 'x');
+    M.captureConclusion(&rt, &reason_buf, 0, 0, 1);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    // Truncation marker must NOT appear — the budget should not trip.
+    try testing.expect(std.mem.indexOf(u8, out, "truncated") == null);
+    // The full 1500-char content must appear contiguously.
+    try testing.expect(std.mem.indexOf(u8, out, &reason_buf) != null);
+    // Footer (counts + bottom border) must emit. The bottom border
+    // glyph `╰` (UTF-8 e2 95 b0) survives even when prose is long.
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2570}") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "turns") != null);
+}
+
+test "truncateAtUtf8Boundary never splits a multibyte codepoint" {
+    // The conclusion buffer overflow path uses this helper to trim
+    // a single over-long reason line. A naive byte slice could
+    // leave a half-codepoint at the end (e.g. cut off the middle
+    // of a `╭` which is e2 95 ad in UTF-8), which the terminal
+    // would render as `?` or a replacement glyph.
+    const M = Module(types.Config{}, struct {
+        conclusion_buf: [128]u8 = undefined,
+        conclusion_len: usize = 0,
+    });
+    // ASCII case — round-trips unchanged below cap.
+    try testing.expectEqualStrings("hello", M.truncateAtUtf8Boundary("hello", 10));
+    try testing.expectEqualStrings("hello", M.truncateAtUtf8Boundary("hello world", 5));
+    // Box-drawing `╭` is 3 bytes (e2 95 ad). Cutting at 1 or 2
+    // would leave a continuation prefix; we must back off to 0.
+    const s = "\u{256D}xy"; // ╭xy = 5 bytes total
+    try testing.expectEqualStrings("", M.truncateAtUtf8Boundary(s, 1));
+    try testing.expectEqualStrings("", M.truncateAtUtf8Boundary(s, 2));
+    try testing.expectEqualStrings("\u{256D}", M.truncateAtUtf8Boundary(s, 3));
+    try testing.expectEqualStrings("\u{256D}x", M.truncateAtUtf8Boundary(s, 4));
+    try testing.expectEqualStrings("\u{256D}xy", M.truncateAtUtf8Boundary(s, 5));
+}
+
+test "Module.captureConclusion: overflow past 8 KiB emits truncation marker AND preserves footer" {
+    // Forced over-cap: an LLM that emits a 12 KiB single paragraph
+    // (rare but possible — JSON dumps, long-form prose) must not
+    // silently drop the footer + counts. The pre-#211 shape's
+    // `writeAll(...) catch {}` would fill the buffer with prose and
+    // leave nothing for the closing chrome → visibly-broken banner.
+    // The new shape stops the loop at the reserve boundary, emits
+    // the truncation marker, then lets counts + border land.
+    const FakeRuntime = struct {
+        conclusion_buf: [8 * 1024]u8 = undefined,
+        conclusion_len: usize = 0,
+    };
+    const M = Module(types.Config{}, FakeRuntime);
+
+    var rt: FakeRuntime = .{};
+    var reason_buf: [12 * 1024]u8 = undefined;
+    @memset(&reason_buf, 'x');
+    M.captureConclusion(&rt, &reason_buf, 7, 4, 3);
+    const out = rt.conclusion_buf[0..rt.conclusion_len];
+
+    // Truncation marker must appear, referencing the recovery action.
+    try testing.expect(std.mem.indexOf(u8, out, "truncated") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Alt+Shift+C") != null);
+    // Footer survives — counts row AND bottom border.
+    try testing.expect(std.mem.indexOf(u8, out, "7") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "execs") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "turns") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2570}") != null);
+    // We must not have overflowed the buffer's actual storage —
+    // conclusion_len is set from w.end which is capped at buf.len.
+    try testing.expect(rt.conclusion_len <= rt.conclusion_buf.len);
+    // And the buffer is "well-used" — we shouldn't have stopped
+    // far short of the cap (regression guard against the reserve
+    // being absurdly large).
+    try testing.expect(rt.conclusion_len > rt.conclusion_buf.len / 2);
 }
 
 // Tiny config + FakeRuntime fixture for pushTurn / freeTurns tests.
