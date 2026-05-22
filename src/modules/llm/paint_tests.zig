@@ -1693,3 +1693,95 @@ test "chat overlay: long done-action reason renders in full, not capped at 480 c
     // Truncation marker must NOT appear.
     try testing.expect(std.mem.indexOf(u8, painted.?, "\u{2026}]") == null);
 }
+
+test "inline chat: multi-newline done reason — back-walk anchor reserves enough rows" {
+    // Regression for the countTurnRows under-count bug Copilot caught
+    // in round 1 of PR #212. Previously: WrapIter over the raw JSON
+    // envelope counted `\n` JSON escapes as 2 literal chars on a
+    // single line. The actual render parses the envelope, feeds the
+    // reason to md_render which hard-breaks on each `\n` —
+    // emitting more rows than the estimator predicted. The back-
+    // walk then picked `start_turn` thinking the newest turn took
+    // FEWER rows than it actually does, and the older neighbour
+    // ate scrollback that should have gone to the newest turn.
+    //
+    // Worked example: a reason with 4 embedded `\n` characters
+    // becomes 5 hard-broken rows after parsing. WrapIter on the raw
+    // envelope (which has `\\n` as the 2-char JSON encoding) sees
+    // those as inline chars on ~1-2 wrap rows. Estimator was off
+    // by ~3-4 rows; with limited scrollback the newest turn's
+    // tail got clipped.
+    //
+    // Test setup: an OLDER user turn (small) + a newer assistant
+    // done envelope with 5 embedded `\n` separators. Asserts the
+    // TAIL sentinel of the newest reason still appears in the
+    // paint output — proving the back-walk reserved enough rows
+    // for it.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+
+    // Older user turn — small. The assistant turn that follows is
+    // the newest; back-walk should reserve enough rows for it.
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(
+        u8,
+        "tell me about something with multiple paragraphs",
+    ));
+
+    // Assistant done envelope with 5 `\n` escapes — JSON-encoded.
+    // Each `\\n` in the source string is a literal `\n` JSON escape
+    // (two bytes in the envelope content), which the parser
+    // converts to a real newline. md_render then hard-breaks on
+    // each newline → 6 separate rows of content.
+    const envelope =
+        "{\"action\":\"done\",\"reason\":\"" ++
+        "Para1 head FRONT-SENTINEL\\n" ++
+        "Para2 middle\\n" ++
+        "Para3 body content\\n" ++
+        "Para4 more body\\n" ++
+        "Para5 nearing end\\n" ++
+        "Para6 tail TAIL-SENTINEL\"}";
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
+    defer helpers.freeTurns(&rt);
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const painted = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(painted != null);
+
+    // TAIL-SENTINEL is on the LAST row of the newest turn. Pre-fix
+    // (under-count), the back-walk thought the assistant turn fit
+    // in ~2 rows, gave the older user turn too many, and clipped
+    // off the tail of the assistant turn. Post-fix, the escape
+    // count adds 5 rows to the estimate so back-walk reserves
+    // enough room.
+    try testing.expect(std.mem.indexOf(u8, painted.?, "TAIL-SENTINEL") != null);
+}
