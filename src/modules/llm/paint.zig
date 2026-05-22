@@ -429,23 +429,24 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (slice.len < q.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .done => {
-                    // Reason is free-form prose. Pre-fix shape capped
-                    // at `max_visible` cols → a 600-word LLM reply
-                    // got clipped to one row's worth (~74 chars on an
-                    // 80-col terminal). Inline panel has rows to
-                    // spare; render via the markdown-aware wrap path
-                    // so multi-paragraph reasons span multiple rows.
-                    // Same `\u{2026}` overflow marker, but applied
-                    // per-row by md_render when content exceeds
-                    // `max_rows`, not per-byte.
+                    // Reason is free-form prose. Render via the
+                    // markdown-aware wrap path so multi-paragraph
+                    // reasons span multiple rows.
                     try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m "); // mauve check
                     const r = parsed.reason();
-                    // The `✓ ` prefix took 2 visible cols on the first
-                    // row; subsequent wrap rows have the full
-                    // `max_visible` budget. md_render handles per-row
-                    // wrap + the `[…]` overflow marker only when
-                    // content actually exceeds max_rows.
-                    return md_render.render(w, r, max_visible, max_rows, &writeSanitized);
+                    // The `✓ ` prefix consumed 2 cols of row 1 BEFORE
+                    // md_render starts wrapping. Without this
+                    // adjustment, md_render's first chunk fits
+                    // `max_visible` cols but the terminal renders
+                    // `2 + max_visible` cols total — soft-wraps the
+                    // last 2 chars onto the next row and md_render's
+                    // returned `rows_used` count is off by 1. Cost
+                    // of the conservative cap: 2 cols of wrap budget
+                    // on continuation rows that don't carry the
+                    // prefix. Trivial — typical assistant prose
+                    // wraps mid-word anyway.
+                    const wrap_cols: usize = if (max_visible > 2) max_visible - 2 else max_visible;
+                    return md_render.render(w, r, wrap_cols, max_rows, &writeSanitized);
                 },
             }
             return 1;
