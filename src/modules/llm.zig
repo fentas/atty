@@ -714,19 +714,10 @@ pub fn configure(comptime cfg: Config) type {
             /// across `dialogReset` so `Alt+Shift+C` can re-emit.
             /// `null` means no completed dialog yet this session.
             conclusion_formatted: ?[]u8 = null,
-            /// Byte offset into `conclusion_formatted` for the next
-            /// chunk to emit. Each `provideTermBytes` tick advances
-            /// this by up to `conclusion_chunk_size` (8 KiB);
-            /// `conclusion_pending` clears when offset == len.
-            /// `Alt+Shift+C` re-emit resets this to 0.
-            conclusion_offset: usize = 0,
             /// Latched flag — set by `handleDialogResponse` on
             /// `action=done` so the next `provideTermBytes` tick
             /// emits the conclusion banner (auto-show behaviour).
-            /// Cleared after the LAST chunk emits (when offset
-            /// reaches conclusion_formatted.?.len). The
-            /// `Alt+Shift+C` action re-arms this flag for an
-            /// explicit re-emit.
+            /// Cleared after the banner emits.
             conclusion_pending: bool = false,
 
             // ── Chat overlay (phase 2a — Alt+Shift+C) ───────────

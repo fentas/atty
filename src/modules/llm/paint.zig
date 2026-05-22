@@ -1173,19 +1173,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
             }
             // Conclusion banner emission takes precedence over the
-            // cursor-colour edge logic — the banner is multi-tick
-            // output that scrolls into shell history; cursor-colour
-            // OSC sequences are infinitely retriable on the next
-            // tick. Chunked across multiple ticks because the heap-
-            // allocated `conclusion_formatted` buffer can exceed
-            // any single-write size for long LLM replies (#211).
-            // Each chunk is up to `dialog.conclusion_chunk_size`
-            // bytes; `nextConclusionChunk` clears the `pending`
-            // latch when the final chunk goes out.
+            // cursor-colour edge logic — the banner is one-shot
+            // multi-line output that scrolls into shell history.
+            // The proxy's `writeAll` on the returned slice handles
+            // arbitrary sizes via posix-level looping, so a single
+            // emission is correct even for the multi-KiB banners
+            // produced by long LLM replies (#211 / #212). Earlier
+            // shapes chunked across ticks; that caused visible
+            // stutter + broke the terminal's auto-scroll because
+            // the conclusion was interleaved with cursor/statusbar
+            // events between chunks.
             if (rt.conclusion_pending) {
-                if (dialog_helpers.nextConclusionChunk(rt)) |chunk| {
-                    return chunk;
+                if (rt.conclusion_formatted) |formatted| {
+                    rt.conclusion_pending = false;
+                    return formatted;
                 }
+                rt.conclusion_pending = false;
             }
             if (!cfg.prefix_signal_cursor) return null;
             // Cursor colour fires when EITHER the prefix is matched

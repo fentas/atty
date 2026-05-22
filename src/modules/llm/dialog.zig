@@ -928,7 +928,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.allocator.free(old);
                 rt.conclusion_formatted = null;
             }
-            rt.conclusion_offset = 0;
 
             // Worst-case sizing: every byte of reason ends up as a
             // separate single-byte line, each taking ~22 bytes of
@@ -1053,37 +1052,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
         }
 
-        /// Emission chunk size for the conclusion banner. Each
-        /// `provideTermBytes` tick returns up to this many bytes
-        /// from `conclusion_formatted`; subsequent ticks resume
-        /// from `conclusion_offset`. 8 KiB was chosen to match
-        /// the previous fixed-buffer size — typical TTYs handle
-        /// 8 KiB writes in one syscall, and giving the proxy a
-        /// chance to interleave its other event sources every
-        /// 8 KiB keeps long banners from monopolising the
-        /// term-bytes channel.
-        pub const conclusion_chunk_size: usize = 8 * 1024;
-
-        /// Return the next chunk of `conclusion_formatted` and
-        /// advance `conclusion_offset`. Returns null when the
-        /// banner is fully emitted (or never captured). Clears
-        /// `conclusion_pending` on the last chunk so the proxy
-        /// stops polling.
-        pub fn nextConclusionChunk(rt: *Runtime) ?[]const u8 {
-            const formatted = rt.conclusion_formatted orelse return null;
-            if (rt.conclusion_offset >= formatted.len) {
-                rt.conclusion_pending = false;
-                return null;
-            }
-            const end = @min(rt.conclusion_offset + conclusion_chunk_size, formatted.len);
-            const chunk = formatted[rt.conclusion_offset..end];
-            rt.conclusion_offset = end;
-            if (rt.conclusion_offset >= formatted.len) {
-                rt.conclusion_pending = false;
-            }
-            return chunk;
-        }
-
         /// Free the heap-owned conclusion buffer. Called from
         /// `detach`. Idempotent — null-buffer is fine.
         pub fn freeConclusion(rt: *Runtime) void {
@@ -1091,7 +1059,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.allocator.free(buf);
                 rt.conclusion_formatted = null;
             }
-            rt.conclusion_offset = 0;
             rt.conclusion_pending = false;
         }
 
@@ -1170,7 +1137,6 @@ test "Module.captureConclusion writes reason + counts into the buffer" {
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
         conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
@@ -1216,7 +1182,6 @@ test "Module.captureConclusion wraps multi-line reason — every row keeps the `
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
         conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
@@ -1267,7 +1232,6 @@ test "Module.captureConclusion two-line reason with trailing newline → 2 reaso
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
         conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
@@ -1294,7 +1258,6 @@ test "Module.captureConclusion all-whitespace reason → falls back to bare ✓ 
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
         conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
@@ -1318,7 +1281,6 @@ test "Module.captureConclusion falls back to 'done' when reason is empty" {
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
         conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
@@ -1336,16 +1298,16 @@ test "Module.captureConclusion falls back to 'done' when reason is empty" {
     try testing.expect(std.mem.indexOf(u8, out, "execs") != null);
 }
 
-test "Module.captureConclusion: 32 KiB reason allocates + emits in multiple chunks" {
+test "Module.captureConclusion: 32 KiB reason allocates the full content (no truncation)" {
     // Repro for #211 — earlier shapes truncated past ~280 visible
     // chars (1 KiB fixed buf with chrome) or ~7.5 KiB (8 KiB fixed
-    // buf bandaid). The chunked emission has no cap on the reason
-    // itself; the chunk_size (8 KiB) bounds per-tick emission, not
-    // total content.
+    // buf bandaid). The heap-allocated buffer has no cap on the
+    // reason; the proxy's writeAll handles arbitrary slice sizes
+    // via posix-level looping, so a single provideTermBytes return
+    // is correct.
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
         conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
@@ -1362,61 +1324,11 @@ test "Module.captureConclusion: 32 KiB reason allocates + emits in multiple chun
     try testing.expect(formatted.len > reason_buf.len); // chrome adds bytes
     try testing.expect(std.mem.indexOf(u8, formatted, reason_buf[0..]) != null);
 
-    // Multi-chunk emission: arm pending and drain.
-    rt.conclusion_pending = true;
-    var chunks_emitted: usize = 0;
-    var bytes_emitted: usize = 0;
-    while (M.nextConclusionChunk(&rt)) |chunk| {
-        chunks_emitted += 1;
-        bytes_emitted += chunk.len;
-        try testing.expect(chunk.len <= M.conclusion_chunk_size);
-    }
-    // > 32 KiB content + chrome → at least 5 chunks of 8 KiB.
-    try testing.expect(chunks_emitted >= 5);
-    try testing.expectEqual(formatted.len, bytes_emitted);
-    // Pending cleared after the final chunk.
-    try testing.expect(!rt.conclusion_pending);
-    // Offset at end-of-buffer.
-    try testing.expectEqual(formatted.len, rt.conclusion_offset);
-}
-
-test "Module.nextConclusionChunk returns null when no capture exists" {
-    const FakeRuntime = struct {
-        allocator: std.mem.Allocator,
-        conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
-        conclusion_pending: bool = false,
-    };
-    const M = Module(types.Config{}, FakeRuntime);
-
-    var rt: FakeRuntime = .{ .allocator = testing.allocator };
-    // No capture; nextConclusionChunk must return null cleanly.
-    try testing.expect(M.nextConclusionChunk(&rt) == null);
-}
-
-test "Module.nextConclusionChunk single-chunk path for short reason" {
-    // Short reason fits in one chunk; one call drains the whole
-    // buffer and clears pending.
-    const FakeRuntime = struct {
-        allocator: std.mem.Allocator,
-        conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
-        conclusion_pending: bool = false,
-    };
-    const M = Module(types.Config{}, FakeRuntime);
-
-    var rt: FakeRuntime = .{ .allocator = testing.allocator };
-    defer M.freeConclusion(&rt);
-    M.captureConclusion(&rt, "short reason", 1, 0, 1);
-    rt.conclusion_pending = true;
-
-    const chunk = M.nextConclusionChunk(&rt).?;
-    try testing.expect(chunk.len > 0);
-    try testing.expect(chunk.len <= M.conclusion_chunk_size);
-    // Single chunk drained the buffer; pending cleared; second
-    // call returns null.
-    try testing.expect(!rt.conclusion_pending);
-    try testing.expect(M.nextConclusionChunk(&rt) == null);
+    // Footer still emits — counts + bottom border are in the
+    // formatted slice regardless of reason size.
+    try testing.expect(std.mem.indexOf(u8, formatted, "execs") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "turns") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "\u{2570}") != null); // ╰
 }
 
 test "Module.captureConclusion replaces previous capture (re-capture)" {
@@ -1426,7 +1338,6 @@ test "Module.captureConclusion replaces previous capture (re-capture)" {
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
         conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
@@ -1442,15 +1353,12 @@ test "Module.captureConclusion replaces previous capture (re-capture)" {
     const formatted = rt.conclusion_formatted.?;
     try testing.expect(std.mem.indexOf(u8, formatted, "second dialog") != null);
     try testing.expect(std.mem.indexOf(u8, formatted, "first dialog") == null);
-    // Offset reset for the new capture.
-    try testing.expectEqual(@as(usize, 0), rt.conclusion_offset);
 }
 
 test "Module.freeConclusion is idempotent and safe on null capture" {
     const FakeRuntime = struct {
         allocator: std.mem.Allocator,
         conclusion_formatted: ?[]u8 = null,
-        conclusion_offset: usize = 0,
         conclusion_pending: bool = false,
     };
     const M = Module(types.Config{}, FakeRuntime);
@@ -1468,7 +1376,6 @@ test "Module.freeConclusion is idempotent and safe on null capture" {
     try testing.expect(rt.conclusion_formatted != null);
     M.freeConclusion(&rt);
     try testing.expect(rt.conclusion_formatted == null);
-    try testing.expectEqual(@as(usize, 0), rt.conclusion_offset);
     try testing.expect(!rt.conclusion_pending);
     // Idempotent.
     M.freeConclusion(&rt);
