@@ -952,11 +952,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const footer_reserve: usize = 512;
             // Banner row emitted in place of the next reason line
             // once we've consumed the prose budget. Dim styling +
-            // ellipsis matches the rest of the chrome palette;
-            // refers the user to Alt+Shift+C so they have a
-            // specific recovery action rather than "content was
-            // cut off, sorry."
-            const truncation_marker = "\x1B[2m\u{2502}\x1B[0m   \x1B[2m[\u{2026}truncated; Alt+Shift+C for full conversation]\x1B[0m\r\n";
+            // ellipsis matches the rest of the chrome palette.
+            //
+            // Wording note: earlier drafts pointed at Alt+Shift+C
+            // for the "full conversation". That promise is hollow
+            // for inline (non-overlay) dialogs because
+            // `dialogReset` at the action=done site (see
+            // `hooks.zig:1805`) wipes `turns[]` before the user
+            // can press Alt+Shift+C — the overlay then falls back
+            // to rendering this very banner from `conclusion_buf`
+            // and the user sees the same truncated text. Until
+            // chunked emission lands (#211) the honest message is
+            // "the reply exceeded the banner's 8 KiB budget" —
+            // user-actionable as "re-prompt with shorter scope"
+            // or "ask the LLM for a summary" without a false
+            // recovery promise.
+            const truncation_marker = "\x1B[2m\u{2502}\x1B[0m   \x1B[2m[\u{2026}truncated \u{2014} reply exceeded the 8 KiB banner budget]\x1B[0m\r\n";
             var w: std.Io.Writer = .fixed(&rt.conclusion_buf);
             // Single `\r\n` so the banner starts at column 1 on the
             // row immediately under the shell's prompt redraw — no
@@ -1015,17 +1026,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // overflow, which also dropped the closing
                     // chrome → visible "broken banner" failure.
                     //
-                    // Per-line chrome cost (`│   ` prefix + CRLF +
-                    // ANSI) ≈ 22 bytes. If the line itself is so
-                    // long that even truncated-to-fit it won't
-                    // leave any prose, emit the marker and stop.
-                    // Otherwise truncate to what fits (at a UTF-8
-                    // boundary so we never split a multibyte
-                    // codepoint), write it, then emit the marker
-                    // — that way ONE long line still surfaces its
-                    // opening prose instead of being silently
-                    // replaced by the marker alone.
-                    const prefix_cost: usize = 22;
+                    // Per-line chrome cost is asymmetric: the first
+                    // row carries the `✓` glyph + cyan/bold SGR
+                    // (~36 bytes total chrome); continuation rows
+                    // are just `│   ` + CRLF + dim SGR (~16 bytes).
+                    // Use 40 as a safe upper bound so we never let
+                    // a print silently fail via `catch {}` due to
+                    // an under-counted reservation. Reserving 40
+                    // for an always-16-byte case "wastes" 24 bytes
+                    // of prose room at worst — negligible against
+                    // the 8 KiB total.
+                    //
+                    // If the line itself is so long that even
+                    // truncated-to-fit it won't leave any prose,
+                    // emit the marker and stop. Otherwise truncate
+                    // to what fits (at a UTF-8 boundary so we
+                    // never split a multibyte codepoint), write
+                    // it, then emit the marker — that way ONE
+                    // long line still surfaces its opening prose
+                    // instead of being silently replaced by the
+                    // marker alone.
+                    const prefix_cost: usize = 40;
                     const used = w.end;
                     const remaining = if (rt.conclusion_buf.len > used + footer_reserve)
                         rt.conclusion_buf.len - used - footer_reserve
@@ -1377,9 +1398,16 @@ test "Module.captureConclusion: overflow past 8 KiB emits truncation marker AND 
     M.captureConclusion(&rt, &reason_buf, 7, 4, 3);
     const out = rt.conclusion_buf[0..rt.conclusion_len];
 
-    // Truncation marker must appear, referencing the recovery action.
+    // Truncation marker must appear, naming the buffer budget so
+    // the user knows the constraint (and doesn't expect a recovery
+    // path that doesn't exist post-dialogReset — see the wording
+    // note on the marker in captureConclusion).
     try testing.expect(std.mem.indexOf(u8, out, "truncated") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Alt+Shift+C") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "8 KiB") != null);
+    // Negative: the old "Alt+Shift+C for full conversation" promise
+    // was misleading because `dialogReset` wipes `turns[]` after
+    // captureConclusion. Lock in that wording does NOT regress.
+    try testing.expect(std.mem.indexOf(u8, out, "Alt+Shift+C") == null);
     // Footer survives — counts row AND bottom border.
     try testing.expect(std.mem.indexOf(u8, out, "7") != null);
     try testing.expect(std.mem.indexOf(u8, out, "execs") != null);
