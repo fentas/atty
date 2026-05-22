@@ -910,10 +910,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// Format the LLM session conclusion into a multi-line
         /// banner stored in `conclusion_formatted`. Re-emittable
         /// via Alt+Shift+C (`llm_chat_overlay_toggle`). Surfaced
-        /// via `provideTermBytes` which chunks the banner into
-        /// `conclusion_chunk_size`-byte slices across multiple
-        /// ticks — the banner scrolls into the shell's normal
-        /// history above the next prompt.
+        /// via `provideTermBytes` in a single-shot emission — the
+        /// proxy's `writeAll(STDOUT, ...)` handles arbitrary slice
+        /// sizes via posix-level looping, so the banner scrolls
+        /// into the shell's normal history above the next prompt
+        /// in one terminal frame.
         ///
         /// Format (statusbar-style palette: mauve brand + cyan
         /// accent + dim chrome). Leading `\r\n` so the banner never
@@ -929,8 +930,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// content — no fixed cap, no truncation. Frees any
         /// previous capture first (re-capture / new dialog).
         /// Allocation failure is logged to stderr and leaves
-        /// `conclusion_formatted` null + `conclusion_pending` false
-        /// — the worst case is a missing banner, never a crash.
+        /// `conclusion_formatted = null`. The caller (action=done
+        /// handler in hooks.zig) unconditionally arms
+        /// `conclusion_pending = true` after this returns; the
+        /// paint hook (provideTermBytes) clears the latch when
+        /// it sees `formatted == null`, so a banner-skip on alloc
+        /// failure recovers cleanly without polling.
         pub fn captureConclusion(rt: *Runtime, reason: []const u8, execs: usize, obs: usize, turns: usize) void {
             // Free any prior capture (re-capture path: same session,
             // second LLM dialog). Lives across `dialogReset` for
@@ -1113,10 +1118,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.dialog_parse_retry_count = 0;
             rt.question_choices_count = 0;
             // Disarm the conclusion auto-emit latch — but keep the
-            // captured `conclusion_buf` so `Alt+C` can still recall
-            // the LAST completed session even if this reset was a
-            // cancel. The `.done` path explicitly RE-arms the latch
-            // AFTER calling dialogReset (see the captureConclusion
+            // captured `conclusion_formatted` so `Alt+Shift+C` can
+            // still recall the LAST completed session even if this
+            // reset was a cancel. The `.done` path explicitly RE-arms
+            // the latch AFTER calling dialogReset (see captureConclusion
             // site).
             rt.conclusion_pending = false;
             rt.in_flight = false;
@@ -1358,10 +1363,14 @@ test "Module.captureConclusion replaces previous capture (re-capture)" {
     defer M.freeConclusion(&rt);
 
     M.captureConclusion(&rt, "first dialog", 1, 0, 1);
-    const first_buf_ptr = rt.conclusion_formatted.?.ptr;
-    _ = first_buf_ptr;
     M.captureConclusion(&rt, "second dialog with longer reason for fun", 2, 1, 2);
     // Second capture wins; first dialog text is gone from buffer.
+    // `testing.allocator` catches a missing free of the first
+    // buffer (the leak detector flags it at test teardown); the
+    // assertion below catches the data-replacement bug (where we
+    // freed the first but didn't write the second). Pointer
+    // identity isn't a useful assertion — GPA may reuse the
+    // same address for the realloc of equivalent sizes.
     const formatted = rt.conclusion_formatted.?;
     try testing.expect(std.mem.indexOf(u8, formatted, "second dialog") != null);
     try testing.expect(std.mem.indexOf(u8, formatted, "first dialog") == null);
