@@ -92,6 +92,50 @@ test "parseClassifyResponse — wrong type → DaemonError" {
     try testing.expectError(mod.Error.DaemonError, err);
 }
 
+test "parseMutationResponse — ok envelope" {
+    const buf =
+        \\{"id":1,"type":"ok"}
+    ;
+    try mod.Client.parseMutationResponse(buf);
+}
+
+test "parseMutationResponse — error envelope → DaemonError" {
+    // Mirrors what the daemon emits when SO_PEERCRED auth or
+    // /proc lookup rejects a SetThreatLevel.
+    const buf =
+        \\{"id":1,"type":"error","message":"non-root caller (uid 1000) cannot set threat level for pid 4242 (owned by uid 0)"}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf));
+}
+
+test "parseMutationResponse — unexpected type → DaemonError" {
+    // A `classify` response leaked onto a mutation socket (or
+    // any other unrecognized shape) is a protocol violation,
+    // not a silent success.
+    const buf =
+        \\{"id":1,"type":"classify","verdict":"safe"}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf));
+}
+
+test "parseMutationResponse — empty body → DaemonError" {
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(""));
+}
+
+test "parseMutationResponse — error envelope with embedded `\"type\":\"ok\"` text still rejects" {
+    // Confusable: a daemon error whose `message` field happens
+    // to echo the literal `"type":"ok"` (e.g. quoting a buggy
+    // client request) MUST still classify as DaemonError. The
+    // pre-tightening substring scan would have returned success
+    // because both "type":"error" and "type":"ok" appear; the
+    // first-occurrence anchor ensures the envelope's own type
+    // field wins.
+    const buf =
+        \\{"id":1,"type":"error","message":"rejected request: \"type\":\"ok\""}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf));
+}
+
 test "Client.init constructs without connecting" {
     var c = mod.Client.init("/nonexistent.sock");
     defer c.deinit();

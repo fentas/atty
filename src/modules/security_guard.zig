@@ -467,7 +467,20 @@ pub fn configure(comptime cfg: Config) type {
                             _ = rt.trust.add(a, hash) catch {};
                         }
                         if (rt.daemon) |*client| {
-                            client.trustAdd(hash) catch {};
+                            client.trustAdd(hash) catch |err| switch (err) {
+                                error.DaemonError => {
+                                    // Daemon-side rejection (auth /
+                                    // perm / disk-full) means the
+                                    // hash never landed in
+                                    // commands.trusted.txt — a
+                                    // fresh atty session won't see
+                                    // this trust. Local rt.trust
+                                    // still works for THIS session.
+                                    const msg = "atty: daemon rejected trustAdd — `[t]rust permanently` won't persist across sessions\n";
+                                    _ = std.c.write(2, msg, msg.len);
+                                },
+                                else => {},
+                            };
                         }
                     }
                     markShellThreat(rt, ctx, pending);
@@ -509,7 +522,13 @@ pub fn configure(comptime cfg: Config) type {
                 _ = rt.session_trust.add(a, hash) catch {};
             }
             if (rt.daemon) |*client| {
-                client.sessionAddTrust(hash) catch {};
+                client.sessionAddTrust(hash) catch |err| switch (err) {
+                    error.DaemonError => {
+                        const msg = "atty: daemon rejected sessionAddTrust — entry won't appear in `atty-guard session list`\n";
+                        _ = std.c.write(2, msg, msg.len);
+                    },
+                    else => {},
+                };
             }
         }
 
@@ -551,7 +570,13 @@ pub fn configure(comptime cfg: Config) type {
             rt.session_blocked_hosts_lens[slot] = @intCast(host.len);
             rt.session_blocked_hosts_count += 1;
             if (rt.daemon) |*client| {
-                client.sessionAddUrlBlock(host) catch {};
+                client.sessionAddUrlBlock(host) catch |err| switch (err) {
+                    error.DaemonError => {
+                        const msg = "atty: daemon rejected sessionAddUrlBlock — entry won't appear in `atty-guard session list`\n";
+                        _ = std.c.write(2, msg, msg.len);
+                    },
+                    else => {},
+                };
             }
             // Cancel the current command too — `[B]lock` implies
             // "don't run this one either."
@@ -674,7 +699,25 @@ pub fn configure(comptime cfg: Config) type {
             // of a missed kernel-side mark is "no kernel
             // enforcement this time", which is the V2-A
             // fallback semantics anyway.
-            rt.daemon.?.setThreatLevel(pid, lvl) catch {};
+            //
+            // DaemonError specifically means the daemon SAID NO
+            // (auth gate rejected, sandbox blocked /proc, rate
+            // limit, etc.) — pre-fix the four mutation RPCs
+            // swallowed the daemon's error envelope, so a
+            // broken auth path looked like success while the
+            // kernel map silently never updated. Log to stderr
+            // so the failure surfaces during dev/debug runs and
+            // in systemd journal capture; no in-band UI for
+            // now since security_guard has no error-latch
+            // channel and aborting the proxy on every daemon
+            // hiccup would be worse than the silent failure.
+            rt.daemon.?.setThreatLevel(pid, lvl) catch |err| switch (err) {
+                error.DaemonError => {
+                    const msg = "atty: daemon rejected setThreatLevel — kernel enforcement may be inactive\n";
+                    _ = std.c.write(2, msg, msg.len);
+                },
+                else => {},
+            };
         }
 
         /// Statusbar segment — emits a brief threat-level icon

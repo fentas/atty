@@ -190,15 +190,52 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
+        try self.readMutationResponse();
+    }
+
+    /// Parse the daemon's `{"type":"ok"}` vs
+    /// `{"type":"error","message":...}` response envelope for
+    /// mutation RPCs. Pre-fix the four mutation RPCs
+    /// (setThreatLevel, sessionAddTrust, trustAdd,
+    /// sessionAddUrlBlock) read the line and silently treated
+    /// any well-formed response as success — daemon rejections
+    /// (rate limit, auth, malformed input, sandbox /proc blocked)
+    /// all landed atty-side as "success". `classifyOrErr` always
+    /// parsed; the mutation paths now match.
+    fn readMutationResponse(self: *Client) Error!void {
         const line_len = self.readLine() catch {
             self.close();
             return Error.Unavailable;
         };
-        // We don't parse the body — daemon returns `{"type":"ok"}`
-        // on success. Any well-formed line is treated as success
-        // here; the in-proc fallback handles cases where the daemon
-        // closed mid-write.
-        _ = line_len;
+        return parseMutationResponse(self.read_buf[0..line_len]);
+    }
+
+    /// Pure-function variant of `readMutationResponse`'s parse —
+    /// split out so tests can exercise the envelope handling
+    /// without spinning up a real socket.
+    ///
+    /// Strategy: find the FIRST `"type":` substring and look at
+    /// what follows. Anchoring on the first occurrence (rather
+    /// than `indexOf` over the whole body) avoids confusables
+    /// where a `message` field embeds the literal text
+    /// `"type":"ok"` — substring match would otherwise return
+    /// success on a daemon error envelope whose message
+    /// happened to quote that shape.
+    ///
+    ///   - `"type":"ok"`    → success (no-op return)
+    ///   - `"type":"error"` → `Error.DaemonError`
+    ///   - other shapes     → `Error.DaemonError` (daemon should
+    ///                        emit one of those two; anything
+    ///                        else is a protocol violation).
+    pub fn parseMutationResponse(body: []const u8) Error!void {
+        const type_at = std.mem.indexOf(u8, body, "\"type\":\"") orelse
+            return Error.DaemonError;
+        const value_start = type_at + "\"type\":\"".len;
+        if (value_start >= body.len) return Error.DaemonError;
+        const remaining = body[value_start..];
+        if (std.mem.startsWith(u8, remaining, "ok\"")) return;
+        if (std.mem.startsWith(u8, remaining, "error\"")) return Error.DaemonError;
+        return Error.DaemonError;
     }
 
     pub const ThreatLevel = enum { low, high, critical };
@@ -222,10 +259,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        _ = self.readLine() catch {
-            self.close();
-            return Error.Unavailable;
-        };
+        try self.readMutationResponse();
     }
 
     /// Canonical persistence path for `[t]rust permanently`.
@@ -255,10 +289,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        _ = self.readLine() catch {
-            self.close();
-            return Error.Unavailable;
-        };
+        try self.readMutationResponse();
     }
 
     /// Fetch the caller's persistent trust hashes from the daemon
@@ -288,10 +319,17 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
+        const body = self.read_buf[0..line_len];
+        // Envelope check first — pre-this-PR trustList silently
+        // ignored daemon error envelopes (no `trust` array → no
+        // hashes added → looks like "empty trust list, no
+        // problem"). Surface auth / sandbox rejections instead.
+        if (std.mem.indexOf(u8, body, "\"type\":\"error\"") != null) {
+            return Error.DaemonError;
+        }
         // Parse minimal: scan for "trust":[...] array, extract each
         // 64-char hex needle, add to target. Avoids pulling in a
         // full JSON parser for what is a known-shape response.
-        const body = self.read_buf[0..line_len];
         const trust_at = std.mem.indexOf(u8, body, "\"trust\":[") orelse return;
         const arr_start = trust_at + "\"trust\":[".len;
         var cursor: usize = arr_start;
@@ -332,10 +370,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        _ = self.readLine() catch {
-            self.close();
-            return Error.Unavailable;
-        };
+        try self.readMutationResponse();
     }
 
     /// RFC 8259 minimal JSON-string escaper: `"`, `\`, control
