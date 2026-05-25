@@ -528,8 +528,10 @@ pub fn configure(comptime cfg: Config) type {
             /// last banner — without this flag, a later reset/cancel
             /// of a NEW dialog would re-flush the prior dialog's
             /// banner into the new session file. Set on
-            /// `captureConclusion`; cleared after the wrapper's
-            /// `appendConclusion` succeeds AND on every rotation.
+            /// `captureConclusion`; cleared unconditionally by the
+            /// dialogReset wrapper, detach, and every rotation
+            /// (incognito skips and write failures must not re-fire
+            /// the same banner on the next reset).
             chat_persist_conclusion_pending: bool = false,
             /// Copy of the response surfaced via pollShellInput.
             /// Owned by the runtime; valid until the next poll.
