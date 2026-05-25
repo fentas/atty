@@ -329,11 +329,15 @@ test "dropWellFormedCpr: malformed CSI with R but no `;` passes through" {
     try testing.expectEqualSlices(u8, "\x1B[24R", out[0..n]);
 }
 
-test "dropWellFormedCpr: partial reply at end of buffer passes through (cross-chunk handled by DsrParser)" {
+test "dropWellFormedCpr: partial reply at end of buffer passes through (split-chunk gap is documented)" {
     var out: [16]u8 = undefined;
-    // `\x1B[24;` with no R — incomplete. dropWellFormedCpr is the
-    // single-chunk fast path; partial completions are the gated
-    // DsrParser's job.
+    // `\x1B[24;` with no R — incomplete. This scrubber is single-
+    // chunk-only by design; the gated DsrParser's cross-chunk
+    // reassembly does NOT cover this case (the gate is closed for
+    // shell-fired CPRs). Documented in `dropWellFormedCpr`'s
+    // docstring as an accepted theoretical gap — terminals emit
+    // CPR atomically as one pty write so the split case is
+    // vanishingly rare in practice.
     const n = mod.dropWellFormedCpr("\x1B[24;", &out, false);
     try testing.expectEqualSlices(u8, "\x1B[24;", out[0..n]);
 }
@@ -365,4 +369,21 @@ test "dropWellFormedCpr: leak repro (starship-redraw style) — only the CPR rep
     const input = "\x1B[B\x1B[42;1R\x1B[42;1Rkey\x1B[42;2R";
     const n = mod.dropWellFormedCpr(input, &out, false);
     try testing.expectEqualStrings("\x1B[Bkey", out[0..n]);
+}
+
+test "dropWellFormedCpr: empty input is a no-op" {
+    var out: [4]u8 = undefined;
+    const n = mod.dropWellFormedCpr("", &out, false);
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+test "dropWellFormedCpr: CUP sequence (\\x1b[24;80H) is NOT a CPR — must pass through" {
+    // Sibling shape, different terminator. `H` is CUP (cursor
+    // position SET). The matcher requires `R` exactly; without
+    // the terminator check we'd eat positioning commands too.
+    // Stub-resistant test: combined drop + surround in one shot.
+    var out: [64]u8 = undefined;
+    const input = "before\x1B[24;80H\x1B[24;80Rafter";
+    const n = mod.dropWellFormedCpr(input, &out, false);
+    try testing.expectEqualStrings("before\x1B[24;80Hafter", out[0..n]);
 }

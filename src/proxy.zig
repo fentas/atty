@@ -716,6 +716,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     &stdin_cpr_buf,
                     alt_screen.active,
                 );
+                if (cpr_drop_len < dsr_result.filtered_len) {
+                    trace.log(.cursor, "cpr_scrub: pre={d} post={d} dropped={d}", .{ dsr_result.filtered_len, cpr_drop_len, dsr_result.filtered_len - cpr_drop_len });
+                }
                 var input: []const u8 = stdin_cpr_buf[0..cpr_drop_len];
                 if (input.len == 0) continue; // entire chunk was DSR reply
                 trace.logBytes(.input, "stdin_read", input);

@@ -257,10 +257,15 @@ pub const DsrParser = struct {
 /// `\x1B[<row>;` but bails on the unrecognised `R` terminator).
 ///
 /// This pass scans for COMPLETE replies that fit entirely in
-/// `input` (the common case — terminals emit the reply as a
-/// single chunk). Partial-cross-read replies still go through
-/// the gated `DsrParser` path which has the cross-chunk reassembly
-/// logic.
+/// `input`. Terminals emit CPR as a single `write(2)` from the
+/// pty side, so in practice the whole reply lands in one
+/// `read(2)`; a chunk boundary splitting `\x1B[12;` from `34R`
+/// would leak the second half. The gated `DsrParser` does cross-
+/// chunk reassembly but ONLY when `expecting_reply` is armed,
+/// which is precisely *not* the shell-fired case. Stateful
+/// withholding here would re-introduce the lone-Esc-eater
+/// problem that motivated the gate in the first place, so we
+/// accept the theoretical split-chunk gap.
 ///
 /// Caller passes alt_screen_active=false to engage the drop —
 /// in alt-screen mode the running TUI (nvim, atuin, lazygit)
@@ -275,7 +280,9 @@ pub fn dropWellFormedCpr(input: []const u8, out: []u8, alt_screen_active: bool) 
     var w: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
-        if (i + 5 <= input.len and input[i] == 0x1B and input[i + 1] == '[') {
+        // Minimum CPR shape `\x1B[<d>;<d>R` is 6 bytes; skip the
+        // matchCprAt call when fewer remain.
+        if (i + 6 <= input.len and input[i] == 0x1B and input[i + 1] == '[') {
             if (matchCprAt(input, i)) |after| {
                 i = after;
                 continue;
