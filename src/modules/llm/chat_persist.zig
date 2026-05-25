@@ -39,14 +39,12 @@ extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
-extern "c" fn stat(path: [*:0]const u8, statbuf: *Stat) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn getpid() c_int;
 extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
 const CLOCK_REALTIME: c_int = 0;
-const S_IFMT: c_uint = 0o170000;
-const S_IFDIR: c_uint = 0o040000;
 const O_EXCL: c_int = 0o200;
+const O_DIRECTORY: c_int = 0o200000;
 
 const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;
@@ -55,14 +53,14 @@ const O_APPEND: c_int = 0o2000;
 const FILE_MODE: c_int = 0o600;
 const DIR_MODE: c_uint = 0o700;
 
-// glibc x86_64 `struct stat` shape — we only need `mode` and
-// `size`. The padding spans match the actual field offsets so the
-// kernel's writes land in the right slots. Linux-only by design;
-// musl uses the same x86_64 layout for the fields we touch.
+// glibc x86_64 `struct stat` — we only need `size` for
+// `loadLastTurns`'s tail seek. The 48-byte pad matches the
+// offset of `st_size` in this libc/arch combo. Dir validation
+// uses `open(O_RDONLY|O_DIRECTORY)` instead of stat to dodge
+// the per-arch layout drift entirely (mode lives at a
+// different offset on aarch64 vs x86_64).
 const Stat = extern struct {
-    _pad0: [24]u8,
-    mode: u32,
-    _pad1: [20]u8,
+    _pad: [48]u8,
     size: i64,
     _pad2: [80]u8,
 };
@@ -114,16 +112,18 @@ pub fn resolveDir(allocator: std.mem.Allocator, explicit_dir: []const u8) ![]u8 
     }
 
     // Verify the final segment actually exists AND is a directory.
-    // Without this check, an unwritable home (EACCES on the parent
-    // mkdir, missing $HOME on a kiosk session) silently degrades
-    // to "persistence enabled but never writes" — surfaces nothing
-    // to the user. Returning error.NotFound here lets the caller
-    // treat persistence as unavailable.
+    // Probing via open(O_DIRECTORY) instead of stat() because the
+    // `struct stat` layout drifts across libc + arch combos (mode
+    // at offset 24 on x86_64, offset 16 on aarch64-musl), and we
+    // don't want a release binary to silently mis-decode the type
+    // bits and disable persistence. O_DIRECTORY's contract is
+    // kernel-level: success ↔ path is a directory; ENOTDIR ↔ not
+    // a dir; ENOENT / EACCES ↔ doesn't exist or unreachable.
     const dir_z = try allocator.dupeZ(u8, dir);
     defer allocator.free(dir_z);
-    var st: Stat = undefined;
-    if (stat(dir_z.ptr, &st) != 0) return error.PersistenceDirUnavailable;
-    if ((st.mode & S_IFMT) != S_IFDIR) return error.PersistenceDirNotADir;
+    const probe = open(dir_z.ptr, O_RDONLY | O_DIRECTORY);
+    if (probe < 0) return error.PersistenceDirUnavailable;
+    _ = close(probe);
 
     return allocator.dupe(u8, dir);
 }
