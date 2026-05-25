@@ -73,8 +73,13 @@ struct Cli {
     ///              `--config <path>` pointing at a TOML file
     ///              with `model_path` + `tokenizer_path` set, and
     ///              `libonnxruntime.so` on the loader path.
-    #[arg(long, default_value = "stub", value_parser = ["stub", "heuristic", "onnx"])]
-    tier2: String,
+    /// Omitted → look at config's `[tier2] backend`, then fall
+    /// back to `stub`. Use `Option<String>` rather than a clap
+    /// `default_value = "stub"` so main can distinguish "operator
+    /// didn't pass --tier2" from "operator passed --tier2 stub"
+    /// — the latter wins over a config-file `backend = "onnx"`.
+    #[arg(long, value_parser = ["stub", "heuristic", "onnx"])]
+    tier2: Option<String>,
 
     /// Optional TOML config — currently populates the Tier-2 ONNX
     /// backend's model/tokenizer paths + thresholds. All fields
@@ -613,8 +618,6 @@ fn main() -> std::io::Result<()> {
     }
 
     let socket = cli.socket.unwrap_or_else(default_socket_path);
-    let backend =
-        classifier::BackendKind::parse(&cli.tier2).unwrap_or(classifier::BackendKind::Stub);
 
     // Optional TOML config — only used by the ONNX backend today,
     // but the loader is generic so future Tier-2 backends + V2-F
@@ -650,6 +653,47 @@ fn main() -> std::io::Result<()> {
         },
         None => config::Config::default(),
     };
+
+    // Tier-2 backend selection — precedence:
+    //   1. Explicit CLI `--tier2 <value>` wins.
+    //   2. Config-file `[tier2] backend = "..."` next.
+    //   3. Default `stub` (matches pre-#227 behavior).
+    //
+    // Pre-fix, `cli.tier2` had a clap default of "stub" so main.rs
+    // couldn't distinguish "operator didn't pass --tier2" from
+    // "operator explicitly passed stub" — the documented config
+    // path silently lost to the always-present CLI default. Now
+    // `cli.tier2: Option<String>` makes "omitted" observable.
+    //
+    // Invalid config backend → hard fail (matches the explicit-
+    // config posture from #226 / finding 019).
+    let backend_source: &'static str;
+    let backend_str: String = if let Some(ref t) = cli.tier2 {
+        backend_source = "cli";
+        t.clone()
+    } else if let Some(ref t) = file_cfg.tier2.backend {
+        backend_source = "config";
+        t.clone()
+    } else {
+        backend_source = "default";
+        "stub".to_owned()
+    };
+    let backend = classifier::BackendKind::parse(&backend_str).ok_or_else(|| {
+        eprintln!(
+            "atty-guard: invalid tier2 backend {:?} from {} — expected stub|heuristic|onnx",
+            backend_str, backend_source
+        );
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid tier2 backend: {backend_str}"),
+        )
+    })?;
+    if cli.verbosity >= 1 {
+        eprintln!(
+            "atty-guard: tier2={} (source={})",
+            backend_str, backend_source
+        );
+    }
 
     // Single-instance guard via flock on a sibling `.lock` file.
     // Holding the file alive for the daemon's lifetime keeps the
@@ -713,7 +757,7 @@ fn main() -> std::io::Result<()> {
         eprintln!(
             "atty-guard: listening on {} (tier2={})",
             socket.display(),
-            cli.tier2
+            backend_str
         );
     }
 
