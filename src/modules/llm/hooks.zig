@@ -1019,17 +1019,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // overlay rendering the conversation history.
                     // Open shows turns + conclusion in a chrome-free
                     // text view; close exits the alt screen and
-                    // restores the underlying shell.
+                    // restores the underlying shell. Opens even when
+                    // empty — the overlay's input row is the entry
+                    // point for a fresh chat.
                     if (!rt.chat_overlay_open) {
-                        const has_content = rt.turns_len > 0 or rt.conclusion_formatted != null;
-                        if (!has_content) {
-                            // Nothing to show yet — refuse to open
-                            // (avoids an empty alt-screen that the
-                            // user has to dismiss). Hint surface
-                            // tells them how to populate it.
-                            latchHint(rt, "no LLM session to recall — run a dialog (Alt+S) first");
-                            return true;
-                        }
                         // Mutual exclusion — if the inline panel is
                         // open, close it first so cursor focus is
                         // unambiguous and `extraReserveRows` returns

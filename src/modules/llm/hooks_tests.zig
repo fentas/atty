@@ -15,7 +15,7 @@ const shutdownAndFree = @import("test_helpers.zig").shutdownAndFree;
 
 const test_io: std.Io = std.Io.failing;
 
-test "chat overlay (Alt+Shift+C): refuses to open when no conversation exists" {
+test "chat overlay (Alt+Shift+C): opens empty when no conversation exists" {
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -43,12 +43,20 @@ test "chat overlay (Alt+Shift+C): refuses to open when no conversation exists" {
     };
 
     // Fresh runtime — no turns, no conclusion. Alt+Shift+C should
-    // hint-and-no-op rather than open an empty overlay.
+    // still open the overlay so the user can start a fresh chat
+    // (the overlay's input row is the entry point); the prior
+    // "refuse-and-hint" UX gated the overlay on having a recall
+    // candidate, which blocked the common "I just want to ask
+    // something" entry point.
     const consumed = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
     try testing.expect(consumed);
+    try testing.expect(rt.chat_overlay_open);
+    try testing.expect(rt.chat_overlay_paint_pending);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+
+    // Toggle again — should close.
+    _ = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
     try testing.expect(!rt.chat_overlay_open);
-    try testing.expect(rt.hint_pending);
-    rt.hint_pending = false; // drain the latch so the next test starts clean
 }
 
 test "chat overlay: onInput swallows all keystrokes while open" {
