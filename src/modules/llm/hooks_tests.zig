@@ -42,12 +42,9 @@ test "chat overlay (Alt+Shift+C): opens empty when no conversation exists" {
         .is_tty = false,
     };
 
-    // Fresh runtime — no turns, no conclusion. Alt+Shift+C should
-    // still open the overlay so the user can start a fresh chat
-    // (the overlay's input row is the entry point); the prior
-    // "refuse-and-hint" UX gated the overlay on having a recall
-    // candidate, which blocked the common "I just want to ask
-    // something" entry point.
+    // Fresh runtime — no turns, no conclusion. The overlay is its
+    // own chat entry point; opening it must succeed even with
+    // nothing to recall.
     const consumed = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
     try testing.expect(consumed);
     try testing.expect(rt.chat_overlay_open);
