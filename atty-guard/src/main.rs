@@ -619,15 +619,33 @@ fn main() -> std::io::Result<()> {
     // Optional TOML config — only used by the ONNX backend today,
     // but the loader is generic so future Tier-2 backends + V2-F
     // OSV-lookup tunables can hang here without reshuffling.
+    //
+    // Failure posture: when `--config <path>` is EXPLICITLY passed
+    // by the operator, a load failure (missing file, parse error,
+    // bad permissions) is a HARD error. Pre-fix, the daemon logged
+    // and continued with `Config::default()` — which silently
+    // disabled `[accumulator] block_threshold` (auto-Block off),
+    // reverted `[tier2.onnx]` thresholds, and reset `[server]`
+    // connection caps. In a systemd deployment the service looked
+    // healthy while running with the wrong policy.
+    //
+    // Matches the atom-pin-file posture (`/etc/atty-guard/atoms.pins.toml`,
+    // shipped via #208): explicit opt-in means the operator wants
+    // the policy enforced, so silent fallback defeats the purpose.
+    // When `--config` is omitted, defaults are still the right
+    // behavior — no operator policy was promised.
     let file_cfg = match cli.config.as_ref() {
         Some(p) => match config::load(p) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!(
-                    "atty-guard: --config {} ({e}) — using defaults",
+                    "atty-guard: --config {} rejected ({e}) — refusing to start with defaults; either fix the config or omit --config to use defaults intentionally",
                     p.display()
                 );
-                config::Config::default()
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("config load failed: {e}"),
+                ));
             }
         },
         None => config::Config::default(),
