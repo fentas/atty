@@ -251,15 +251,14 @@ pub const DsrParser = struct {
 /// call entirely to avoid the copy.
 ///
 /// `out` must be at least `input.len` bytes; debug-asserted.
-/// `out` and `input` may NOT overlap (the loop reads `input[i]`
-/// after writing `out[w]` — overlap would corrupt the trailing
-/// bytes of a same-buffer call).
+/// Overlap rules differ by branch: the alt-screen pass-through
+/// uses `@memmove` and tolerates overlapping/same-buffer
+/// callers; the scrub loop is NOT overlap-safe (it reads
+/// `input[i]` after writing `out[w]`). Callers needing
+/// overlap-safety must route through the alt-screen branch.
 pub fn dropWellFormedCpr(input: []const u8, out: []u8, alt_screen_active: bool) usize {
     std.debug.assert(out.len >= input.len);
     if (alt_screen_active) {
-        // @memmove tolerates same-buffer / overlapping callers
-        // even though no caller passes one today — cheap insurance
-        // for an exported helper.
         @memmove(out[0..input.len], input);
         return input.len;
     }
