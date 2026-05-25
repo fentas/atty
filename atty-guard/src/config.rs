@@ -214,12 +214,21 @@ pub fn load(path: &Path) -> Result<Config, LoadError> {
 }
 
 /// Stub for builds without the `tier2-onnx` feature: no TOML
-/// parser is in the dep tree, so we accept the `--config` flag
-/// but return the defaults. Lets the daemon stay launchable from
-/// a systemd unit that hardcodes `--config /etc/atty-guard.toml`
-/// regardless of which feature set the operator built with.
+/// parser is in the dep tree, but we still attempt to READ the
+/// file so the I/O failure posture matches the feature-on build.
+/// Pre-fix, the stub returned `Ok(default)` unconditionally —
+/// `--config /missing.toml` silently succeeded on
+/// non-tier2-onnx builds, defeating the explicit-config
+/// fail-closed posture for that feature flavor. Now both paths
+/// fail consistently on unreadable files; the stub additionally
+/// ignores TOML content (no parser available), so a syntactically
+/// valid file is treated as defaults regardless of what's in it
+/// — that's the right behavior since the only config fields the
+/// stub could honor (`[server]`, `[accumulator]`) DO have stub
+/// equivalents but aren't wired through the stub path today.
 #[cfg(not(feature = "tier2-onnx"))]
-pub fn load(_path: &Path) -> Result<Config, LoadError> {
+pub fn load(path: &Path) -> Result<Config, LoadError> {
+    std::fs::read_to_string(path).map_err(LoadError::Io)?;
     Ok(Config::default())
 }
 

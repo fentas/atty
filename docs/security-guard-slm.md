@@ -66,7 +66,7 @@ atty-guard \
     -v 1
 ```
 
-Without `--config` (or with a missing config), the daemon errors out at OnnxBackend construction with a clear message and falls back to `StubBackend` — atty-guard still starts, just without SLM-grade Tier-2.
+Without `--config`, the daemon starts with built-in defaults (Stub backend). With `--config <path>`, a load failure is a hard error — fix the config or omit `--config` to use defaults intentionally. When config + onnx are wired but OnnxBackend construction itself fails (model file missing, tokenizer parse error, etc.), the daemon logs a clear message and falls back to `StubBackend` — atty-guard still starts, just without SLM-grade Tier-2.
 
 ## Runtime: pure-Rust tract, no C deps
 

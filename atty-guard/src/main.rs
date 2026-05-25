@@ -654,44 +654,37 @@ fn main() -> std::io::Result<()> {
         None => config::Config::default(),
     };
 
-    // Tier-2 backend selection — precedence:
-    //   1. Explicit CLI `--tier2 <value>` wins.
-    //   2. Config-file `[tier2] backend = "..."` next.
-    //   3. Default `stub` (matches pre-#227 behavior).
-    //
-    // Pre-fix, `cli.tier2` had a clap default of "stub" so main.rs
-    // couldn't distinguish "operator didn't pass --tier2" from
-    // "operator explicitly passed stub" — the documented config
-    // path silently lost to the always-present CLI default. Now
-    // `cli.tier2: Option<String>` makes "omitted" observable.
-    //
-    // Invalid config backend → hard fail (matches the explicit-
-    // config posture from #226 / finding 019).
-    let backend_source: &'static str;
-    let backend_str: String = if let Some(ref t) = cli.tier2 {
-        backend_source = "cli";
-        t.clone()
-    } else if let Some(ref t) = file_cfg.tier2.backend {
-        backend_source = "config";
-        t.clone()
-    } else {
-        backend_source = "default";
-        "stub".to_owned()
+    // Tier-2 backend selection via the resolve_backend helper —
+    // precedence + validation tested directly in classifier.rs.
+    // Invalid backend (from cli OR config) → hard fail to match
+    // the explicit-config posture from #226.
+    let (backend, backend_source) = match classifier::resolve_backend(
+        cli.tier2.as_deref(),
+        file_cfg.tier2.backend.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err((raw, source)) => {
+            eprintln!(
+                "atty-guard: invalid tier2 backend {:?} from {} — expected stub|heuristic|onnx",
+                raw,
+                source.as_str(),
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid tier2 backend: {raw}"),
+            ));
+        }
     };
-    let backend = classifier::BackendKind::parse(&backend_str).ok_or_else(|| {
-        eprintln!(
-            "atty-guard: invalid tier2 backend {:?} from {} — expected stub|heuristic|onnx",
-            backend_str, backend_source
-        );
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid tier2 backend: {backend_str}"),
-        )
-    })?;
+    let backend_str: &'static str = match backend {
+        classifier::BackendKind::Stub => "stub",
+        classifier::BackendKind::Heuristic => "heuristic",
+        classifier::BackendKind::Onnx => "onnx",
+    };
     if cli.verbosity >= 1 {
         eprintln!(
             "atty-guard: tier2={} (source={})",
-            backend_str, backend_source
+            backend_str,
+            backend_source.as_str(),
         );
     }
 

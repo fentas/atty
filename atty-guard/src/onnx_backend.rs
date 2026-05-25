@@ -56,8 +56,33 @@ impl std::fmt::Display for LoadError {
                 f,
                 "atty-guard built without --features tier2-onnx — recompile with the feature on"
             ),
-            LoadError::ModelMissing(p) => write!(f, "model file not found: {p}"),
-            LoadError::TokenizerMissing(p) => write!(f, "tokenizer file not found: {p}"),
+            LoadError::ModelMissing(p) => {
+                // Empty path almost always means the operator
+                // wrote `[tier2] backend = "onnx"` but forgot to
+                // add the `[tier2.onnx]` section — pre-fix this
+                // surfaced as `model file not found:` with a
+                // trailing space, which looked like a stripped
+                // value. Now the empty case names the missing
+                // section explicitly so the fix is obvious.
+                if p.is_empty() {
+                    write!(
+                        f,
+                        "[tier2.onnx] model_path is empty — set it in the config (see docs/security-guard-slm.md) or pick a non-onnx backend"
+                    )
+                } else {
+                    write!(f, "model file not found: {p}")
+                }
+            }
+            LoadError::TokenizerMissing(p) => {
+                if p.is_empty() {
+                    write!(
+                        f,
+                        "[tier2.onnx] tokenizer_path is empty — set it in the config (see docs/security-guard-slm.md) or pick a non-onnx backend"
+                    )
+                } else {
+                    write!(f, "tokenizer file not found: {p}")
+                }
+            }
             LoadError::InitFailed(d) => write!(f, "onnx init failed: {d}"),
         }
     }
