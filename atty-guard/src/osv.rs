@@ -155,6 +155,24 @@ mod with_ureq {
     use std::sync::Mutex;
     use std::time::Instant;
 
+    /// Hard cap on cached OSV lookups. A local client with socket
+    /// access can flood unique package names (`npm install rand-1`,
+    /// `npm install rand-2`, …); without a cap the cache grows
+    /// linearly until daemon restart. 4096 covers any realistic
+    /// npm-namespace workload (the npm registry has ~3M packages
+    /// total but a single shell session touches a tiny subset).
+    /// Hit triggers FIFO eviction of the oldest expired entry,
+    /// falling back to the absolute-oldest insertion if none are
+    /// expired yet.
+    pub const MAX_CACHE_ENTRIES: usize = 4096;
+
+    /// Cap on package-name length stored in the cache key.
+    /// npm package names max out at 214 chars per the spec; 256
+    /// gives 16 bytes of slack. Longer keys are likely adversarial
+    /// (key-cardinality inflation) and just don't get cached —
+    /// the lookup still proceeds, the result just won't memoize.
+    pub const MAX_PACKAGE_KEY_LEN: usize = 256;
+
     pub struct OsvClient {
         endpoint: String,
         agent: ureq::Agent,
@@ -212,8 +230,102 @@ mod with_ureq {
         }
 
         fn cache_set(&self, package: &str, v: OsvVerdict) {
+            // Don't cache absurdly long keys — they're either junk
+            // or an adversarial attempt to bloat the entry size.
+            // npm spec caps names at 214; we accept 256 as a safety
+            // margin. Lookup still happens via lookup_npm above —
+            // just doesn't get memoized.
+            if package.len() > MAX_PACKAGE_KEY_LEN {
+                return;
+            }
             let mut g = self.cache.lock().expect("osv cache poisoned");
+            // Cap enforcement + opportunistic prune. When at cap,
+            // try to evict an EXPIRED entry first (cheap + matches
+            // the "TTL governs freshness" contract). If everything
+            // is fresh, evict the oldest by insertion time — FIFO,
+            // which is appropriate because hot keys re-populate
+            // quickly via subsequent lookups.
+            if g.len() >= MAX_CACHE_ENTRIES {
+                // First pass: drop any entries past TTL. Cheap O(n)
+                // walk; only runs at the cap boundary.
+                let cutoff = self.cache_ttl;
+                let now = Instant::now();
+                g.retain(|_, (when, _)| now.duration_since(*when) < cutoff);
+                // If still at/over cap, evict the oldest by insertion.
+                if g.len() >= MAX_CACHE_ENTRIES {
+                    if let Some((oldest_key, _)) = g
+                        .iter()
+                        .min_by_key(|(_, (when, _))| *when)
+                        .map(|(k, v)| (k.clone(), v.0))
+                    {
+                        g.remove(&oldest_key);
+                    }
+                }
+            }
             g.insert(package.into(), (Instant::now(), v));
+        }
+    }
+
+    #[cfg(test)]
+    mod cache_tests {
+        use super::*;
+
+        fn client_with_ttl(ttl: Duration) -> OsvClient {
+            OsvClient::new(OsvConfig {
+                endpoint: "http://test/never".into(),
+                timeout: Duration::from_millis(100),
+                cache_ttl: ttl,
+            })
+        }
+
+        #[test]
+        fn cap_holds_under_flood() {
+            // Insert MAX + 100 unique keys via cache_set directly
+            // (would otherwise need a fake HTTP server). After
+            // the flood the cache size MUST stay ≤ MAX —
+            // pre-fix, this grew linearly to MAX + 100.
+            let c = client_with_ttl(Duration::from_secs(3600));
+            for i in 0..(MAX_CACHE_ENTRIES + 100) {
+                let key = format!("test-pkg-{}", i);
+                c.cache_set(&key, OsvVerdict::None);
+            }
+            let len = c.cache.lock().unwrap().len();
+            assert!(len <= MAX_CACHE_ENTRIES, "cache size {} > cap {}", len, MAX_CACHE_ENTRIES);
+        }
+
+        #[test]
+        fn oversize_key_not_cached() {
+            // npm spec caps names at 214; we accept 256. Anything
+            // longer is dropped silently to bound key size.
+            let c = client_with_ttl(Duration::from_secs(3600));
+            let oversize = "x".repeat(MAX_PACKAGE_KEY_LEN + 1);
+            c.cache_set(&oversize, OsvVerdict::None);
+            assert_eq!(c.cache.lock().unwrap().len(), 0);
+        }
+
+        #[test]
+        fn at_max_key_len_is_cached() {
+            let c = client_with_ttl(Duration::from_secs(3600));
+            let at_max = "x".repeat(MAX_PACKAGE_KEY_LEN);
+            c.cache_set(&at_max, OsvVerdict::None);
+            assert_eq!(c.cache.lock().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn expired_entries_pruned_at_cap_boundary() {
+            // Tiny TTL — every entry expires after 10ms. Insert
+            // MAX with tiny TTL, sleep past TTL, insert one more
+            // → the prune path runs at cap and clears all the
+            // expired entries; cache should drop to just the
+            // fresh insertion.
+            let c = client_with_ttl(Duration::from_millis(10));
+            for i in 0..MAX_CACHE_ENTRIES {
+                c.cache_set(&format!("expire-{}", i), OsvVerdict::None);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            c.cache_set("fresh", OsvVerdict::None);
+            let len = c.cache.lock().unwrap().len();
+            assert!(len < MAX_CACHE_ENTRIES, "expected prune; got {} entries", len);
         }
     }
 }
@@ -373,3 +485,4 @@ mod tests {
         assert!(s.contains("timed out"));
     }
 }
+
