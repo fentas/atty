@@ -59,6 +59,54 @@ impl BackendKind {
     }
 }
 
+/// Source attribution for a resolved backend choice — surfaced
+/// in startup logs + the error message when validation fails.
+/// Kept as a tiny enum (not `&'static str`) so a misspelled
+/// arm fails to compile rather than producing a wrong log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendSource {
+    Cli,
+    Config,
+    Default,
+}
+
+impl BackendSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendSource::Cli => "cli",
+            BackendSource::Config => "config",
+            BackendSource::Default => "default",
+        }
+    }
+}
+
+/// Resolve the effective Tier-2 backend.
+///
+/// Precedence: explicit CLI `--tier2` > config-file
+/// `[tier2] backend = "..."` > built-in default (stub).
+///
+/// Returns `(BackendKind, BackendSource)` so callers can log the
+/// chosen backend and where it came from. On an unknown value
+/// returns the offending string + its source so the caller can
+/// surface an operator-actionable error naming the source
+/// (`"... from config — expected stub|heuristic|onnx"`).
+pub fn resolve_backend(
+    cli: Option<&str>,
+    config: Option<&str>,
+) -> Result<(BackendKind, BackendSource), (String, BackendSource)> {
+    let (raw, source) = if let Some(t) = cli {
+        (t.to_owned(), BackendSource::Cli)
+    } else if let Some(t) = config {
+        (t.to_owned(), BackendSource::Config)
+    } else {
+        ("stub".to_owned(), BackendSource::Default)
+    };
+    match BackendKind::parse(&raw) {
+        Some(k) => Ok((k, source)),
+        None => Err((raw, source)),
+    }
+}
+
 pub struct Classifier {
     tier1: Tier1,
     tier2: Box<dyn Tier2Backend>,
@@ -1140,5 +1188,62 @@ mod tests {
         assert!(matches!(r.category, Category::CurlPipeSh));
         // Tier-1's reason wins.
         assert!(r.reason.contains("remote-fetch-and-execute"));
+    }
+}
+
+#[cfg(test)]
+mod resolve_backend_tests {
+    use super::{resolve_backend, BackendKind, BackendSource};
+
+    #[test]
+    fn cli_wins_over_config() {
+        // CLI `--tier2` overrides the config file's `[tier2]
+        // backend` when both are set; source reports CLI.
+        let (kind, src) = resolve_backend(Some("stub"), Some("onnx")).unwrap();
+        assert_eq!(kind, BackendKind::Stub);
+        assert_eq!(src, BackendSource::Cli);
+    }
+
+    #[test]
+    fn config_used_when_cli_omitted() {
+        // CLI absent + config present: config selects; source
+        // reports Config. The CLI value being `Option<String>`
+        // (not a clap-defaulted string) is what makes the
+        // "omitted" branch distinguishable from "explicitly
+        // chose default".
+        let (kind, src) = resolve_backend(None, Some("onnx")).unwrap();
+        assert_eq!(kind, BackendKind::Onnx);
+        assert_eq!(src, BackendSource::Config);
+    }
+
+    #[test]
+    fn default_stub_when_both_omitted() {
+        let (kind, src) = resolve_backend(None, None).unwrap();
+        assert_eq!(kind, BackendKind::Stub);
+        assert_eq!(src, BackendSource::Default);
+    }
+
+    #[test]
+    fn invalid_cli_rejected_with_source() {
+        // Hard fail surfaces the invalid string + its source so
+        // the operator's error message can attribute correctly
+        // ("invalid tier2 backend ... from cli").
+        let err = resolve_backend(Some("garbage"), Some("onnx")).unwrap_err();
+        assert_eq!(err.0, "garbage");
+        assert_eq!(err.1, BackendSource::Cli);
+    }
+
+    #[test]
+    fn invalid_config_rejected_with_source() {
+        let err = resolve_backend(None, Some("garbage")).unwrap_err();
+        assert_eq!(err.0, "garbage");
+        assert_eq!(err.1, BackendSource::Config);
+    }
+
+    #[test]
+    fn cli_heuristic_recognized() {
+        let (kind, src) = resolve_backend(Some("heuristic"), None).unwrap();
+        assert_eq!(kind, BackendKind::Heuristic);
+        assert_eq!(src, BackendSource::Cli);
     }
 }

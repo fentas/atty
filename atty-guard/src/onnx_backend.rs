@@ -56,8 +56,30 @@ impl std::fmt::Display for LoadError {
                 f,
                 "atty-guard built without --features tier2-onnx — recompile with the feature on"
             ),
-            LoadError::ModelMissing(p) => write!(f, "model file not found: {p}"),
-            LoadError::TokenizerMissing(p) => write!(f, "tokenizer file not found: {p}"),
+            LoadError::ModelMissing(p) => {
+                // Empty path almost always means the operator wrote
+                // `[tier2] backend = "onnx"` without a `[tier2.onnx]`
+                // section; naming the missing key in the message
+                // makes the fix obvious without consulting docs.
+                if p.is_empty() {
+                    write!(
+                        f,
+                        "[tier2.onnx] model_path is empty — set it (e.g. model_path = \"/var/lib/atty-guard/models/securebert2-int8.onnx\") or, under [tier2], pick a non-onnx backend (`backend = \"stub\"` or `backend = \"heuristic\"`)"
+                    )
+                } else {
+                    write!(f, "model file not found: {p}")
+                }
+            }
+            LoadError::TokenizerMissing(p) => {
+                if p.is_empty() {
+                    write!(
+                        f,
+                        "[tier2.onnx] tokenizer_path is empty — set it (e.g. tokenizer_path = \"/var/lib/atty-guard/models/securebert2-tokenizer.json\") or, under [tier2], pick a non-onnx backend (`backend = \"stub\"` or `backend = \"heuristic\"`)"
+                    )
+                } else {
+                    write!(f, "tokenizer file not found: {p}")
+                }
+            }
             LoadError::InitFailed(d) => write!(f, "onnx init failed: {d}"),
         }
     }

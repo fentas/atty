@@ -213,13 +213,20 @@ pub fn load(path: &Path) -> Result<Config, LoadError> {
     toml::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))
 }
 
-/// Stub for builds without the `tier2-onnx` feature: no TOML
-/// parser is in the dep tree, so we accept the `--config` flag
-/// but return the defaults. Lets the daemon stay launchable from
-/// a systemd unit that hardcodes `--config /etc/atty-guard.toml`
-/// regardless of which feature set the operator built with.
+/// Stub for builds without the `tier2-onnx` feature.
+///
+/// TOML parsing is gated behind `tier2-onnx`; this stub deliberately
+/// does NOT parse the file even when the `toml` crate is in the dep
+/// tree via another feature (e.g. `atoms-fetch`) — keeping the
+/// parsing surface tied to a single feature flag.
+///
+/// The stub still performs the file read so the I/O failure posture
+/// is identical to the feature-on build: an unreadable `--config
+/// <path>` is a hard error in both flavors. A readable file always
+/// returns `Config::default()` regardless of contents.
 #[cfg(not(feature = "tier2-onnx"))]
-pub fn load(_path: &Path) -> Result<Config, LoadError> {
+pub fn load(path: &Path) -> Result<Config, LoadError> {
+    std::fs::read_to_string(path).map_err(LoadError::Io)?;
     Ok(Config::default())
 }
 
@@ -265,19 +272,33 @@ block_threshold = 0.9
         assert_eq!(cfg.tier2.onnx.model, "securebert2");
     }
 
+    #[cfg(not(feature = "tier2-onnx"))]
     #[test]
-    fn no_feature_load_returns_defaults() {
-        // On builds without `tier2-onnx`, `load` is a no-op that
-        // returns defaults. Pass any path; nothing is read.
-        let cfg = load(Path::new("/nonexistent.toml"));
-        #[cfg(not(feature = "tier2-onnx"))]
-        {
-            assert!(cfg.is_ok());
-            let c = cfg.unwrap();
-            assert_eq!(c.tier2.onnx.model, "securebert2");
-        }
-        // On feature builds, /nonexistent → IO error. Drop the
-        // result to keep the test trivially passing in both modes.
-        let _ = cfg;
+    fn no_feature_load_readable_file_returns_defaults() {
+        // Stub builds still perform the I/O so the failure posture
+        // matches the feature-on path; on a readable file the
+        // result is always `Config::default()` since the stub
+        // ignores TOML content (no parser wired through this path
+        // even when `toml` is present via another feature like
+        // `atoms-fetch`).
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"anything = \"ignored\"").unwrap();
+        let cfg = load(tmp.path()).expect("readable file should succeed");
+        assert_eq!(cfg.tier2.onnx.model, "securebert2");
+    }
+
+    #[cfg(not(feature = "tier2-onnx"))]
+    #[test]
+    fn no_feature_load_missing_file_errors() {
+        // Stub I/O failure parity: missing path → LoadError::Io,
+        // same as the feature-on build. Without this the explicit-
+        // --config fail-closed posture only applied to tier2-onnx
+        // builds, defeating it on default builds.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.toml");
+        assert!(!missing.exists());
+        let cfg = load(&missing);
+        assert!(cfg.is_err(), "missing path should not succeed");
     }
 }
