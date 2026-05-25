@@ -296,7 +296,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 const ind = std.fmt.bufPrint(&sb, "\x1B[2m[\u{2191} {d} below]\x1B[0m ", .{overlay_offset}) catch "";
                 w.writeAll(ind) catch return false;
             }
-            w.writeAll("\x1B[2m[Alt+T auto \u{00B7} Alt+M model \u{00B7} Alt+Shift+C close \u{00B7} Enter send \u{00B7} PgUp/PgDn]\x1B[0m") catch return false;
+            w.writeAll("\x1B[2m[Alt+T auto \u{00B7} Alt+M model \u{00B7} Alt+Shift+C close \u{00B7} Enter send \u{00B7} Shift\u{2191}\u{2193}/PgUp\u{00B7}PgDn]\x1B[0m") catch return false;
             // Transfer ownership of the formatted buffer to the
             // Runtime so the provideTermBytes consumer gets a
             // stable slice that survives until the next paint.
