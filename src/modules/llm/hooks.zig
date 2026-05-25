@@ -1015,13 +1015,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     return true;
                 },
                 .llm_chat_overlay_toggle => {
-                    // Phase 2a: toggle a persistent alt-screen
-                    // overlay rendering the conversation history.
-                    // Open shows turns + conclusion in a chrome-free
-                    // text view; close exits the alt screen and
-                    // restores the underlying shell. Opens even when
-                    // empty — the overlay's input row is the entry
-                    // point for a fresh chat.
+                    // Empty-open is intentional: the overlay's input
+                    // row is the entry point for a fresh chat.
                     if (!rt.chat_overlay_open) {
                         // Mutual exclusion — if the inline panel is
                         // open, close it first so cursor focus is
