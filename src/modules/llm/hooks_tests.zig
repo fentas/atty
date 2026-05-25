@@ -494,8 +494,8 @@ test "inline chat: Alt+Shift+C closes inline panel first if it was open (mutuall
         .is_tty = false,
     };
 
-    // Seed content so the overlay-toggle handler doesn't refuse to
-    // open with "no LLM session to recall".
+    // Seed a turn so the post-toggle overlay paint has content to
+    // render — the mutual-exclusion contract is what's under test.
     const helpers = dialog.Module(L.config, L.Runtime);
     try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "first prompt"));
     defer helpers.freeTurns(&rt);
