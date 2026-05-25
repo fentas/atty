@@ -171,10 +171,8 @@ pub const Action = union(enum) {
     /// view never moves past the oldest turn. Sibling
     /// `chat_scroll_page_*` scrolls by one viewport's worth.
     ///
-    /// **Not bound by default** (single-step keys live in the
-    /// future per-surface ring-buffer story; for now only page
-    /// scroll is shipped). Listed here so user configs can map
-    /// e.g. Shift+Up / Shift+Down.
+    /// Default **Shift+Up / Shift+Down** when a chat surface is
+    /// open; otherwise the keystroke falls through to the shell.
     chat_scroll_up,
     chat_scroll_down,
     /// Scroll the chat history view back / forward by one page —
