@@ -454,8 +454,11 @@ pub fn configure(comptime cfg: Config) type {
         const latchHint = dialog_helpers.latchHint;
         const latchErr = dialog_helpers.latchErr;
         const queueInjection = dialog_helpers.queueInjection;
-        const dialogReset = dialog_helpers.dialogReset;
-        const abortDialog = dialog_helpers.abortDialog;
+        // dialogReset / abortDialog are deliberately NOT aliased here:
+        // hooks.zig wraps both with the persistence-rotation logic and
+        // call sites must go through the wrappers. Aliasing them flat
+        // in this scope would be a drift trap — a future llm.zig edit
+        // could call the un-wrapped helper and silently skip rotation.
 
         // Shared state struct (mutex + buffers shared between
         // proxy and worker thread) lives in `llm/worker.zig`.
