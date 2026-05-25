@@ -48,7 +48,8 @@ const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
 const CursorTracker = @import("cursor_tracker.zig").CursorTracker;
-const DsrParser = @import("cursor_dsr.zig").DsrParser;
+const cursor_dsr = @import("cursor_dsr.zig");
+const DsrParser = cursor_dsr.DsrParser;
 const Osc7 = @import("osc7.zig").Osc7;
 const subprocess_mod = @import("subprocess.zig");
 const overlay_ring = @import("overlay_ring.zig");
@@ -273,6 +274,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // Sized to match `read_buf` since the filtered output is at most
     // as long as the input.
     var stdin_filtered_buf: [4096]u8 = undefined;
+    // Second scratch buffer for the shell-fired-CPR pass after
+    // `DsrParser.feed`. Distinct from `stdin_filtered_buf` so the
+    // first pass's output can be re-read while we write to this one.
+    var stdin_cpr_buf: [4096]u8 = undefined;
 
     // Alternate-screen-buffer tracker — full-screen TUIs (k9s, vim,
     // less, htop, helix, lazygit, …) swap to the alt buffer with
@@ -698,7 +703,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     cursor_tracker.setPosition(pos.row, pos.col);
                     trace.log(.cursor, "DSR-6n reply: row={d} col={d}", .{ pos.row, pos.col });
                 }
-                var input: []const u8 = stdin_filtered_buf[0..dsr_result.filtered_len];
+                // Second pass: strip CPR replies that atty didn't query
+                // for. Prompt redraws (starship, p10k) fire DSR on
+                // every refresh; the gated DsrParser passes those
+                // replies through because `expecting_reply` is false.
+                // Without this pass the reply's trailing `<col>R`
+                // leaks onto the shell's prompt as visible text. The
+                // drop is no-op when alt-screen is active — the
+                // running TUI owns its own CPR protocol.
+                const cpr_drop_len = cursor_dsr.dropWellFormedCpr(
+                    stdin_filtered_buf[0..dsr_result.filtered_len],
+                    &stdin_cpr_buf,
+                    alt_screen.active,
+                );
+                var input: []const u8 = stdin_cpr_buf[0..cpr_drop_len];
                 if (input.len == 0) continue; // entire chunk was DSR reply
                 trace.logBytes(.input, "stdin_read", input);
                 trace.log(.altscreen, "alt_screen.active={} module_overlay_active={}", .{ alt_screen.active, ctx.module_overlay_active });

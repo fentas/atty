@@ -238,6 +238,74 @@ pub const DsrParser = struct {
     }
 };
 
+/// Strip well-formed CPR (cursor-position report) replies that
+/// atty *didn't* query for. The shell's prompt — starship, p10k,
+/// any prompt that re-anchors via `\x1B[6n` — fires its own DSR
+/// queries on every redraw. The terminal's reply lands on atty's
+/// stdin; `DsrParser.feed` only consumes it when atty's gate is
+/// armed (so user-typed Esc keystrokes don't get eaten between
+/// atty's own queries). Replies from shell-fired queries leak
+/// through the gate to the next read consumer.
+///
+/// Visible symptom: holding Ctrl+Up (which dispatches
+/// `chat_focus_to_shell` then forwards subsequent keys to the
+/// shell) trips zsh's history-search prompt redraw → starship
+/// fires DSR per redraw → the terminal answers fast enough that
+/// the replies arrive in the same poll wakeup → the keymap
+/// matcher / shell echoes the trailing `<col>R` tail on the
+/// prompt line (the shell's CSI consumer eats the leading
+/// `\x1B[<row>;` but bails on the unrecognised `R` terminator).
+///
+/// This pass scans for COMPLETE replies that fit entirely in
+/// `input` (the common case — terminals emit the reply as a
+/// single chunk). Partial-cross-read replies still go through
+/// the gated `DsrParser` path which has the cross-chunk reassembly
+/// logic.
+///
+/// Caller passes alt_screen_active=false to engage the drop —
+/// in alt-screen mode the running TUI (nvim, atuin, lazygit)
+/// owns the query/reply protocol and we MUST pass replies
+/// through verbatim; this function returns the input unchanged
+/// in that mode.
+pub fn dropWellFormedCpr(input: []const u8, out: []u8, alt_screen_active: bool) usize {
+    if (alt_screen_active) {
+        @memcpy(out[0..input.len], input);
+        return input.len;
+    }
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < input.len) {
+        if (i + 5 <= input.len and input[i] == 0x1B and input[i + 1] == '[') {
+            if (matchCprAt(input, i)) |after| {
+                i = after;
+                continue;
+            }
+        }
+        out[w] = input[i];
+        w += 1;
+        i += 1;
+    }
+    return w;
+}
+
+/// Return the index one past the CPR reply starting at `start`,
+/// or null if the bytes at `start` don't form a complete
+/// `\x1B[<digits>;<digits>R` sequence. Requires at least one
+/// digit on each side of the `;`. Digit count is capped (16 each
+/// side) so a hostile stream can't loop the scanner.
+fn matchCprAt(input: []const u8, start: usize) ?usize {
+    var p: usize = start + 2;
+    const len = input.len;
+    var d1: usize = 0;
+    while (p < len and d1 < 16 and input[p] >= '0' and input[p] <= '9') : (p += 1) d1 += 1;
+    if (d1 == 0 or p >= len or input[p] != ';') return null;
+    p += 1;
+    var d2: usize = 0;
+    while (p < len and d2 < 16 and input[p] >= '0' and input[p] <= '9') : (p += 1) d2 += 1;
+    if (d2 == 0 or p >= len or input[p] != 'R') return null;
+    return p + 1;
+}
+
 fn parseClamped(digits: []const u8) u16 {
     var acc: u32 = 0;
     const cap: u32 = std.math.maxInt(u16);

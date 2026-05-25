@@ -278,3 +278,91 @@ test "DsrParser: user Esc within the query window aborts the buffered byte" {
     try testing.expectEqualSlices(u8, "\x1B\x1B", out[0..r.filtered_len]);
     try testing.expect(!p.expecting_reply);
 }
+
+// ---------------------------------------------------------------------
+// dropWellFormedCpr — second-pass shell-fired-CPR scrubber
+// ---------------------------------------------------------------------
+
+test "dropWellFormedCpr: lone reply consumed when alt-screen off" {
+    var out: [32]u8 = undefined;
+    const n = mod.dropWellFormedCpr("\x1B[24;80R", &out, false);
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+test "dropWellFormedCpr: reply embedded between printable bytes survives the surround" {
+    var out: [32]u8 = undefined;
+    const n = mod.dropWellFormedCpr("a\x1B[24;80Rb", &out, false);
+    try testing.expectEqualStrings("ab", out[0..n]);
+}
+
+test "dropWellFormedCpr: multiple back-to-back replies all dropped (held-key scenario)" {
+    var out: [128]u8 = undefined;
+    const input = "\x1B[24;80R\x1B[24;81R\x1B[24;82R";
+    const n = mod.dropWellFormedCpr(input, &out, false);
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+test "dropWellFormedCpr: alt-screen pass-through (TUI owns its own CPR protocol)" {
+    var out: [32]u8 = undefined;
+    const input = "\x1B[24;80R";
+    const n = mod.dropWellFormedCpr(input, &out, true);
+    try testing.expectEqualSlices(u8, input, out[0..n]);
+}
+
+test "dropWellFormedCpr: user Esc keystroke passes through untouched" {
+    var out: [8]u8 = undefined;
+    const n = mod.dropWellFormedCpr("\x1B", &out, false);
+    try testing.expectEqualSlices(u8, "\x1B", out[0..n]);
+}
+
+test "dropWellFormedCpr: legitimate keymap CSI sequences pass through" {
+    var out: [32]u8 = undefined;
+    // Up arrow + Ctrl+modified Up + kitty CSI-u
+    const input = "\x1B[A\x1B[1;5A\x1B[57362;5u";
+    const n = mod.dropWellFormedCpr(input, &out, false);
+    try testing.expectEqualSlices(u8, input, out[0..n]);
+}
+
+test "dropWellFormedCpr: malformed CSI with R but no `;` passes through" {
+    var out: [16]u8 = undefined;
+    const n = mod.dropWellFormedCpr("\x1B[24R", &out, false);
+    try testing.expectEqualSlices(u8, "\x1B[24R", out[0..n]);
+}
+
+test "dropWellFormedCpr: partial reply at end of buffer passes through (cross-chunk handled by DsrParser)" {
+    var out: [16]u8 = undefined;
+    // `\x1B[24;` with no R — incomplete. dropWellFormedCpr is the
+    // single-chunk fast path; partial completions are the gated
+    // DsrParser's job.
+    const n = mod.dropWellFormedCpr("\x1B[24;", &out, false);
+    try testing.expectEqualSlices(u8, "\x1B[24;", out[0..n]);
+}
+
+test "dropWellFormedCpr: reply with missing first digit doesn't match" {
+    var out: [16]u8 = undefined;
+    const n = mod.dropWellFormedCpr("\x1B[;5R", &out, false);
+    try testing.expectEqualSlices(u8, "\x1B[;5R", out[0..n]);
+}
+
+test "dropWellFormedCpr: hostile huge digit run capped, no infinite loop" {
+    var input_buf: [64]u8 = undefined;
+    @memset(&input_buf, '9');
+    input_buf[0] = 0x1B;
+    input_buf[1] = '[';
+    var out: [64]u8 = undefined;
+    const n = mod.dropWellFormedCpr(input_buf[0..64], &out, false);
+    // 16-digit cap on the first param; the 17th `9` isn't a `;`
+    // → mismatch → whole buffer passes through verbatim.
+    try testing.expectEqualSlices(u8, input_buf[0..64], out[0..n]);
+}
+
+test "dropWellFormedCpr: leak repro (starship-redraw style) — only the CPR replies vanish" {
+    // What atty would see in the user's bug report: a few real
+    // keystrokes the keymap matcher will handle, interleaved with
+    // a burst of shell-fired CPR replies. Everything except the
+    // replies should survive.
+    var out: [128]u8 = undefined;
+    const input = "\x1B[B\x1B[42;1R\x1B[42;1Rkey\x1B[42;2R";
+    const n = mod.dropWellFormedCpr(input, &out, false);
+    try testing.expectEqualStrings("\x1B[Bkey", out[0..n]);
+}
