@@ -345,6 +345,11 @@ pub fn configure(comptime cfg: Config) type {
             // sees PageUp normally.
             .{ .bytes = keymap.key("PageUp"), .action = .chat_scroll_page_up, .label = "PageUp", .description = "chat: scroll back one page (when chat surface is open)" },
             .{ .bytes = keymap.key("PageDown"), .action = .chat_scroll_page_down, .label = "PageDown", .description = "chat: scroll forward one page (when chat surface is open)" },
+            // Shift+Arrow stays legacy-encoded on every terminal we
+            // target (kitty kbd flag 1 doesn't re-encode modified
+            // arrows — same rationale as Ctrl+Up/Down above).
+            .{ .bytes = keymap.key("Shift+Up"), .action = .chat_scroll_up, .label = "Shift+Up", .description = "chat: scroll back one turn (when chat surface is open)" },
+            .{ .bytes = keymap.key("Shift+Down"), .action = .chat_scroll_down, .label = "Shift+Down", .description = "chat: scroll forward one turn (when chat surface is open)" },
             // Jump-to-tail. Reverses PageUp scrolling without a
             // matching number of PageDowns. `Ctrl+End` instead of
             // bare `End` because the latter is already claimed by

@@ -313,6 +313,7 @@ Press **`Alt+H`** any time to scroll the full cheat-sheet into shell history. Th
 | `Ctrl+Alt+Up`   | (chat only) Grow inline chat panel by one row.            |
 | `Ctrl+Alt+Down` | (chat only) Shrink inline chat panel by one row.          |
 | `Shift+Enter`   | (chat input) Insert newline instead of submitting.        |
+| `Shift+Up` / `Shift+Down` | (chat only) Scroll chat history one turn back/forward. |
 | `PageUp` / `PageDown` | (chat only) Scroll chat history one page back/forward. |
 | `Ctrl+End`      | (chat only) Snap chat view to the live tail.              |
 
