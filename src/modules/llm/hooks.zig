@@ -40,7 +40,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const appendCaptured = dialog_helpers.appendCaptured;
         const advancePastMarker = dialog_helpers.advancePastMarker;
         const captureConclusion = dialog_helpers.captureConclusion;
-        const pushTurn = dialog_helpers.pushTurn;
+
+        /// Push a turn to the in-memory ring AND (when persistence
+        /// is enabled and the dialog isn't incognito) append the
+        /// turn as one NDJSON line to the current session file.
+        /// Best-effort: disk failures leave the in-memory push
+        /// intact. Incognito sessions skip the disk path entirely
+        /// — `incognito gates LOCAL recording` is the contract the
+        /// UI advertises (see paint.zig divider docstring).
+        fn pushTurn(rt: *Runtime, ctx: *m.Context, kind: dialog.TurnKind, content: []u8) !void {
+            try dialog_helpers.pushTurn(rt, kind, content);
+            if (!ctx.incognito and rt.chat_persist_path.len > 0) {
+                if (chat_persist.appendTurn(rt.allocator, rt.chat_persist_path, kind, content)) {
+                    rt.chat_persist_has_writes = true;
+                }
+            }
+        }
 
         /// Drop the unused 0-byte reservation when no record was
         /// appended, then free the path slice. Used by both the
@@ -487,7 +502,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                         latchErr(rt, "out of memory submitting pick");
                                         continue;
                                     };
-                                    pushTurn(rt, .user, copy) catch {
+                                    pushTurn(rt, ctx, .user, copy) catch {
                                         rt.allocator.free(copy);
                                         latchErr(rt, "out of memory submitting pick");
                                         continue;
@@ -579,7 +594,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 rt.chat_inline_paint_pending = true;
                                 continue;
                             };
-                            pushTurn(rt, .user, copy) catch {
+                            pushTurn(rt, ctx, .user, copy) catch {
                                 rt.allocator.free(copy);
                                 latchErr(rt, "out of memory submitting chat turn");
                                 rt.chat_inline_input_len = 0;
@@ -644,7 +659,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                         latchErr(rt, "out of memory submitting pick");
                                         continue;
                                     };
-                                    pushTurn(rt, .user, copy) catch {
+                                    pushTurn(rt, ctx, .user, copy) catch {
                                         rt.allocator.free(copy);
                                         latchErr(rt, "out of memory submitting pick");
                                         continue;
@@ -716,7 +731,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 rt.chat_overlay_paint_pending = true;
                                 continue;
                             };
-                            pushTurn(rt, .user, copy) catch {
+                            pushTurn(rt, ctx, .user, copy) catch {
                                 rt.allocator.free(copy);
                                 latchErr(rt, "out of memory submitting chat turn");
                                 rt.chat_input_len = 0;
@@ -814,7 +829,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         std.mem.trim(u8, line, " \t");
                     if (body.len > 0 and body.len <= cfg.max_prompt_bytes and !rt.inert and rt.osc133_capture.active) {
                         const initial = rt.allocator.dupe(u8, body) catch return .forward;
-                        pushTurn(rt, .user, initial) catch {
+                        pushTurn(rt, ctx, .user, initial) catch {
                             rt.allocator.free(initial);
                             return .forward;
                         };
@@ -1561,7 +1576,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     return;
                 };
 
-            pushTurn(rt, .observation, observation_slice) catch {
+            pushTurn(rt, ctx, .observation, observation_slice) catch {
                 rt.allocator.free(observation_slice);
                 abortDialog(rt, ctx.io, "out of memory recording observation");
                 return;
@@ -1609,7 +1624,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     abortDialog(rt, ctx.io, "out of memory recording answer");
                     return;
                 };
-                pushTurn(rt, .user, answer) catch {
+                pushTurn(rt, ctx, .user, answer) catch {
                     rt.allocator.free(answer);
                     abortDialog(rt, ctx.io, "out of memory recording answer");
                     return;
@@ -1868,7 +1883,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         abortDialog(rt, ctx.io, "out of memory continuing dialog");
                         return null;
                     };
-                    pushTurn(rt, .assistant_exec, assistant_copy) catch {
+                    pushTurn(rt, ctx, .assistant_exec, assistant_copy) catch {
                         rt.allocator.free(assistant_copy);
                         abortDialog(rt, ctx.io, "out of memory continuing dialog");
                         return null;
@@ -1953,7 +1968,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 latchErr(rt, "out of memory pushing chat reply");
                                 return null;
                             };
-                            pushTurn(rt, .assistant_exec, reason_copy) catch {
+                            pushTurn(rt, ctx, .assistant_exec, reason_copy) catch {
                                 rt.allocator.free(reason_copy);
                                 latchErr(rt, "out of memory pushing chat reply");
                                 return null;
@@ -2076,7 +2091,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // dupe OOMs keeps the chat-scrollback story
                     // intact without abort-on-OOM.
                     if (rt.allocator.dupe(u8, raw)) |copy| {
-                        pushTurn(rt, .assistant_exec, copy) catch rt.allocator.free(copy);
+                        pushTurn(rt, ctx, .assistant_exec, copy) catch rt.allocator.free(copy);
                     } else |_| {}
                     const q = parsed.question();
                     // Multi-choice: copy choices into Runtime-
@@ -2263,7 +2278,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 latchErr(rt, "out of memory starting dialog");
                 return .forward;
             };
-            pushTurn(rt, .user, initial) catch {
+            pushTurn(rt, ctx, .user, initial) catch {
                 rt.allocator.free(initial);
                 latchErr(rt, "out of memory starting dialog");
                 return .forward;
@@ -2383,7 +2398,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 latchErr(rt, "out of memory starting dialog");
                 return true;
             };
-            pushTurn(rt, .user, initial) catch {
+            pushTurn(rt, ctx, .user, initial) catch {
                 rt.allocator.free(initial);
                 latchErr(rt, "out of memory starting dialog");
                 return true;
@@ -2565,7 +2580,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // from nowhere.
             const assistant_copy = try rt.allocator.dupe(u8, raw);
             errdefer rt.allocator.free(assistant_copy);
-            try pushTurn(rt, .assistant_exec, assistant_copy);
+            try pushTurn(rt, ctx, .assistant_exec, assistant_copy);
 
             // Detect specific drift patterns we've seen in practice
             // so the corrective turn can be CONCRETE about the fix
@@ -2609,7 +2624,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 .{ reason, concrete_hint },
             );
             errdefer rt.allocator.free(corrective);
-            try pushTurn(rt, .user, corrective);
+            try pushTurn(rt, ctx, .user, corrective);
 
             // Fire the retry. fireDialogRequest builds the request
             // body from the full turn list (including our newly

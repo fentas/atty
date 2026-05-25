@@ -435,7 +435,7 @@ streaming when wired up.
 
 ### Persistence — survive across sessions
 
-Each dialog session writes its own NDJSON file. Files are named `YYYYMMDDTHHMMSS-XXXXXX.jsonl` (timestamp + 6 hex chars of in-second uniqueness; uniqueness enforced via `O_CREAT|O_EXCL` retry). Turns append on every `pushTurn`; the captured conclusion banner is appended as a final `{"kind":"conclusion",...}` record on detach.
+Each dialog session writes its own NDJSON file. Files are named `YYYYMMDDTHHMMSS-XXXXXX.jsonl` (timestamp + 6 hex chars of in-second uniqueness; uniqueness enforced via `O_CREAT|O_EXCL` retry). Turns append on every `pushTurn`; the captured conclusion banner is appended as a final `{"kind":"conclusion",...}` record when the dialog completes (`.done` → `dialogReset` rotation), with `detach` catching the rare mid-dialog-exit case. Incognito sessions (Ctrl+Shift+I) skip the disk path entirely — `incognito` gates local recording, matching the `🕶` inline-panel indicator.
 
 > **Migrating from a pre-multi-dialog atty?** If your previous build wrote `~/.local/share/atty/chat.jsonl`, that file is left untouched but no longer read. The new home is `~/.local/state/atty/dialogs/`. Move or `cat` the old NDJSON into a single dated file under the new directory if you want it surfaced by the (upcoming) recall picker.
 

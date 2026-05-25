@@ -33,10 +33,14 @@ pub fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
     // exercise the open/close cycle without running detach.
     if (rt.chat_overlay_buf) |slice| rt.allocator.free(slice);
     // Per-session NDJSON path — allocated by attach when
-    // chat_persist_enabled is on (default). The path is also a
-    // file `O_EXCL`-reserved on disk; unlink before freeing so
-    // test runs don't pollute the developer/CI XDG state dir
-    // with empty 0-byte session files.
+    // chat_persist_enabled is on (default). The path is an
+    // `O_EXCL`-reserved file on disk; unlink before freeing so
+    // test runs don't pollute the developer/CI XDG state dir.
+    // After the file is gone, attempt to rmdir the dialogs dir
+    // (best-effort: succeeds when no concurrent test left a
+    // reservation behind, fails harmlessly otherwise). Otherwise
+    // `zig build test` would leave `~/.local/state/atty/dialogs`
+    // on every dev machine that runs the suite.
     if (rt.chat_persist_path.len > 0) {
         const chat_persist = @import("chat_persist.zig");
         const z = rt.allocator.dupeZ(u8, rt.chat_persist_path) catch null;
@@ -46,5 +50,12 @@ pub fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
         }
         rt.allocator.free(rt.chat_persist_path);
     }
-    if (rt.chat_persist_dir.len > 0) rt.allocator.free(rt.chat_persist_dir);
+    if (rt.chat_persist_dir.len > 0) {
+        const dz = rt.allocator.dupeZ(u8, rt.chat_persist_dir) catch null;
+        if (dz) |s| {
+            defer rt.allocator.free(s);
+            _ = std.c.rmdir(s.ptr);
+        }
+        rt.allocator.free(rt.chat_persist_dir);
+    }
 }

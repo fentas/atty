@@ -431,21 +431,11 @@ pub fn configure(comptime cfg: Config) type {
         // helpers are otherwise free of cfg-level dependencies. See
         // llm/dialog.zig's `Module()` for the body.
         const dialog_helpers = dialog.Module(cfg, Runtime);
-        /// Wrapper around `dialog_helpers.pushTurn` that ALSO appends
-        /// the new turn to the per-session NDJSON file at
-        /// `rt.chat_persist_path` (set by `attach` when
-        /// `cfg.chat_persist_enabled`). Best-effort: disk failures
-        /// are silent so an in-memory turn isn't lost when the
-        /// store is unwritable. Sets `chat_persist_has_writes` so
-        /// the rotation path knows the reservation isn't empty.
-        fn pushTurn(rt: *Runtime, kind: dialog.TurnKind, content: []u8) !void {
-            try dialog_helpers.pushTurn(rt, kind, content);
-            if (rt.chat_persist_path.len > 0) {
-                if (chat_persist.appendTurn(rt.allocator, rt.chat_persist_path, kind, content)) {
-                    rt.chat_persist_has_writes = true;
-                }
-            }
-        }
+        // The persistence-aware pushTurn lives in hooks.zig — it
+        // takes a `ctx: *m.Context` so the incognito flag can gate
+        // the disk write. Defining it here too would be dead code
+        // (hooks.zig binds its own `pushTurn` const at the top of
+        // the Module factory).
         const freeTurns = dialog_helpers.freeTurns;
         const freeConclusion = dialog_helpers.freeConclusion;
         const appendCaptured = dialog_helpers.appendCaptured;
@@ -1099,8 +1089,13 @@ pub fn configure(comptime cfg: Config) type {
             if (rt.chat_persist_path.len > 0) {
                 if (rt.chat_persist_conclusion_pending) {
                     if (rt.conclusion_formatted) |banner| {
-                        _ = chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner);
-                        rt.chat_persist_has_writes = true;
+                        // Gate has_writes on the actual append result;
+                        // a failed write must NOT mark an otherwise-empty
+                        // reservation as "had a write" (the unlink path
+                        // below relies on this to clean 0-byte files).
+                        if (chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner)) {
+                            rt.chat_persist_has_writes = true;
+                        }
                         rt.chat_persist_conclusion_pending = false;
                     }
                 }
