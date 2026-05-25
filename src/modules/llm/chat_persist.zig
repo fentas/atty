@@ -37,6 +37,7 @@ extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
+extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
@@ -233,6 +234,14 @@ fn turnKindStr(kind: dialog.TurnKind) []const u8 {
         .assistant_exec => "assistant_exec",
         .observation => "observation",
     };
+}
+
+/// Best-effort `unlink(2)` on a null-terminated path. Used by the
+/// detach + dialog-rotation paths to drop unused 0-byte session
+/// reservations. Failures are silent — the only consequence is a
+/// stale 0-byte file the user (or PR 2's retention sweep) sweeps later.
+pub fn unlinkPath(path_z: [*:0]const u8) c_int {
+    return unlink(path_z);
 }
 
 /// Load the LAST `max_turns` turns from `path`. Returns the turns

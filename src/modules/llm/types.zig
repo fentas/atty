@@ -691,8 +691,12 @@ pub const Config = struct {
     /// {"kind":"conclusion","content":"Listed 2 zig files."}
     /// ```
     /// `kind` ∈ {`user`, `assistant_exec`, `observation`,
-    /// `conclusion`}. Unknown kinds are silently skipped on load
-    /// (forward-compat for future Turn taxonomy).
+    /// `conclusion`}. `conclusion` is currently **write-only** —
+    /// `loadLastTurns` parses only the three turn kinds; the
+    /// recall picker (follow-up PR) extends the loader to
+    /// surface conclusion records as the "summary" preview line.
+    /// Unknown kinds are silently skipped on load (forward-compat
+    /// for future taxonomy).
     chat_persist_dir: []const u8 = "",
     /// Inline chat panel — how many rows the panel claims above
     /// the statusbar when `Alt+C` opens it. The bottom row is the

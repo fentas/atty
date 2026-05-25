@@ -436,11 +436,14 @@ pub fn configure(comptime cfg: Config) type {
         /// `rt.chat_persist_path` (set by `attach` when
         /// `cfg.chat_persist_enabled`). Best-effort: disk failures
         /// are silent so an in-memory turn isn't lost when the
-        /// store is unwritable.
+        /// store is unwritable. Sets `chat_persist_has_writes` so
+        /// the rotation path knows the reservation isn't empty.
         fn pushTurn(rt: *Runtime, kind: dialog.TurnKind, content: []u8) !void {
             try dialog_helpers.pushTurn(rt, kind, content);
             if (rt.chat_persist_path.len > 0) {
-                _ = chat_persist.appendTurn(rt.allocator, rt.chat_persist_path, kind, content);
+                if (chat_persist.appendTurn(rt.allocator, rt.chat_persist_path, kind, content)) {
+                    rt.chat_persist_has_writes = true;
+                }
             }
         }
         const freeTurns = dialog_helpers.freeTurns;
@@ -512,6 +515,16 @@ pub fn configure(comptime cfg: Config) type {
             /// Owned by the runtime; freed in detach. File is
             /// created lazily on first write (O_CREAT|O_APPEND).
             chat_persist_path: []u8 = &.{},
+            /// Resolved dialogs directory — survives across dialogs
+            /// in a single atty process so `dialogReset` can
+            /// `createSessionPath` for the next dialog without
+            /// re-resolving XDG. Empty when persistence is unavailable.
+            chat_persist_dir: []u8 = &.{},
+            /// True once any record (turn or conclusion) has been
+            /// appended to the current `chat_persist_path`. Lets the
+            /// dialog-reset rotation `unlink` an unused reservation
+            /// instead of leaving a 0-byte file behind.
+            chat_persist_has_writes: bool = false,
             /// Copy of the response surfaced via pollShellInput.
             /// Owned by the runtime; valid until the next poll.
             inject_buf: [cfg.max_response_bytes]u8 = undefined,
@@ -1027,16 +1040,16 @@ pub fn configure(comptime cfg: Config) type {
                 .captured_output = captured_output,
             };
 
-            // Chat-session persistence — reserve a unique path inside
-            // the dialogs dir. The file isn't created until the first
-            // pushTurn (the writer uses O_CREAT|O_APPEND); sessions
-            // that never push a turn leave no artifact behind. The
-            // picker (PR 2 follow-up) is the load path; attach here
-            // only writes.
+            // Chat-session persistence — resolve the dialogs dir
+            // (stashed for the dialogReset rotation path) and atomically
+            // reserve the first dialog's NDJSON file via O_EXCL. The
+            // dir survives across dialogs in this process; the path
+            // rotates on every dialogReset. Empty-session reservations
+            // get unlinked on rotation instead of leaving 0-byte files.
             if (cfg.chat_persist_enabled) {
                 if (chat_persist.resolveDir(allocator, cfg.chat_persist_dir)) |dir| {
-                    defer allocator.free(dir);
                     if (dir.len > 0) {
+                        rt.chat_persist_dir = dir;
                         if (chat_persist.createSessionPath(allocator, dir)) |path| {
                             if (path.len > 0) {
                                 rt.chat_persist_path = path;
@@ -1044,6 +1057,8 @@ pub fn configure(comptime cfg: Config) type {
                                 allocator.free(path);
                             }
                         } else |_| {}
+                    } else {
+                        allocator.free(dir);
                     }
                 } else |_| {}
             }
@@ -1060,13 +1075,25 @@ pub fn configure(comptime cfg: Config) type {
             if (rt.chat_inline_open) {
                 _ = std.c.write(1, "\x1B[?25h", 6);
             }
-            // Flush the captured conclusion to the session file
-            // BEFORE freeing it. Best-effort: any disk failure is
-            // silent (the in-memory banner already rendered to
-            // the user; persistence is a recall-side concern).
+            // Flush any conclusion the in-flight dialog captured but
+            // hasn't yet rotated past (atty exits mid-dialog after
+            // a `.done`). Best-effort: any disk failure is silent —
+            // the in-memory banner already rendered.
             if (rt.chat_persist_path.len > 0) {
                 if (rt.conclusion_formatted) |banner| {
                     _ = chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner);
+                    rt.chat_persist_has_writes = true;
+                }
+                // Untouched reservation → unlink so the 0-byte file
+                // doesn't accumulate. dialogReset rotation does the
+                // same for mid-process dialogs; this catches the
+                // attach-but-no-turns case.
+                if (!rt.chat_persist_has_writes) {
+                    const z = rt.allocator.dupeZ(u8, rt.chat_persist_path) catch null;
+                    if (z) |s| {
+                        defer rt.allocator.free(s);
+                        _ = chat_persist.unlinkPath(s.ptr);
+                    }
                 }
             }
             freeTurns(rt);
@@ -1083,6 +1110,7 @@ pub fn configure(comptime cfg: Config) type {
             // worker-owned state below.
             rt.allocator.destroy(rt.captured_output);
             if (rt.chat_persist_path.len > 0) rt.allocator.free(rt.chat_persist_path);
+            if (rt.chat_persist_dir.len > 0) rt.allocator.free(rt.chat_persist_dir);
             if (rt.thread) |t| {
                 {
                     rt.shared.mutex.lockUncancelable(io);

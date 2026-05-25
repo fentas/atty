@@ -33,6 +33,18 @@ pub fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
     // exercise the open/close cycle without running detach.
     if (rt.chat_overlay_buf) |slice| rt.allocator.free(slice);
     // Per-session NDJSON path — allocated by attach when
-    // chat_persist_enabled is on (default).
-    if (rt.chat_persist_path.len > 0) rt.allocator.free(rt.chat_persist_path);
+    // chat_persist_enabled is on (default). The path is also a
+    // file `O_EXCL`-reserved on disk; unlink before freeing so
+    // test runs don't pollute the developer/CI XDG state dir
+    // with empty 0-byte session files.
+    if (rt.chat_persist_path.len > 0) {
+        const chat_persist = @import("chat_persist.zig");
+        const z = rt.allocator.dupeZ(u8, rt.chat_persist_path) catch null;
+        if (z) |s| {
+            defer rt.allocator.free(s);
+            _ = chat_persist.unlinkPath(s.ptr);
+        }
+        rt.allocator.free(rt.chat_persist_path);
+    }
+    if (rt.chat_persist_dir.len > 0) rt.allocator.free(rt.chat_persist_dir);
 }

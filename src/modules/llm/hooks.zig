@@ -16,6 +16,7 @@ const dialog = @import("dialog.zig");
 const types = @import("types.zig");
 const sys_context = @import("sys_context.zig");
 const worker_mod_ns = @import("worker.zig");
+const chat_persist = @import("chat_persist.zig");
 const keymap = @import("../../keymap.zig");
 const nowMs = @import("../_lib.zig").nowMs;
 
@@ -39,9 +40,68 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         const appendCaptured = dialog_helpers.appendCaptured;
         const advancePastMarker = dialog_helpers.advancePastMarker;
         const captureConclusion = dialog_helpers.captureConclusion;
-        const dialogReset = dialog_helpers.dialogReset;
-        const abortDialog = dialog_helpers.abortDialog;
         const pushTurn = dialog_helpers.pushTurn;
+
+        /// Drop the unused 0-byte reservation when no record was
+        /// appended, then free the path slice. Used by both the
+        /// rotation path and the early-bail rotation cases.
+        fn dropUnusedReservation(rt: *Runtime) void {
+            if (rt.chat_persist_path.len == 0) return;
+            if (!rt.chat_persist_has_writes) {
+                const z = rt.allocator.dupeZ(u8, rt.chat_persist_path) catch null;
+                if (z) |s| {
+                    defer rt.allocator.free(s);
+                    _ = chat_persist.unlinkPath(s.ptr);
+                }
+            }
+            rt.allocator.free(rt.chat_persist_path);
+            rt.chat_persist_path = &.{};
+        }
+
+        /// Reserve the next session path. No-op when the dialogs
+        /// dir is unavailable; failures leave `chat_persist_path`
+        /// empty so subsequent `pushTurn`s silently skip the disk.
+        fn rotatePersistencePath(rt: *Runtime) void {
+            if (rt.chat_persist_dir.len == 0) return;
+            if (chat_persist.createSessionPath(rt.allocator, rt.chat_persist_dir)) |path| {
+                if (path.len > 0) {
+                    rt.chat_persist_path = path;
+                } else {
+                    rt.allocator.free(path);
+                }
+            } else |_| {}
+            rt.chat_persist_has_writes = false;
+        }
+
+        /// dialogReset wrapper — flushes the captured conclusion to
+        /// the current session file (the `.done` path sets
+        /// `conclusion_formatted` BEFORE calling dialogReset), then
+        /// rotates the session path so the next dialog lands in a
+        /// fresh file. Empty reservations get `unlink`ed so we
+        /// don't accumulate 0-byte files for cancel paths.
+        fn dialogReset(rt: *Runtime, io: std.Io) void {
+            if (rt.chat_persist_path.len > 0) {
+                if (rt.conclusion_formatted) |banner| {
+                    if (chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner)) {
+                        rt.chat_persist_has_writes = true;
+                    }
+                }
+            }
+            dialog_helpers.dialogReset(rt, io);
+            dropUnusedReservation(rt);
+            rotatePersistencePath(rt);
+        }
+
+        /// abortDialog wrapper — no conclusion to flush on the
+        /// error path; just rotate after the helper's internal
+        /// dialogReset call (which sees the un-wrapped sibling in
+        /// dialog_helpers' scope, NOT this wrapper, so we don't
+        /// rotate twice).
+        fn abortDialog(rt: *Runtime, io: std.Io, msg: []const u8) void {
+            dialog_helpers.abortDialog(rt, io, msg);
+            dropUnusedReservation(rt);
+            rotatePersistencePath(rt);
+        }
 
         const Turn = dialog.Turn;
         const DialogResponse = dialog.Response(cfg.max_response_bytes);
