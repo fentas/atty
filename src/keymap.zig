@@ -171,8 +171,9 @@ pub const Action = union(enum) {
     /// view never moves past the oldest turn. Sibling
     /// `chat_scroll_page_*` scrolls by one viewport's worth.
     ///
-    /// Default **Shift+Up / Shift+Down** when a chat surface is
-    /// open; otherwise the keystroke falls through to the shell.
+    /// Default **Shift+Up / Shift+Down** while focus is in a
+    /// chat surface; otherwise the keystroke falls through to
+    /// the shell unchanged.
     chat_scroll_up,
     chat_scroll_down,
     /// Scroll the chat history view back / forward by one page —
