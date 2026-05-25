@@ -295,7 +295,10 @@ block_threshold = 0.9
         // same as the feature-on build. Without this the explicit-
         // --config fail-closed posture only applied to tier2-onnx
         // builds, defeating it on default builds.
-        let cfg = load(Path::new("/nonexistent-stub-test-path.toml"));
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.toml");
+        assert!(!missing.exists());
+        let cfg = load(&missing);
         assert!(cfg.is_err(), "missing path should not succeed");
     }
 }
