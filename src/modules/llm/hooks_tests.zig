@@ -15,7 +15,7 @@ const shutdownAndFree = @import("test_helpers.zig").shutdownAndFree;
 
 const test_io: std.Io = std.Io.failing;
 
-test "chat overlay (Alt+Shift+C): refuses to open when no conversation exists" {
+test "chat overlay (Alt+Shift+C): opens empty when no conversation exists" {
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -42,13 +42,18 @@ test "chat overlay (Alt+Shift+C): refuses to open when no conversation exists" {
         .is_tty = false,
     };
 
-    // Fresh runtime — no turns, no conclusion. Alt+Shift+C should
-    // hint-and-no-op rather than open an empty overlay.
+    // Fresh runtime — no turns, no conclusion. The overlay is its
+    // own chat entry point; opening it must succeed even with
+    // nothing to recall.
     const consumed = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
     try testing.expect(consumed);
+    try testing.expect(rt.chat_overlay_open);
+    try testing.expect(rt.chat_overlay_paint_pending);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+
+    // Toggle again — should close.
+    _ = try L.onAction(&rt, &ctx, .llm_chat_overlay_toggle);
     try testing.expect(!rt.chat_overlay_open);
-    try testing.expect(rt.hint_pending);
-    rt.hint_pending = false; // drain the latch so the next test starts clean
 }
 
 test "chat overlay: onInput swallows all keystrokes while open" {
@@ -489,8 +494,8 @@ test "inline chat: Alt+Shift+C closes inline panel first if it was open (mutuall
         .is_tty = false,
     };
 
-    // Seed content so the overlay-toggle handler doesn't refuse to
-    // open with "no LLM session to recall".
+    // Seed a turn so the post-toggle overlay paint has content to
+    // render — the mutual-exclusion contract is what's under test.
     const helpers = dialog.Module(L.config, L.Runtime);
     try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "first prompt"));
     defer helpers.freeTurns(&rt);
