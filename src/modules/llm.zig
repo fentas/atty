@@ -1087,18 +1087,16 @@ pub fn configure(comptime cfg: Config) type {
             // to its source file in a prior dialogReset) doesn't
             // duplicate into the current empty reservation.
             if (rt.chat_persist_path.len > 0) {
-                if (rt.chat_persist_conclusion_pending) {
+                // ALSO gated on has_writes: an incognito dialog
+                // never persisted a turn, so its conclusion must
+                // not leak here either (matches the dialogReset
+                // wrapper's gate).
+                if (rt.chat_persist_conclusion_pending and rt.chat_persist_has_writes) {
                     if (rt.conclusion_formatted) |banner| {
-                        // Gate has_writes on the actual append result;
-                        // a failed write must NOT mark an otherwise-empty
-                        // reservation as "had a write" (the unlink path
-                        // below relies on this to clean 0-byte files).
-                        if (chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner)) {
-                            rt.chat_persist_has_writes = true;
-                        }
-                        rt.chat_persist_conclusion_pending = false;
+                        _ = chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner);
                     }
                 }
+                rt.chat_persist_conclusion_pending = false;
                 // Untouched reservation → unlink so the 0-byte file
                 // doesn't accumulate. dialogReset rotation does the
                 // same for mid-process dialogs; this catches the

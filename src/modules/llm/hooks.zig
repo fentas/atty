@@ -106,18 +106,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// so a banner retained across a previous dialogReset
         /// (kept in memory for the overlay's recall behavior)
         /// doesn't get re-appended to the next dialog's file.
+        /// ALSO gated on `chat_persist_has_writes` so an incognito
+        /// dialog's conclusion doesn't leak past the per-turn
+        /// incognito gate — if no turn was persisted to this file,
+        /// the conclusion isn't either, and the empty reservation
+        /// gets `unlink`ed below.
         fn dialogReset(rt: *Runtime, io: std.Io) void {
-            if (rt.chat_persist_path.len > 0 and rt.chat_persist_conclusion_pending) {
+            if (rt.chat_persist_path.len > 0 and rt.chat_persist_conclusion_pending and rt.chat_persist_has_writes) {
                 if (rt.conclusion_formatted) |banner| {
-                    if (chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner)) {
-                        rt.chat_persist_has_writes = true;
-                    }
+                    _ = chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner);
                 }
-                // Flushed (or attempt failed); either way the
-                // banner is no longer pending — a retry would
-                // duplicate-write the same content.
-                rt.chat_persist_conclusion_pending = false;
             }
+            // Clear pending unconditionally — an incognito skip or
+            // a write failure must not re-flush the same banner on
+            // the next reset.
+            rt.chat_persist_conclusion_pending = false;
             dialog_helpers.dialogReset(rt, io);
             dropUnusedReservation(rt);
             rotatePersistencePath(rt);
