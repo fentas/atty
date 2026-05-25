@@ -168,7 +168,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const has_turns = rt.turns_len > 0;
             const has_conclusion = rt.conclusion_formatted != null;
             if (!has_turns and !has_conclusion) {
-                w.writeAll("  \x1B[2m(no conversation yet \u{2014} start one with Alt+S)\x1B[0m\r\n") catch return false;
+                w.writeAll("  \x1B[2m(no conversation yet \u{2014} type a prompt below, or Alt+S for a structured dialog)\x1B[0m\r\n") catch return false;
             } else {
                 for (rt.turns[0..tail_end]) |turn| {
                     // Structured render: the alt-screen has rows to
