@@ -32,4 +32,7 @@ pub fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
     // paintChatOverlay; freed here so tests don't leak when they
     // exercise the open/close cycle without running detach.
     if (rt.chat_overlay_buf) |slice| rt.allocator.free(slice);
+    // Per-session NDJSON path — allocated by attach when
+    // chat_persist_enabled is on (default).
+    if (rt.chat_persist_path.len > 0) rt.allocator.free(rt.chat_persist_path);
 }

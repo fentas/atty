@@ -432,27 +432,14 @@ pub fn configure(comptime cfg: Config) type {
         // llm/dialog.zig's `Module()` for the body.
         const dialog_helpers = dialog.Module(cfg, Runtime);
         /// Wrapper around `dialog_helpers.pushTurn` that ALSO appends
-        /// the new turn to the resolved `rt.chat_persist_path` (set
-        /// by `attach` when `cfg.chat_persist_enabled`) so the chat
-        /// history survives across atty sessions. Best-effort: disk
-        /// failures are silent (the in-memory push has already
-        /// succeeded by the time we attempt the append).
-        ///
-        /// Before appending, rotate the file if it has grown past
-        /// `cfg.chat_persist_max_bytes` (when set). The rotation
-        /// uses tmp+rename so a crash mid-rotation leaves the
-        /// original intact.
-        ///
-        /// The loader in `attach` deliberately calls
-        /// `dialog_helpers.pushTurn` DIRECTLY (not this wrapper) —
-        /// otherwise it would re-append every loaded turn to the
-        /// file on every startup, doubling content each run.
+        /// the new turn to the per-session NDJSON file at
+        /// `rt.chat_persist_path` (set by `attach` when
+        /// `cfg.chat_persist_enabled`). Best-effort: disk failures
+        /// are silent so an in-memory turn isn't lost when the
+        /// store is unwritable.
         fn pushTurn(rt: *Runtime, kind: dialog.TurnKind, content: []u8) !void {
             try dialog_helpers.pushTurn(rt, kind, content);
             if (rt.chat_persist_path.len > 0) {
-                if (cfg.chat_persist_max_bytes > 0) {
-                    _ = chat_persist.rotateIfExceeded(rt.allocator, rt.chat_persist_path, cfg.chat_persist_max_bytes);
-                }
                 _ = chat_persist.appendTurn(rt.allocator, rt.chat_persist_path, kind, content);
             }
         }
@@ -517,11 +504,13 @@ pub fn configure(comptime cfg: Config) type {
             /// the underlying syscalls / file reads failed.
             /// Owned by the runtime; freed in detach.
             os_info: []u8 = &.{},
-            /// Resolved chat-history file path — used by the
-            /// pushTurn-wrapper to append every turn. Empty when
-            /// persistence is disabled or path resolution failed
-            /// (no HOME / XDG_DATA_HOME and no explicit override).
-            /// Owned by the runtime; freed in detach.
+            /// Resolved per-session NDJSON path — used by the
+            /// pushTurn-wrapper to append every turn and by detach
+            /// to write the conclusion record. Empty when
+            /// persistence is disabled or dir resolution failed
+            /// (no HOME / XDG_STATE_HOME and no explicit override).
+            /// Owned by the runtime; freed in detach. File is
+            /// created lazily on first write (O_CREAT|O_APPEND).
             chat_persist_path: []u8 = &.{},
             /// Copy of the response surfaced via pollShellInput.
             /// Owned by the runtime; valid until the next poll.
@@ -1038,31 +1027,25 @@ pub fn configure(comptime cfg: Config) type {
                 .captured_output = captured_output,
             };
 
-            // Chat-history persistence — when enabled, resolve the
-            // path (default: ${XDG_DATA_HOME}/atty/chat.jsonl) and
-            // load the last N turns from disk into the ring so the
-            // chat panel + dialog context pick up where the previous
-            // session left off. Best-effort: any I/O / path-resolve
-            // failure leaves the ring empty AND disables further
-            // persistence (chat_persist_path stays `&.{}`).
+            // Chat-session persistence — reserve a unique path inside
+            // the dialogs dir. The file isn't created until the first
+            // pushTurn (the writer uses O_CREAT|O_APPEND); sessions
+            // that never push a turn leave no artifact behind. The
+            // picker (PR 2 follow-up) is the load path; attach here
+            // only writes.
             if (cfg.chat_persist_enabled) {
-                const resolved = chat_persist.resolvePath(allocator, cfg.chat_persist_path) catch &.{};
-                if (resolved.len > 0) {
-                    rt.chat_persist_path = resolved;
-                    const max_bytes: usize = 4 * 1024 * 1024;
-                    var loaded = chat_persist.loadLastTurns(allocator, resolved, cfg.history_turns_max, max_bytes) catch {
-                        return rt;
-                    };
-                    defer loaded.deinit(allocator);
-                    for (loaded.items) |t| {
-                        // Direct dialog_helpers.pushTurn (not the
-                        // wrapper) so loaded turns don't re-append
-                        // to the file on every startup.
-                        dialog_helpers.pushTurn(&rt, t.kind, t.content) catch {
-                            allocator.free(t.content);
-                        };
+                if (chat_persist.resolveDir(allocator, cfg.chat_persist_dir)) |dir| {
+                    defer allocator.free(dir);
+                    if (dir.len > 0) {
+                        if (chat_persist.createSessionPath(allocator, dir)) |path| {
+                            if (path.len > 0) {
+                                rt.chat_persist_path = path;
+                            } else {
+                                allocator.free(path);
+                            }
+                        } else |_| {}
                     }
-                }
+                } else |_| {}
             }
 
             return rt;
@@ -1076,6 +1059,15 @@ pub fn configure(comptime cfg: Config) type {
             // `reset`. Always-restore is safe: `?25h` is idempotent.
             if (rt.chat_inline_open) {
                 _ = std.c.write(1, "\x1B[?25h", 6);
+            }
+            // Flush the captured conclusion to the session file
+            // BEFORE freeing it. Best-effort: any disk failure is
+            // silent (the in-memory banner already rendered to
+            // the user; persistence is a recall-side concern).
+            if (rt.chat_persist_path.len > 0) {
+                if (rt.conclusion_formatted) |banner| {
+                    _ = chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner);
+                }
             }
             freeTurns(rt);
             freeConclusion(rt);
