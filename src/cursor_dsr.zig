@@ -238,6 +238,65 @@ pub const DsrParser = struct {
     }
 };
 
+/// Strip well-formed CPR replies that atty didn't query for.
+///
+/// Single-chunk only: stateful cross-chunk withholding would
+/// re-engage the lone-Esc-eater problem that `expecting_reply`
+/// exists to prevent. In practice terminals emit CPR as one
+/// pty write so split-across-reads is vanishingly rare.
+///
+/// `alt_screen_active=true` is a verbatim pass-through — the
+/// running TUI owns its own DSR/CPR protocol. Callers that
+/// already know they don't need the scrub should skip the
+/// call entirely to avoid the copy.
+///
+/// `out` must be at least `input.len` bytes; debug-asserted.
+/// In-place (`out.ptr == input.ptr`) is safe in both branches:
+/// the alt-screen path uses `@memmove`, and the scrub loop's
+/// write index `w` never gets ahead of its read index `i` (CPR
+/// matches skip ahead in `input` without writing). Partial
+/// overlap where `out` starts somewhere inside `input` is
+/// undefined.
+pub fn dropWellFormedCpr(input: []const u8, out: []u8, alt_screen_active: bool) usize {
+    std.debug.assert(out.len >= input.len);
+    if (alt_screen_active) {
+        @memmove(out[0..input.len], input);
+        return input.len;
+    }
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < input.len) {
+        if (i + 6 <= input.len and input[i] == 0x1B and input[i + 1] == '[') {
+            if (matchCprAt(input, i)) |after| {
+                i = after;
+                continue;
+            }
+        }
+        out[w] = input[i];
+        w += 1;
+        i += 1;
+    }
+    return w;
+}
+
+/// Return the index one past the CPR reply starting at `start`,
+/// or null if the bytes at `start` don't form a complete
+/// `\x1B[<digits>;<digits>R` sequence. Requires at least one
+/// digit on each side of the `;`. Digit count is capped (16 each
+/// side) so a hostile stream can't loop the scanner.
+fn matchCprAt(input: []const u8, start: usize) ?usize {
+    var p: usize = start + 2;
+    const len = input.len;
+    var d1: usize = 0;
+    while (p < len and d1 < 16 and input[p] >= '0' and input[p] <= '9') : (p += 1) d1 += 1;
+    if (d1 == 0 or p >= len or input[p] != ';') return null;
+    p += 1;
+    var d2: usize = 0;
+    while (p < len and d2 < 16 and input[p] >= '0' and input[p] <= '9') : (p += 1) d2 += 1;
+    if (d2 == 0 or p >= len or input[p] != 'R') return null;
+    return p + 1;
+}
+
 fn parseClamped(digits: []const u8) u16 {
     var acc: u32 = 0;
     const cap: u32 = std.math.maxInt(u16);

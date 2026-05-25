@@ -48,7 +48,8 @@ const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
 const CursorTracker = @import("cursor_tracker.zig").CursorTracker;
-const DsrParser = @import("cursor_dsr.zig").DsrParser;
+const cursor_dsr = @import("cursor_dsr.zig");
+const DsrParser = cursor_dsr.DsrParser;
 const Osc7 = @import("osc7.zig").Osc7;
 const subprocess_mod = @import("subprocess.zig");
 const overlay_ring = @import("overlay_ring.zig");
@@ -271,7 +272,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     var dsr_parser = DsrParser{};
     // Scratch buffer the parser writes filtered stdin bytes into.
     // Sized to match `read_buf` since the filtered output is at most
-    // as long as the input.
+    // as long as the input. The second-pass CPR scrub runs in-place
+    // on this same buffer (`dropWellFormedCpr` supports it — see
+    // its docstring), so no second scratch is needed.
     var stdin_filtered_buf: [4096]u8 = undefined;
 
     // Alternate-screen-buffer tracker — full-screen TUIs (k9s, vim,
@@ -698,8 +701,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     cursor_tracker.setPosition(pos.row, pos.col);
                     trace.log(.cursor, "DSR-6n reply: row={d} col={d}", .{ pos.row, pos.col });
                 }
+                // Second pass: strip CPR replies the gated DsrParser
+                // didn't claim — some shells/prompts fire their own
+                // DSR queries on redraw, and the trailing `<col>R`
+                // tail otherwise echoes onto the prompt as text.
+                // Skip when alt-screen is active: the running TUI
+                // owns its own CPR protocol.
                 var input: []const u8 = stdin_filtered_buf[0..dsr_result.filtered_len];
-                if (input.len == 0) continue; // entire chunk was DSR reply
+                if (!alt_screen.active) {
+                    const cpr_drop_len = cursor_dsr.dropWellFormedCpr(
+                        stdin_filtered_buf[0..dsr_result.filtered_len],
+                        stdin_filtered_buf[0..dsr_result.filtered_len],
+                        false,
+                    );
+                    if (cpr_drop_len < dsr_result.filtered_len) {
+                        trace.log(.cursor, "cpr_scrub: pre={d} post={d} dropped={d}", .{ dsr_result.filtered_len, cpr_drop_len, dsr_result.filtered_len - cpr_drop_len });
+                    }
+                    input = stdin_filtered_buf[0..cpr_drop_len];
+                }
+                if (input.len == 0) continue; // chunk fully scrubbed (gated DSR reply or shell-fired CPR)
                 trace.logBytes(.input, "stdin_read", input);
                 trace.log(.altscreen, "alt_screen.active={} module_overlay_active={}", .{ alt_screen.active, ctx.module_overlay_active });
 
