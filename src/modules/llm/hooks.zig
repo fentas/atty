@@ -71,6 +71,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
             } else |_| {}
             rt.chat_persist_has_writes = false;
+            // Any retained `conclusion_formatted` was already
+            // persisted by the wrapper's pre-reset flush (or was a
+            // cancel path with no banner). The banner stays in
+            // memory for overlay recall but must not re-persist
+            // into THIS file — pending stays false until the next
+            // `captureConclusion` sets it.
+            rt.chat_persist_conclusion_pending = false;
         }
 
         /// dialogReset wrapper — flushes the captured conclusion to
@@ -79,13 +86,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// rotates the session path so the next dialog lands in a
         /// fresh file. Empty reservations get `unlink`ed so we
         /// don't accumulate 0-byte files for cancel paths.
+        ///
+        /// The flush is gated on `chat_persist_conclusion_pending`
+        /// so a banner retained across a previous dialogReset
+        /// (kept in memory for the overlay's recall behavior)
+        /// doesn't get re-appended to the next dialog's file.
         fn dialogReset(rt: *Runtime, io: std.Io) void {
-            if (rt.chat_persist_path.len > 0) {
+            if (rt.chat_persist_path.len > 0 and rt.chat_persist_conclusion_pending) {
                 if (rt.conclusion_formatted) |banner| {
                     if (chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner)) {
                         rt.chat_persist_has_writes = true;
                     }
                 }
+                // Flushed (or attempt failed); either way the
+                // banner is no longer pending — a retry would
+                // duplicate-write the same content.
+                rt.chat_persist_conclusion_pending = false;
             }
             dialog_helpers.dialogReset(rt, io);
             dropUnusedReservation(rt);

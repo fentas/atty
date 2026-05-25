@@ -664,11 +664,15 @@ pub const Config = struct {
     /// Persist each dialog session to its own NDJSON file under
     /// `chat_persist_dir`. Default ON.
     ///
-    /// On `attach`: resolve the directory + reserve a unique
-    /// session path (no file created yet). On every `pushTurn`:
-    /// append the turn as one NDJSON line. On `detach`: if a
-    /// conclusion banner was captured, append a final
-    /// `kind:"conclusion"` record.
+    /// On `attach`: resolve the directory + ATOMICALLY reserve a
+    /// unique session path via `O_CREAT|O_EXCL` — this leaves a
+    /// 0-byte file on disk until either a turn appends to it OR
+    /// the reservation gets `unlink`ed at rotation/detach time
+    /// (cancel paths with no turns DO clean themselves up). Every
+    /// `pushTurn` appends a JSONL line; every `dialogReset`
+    /// flushes a captured conclusion record, drops the unused
+    /// reservation if no record was written, and rotates to a
+    /// fresh path for the next dialog.
     ///
     /// Files appear as `<chat_persist_dir>/YYYYMMDDTHHMMSS-XXXXXX
     /// .jsonl` — distinct per session so a recall picker (PR 2

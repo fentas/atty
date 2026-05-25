@@ -511,12 +511,15 @@ pub fn configure(comptime cfg: Config) type {
             /// Owned by the runtime; freed in detach.
             os_info: []u8 = &.{},
             /// Resolved per-session NDJSON path — used by the
-            /// pushTurn-wrapper to append every turn and by detach
-            /// to write the conclusion record. Empty when
-            /// persistence is disabled or dir resolution failed
-            /// (no HOME / XDG_STATE_HOME and no explicit override).
-            /// Owned by the runtime; freed in detach. File is
-            /// created lazily on first write (O_CREAT|O_APPEND).
+            /// pushTurn-wrapper to append every turn and by the
+            /// dialog-reset wrapper to write the conclusion record
+            /// just before rotation. Empty when persistence is
+            /// disabled or dir resolution failed. Owned by the
+            /// runtime; freed in detach. File is eagerly reserved
+            /// at attach/rotation via `createSessionPath` (uses
+            /// `O_CREAT|O_EXCL` to guarantee path uniqueness); a
+            /// session that never writes a record gets its 0-byte
+            /// reservation `unlink`ed during rotation/detach.
             chat_persist_path: []u8 = &.{},
             /// Resolved dialogs directory — survives across dialogs
             /// in a single atty process so `dialogReset` can
@@ -528,6 +531,16 @@ pub fn configure(comptime cfg: Config) type {
             /// dialog-reset rotation `unlink` an unused reservation
             /// instead of leaving a 0-byte file behind.
             chat_persist_has_writes: bool = false,
+            /// True when `conclusion_formatted` carries a banner that
+            /// hasn't been persisted to the current session file yet.
+            /// `conclusion_formatted` itself is deliberately retained
+            /// across `dialogReset` so the overlay can re-emit the
+            /// last banner — without this flag, a later reset/cancel
+            /// of a NEW dialog would re-flush the prior dialog's
+            /// banner into the new session file. Set on
+            /// `captureConclusion`; cleared after the wrapper's
+            /// `appendConclusion` succeeds AND on every rotation.
+            chat_persist_conclusion_pending: bool = false,
             /// Copy of the response surfaced via pollShellInput.
             /// Owned by the runtime; valid until the next poll.
             inject_buf: [cfg.max_response_bytes]u8 = undefined,
@@ -1079,13 +1092,17 @@ pub fn configure(comptime cfg: Config) type {
                 _ = std.c.write(1, "\x1B[?25h", 6);
             }
             // Flush any conclusion the in-flight dialog captured but
-            // hasn't yet rotated past (atty exits mid-dialog after
-            // a `.done`). Best-effort: any disk failure is silent —
-            // the in-memory banner already rendered.
+            // hasn't yet rotated past. Gated on `_pending` so a
+            // banner retained for overlay recall (already persisted
+            // to its source file in a prior dialogReset) doesn't
+            // duplicate into the current empty reservation.
             if (rt.chat_persist_path.len > 0) {
-                if (rt.conclusion_formatted) |banner| {
-                    _ = chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner);
-                    rt.chat_persist_has_writes = true;
+                if (rt.chat_persist_conclusion_pending) {
+                    if (rt.conclusion_formatted) |banner| {
+                        _ = chat_persist.appendConclusion(rt.allocator, rt.chat_persist_path, banner);
+                        rt.chat_persist_has_writes = true;
+                        rt.chat_persist_conclusion_pending = false;
+                    }
                 }
                 // Untouched reservation → unlink so the 0-byte file
                 // doesn't accumulate. dialogReset rotation does the
