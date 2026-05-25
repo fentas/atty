@@ -265,7 +265,7 @@ test "loadLastTurns: caps at max_turns (keeps newest)" {
     try testing.expectEqualStrings("t5", loaded.items[2].content);
 }
 
-test "appendConclusion: writes a kind:conclusion record at the tail" {
+test "appendConclusion: lands AFTER appendTurn (tail position pinned)" {
     var name_buf: [64]u8 = undefined;
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
@@ -278,7 +278,6 @@ test "appendConclusion: writes a kind:conclusion record at the tail" {
     try testing.expect(appendTurn(testing.allocator, name, .user, "list zig files"));
     try testing.expect(appendConclusion(testing.allocator, name, "Listed 2 zig files."));
 
-    // Read raw and confirm the final line carries kind:"conclusion".
     const fd = std.c.open(name_z.ptr, .{ .ACCMODE = .RDONLY });
     try testing.expect(fd >= 0);
     defer _ = std.c.close(fd);
@@ -286,11 +285,15 @@ test "appendConclusion: writes a kind:conclusion record at the tail" {
     const n = std.c.read(fd, &buf, buf.len);
     try testing.expect(n > 0);
     const slice = buf[0..@as(usize, @intCast(n))];
-    try testing.expect(std.mem.indexOf(u8, slice, "\"kind\":\"conclusion\"") != null);
+    // Pin ORDER, not just presence: user record must precede the
+    // conclusion record (the conclusion appends — never inserts).
+    const user_at = std.mem.indexOf(u8, slice, "\"kind\":\"user\"") orelse return error.UserRecordMissing;
+    const concl_at = std.mem.indexOf(u8, slice, "\"kind\":\"conclusion\"") orelse return error.ConclusionMissing;
+    try testing.expect(user_at < concl_at);
     try testing.expect(std.mem.indexOf(u8, slice, "Listed 2 zig files.") != null);
 }
 
-test "resolveDir: explicit dir is returned verbatim (after mkdir-p)" {
+test "resolveDir: explicit dir is returned verbatim AND mkdir-p actually ran" {
     var name_buf: [64]u8 = undefined;
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
@@ -301,28 +304,84 @@ test "resolveDir: explicit dir is returned verbatim (after mkdir-p)" {
     defer testing.allocator.free(got);
     try testing.expectEqualStrings(dir, got);
 
-    // Cleanup the mkdir-p'd dir.
+    // Cleanup; rmdir returns 0 ONLY when the dir actually exists and
+    // is empty — pins that resolveDir performed the mkdir.
     const z = try testing.allocator.dupeZ(u8, dir);
     defer testing.allocator.free(z);
-    _ = std.c.rmdir(z.ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.rmdir(z.ptr));
 }
 
-test "createSessionPath: timestamp + random suffix shape" {
-    const path = try createSessionPath(testing.allocator, "/tmp/atty-fake-dir");
+test "resolveDir: missing-and-uncreatable dir surfaces an error" {
+    // Try to create a subdir under a non-traversable path. /proc/1
+    // exists but is owned by root + non-traversable to regular users;
+    // mkdir under it fails EACCES, the final stat fails ENOENT, and
+    // resolveDir must surface that — silent success here is what the
+    // High finding caught.
+    const got = resolveDir(testing.allocator, "/proc/1/atty-cannot-create");
+    try testing.expectError(error.PersistenceDirUnavailable, got);
+}
+
+test "createSessionPath: timestamp + suffix shape AND reserves the file via O_EXCL" {
+    var name_buf: [64]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-create-sess-{x}", .{seed});
+    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dir_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir_z.ptr, 0o700));
+    defer _ = std.c.rmdir(dir_z.ptr);
+
+    const path = try createSessionPath(testing.allocator, dir);
     defer testing.allocator.free(path);
-    // Shape: /tmp/atty-fake-dir/YYYYMMDDTHHMMSS-XXXXXX.jsonl
-    try testing.expect(std.mem.startsWith(u8, path, "/tmp/atty-fake-dir/"));
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    try testing.expect(std.mem.startsWith(u8, path, dir));
     try testing.expect(std.mem.endsWith(u8, path, ".jsonl"));
-    const stem_start = "/tmp/atty-fake-dir/".len;
+    const stem_start = dir.len + 1;
     const stem_end = path.len - ".jsonl".len;
     const stem = path[stem_start..stem_end];
     // YYYYMMDDTHHMMSS = 15 chars, '-' = 1, 6 hex chars = 6 → 22.
     try testing.expectEqual(@as(usize, 22), stem.len);
     try testing.expectEqual(@as(u8, 'T'), stem[8]);
     try testing.expectEqual(@as(u8, '-'), stem[15]);
+
+    // The file MUST exist on disk: createSessionPath's contract is
+    // atomic reservation via O_EXCL, not just path-string generation.
+    const verify_fd = std.c.open(path_z.ptr, .{ .ACCMODE = .RDONLY });
+    try testing.expect(verify_fd >= 0);
+    _ = std.c.close(verify_fd);
 }
 
-test "createSessionPath: empty dir returns empty path" {
+test "createSessionPath: two back-to-back calls produce distinct paths (no overwrite)" {
+    var name_buf: [64]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-create-sess-distinct-{x}", .{seed});
+    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dir_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir_z.ptr, 0o700));
+    defer _ = std.c.rmdir(dir_z.ptr);
+
+    const a = try createSessionPath(testing.allocator, dir);
+    defer testing.allocator.free(a);
+    const az = try testing.allocator.dupeZ(u8, a);
+    defer testing.allocator.free(az);
+    defer _ = std.c.unlink(az.ptr);
+
+    const b = try createSessionPath(testing.allocator, dir);
+    defer testing.allocator.free(b);
+    const bz = try testing.allocator.dupeZ(u8, b);
+    defer testing.allocator.free(bz);
+    defer _ = std.c.unlink(bz.ptr);
+
+    try testing.expect(!std.mem.eql(u8, a, b));
+}
+
+test "createSessionPath: empty dir returns empty path (no file created)" {
     const path = try createSessionPath(testing.allocator, "");
     defer testing.allocator.free(path);
     try testing.expectEqual(@as(usize, 0), path.len);

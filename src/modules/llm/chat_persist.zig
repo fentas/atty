@@ -39,9 +39,14 @@ extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
+extern "c" fn stat(path: [*:0]const u8, statbuf: *Stat) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+extern "c" fn getpid() c_int;
 extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
 const CLOCK_REALTIME: c_int = 0;
+const S_IFMT: c_uint = 0o170000;
+const S_IFDIR: c_uint = 0o040000;
+const O_EXCL: c_int = 0o200;
 
 const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;
@@ -50,11 +55,14 @@ const O_APPEND: c_int = 0o2000;
 const FILE_MODE: c_int = 0o600;
 const DIR_MODE: c_uint = 0o700;
 
-// Minimal stat struct — we only need st_size. Layout matches Linux's
-// `struct stat` (the kernel definition; libc passes it through). On
-// non-Linux this would need to be revisited; atty is Linux-only.
+// glibc x86_64 `struct stat` shape — we only need `mode` and
+// `size`. The padding spans match the actual field offsets so the
+// kernel's writes land in the right slots. Linux-only by design;
+// musl uses the same x86_64 layout for the fields we touch.
 const Stat = extern struct {
-    _pad: [48]u8,
+    _pad0: [24]u8,
+    mode: u32,
+    _pad1: [20]u8,
     size: i64,
     _pad2: [80]u8,
 };
@@ -95,7 +103,7 @@ pub fn resolveDir(allocator: std.mem.Allocator, explicit_dir: []const u8) ![]u8 
     // mkdir -p the path one segment at a time so the parents exist.
     // Single-pass (no per-segment retry on EEXIST): a fresh mkdir
     // failing for any reason other than "already exists" surfaces
-    // later when we try to open(O_CREAT) inside it.
+    // via the final stat check below.
     var i: usize = 1;
     while (i <= dir.len) : (i += 1) {
         if (i == dir.len or dir[i] == '/') {
@@ -105,13 +113,30 @@ pub fn resolveDir(allocator: std.mem.Allocator, explicit_dir: []const u8) ![]u8 
         }
     }
 
+    // Verify the final segment actually exists AND is a directory.
+    // Without this check, an unwritable home (EACCES on the parent
+    // mkdir, missing $HOME on a kiosk session) silently degrades
+    // to "persistence enabled but never writes" — surfaces nothing
+    // to the user. Returning error.NotFound here lets the caller
+    // treat persistence as unavailable.
+    const dir_z = try allocator.dupeZ(u8, dir);
+    defer allocator.free(dir_z);
+    var st: Stat = undefined;
+    if (stat(dir_z.ptr, &st) != 0) return error.PersistenceDirUnavailable;
+    if ((st.mode & S_IFMT) != S_IFDIR) return error.PersistenceDirNotADir;
+
     return allocator.dupe(u8, dir);
 }
 
-/// Build a fresh per-session file path inside `dir`. Format:
-/// `<dir>/YYYYMMDDTHHMMSS-<rand>.jsonl` (rand = 6 hex chars from
-/// /dev/urandom-backed `std.crypto.random`). Two atty sessions
-/// starting in the same second won't collide.
+/// Reserve a fresh per-session file path inside `dir` by
+/// creating an empty file with `O_CREAT|O_EXCL`. Format:
+/// `<dir>/YYYYMMDDTHHMMSS-<suffix>.jsonl`. The suffix mixes
+/// nanoseconds with pid for an initial guess, then retries
+/// (up to 64 times) on EEXIST by tweaking the suffix — that
+/// closes the two-atty-processes-collide-on-(ns,pid) window
+/// completely. Trade-off: every session leaves an artifact on
+/// disk, even ones that never push a turn. Worth it for the
+/// no-overwrite guarantee.
 pub fn createSessionPath(allocator: std.mem.Allocator, dir: []const u8) ![]u8 {
     if (dir.len == 0) return allocator.dupe(u8, "");
     var ts: std.posix.timespec = undefined;
@@ -121,27 +146,45 @@ pub fn createSessionPath(allocator: std.mem.Allocator, dir: []const u8) ![]u8 {
     const yd = ep.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = ep.getDaySeconds();
-    // nanoseconds give us in-second uniqueness; 3 bytes = 6 hex chars.
     const ns: u64 = if (ts.nsec > 0) @intCast(ts.nsec) else 0;
-    const r0: u8 = @truncate(ns >> 16);
-    const r1: u8 = @truncate(ns >> 8);
-    const r2: u8 = @truncate(ns);
-    return std.fmt.allocPrint(
-        allocator,
-        "{s}/{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}-{x:0>2}{x:0>2}{x:0>2}.jsonl",
-        .{
-            dir,
-            @as(u16, yd.year),
-            md.month.numeric(),
-            md.day_index + 1,
-            ds.getHoursIntoDay(),
-            ds.getMinutesIntoHour(),
-            ds.getSecondsIntoMinute(),
-            r0,
-            r1,
-            r2,
-        },
-    );
+    const pid: u32 = @bitCast(getpid());
+
+    var attempt: u32 = 0;
+    while (attempt < 64) : (attempt += 1) {
+        const mix: u32 = @as(u32, @truncate(ns)) ^ pid ^ attempt;
+        const r0: u8 = @truncate(mix >> 16);
+        const r1: u8 = @truncate(mix >> 8);
+        const r2: u8 = @truncate(mix);
+        const candidate = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}-{x:0>2}{x:0>2}{x:0>2}.jsonl",
+            .{
+                dir,
+                @as(u16, yd.year),
+                md.month.numeric(),
+                md.day_index + 1,
+                ds.getHoursIntoDay(),
+                ds.getMinutesIntoHour(),
+                ds.getSecondsIntoMinute(),
+                r0,
+                r1,
+                r2,
+            },
+        );
+        errdefer allocator.free(candidate);
+
+        const cz = try allocator.dupeZ(u8, candidate);
+        defer allocator.free(cz);
+        const fd = open(cz.ptr, O_WRONLY | O_CREAT | O_EXCL, FILE_MODE);
+        if (fd >= 0) {
+            _ = close(fd);
+            return candidate;
+        }
+        // open failed — most likely EEXIST. Free this attempt and
+        // try the next suffix.
+        allocator.free(candidate);
+    }
+    return error.PersistencePathCollision;
 }
 
 /// Append one turn to the file as a single NDJSON line. Best-effort:
@@ -198,6 +241,9 @@ fn turnKindStr(kind: dialog.TurnKind) []const u8 {
 /// (allocated via `allocator`). Returns an empty list when the file
 /// is missing / unreadable / empty.
 ///
+/// Reserved for the recall picker landing in a follow-up PR — no
+/// production caller invokes this in the per-dialog-file design.
+///
 /// Implementation: when the file is larger than `max_bytes`, seek
 /// to `size - max_bytes` and discard the (necessarily-partial)
 /// first line — that gives a clean tail window onto the newest
@@ -237,10 +283,10 @@ pub fn loadLastTurns(
     // The head-read is exactly the bug we're fixing; silently
     // re-introducing it on a syscall failure would be a worse
     // failure mode than "no history loaded".
-    var stat: Stat = undefined;
+    var st_info: Stat = undefined;
     var skip_partial_line = false;
-    if (fstat(fd, &stat) == 0) {
-        const size: u64 = if (stat.size > 0) @intCast(stat.size) else 0;
+    if (fstat(fd, &st_info) == 0) {
+        const size: u64 = if (st_info.size > 0) @intCast(st_info.size) else 0;
         if (size > max_bytes) {
             const off: i64 = @intCast(size - max_bytes);
             // Peek the byte at `off - 1` to detect whether the
