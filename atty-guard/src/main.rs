@@ -654,10 +654,8 @@ fn main() -> std::io::Result<()> {
         None => config::Config::default(),
     };
 
-    // Tier-2 backend selection via the resolve_backend helper —
-    // precedence + validation tested directly in classifier.rs.
-    // Invalid backend (from cli OR config) → hard fail to match
-    // the explicit-config posture from #226.
+    // Invalid backend (from CLI or config) is a hard error rather
+    // than a silent fallback — operator opt-in should fail loudly.
     let (backend, backend_source) = match classifier::resolve_backend(
         cli.tier2.as_deref(),
         file_cfg.tier2.backend.as_deref(),

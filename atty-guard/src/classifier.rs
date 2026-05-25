@@ -80,20 +80,16 @@ impl BackendSource {
     }
 }
 
-/// Tier-2 backend resolution precedence: explicit CLI wins, then
-/// config-file `[tier2] backend = "..."`, then the built-in
-/// default (stub). Extracted from main.rs so the precedence is
-/// independently testable — pre-extraction the ladder was
-/// inlined and the only proof of correctness was manual
-/// invocation of `cargo run`, which is exactly the kind of
-/// silent regression the original finding (review #3 / 020)
-/// was filed for.
+/// Resolve the effective Tier-2 backend.
 ///
-/// Returns `(BackendKind, BackendSource)` on success so callers
-/// can log the effective backend + where it came from. Returns
-/// the invalid string + its source on failure so the caller can
-/// build an operator-actionable error message (`"... from
-/// config — expected stub|heuristic|onnx"`).
+/// Precedence: explicit CLI `--tier2` > config-file
+/// `[tier2] backend = "..."` > built-in default (stub).
+///
+/// Returns `(BackendKind, BackendSource)` so callers can log the
+/// chosen backend and where it came from. On an unknown value
+/// returns the offending string + its source so the caller can
+/// surface an operator-actionable error naming the source
+/// (`"... from config — expected stub|heuristic|onnx"`).
 pub fn resolve_backend(
     cli: Option<&str>,
     config: Option<&str>,

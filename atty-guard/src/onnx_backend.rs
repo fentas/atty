@@ -57,17 +57,14 @@ impl std::fmt::Display for LoadError {
                 "atty-guard built without --features tier2-onnx — recompile with the feature on"
             ),
             LoadError::ModelMissing(p) => {
-                // Empty path almost always means the operator
-                // wrote `[tier2] backend = "onnx"` but forgot to
-                // add the `[tier2.onnx]` section — pre-fix this
-                // surfaced as `model file not found:` with a
-                // trailing space, which looked like a stripped
-                // value. Now the empty case names the missing
-                // section explicitly so the fix is obvious.
+                // Empty path almost always means the operator wrote
+                // `[tier2] backend = "onnx"` without a `[tier2.onnx]`
+                // section; naming the missing key in the message
+                // makes the fix obvious without consulting docs.
                 if p.is_empty() {
                     write!(
                         f,
-                        "[tier2.onnx] model_path is empty — set it in the config (see docs/security-guard-slm.md) or pick a non-onnx backend"
+                        "[tier2.onnx] model_path is empty — set it (e.g. model_path = \"/var/lib/atty-guard/models/securebert2-int8.onnx\") or pick a non-onnx backend with `[tier2] backend = \"stub\"|\"heuristic\"`"
                     )
                 } else {
                     write!(f, "model file not found: {p}")
@@ -77,7 +74,7 @@ impl std::fmt::Display for LoadError {
                 if p.is_empty() {
                     write!(
                         f,
-                        "[tier2.onnx] tokenizer_path is empty — set it in the config (see docs/security-guard-slm.md) or pick a non-onnx backend"
+                        "[tier2.onnx] tokenizer_path is empty — set it (e.g. tokenizer_path = \"/var/lib/atty-guard/models/securebert2-tokenizer.json\") or pick a non-onnx backend with `[tier2] backend = \"stub\"|\"heuristic\"`"
                     )
                 } else {
                     write!(f, "tokenizer file not found: {p}")
