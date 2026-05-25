@@ -297,9 +297,33 @@ pub fn configure(comptime cfg: Config) type {
             // any sticky high-threat indicator from a prior command.
             // The user has typed something normal; we can stop
             // gating the descendant tree on the previous mark.
-            // (Future V2-B: also fire a SetThreatLevel(.low) RPC
-            // to the daemon to clear the kernel-side BPF map
-            // entry — left for the same PR that wires libbpf-rs.)
+            //
+            // Fire `setThreatLevel(pid, .low)` to the daemon so the
+            // kernel-side BPF map entry (V2-B) also clears. Without
+            // this, the daemon's classify path keeps upgrading
+            // later safe commands to `pid_high_threat` for the rest
+            // of the shell's lifetime — and for Critical, the
+            // daemon keeps returning `Block`, so the user sees
+            // repeated `REFUSED` lines after one critical command.
+            //
+            // Only fire when we ACTUALLY had a non-null mark
+            // (otherwise we're churning Low → Low RPCs on every
+            // clean line, which the daemon would just evict
+            // again). Best-effort: daemon errors are logged to
+            // stderr (same posture as markShellThreat above).
+            if (rt.active_threat != null) {
+                if (ctx.shell_pid) |pid| {
+                    if (rt.daemon != null and !rt.daemon_disabled) {
+                        rt.daemon.?.setThreatLevel(pid, .low) catch |err| switch (err) {
+                            error.DaemonError => {
+                                const msg = "atty: daemon rejected setThreatLevel(low) — kernel enforcement may stay armed\n";
+                                _ = std.c.write(2, msg, msg.len);
+                            },
+                            else => {},
+                        };
+                    }
+                }
+            }
             rt.active_threat = null;
             return .forward;
         }
