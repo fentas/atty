@@ -708,18 +708,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // every refresh; the gated DsrParser passes those
                 // replies through because `expecting_reply` is false.
                 // Without this pass the reply's trailing `<col>R`
-                // leaks onto the shell's prompt as visible text. The
-                // drop is no-op when alt-screen is active — the
-                // running TUI owns its own CPR protocol.
-                const cpr_drop_len = cursor_dsr.dropWellFormedCpr(
-                    stdin_filtered_buf[0..dsr_result.filtered_len],
-                    &stdin_cpr_buf,
-                    alt_screen.active,
-                );
-                if (cpr_drop_len < dsr_result.filtered_len) {
-                    trace.log(.cursor, "cpr_scrub: pre={d} post={d} dropped={d}", .{ dsr_result.filtered_len, cpr_drop_len, dsr_result.filtered_len - cpr_drop_len });
+                // leaks onto the shell's prompt as visible text.
+                // Skip entirely when alt-screen is active — the
+                // running TUI owns its own CPR protocol AND the
+                // scrub would just be a wasted memcpy hop on the
+                // stdin hot path.
+                var input: []const u8 = undefined;
+                if (alt_screen.active) {
+                    input = stdin_filtered_buf[0..dsr_result.filtered_len];
+                } else {
+                    const cpr_drop_len = cursor_dsr.dropWellFormedCpr(
+                        stdin_filtered_buf[0..dsr_result.filtered_len],
+                        &stdin_cpr_buf,
+                        false,
+                    );
+                    if (cpr_drop_len < dsr_result.filtered_len) {
+                        trace.log(.cursor, "cpr_scrub: pre={d} post={d} dropped={d}", .{ dsr_result.filtered_len, cpr_drop_len, dsr_result.filtered_len - cpr_drop_len });
+                    }
+                    input = stdin_cpr_buf[0..cpr_drop_len];
                 }
-                var input: []const u8 = stdin_cpr_buf[0..cpr_drop_len];
                 if (input.len == 0) continue; // chunk fully scrubbed (gated DSR reply or shell-fired CPR)
                 trace.logBytes(.input, "stdin_read", input);
                 trace.log(.altscreen, "alt_screen.active={} module_overlay_active={}", .{ alt_screen.active, ctx.module_overlay_active });

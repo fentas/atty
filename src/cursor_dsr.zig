@@ -246,13 +246,21 @@ pub const DsrParser = struct {
 /// pty write so split-across-reads is vanishingly rare.
 ///
 /// `alt_screen_active=true` is a verbatim pass-through — the
-/// running TUI owns its own DSR/CPR protocol.
+/// running TUI owns its own DSR/CPR protocol. Callers that
+/// already know they don't need the scrub should skip the
+/// call entirely to avoid the copy.
 ///
 /// `out` must be at least `input.len` bytes; debug-asserted.
+/// `out` and `input` may NOT overlap (the loop reads `input[i]`
+/// after writing `out[w]` — overlap would corrupt the trailing
+/// bytes of a same-buffer call).
 pub fn dropWellFormedCpr(input: []const u8, out: []u8, alt_screen_active: bool) usize {
     std.debug.assert(out.len >= input.len);
     if (alt_screen_active) {
-        @memcpy(out[0..input.len], input);
+        // @memmove tolerates same-buffer / overlapping callers
+        // even though no caller passes one today — cheap insurance
+        // for an exported helper.
+        @memmove(out[0..input.len], input);
         return input.len;
     }
     var w: usize = 0;
