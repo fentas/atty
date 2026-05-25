@@ -701,14 +701,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     cursor_tracker.setPosition(pos.row, pos.col);
                     trace.log(.cursor, "DSR-6n reply: row={d} col={d}", .{ pos.row, pos.col });
                 }
-                // Second pass: strip CPR replies that atty didn't query
-                // for. Prompt redraws (starship, p10k) fire DSR on
-                // every refresh; the gated DsrParser passes those
-                // replies through because `expecting_reply` is false.
-                // Without this pass the reply's trailing `<col>R`
-                // leaks onto the shell's prompt as visible text.
-                // Skip entirely when alt-screen is active — the
-                // running TUI owns its own CPR protocol.
+                // Second pass: strip CPR replies the gated DsrParser
+                // didn't claim — some shells/prompts fire their own
+                // DSR queries on redraw, and the trailing `<col>R`
+                // tail otherwise echoes onto the prompt as text.
+                // Skip when alt-screen is active: the running TUI
+                // owns its own CPR protocol.
                 var input: []const u8 = stdin_filtered_buf[0..dsr_result.filtered_len];
                 if (!alt_screen.active) {
                     const cpr_drop_len = cursor_dsr.dropWellFormedCpr(
