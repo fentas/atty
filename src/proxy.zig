@@ -720,7 +720,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     trace.log(.cursor, "cpr_scrub: pre={d} post={d} dropped={d}", .{ dsr_result.filtered_len, cpr_drop_len, dsr_result.filtered_len - cpr_drop_len });
                 }
                 var input: []const u8 = stdin_cpr_buf[0..cpr_drop_len];
-                if (input.len == 0) continue; // entire chunk was DSR reply
+                if (input.len == 0) continue; // chunk fully scrubbed (gated DSR reply or shell-fired CPR)
                 trace.logBytes(.input, "stdin_read", input);
                 trace.log(.altscreen, "alt_screen.active={} module_overlay_active={}", .{ alt_screen.active, ctx.module_overlay_active });
 

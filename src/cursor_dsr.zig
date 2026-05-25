@@ -238,41 +238,19 @@ pub const DsrParser = struct {
     }
 };
 
-/// Strip well-formed CPR (cursor-position report) replies that
-/// atty *didn't* query for. The shell's prompt — starship, p10k,
-/// any prompt that re-anchors via `\x1B[6n` — fires its own DSR
-/// queries on every redraw. The terminal's reply lands on atty's
-/// stdin; `DsrParser.feed` only consumes it when atty's gate is
-/// armed (so user-typed Esc keystrokes don't get eaten between
-/// atty's own queries). Replies from shell-fired queries leak
-/// through the gate to the next read consumer.
+/// Strip well-formed CPR replies that atty didn't query for.
 ///
-/// Visible symptom: holding Ctrl+Up (which dispatches
-/// `chat_focus_to_shell` then forwards subsequent keys to the
-/// shell) trips zsh's history-search prompt redraw → starship
-/// fires DSR per redraw → the terminal answers fast enough that
-/// the replies arrive in the same poll wakeup → the keymap
-/// matcher / shell echoes the trailing `<col>R` tail on the
-/// prompt line (the shell's CSI consumer eats the leading
-/// `\x1B[<row>;` but bails on the unrecognised `R` terminator).
+/// Single-chunk only: stateful cross-chunk withholding would
+/// re-engage the lone-Esc-eater problem that `expecting_reply`
+/// exists to prevent. In practice terminals emit CPR as one
+/// pty write so split-across-reads is vanishingly rare.
 ///
-/// This pass scans for COMPLETE replies that fit entirely in
-/// `input`. Terminals emit CPR as a single `write(2)` from the
-/// pty side, so in practice the whole reply lands in one
-/// `read(2)`; a chunk boundary splitting `\x1B[12;` from `34R`
-/// would leak the second half. The gated `DsrParser` does cross-
-/// chunk reassembly but ONLY when `expecting_reply` is armed,
-/// which is precisely *not* the shell-fired case. Stateful
-/// withholding here would re-introduce the lone-Esc-eater
-/// problem that motivated the gate in the first place, so we
-/// accept the theoretical split-chunk gap.
+/// `alt_screen_active=true` is a verbatim pass-through — the
+/// running TUI owns its own DSR/CPR protocol.
 ///
-/// Caller passes alt_screen_active=false to engage the drop —
-/// in alt-screen mode the running TUI (nvim, atuin, lazygit)
-/// owns the query/reply protocol and we MUST pass replies
-/// through verbatim; this function returns the input unchanged
-/// in that mode.
+/// `out` must be at least `input.len` bytes; debug-asserted.
 pub fn dropWellFormedCpr(input: []const u8, out: []u8, alt_screen_active: bool) usize {
+    std.debug.assert(out.len >= input.len);
     if (alt_screen_active) {
         @memcpy(out[0..input.len], input);
         return input.len;
@@ -280,8 +258,6 @@ pub fn dropWellFormedCpr(input: []const u8, out: []u8, alt_screen_active: bool) 
     var w: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
-        // Minimum CPR shape `\x1B[<d>;<d>R` is 6 bytes; skip the
-        // matchCprAt call when fewer remain.
         if (i + 6 <= input.len and input[i] == 0x1B and input[i + 1] == '[') {
             if (matchCprAt(input, i)) |after| {
                 i = after;
