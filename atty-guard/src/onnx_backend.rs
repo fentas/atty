@@ -64,7 +64,7 @@ impl std::fmt::Display for LoadError {
                 if p.is_empty() {
                     write!(
                         f,
-                        "[tier2.onnx] model_path is empty — set it (e.g. model_path = \"/var/lib/atty-guard/models/securebert2-int8.onnx\") or pick a non-onnx backend with `[tier2] backend = \"stub\"|\"heuristic\"`"
+                        "[tier2.onnx] model_path is empty — set it (e.g. model_path = \"/var/lib/atty-guard/models/securebert2-int8.onnx\") or pick a non-onnx backend (`[tier2] backend = \"stub\"` or `backend = \"heuristic\"`)"
                     )
                 } else {
                     write!(f, "model file not found: {p}")
@@ -74,7 +74,7 @@ impl std::fmt::Display for LoadError {
                 if p.is_empty() {
                     write!(
                         f,
-                        "[tier2.onnx] tokenizer_path is empty — set it (e.g. tokenizer_path = \"/var/lib/atty-guard/models/securebert2-tokenizer.json\") or pick a non-onnx backend with `[tier2] backend = \"stub\"|\"heuristic\"`"
+                        "[tier2.onnx] tokenizer_path is empty — set it (e.g. tokenizer_path = \"/var/lib/atty-guard/models/securebert2-tokenizer.json\") or pick a non-onnx backend (`[tier2] backend = \"stub\"` or `backend = \"heuristic\"`)"
                     )
                 } else {
                     write!(f, "tokenizer file not found: {p}")

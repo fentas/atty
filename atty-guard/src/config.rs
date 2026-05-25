@@ -281,14 +281,11 @@ block_threshold = 0.9
         // ignores TOML content (no parser wired through this path
         // even when `toml` is present via another feature like
         // `atoms-fetch`).
-        let tmp = std::env::temp_dir().join(format!(
-            "atty-guard-config-stub-test-{}.toml",
-            std::process::id()
-        ));
-        std::fs::write(&tmp, "anything = \"ignored\"").unwrap();
-        let cfg = load(&tmp).expect("readable file should succeed");
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"anything = \"ignored\"").unwrap();
+        let cfg = load(tmp.path()).expect("readable file should succeed");
         assert_eq!(cfg.tier2.onnx.model, "securebert2");
-        let _ = std::fs::remove_file(&tmp);
     }
 
     #[cfg(not(feature = "tier2-onnx"))]

@@ -1197,10 +1197,8 @@ mod resolve_backend_tests {
 
     #[test]
     fn cli_wins_over_config() {
-        // Operator passes --tier2 stub on the command line + has
-        // backend = "onnx" in the config file. CLI wins. Without
-        // this contract, finding 020's intent (config-only
-        // selection) couldn't coexist with the cli override path.
+        // CLI `--tier2` overrides the config file's `[tier2]
+        // backend` when both are set; source reports CLI.
         let (kind, src) = resolve_backend(Some("stub"), Some("onnx")).unwrap();
         assert_eq!(kind, BackendKind::Stub);
         assert_eq!(src, BackendSource::Cli);
@@ -1208,10 +1206,11 @@ mod resolve_backend_tests {
 
     #[test]
     fn config_used_when_cli_omitted() {
-        // No --tier2; config selects onnx. Pre-fix this silently
-        // fell to stub because the cli had a clap default of
-        // "stub" that always matched. Post-fix the cli is
-        // Option<String> and None means "look at config".
+        // CLI absent + config present: config selects; source
+        // reports Config. The CLI value being `Option<String>`
+        // (not a clap-defaulted string) is what makes the
+        // "omitted" branch distinguishable from "explicitly
+        // chose default".
         let (kind, src) = resolve_backend(None, Some("onnx")).unwrap();
         assert_eq!(kind, BackendKind::Onnx);
         assert_eq!(src, BackendSource::Config);

@@ -66,7 +66,7 @@ atty-guard \
     -v 1
 ```
 
-Without `--config`, the daemon starts with built-in defaults (Stub backend). With `--config <path>`, a load failure is a hard error — fix the config or omit `--config` to use defaults intentionally. When config + onnx are wired but OnnxBackend construction itself fails (model file missing, tokenizer parse error, etc.), the daemon logs a clear message and falls back to `StubBackend` — atty-guard still starts, just without SLM-grade Tier-2.
+Without `--config` (and without an explicit `--tier2` override), the daemon starts with built-in defaults (Stub backend). `--tier2 heuristic|onnx` alone selects a non-stub backend even without a config file (onnx will then refuse to construct without `[tier2.onnx]` paths and the daemon falls back to Stub with a logged error). With `--config <path>`, a load failure is a hard error — fix the config or omit `--config` to use defaults intentionally. When config + onnx are wired but OnnxBackend construction itself fails (model file missing, tokenizer parse error, etc.), the daemon logs a clear message and falls back to `StubBackend` — atty-guard still starts, just without SLM-grade Tier-2.
 
 ## Runtime: pure-Rust tract, no C deps
 
