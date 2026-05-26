@@ -39,6 +39,16 @@ extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn opendir(path: [*:0]const u8) ?*anyopaque;
+extern "c" fn closedir(dir: *anyopaque) c_int;
+extern "c" fn readdir(dir: *anyopaque) ?*Dirent;
+
+const Dirent = extern struct {
+    _pad0: [18]u8, // d_ino + d_off + d_reclen
+    d_type: u8,
+    d_name: [256]u8, // 256 is the glibc max; longer entries are truncated
+};
+const DT_REG: u8 = 8; // regular file
 extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn getpid() c_int;
@@ -244,6 +254,20 @@ pub fn unlinkPath(path_z: [*:0]const u8) c_int {
     return unlink(path_z);
 }
 
+/// Open a path read-only. Thin pub wrapper so the recall loader
+/// (in hooks.zig) doesn't need its own `extern "c" fn open` decl.
+pub fn openReadOnly(path_z: [*:0]const u8) c_int {
+    return open(path_z, O_RDONLY);
+}
+
+pub fn closeFd(fd: c_int) c_int {
+    return close(fd);
+}
+
+pub fn readBytes(fd: c_int, buf: [*]u8, count: usize) isize {
+    return read(fd, buf, count);
+}
+
 /// Load the LAST `max_turns` turns from `path`. Returns the turns
 /// in original order (oldest first) so the caller can pushTurn them
 /// directly. Caller owns each returned slice + the outer ArrayList
@@ -424,6 +448,151 @@ pub fn parseLine(allocator: std.mem.Allocator, line: []const u8) !LoadedTurn {
 
     const content = try allocator.dupe(u8, parsed.value.content);
     return .{ .kind = k, .content = content };
+}
+
+/// A single record read from a per-session NDJSON file. Either a
+/// `Turn` of one of the three modeled kinds, or a `conclusion`
+/// banner appended at dialog end. The recall picker uses this to
+/// populate both `rt.turns` and `rt.conclusion_formatted` from
+/// one parse pass.
+pub const LoadedRecord = union(enum) {
+    turn: LoadedTurn,
+    conclusion: []u8, // owned
+
+    pub fn deinit(self: LoadedRecord, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .turn => |t| allocator.free(t.content),
+            .conclusion => |c| allocator.free(c),
+        }
+    }
+};
+
+/// Like `parseLine` but also recognises `kind:"conclusion"`. Used by
+/// the recall picker's loader; turn-only consumers stay on
+/// `parseLine` which still rejects conclusion records with
+/// `UnknownTurnKind` (forward-compatible silent skip on the load
+/// path).
+pub fn parseRecord(allocator: std.mem.Allocator, line: []const u8) !LoadedRecord {
+    const Wire = struct {
+        kind: []const u8,
+        content: []const u8,
+    };
+    const parsed = try std.json.parseFromSlice(Wire, allocator, line, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    if (std.mem.eql(u8, parsed.value.kind, "conclusion")) {
+        const content = try allocator.dupe(u8, parsed.value.content);
+        return .{ .conclusion = content };
+    }
+    const k: dialog.TurnKind = if (std.mem.eql(u8, parsed.value.kind, "user"))
+        .user
+    else if (std.mem.eql(u8, parsed.value.kind, "assistant_exec"))
+        .assistant_exec
+    else if (std.mem.eql(u8, parsed.value.kind, "observation"))
+        .observation
+    else
+        return error.UnknownTurnKind;
+    const content = try allocator.dupe(u8, parsed.value.content);
+    return .{ .turn = .{ .kind = k, .content = content } };
+}
+
+/// Metadata for one persisted dialog file, surfaced to the recall
+/// picker. `path` and `name` are owned by the caller; `freeDialog
+/// Meta` releases them.
+pub const DialogMeta = struct {
+    path: []u8, // owned, absolute
+    name: []u8, // owned, basename only (no .jsonl suffix)
+};
+
+pub fn freeDialogMeta(allocator: std.mem.Allocator, m: DialogMeta) void {
+    allocator.free(m.path);
+    allocator.free(m.name);
+}
+
+pub fn freeDialogMetaList(allocator: std.mem.Allocator, list: []DialogMeta) void {
+    for (list) |m| freeDialogMeta(allocator, m);
+    allocator.free(list);
+}
+
+/// List all `*.jsonl` files in `dir`, sorted newest-first.
+/// "Newest" = basename lexical descending (the file format's
+/// `YYYYMMDDTHHMMSS-XXXXXX.jsonl` shape sorts chronologically by
+/// string comparison). Skips files that don't match the shape;
+/// skips zero-byte files (unused reservations).
+pub fn listDialogs(allocator: std.mem.Allocator, dir: []const u8) ![]DialogMeta {
+    if (dir.len == 0) return allocator.alloc(DialogMeta, 0);
+
+    const dir_z = try allocator.dupeZ(u8, dir);
+    defer allocator.free(dir_z);
+    const handle = opendir(dir_z.ptr) orelse return allocator.alloc(DialogMeta, 0);
+    defer _ = closedir(handle);
+
+    var list: std.ArrayList(DialogMeta) = .empty;
+    errdefer {
+        for (list.items) |m| freeDialogMeta(allocator, m);
+        list.deinit(allocator);
+    }
+
+    while (readdir(handle)) |entry| {
+        // Find the trailing NUL in d_name (truncated to ≤ 256).
+        const name_slice = blk: {
+            const buf = &entry.d_name;
+            var n: usize = 0;
+            while (n < buf.len and buf[n] != 0) : (n += 1) {}
+            break :blk buf[0..n];
+        };
+        if (name_slice.len == 0) continue;
+        if (entry.d_type != DT_REG) continue;
+        if (!std.mem.endsWith(u8, name_slice, ".jsonl")) continue;
+
+        // Skip zero-byte reservations.
+        const child_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name_slice });
+        const child_z = try allocator.dupeZ(u8, child_path);
+        defer allocator.free(child_z);
+        const fd_check = open(child_z.ptr, O_RDONLY);
+        if (fd_check < 0) {
+            allocator.free(child_path);
+            continue;
+        }
+        var st: Stat = undefined;
+        const size_ok = fstat(fd_check, &st) == 0 and st.size > 0;
+        _ = close(fd_check);
+        if (!size_ok) {
+            allocator.free(child_path);
+            continue;
+        }
+
+        const stem_len = name_slice.len - ".jsonl".len;
+        const name_owned = try allocator.dupe(u8, name_slice[0..stem_len]);
+        try list.append(allocator, .{ .path = child_path, .name = name_owned });
+    }
+
+    const result = try list.toOwnedSlice(allocator);
+    // Newest-first: lexicographic descending on basename.
+    std.mem.sort(DialogMeta, result, {}, struct {
+        fn less(_: void, a: DialogMeta, b: DialogMeta) bool {
+            return std.mem.lessThan(u8, b.name, a.name);
+        }
+    }.less);
+    return result;
+}
+
+/// Best-effort retention sweep. Drops the OLDEST entries beyond
+/// `keep_count` by `unlink`ing them. Caller invokes from `attach`
+/// before reserving the new session path.
+pub fn pruneOldest(allocator: std.mem.Allocator, dir: []const u8, keep_count: usize) void {
+    if (dir.len == 0 or keep_count == 0) return;
+    const list = listDialogs(allocator, dir) catch return;
+    defer freeDialogMetaList(allocator, list);
+    if (list.len <= keep_count) return;
+    // listDialogs is newest-first; oldest live at the tail.
+    for (list[keep_count..]) |m| {
+        const z = allocator.dupeZ(u8, m.path) catch continue;
+        defer allocator.free(z);
+        _ = unlink(z.ptr);
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────

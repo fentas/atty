@@ -361,6 +361,15 @@ pub fn configure(comptime cfg: Config) type {
             // legacy.
             .{ .bytes = keymap.key("Ctrl+End"), .action = .chat_scroll_to_tail, .label = "Ctrl+End", .description = "chat: jump back to the live tail (when scrolled up)" },
             .{ .bytes = "\x1b[1;5F", .action = .chat_scroll_to_tail },
+            // Recall picker — opens a persisted-dialog browser
+            // overlay. Dual-encoded: legacy `\x1bR` for terminals
+            // without kitty kbd flag 1; CSI-u `\x1b[114;3u` for
+            // those that do (Ghostty / kitty / foot / WezTerm).
+            // Without the CSI-u sibling Alt+R would silently miss
+            // on those terminals — same rationale as the other
+            // Alt+letter bindings in this module.
+            .{ .bytes = keymap.key("Alt+R"), .action = .chat_recall, .label = "Alt+R", .description = "open the chat recall picker (browse persisted dialogs)" },
+            .{ .bytes = "\x1b[114;3u", .action = .chat_recall },
             // Inline panel resize — grow/shrink the panel one row
             // per press. Dual encoded: `keymap.key("Ctrl+Alt+Up")`
             // resolves to the kitty kbd CSI-u form on terminals
@@ -1058,6 +1067,14 @@ pub fn configure(comptime cfg: Config) type {
                 if (chat_persist.resolveDir(allocator, cfg.chat_persist_dir)) |dir| {
                     if (dir.len > 0) {
                         rt.chat_persist_dir = dir;
+                        // Retention sweep BEFORE reserving the new
+                        // session — drops files past `max_dialogs`
+                        // (newest-first by filename). Best-effort:
+                        // I/O failures are silent, the next attach
+                        // tries again.
+                        if (cfg.chat_persist_max_dialogs > 0) {
+                            chat_persist.pruneOldest(allocator, dir, cfg.chat_persist_max_dialogs);
+                        }
                         if (chat_persist.createSessionPath(allocator, dir)) |path| {
                             if (path.len > 0) {
                                 rt.chat_persist_path = path;

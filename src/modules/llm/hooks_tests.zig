@@ -2119,6 +2119,51 @@ test "chat_scroll_to_tail snaps inline_view_offset to 0 when focus is in panel" 
     try testing.expectEqual(false, rt.chat_inline_paint_pending);
 }
 
+test "chat_recall: latches hint and refuses cleanly when no dialogs exist" {
+    const dir: []const u8 = "/tmp/atty-recall-empty-test";
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    _ = std.c.rmdir(dz.ptr); // pre-cleanup
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .chat_persist_enabled = true,
+        .chat_persist_dir = dir,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // attach reserved file A but no past dialogs exist (just the
+    // current reservation, which listDialogs would skip due to
+    // 0-byte filter). Alt+R must consume + hint, not crash.
+    const consumed = try L.onAction(&rt, &ctx, .chat_recall);
+    try testing.expect(consumed);
+    try testing.expect(rt.hint_pending);
+    try testing.expect(!rt.chat_inline_open);
+
+    rt.hint_pending = false;
+}
+
 test "persistence: retained conclusion from prior dialog does NOT leak into the next session file on cancel" {
     // Regression for Copilot's round-2 finding on PR #238:
     // conclusion_formatted survives dialogReset (overlay recall);

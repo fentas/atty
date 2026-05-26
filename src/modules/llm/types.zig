@@ -695,13 +695,19 @@ pub const Config = struct {
     /// {"kind":"conclusion","content":"Listed 2 zig files."}
     /// ```
     /// `kind` ∈ {`user`, `assistant_exec`, `observation`,
-    /// `conclusion`}. `conclusion` is currently **write-only** —
-    /// `loadLastTurns` parses only the three turn kinds; the
-    /// recall picker (follow-up PR) extends the loader to
-    /// surface conclusion records as the "summary" preview line.
-    /// Unknown kinds are silently skipped on load (forward-compat
-    /// for future taxonomy).
+    /// `conclusion`}. `parseLine` parses the three turn kinds;
+    /// `parseRecord` additionally surfaces `conclusion` records
+    /// for the recall picker's loader. Unknown kinds are silently
+    /// skipped (forward-compat for future taxonomy).
     chat_persist_dir: []const u8 = "",
+    /// Maximum number of persisted dialogs to retain on disk.
+    /// `attach` calls `chat_persist.pruneOldest` against
+    /// `chat_persist_dir` before reserving the new session — files
+    /// past this count (newest-first by filename) get `unlink`ed.
+    /// `0` disables the sweep (files accumulate unbounded). 100
+    /// is enough for a few weeks of casual use without being so
+    /// large that the recall picker becomes unscrollable.
+    chat_persist_max_dialogs: usize = 100,
     /// Inline chat panel — how many rows the panel claims above
     /// the statusbar when `Alt+C` opens it. The bottom row is the
     /// input prompt (`> _`), the rows above it scroll back through
