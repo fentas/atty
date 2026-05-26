@@ -545,49 +545,47 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// overflow surfaces in the alt-screen overlay
         /// (Alt+Shift+C) which has the full DECSTBM region.
         fn renderTurnContent(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize, max_rows: usize) !usize {
+            return renderTurnContentWithSkip(w, turn, max_visible, 0, max_rows);
+        }
+
+        /// Render a turn skipping the first `skip_rows` of its
+        /// produced content, emitting up to `max_rows` after.
+        /// Used by the per-row scrollback path to slice through a
+        /// tall turn that doesn't fit the panel in one shot.
+        ///
+        /// Single-row envelopes (`exec` / `question`) return 0
+        /// when `skip_rows >= 1` — the caller should treat that
+        /// as "this turn was fully scrolled past" and not advance
+        /// the panel row counter.
+        ///
+        /// Done-envelope skip drops the `✓ ` prefix too (it lives
+        /// on the logical first row alongside the reason text);
+        /// continuation rows then render via `md_render.renderWithSkip`.
+        fn renderTurnContentWithSkip(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize, skip_rows: usize, max_rows: usize) !usize {
             const c = turn.content;
-            // Quick shape check: assistant turns from the dialog
-            // protocol always start with `{` and contain `"action"`.
-            // Avoids a full JSON parse on every paint for user /
-            // observation turns whose contents are free prose.
             const looks_like_envelope = turn.kind == .assistant_exec and
                 c.len > 2 and
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
             if (!looks_like_envelope) {
-                return try renderWrappedRaw(w, c, max_visible, max_rows);
+                return try renderWrappedRawWithSkip(w, c, max_visible, skip_rows, max_rows);
             }
-            // Parse with the dialog parser so any "open_chat as
-            // separate object" or trailing-prose drift falls back
-            // to the raw render (which at least surfaces what the
-            // model emitted instead of vanishing).
             const R = dialog.Response(cfg.max_response_bytes);
             var parsed: R = .{};
-            // `parseResponse` needs an allocator — the JSON parser
-            // walks the tree once. Use a page-allocator-backed
-            // arena deinit'd at function exit. The arena is cheap
-            // (one mmap per page; freed in one syscall on deinit)
-            // and parse failure cleans up via the same path. On
-            // any parse error, fall through to raw rendering.
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
-                return try renderWrappedRaw(w, c, max_visible, max_rows);
+                return try renderWrappedRawWithSkip(w, c, max_visible, skip_rows, max_rows);
             };
-            // Per-action rendering — single row each. The envelope
-            // shape is already compact (description → command);
-            // wrap would just break the structured summary across
-            // rows for no readability win.
             switch (parsed.action) {
                 .exec => {
+                    if (skip_rows >= 1 or max_rows == 0) return 0;
                     const cmd = parsed.command();
                     const desc = parsed.description();
                     if (desc.len > 0) {
                         try writeSanitized(w, pw.truncateToCols(desc, max_visible / 2));
                         try w.writeAll(" \x1B[2m\u{2192}\x1B[0m ");
                     }
-                    // Command in cyan-on-default to stand out as the
-                    // actionable bit.
                     try w.writeAll("\x1B[22;38;5;14m");
                     const cmd_room: usize = if (max_visible > 20) max_visible - 20 else max_visible;
                     const cslice = pw.truncateToCols(cmd, cmd_room);
@@ -596,32 +594,26 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (cslice.len < cmd.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .question => {
+                    if (skip_rows >= 1 or max_rows == 0) return 0;
                     const q = parsed.question();
                     const slice = pw.truncateToCols(q, max_visible);
-                    try w.writeAll("\x1B[3m"); // italic
+                    try w.writeAll("\x1B[3m");
                     try writeSanitized(w, slice);
                     try w.writeAll("\x1B[0m");
                     if (slice.len < q.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
                 },
                 .done => {
-                    // Reason is free-form prose. Render via the
-                    // markdown-aware wrap path so multi-paragraph
-                    // reasons span multiple rows.
-                    try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m "); // mauve check
+                    if (max_rows == 0) return 0;
+                    // Emit the ✓ prefix only when row 1 is in the
+                    // visible window (skip_rows == 0). For deeper
+                    // scrolls, the prefix is "above" the cut and
+                    // md_render handles the continuation rows.
+                    if (skip_rows == 0) {
+                        try w.writeAll("\x1B[22;38;5;141m\u{2713}\x1B[0m ");
+                    }
                     const r = parsed.reason();
-                    // The `✓ ` prefix consumed 2 cols of row 1 BEFORE
-                    // md_render starts wrapping. Without this
-                    // adjustment, md_render's first chunk fits
-                    // `max_visible` cols but the terminal renders
-                    // `2 + max_visible` cols total — soft-wraps the
-                    // last 2 chars onto the next row and md_render's
-                    // returned `rows_used` count is off by 1. Cost
-                    // of the conservative cap: 2 cols of wrap budget
-                    // on continuation rows that don't carry the
-                    // prefix. Trivial — typical assistant prose
-                    // wraps mid-word anyway.
                     const wrap_cols: usize = if (max_visible > 2) max_visible - 2 else max_visible;
-                    return md_render.render(w, r, wrap_cols, max_rows, &writeSanitized);
+                    return md_render.renderWithSkip(w, r, wrap_cols, skip_rows, max_rows, &writeSanitized);
                 },
             }
             return 1;
@@ -783,6 +775,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// machine + SGR span handling lives in one place.
         fn renderWrappedRaw(w: *std.Io.Writer, content: []const u8, cols: usize, max_rows: usize) anyerror!usize {
             return md_render.render(w, content, cols, max_rows, &writeSanitized);
+        }
+
+        fn renderWrappedRawWithSkip(w: *std.Io.Writer, content: []const u8, cols: usize, skip_rows: usize, max_rows: usize) anyerror!usize {
+            return md_render.renderWithSkip(w, content, cols, skip_rows, max_rows, &writeSanitized);
         }
 
         /// Compute the (row, col) position the real terminal cursor
@@ -1220,18 +1216,47 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 w.print("\x1B[{d};1H\x1B[2K", .{r}) catch return false;
             }
 
-            // `chat_inline_view_offset` shifts the window of the
-            // last `scrollback_rows` turns toward the head. Clamp
-            // here too — turns_len shrinks after FIFO eviction.
-            const max_inline_offset: usize = if (rt.turns_len > 0) rt.turns_len - 1 else 0;
-            const inline_offset: usize = if (rt.chat_inline_view_offset > max_inline_offset) max_inline_offset else rt.chat_inline_view_offset;
-            const visible_end: usize = rt.turns_len - inline_offset;
+            // `chat_inline_view_offset` is in ROWS now (post-#213):
+            // the offset counts rendered rows scrolled UP from the
+            // live tail. Offset 0 = newest content at panel bottom.
+            // Larger offset reveals progressively older rows
+            // (possibly mid-turn — a tall LLM `done` reason becomes
+            // navigable instead of only viewable end-clipped).
             row = top_row + 1;
             const max_inline_visible: usize = if (cols_usize > 12) cols_usize - 6 else 40;
-            // When scrolled back, the top scrollback row becomes a
-            // dim "↑ N more turn(s) below" header so the user
-            // doesn't think new replies vanished — mirrors the
-            // overlay's scrolled-back indicator.
+
+            // Pre-compute per-turn row counts + total. Without a
+            // pre-pass the row→turn translation needs another
+            // back-walk in the wrong direction; one forward sweep
+            // keeps the math straightforward. Counts use the
+            // unbounded estimate (`maxInt(u16)`) so the offset
+            // clamp + window slicing see the TRUE row totals.
+            const big: usize = std.math.maxInt(u16);
+            var turn_row_buf: [256]usize = undefined;
+            const max_tracked = @min(rt.turns_len, turn_row_buf.len);
+            var content_total_rows: usize = 0;
+            for (rt.turns[0..max_tracked], 0..) |t, idx| {
+                turn_row_buf[idx] = countTurnRows(t, max_inline_visible, big);
+                content_total_rows += turn_row_buf[idx];
+            }
+            // Turns past the tracked cap (theoretically unreachable
+            // — history_turns_max defaults far below 256) get
+            // estimated at 1 row each so the total stays a usable
+            // lower bound.
+            if (rt.turns_len > max_tracked) content_total_rows += rt.turns_len - max_tracked;
+
+            // Header row reserved when scrolled back. Decrement
+            // scrollback budget by 1 IF offset > 0.
+            //
+            // Cap offset at `total_rows - 1` so the user can scroll
+            // up to the very first row even when the panel budget
+            // > total content (each step still navigates one row).
+            // The full-content-fits clamp is enforced naturally:
+            // the visible window calculation below clamps
+            // visible_start_row to 0 when offset has consumed all
+            // the content.
+            const max_inline_offset: usize = if (content_total_rows > 1) content_total_rows - 1 else 0;
+            const inline_offset: usize = @min(rt.chat_inline_view_offset, max_inline_offset);
             var scrollback_budget: u16 = scrollback_rows;
             if (inline_offset > 0 and scrollback_budget > 1) {
                 var sb: [80]u8 = undefined;
@@ -1241,67 +1266,48 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 row += 1;
                 scrollback_budget -= 1;
             }
-            // No per-turn truncation: each turn renders its full
-            // wrap-chunk count, capped only by the scrollback
-            // budget. The OLDEST visible turn naturally gets
-            // clipped (via `oldest_turn_cap` in the back-walk
-            // below) when total demand exceeds budget; older
-            // turns scroll off the top. Use PageUp/PageDown to
-            // walk back through chat history.
-            const per_turn_max_rows: usize = scrollback_budget;
-            // Pick `start_turn` by walking BACKWARDS from the newest
-            // visible turn and summing each candidate's rendered-row
-            // claim. Previously this was `visible_end -
-            // scrollback_budget` (one-row-per-turn assumption), which
-            // anchored the OLDEST turns at the panel top and let the
-            // newest turns get clipped — opposite of the intended
-            // tail-anchored layout. Pre-counting via the same wrap
-            // walk used at render time keeps the newest turn fully
-            // visible even when older neighbours each consume up to
-            // `per_turn_max_rows` rows.
-            var start_turn: usize = visible_end;
-            var rows_remaining: u16 = scrollback_budget;
-            var oldest_turn_cap: u16 = 0;
-            while (start_turn > 0 and rows_remaining > 0) {
-                const idx = start_turn - 1;
-                const turn_rows: u16 = @intCast(@min(
-                    countTurnRows(rt.turns[idx], max_inline_visible, per_turn_max_rows),
-                    @as(usize, std.math.maxInt(u16)),
-                ));
-                if (turn_rows >= rows_remaining) {
-                    // Include this turn as the OLDEST visible — its
-                    // render gets clipped to `rows_remaining` rows
-                    // so the newer turns each keep their full claim.
-                    // Without the per-oldest cap, the render loop's
-                    // generic `min(per_turn_max_rows, remaining)`
-                    // would let the newest turn eat the deficit
-                    // instead.
-                    start_turn = idx;
-                    oldest_turn_cap = rows_remaining;
-                    rows_remaining = 0;
-                    break;
-                }
-                rows_remaining -= turn_rows;
-                start_turn = idx;
-            }
-            var first_visible_turn = true;
-            for (rt.turns[start_turn..visible_end]) |turn| {
+
+            // Visible row window in [start, end) coordinates over
+            // the all-turn concatenation (cumulative_top accumulates
+            // turn_row_buf entries oldest→newest).
+            const visible_end_row: usize = content_total_rows - inline_offset;
+            const visible_start_row: usize = if (visible_end_row > scrollback_budget) visible_end_row - scrollback_budget else 0;
+
+            // Walk turns oldest→newest. For each, compute its row
+            // span; intersect with the visible window; render
+            // (possibly with skip_rows at the top + a row budget
+            // at the bottom).
+            var cumulative_top: usize = 0;
+            for (rt.turns[0..max_tracked], 0..) |turn, idx| {
+                const turn_rows = turn_row_buf[idx];
+                const turn_top = cumulative_top;
+                const turn_bot = cumulative_top + turn_rows;
+                cumulative_top = turn_bot;
+
+                if (turn_bot <= visible_start_row) continue;
+                if (turn_top >= visible_end_row) break;
                 if (row >= input_top_row) break;
+
+                const skip = if (turn_top < visible_start_row) visible_start_row - turn_top else 0;
+                const remaining_panel_rows: usize = @intCast(input_top_row - row);
+                const window_room: usize = visible_end_row - @max(turn_top, visible_start_row);
+                const budget = @min(turn_rows - skip, @min(window_room, remaining_panel_rows));
+                if (budget == 0) continue;
+
                 w.print("\x1B[{d};1H\x1B[2K", .{row}) catch return false;
-                const prefix: []const u8 = switch (turn.kind) {
-                    .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
-                    .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
-                    .observation => "\x1B[2mOutput:\x1B[0m ",
-                };
-                w.writeAll(prefix) catch return false;
-                const remaining_rows: usize = @intCast(input_top_row - row);
-                const turn_rows_cap: usize = if (first_visible_turn and oldest_turn_cap > 0)
-                    @min(@as(usize, oldest_turn_cap), remaining_rows)
-                else
-                    @min(per_turn_max_rows, remaining_rows);
-                const rows_used = renderTurnContent(&w, turn, max_inline_visible, turn_rows_cap) catch 1;
+                // The kind-prefix is conceptually part of row 1 of
+                // the turn. Skip emitting it when row 1 isn't in
+                // the window (skip > 0).
+                if (skip == 0) {
+                    const prefix: []const u8 = switch (turn.kind) {
+                        .user => "\x1B[22;1;38;5;14mYou:\x1B[0m ",
+                        .assistant_exec => "\x1B[22;38;5;141matty:\x1B[0m ",
+                        .observation => "\x1B[2mOutput:\x1B[0m ",
+                    };
+                    w.writeAll(prefix) catch return false;
+                }
+                const rows_used = renderTurnContentWithSkip(&w, turn, max_inline_visible, skip, budget) catch 1;
                 row += @intCast(rows_used);
-                first_visible_turn = false;
             }
             if (rt.turns_len == 0 and scrollback_rows > 0) {
                 w.print("\x1B[{d};1H\x1B[2K", .{top_row + 1}) catch return false;

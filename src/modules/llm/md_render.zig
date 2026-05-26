@@ -50,44 +50,76 @@ pub fn render(
     max_rows: usize,
     writeSanitizedFn: *const fn (w: *std.Io.Writer, bytes: []const u8) anyerror!void,
 ) anyerror!usize {
+    return renderWithSkip(w, content, cols, 0, max_rows, writeSanitizedFn);
+}
+
+/// Render `content` skipping the FIRST `skip_rows` produced rows,
+/// then emitting up to `max_rows` more. Per-row scrolling
+/// (`chat_inline_view_offset` in row units) uses this to slice
+/// the visible window through a multi-row turn.
+///
+/// Returns the number of rows emitted (NOT including skipped).
+/// `skip_rows + max_rows == 0` returns 1 (matches `render`'s
+/// "no content" floor).
+pub fn renderWithSkip(
+    w: *std.Io.Writer,
+    content: []const u8,
+    cols: usize,
+    skip_rows: usize,
+    max_rows: usize,
+    writeSanitizedFn: *const fn (w: *std.Io.Writer, bytes: []const u8) anyerror!void,
+) anyerror!usize {
     if (content.len == 0 or max_rows == 0 or cols == 0) return 1;
 
-    var rows: usize = 0;
+    var emitted: usize = 0;
+    var skipped: usize = 0;
     var line_iter = std.mem.splitScalar(u8, content, '\n');
-    // One chunk look-ahead so the LAST allowed row knows whether
-    // more content is coming and can emit the `[…]` marker inline.
     var pending: ?[]const u8 = null;
 
     while (line_iter.next()) |raw_line| {
         var line = raw_line;
         if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
 
-        // Blank source line goes through `pending` like any other
-        // chunk — that way the look-ahead can trim it for the `[…]`
-        // marker if the row budget runs out, instead of letting the
-        // blank consume a row slot that the next non-empty line
-        // needed.
         if (line.len == 0) {
-            if (try flushPending(w, &pending, &rows, max_rows, cols, writeSanitizedFn, true)) return rows;
+            if (try flushOrSkip(w, &pending, &emitted, &skipped, skip_rows, max_rows, cols, writeSanitizedFn, true)) return emitted;
             pending = "";
             continue;
         }
 
         var wrap = pw.wrapIter(line, cols);
         while (wrap.next()) |chunk| {
-            if (try flushPending(w, &pending, &rows, max_rows, cols, writeSanitizedFn, true)) return rows;
+            if (try flushOrSkip(w, &pending, &emitted, &skipped, skip_rows, max_rows, cols, writeSanitizedFn, true)) return emitted;
             pending = chunk;
         }
     }
 
-    // Drop a trailing empty pending — most LLM responses end with
-    // a newline, and rendering an empty final row just to honour
-    // that newline wastes a precious scrollback slot.
     if (pending) |p| if (p.len == 0) {
         pending = null;
     };
-    _ = try flushPending(w, &pending, &rows, max_rows, cols, writeSanitizedFn, false);
-    return if (rows == 0) 1 else rows;
+    _ = try flushOrSkip(w, &pending, &emitted, &skipped, skip_rows, max_rows, cols, writeSanitizedFn, false);
+    return if (emitted == 0) 1 else emitted;
+}
+
+fn flushOrSkip(
+    w: *std.Io.Writer,
+    pending: *?[]const u8,
+    emitted: *usize,
+    skipped: *usize,
+    skip_rows: usize,
+    max_rows: usize,
+    cols: usize,
+    writeSanitizedFn: *const fn (w: *std.Io.Writer, bytes: []const u8) anyerror!void,
+    more_pending: bool,
+) anyerror!bool {
+    if (pending.* == null) return false;
+    if (skipped.* < skip_rows) {
+        // Drop this row — count it toward `skipped` so the row
+        // budget math stays consistent, but emit no bytes.
+        skipped.* += 1;
+        pending.* = null;
+        return false;
+    }
+    return flushPending(w, pending, emitted, max_rows, cols, writeSanitizedFn, more_pending);
 }
 
 /// Emit the pending chunk at the next row. When `more_pending` is
