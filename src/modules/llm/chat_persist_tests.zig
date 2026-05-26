@@ -468,6 +468,10 @@ test "parseRecord: unknown kind still errors (forward-compat sentinel)" {
 // ---------------------------------------------------------------------
 
 test "listDialogs: returns matching files sorted newest-first" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
     var name_buf: [96]u8 = undefined;
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
@@ -495,7 +499,7 @@ test "listDialogs: returns matching files sorted newest-first" {
         _ = std.c.close(fd);
     }
 
-    const list = try listDialogs(testing.allocator, dir);
+    const list = try listDialogs(testing.allocator, real_io, dir);
     defer freeDialogMetaList(testing.allocator, list);
 
     try testing.expectEqual(@as(usize, 3), list.len);
@@ -516,6 +520,10 @@ test "listDialogs: returns matching files sorted newest-first" {
 }
 
 test "listDialogs: skips zero-byte reservations" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
     var name_buf: [96]u8 = undefined;
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
@@ -544,14 +552,17 @@ test "listDialogs: skips zero-byte reservations" {
     defer _ = std.c.unlink(ez.ptr);
     defer _ = std.c.rmdir(dz.ptr);
 
-    const list = try listDialogs(testing.allocator, dir);
+    const list = try listDialogs(testing.allocator, real_io, dir);
     defer freeDialogMetaList(testing.allocator, list);
     try testing.expectEqual(@as(usize, 1), list.len);
     try testing.expect(std.mem.endsWith(u8, list[0].name, "aaaaaa"));
 }
 
 test "listDialogs: returns empty list on missing dir" {
-    const list = try listDialogs(testing.allocator, "/tmp/atty-nonexistent-list-dialogs");
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    const list = try listDialogs(testing.allocator, real_io, "/tmp/atty-nonexistent-list-dialogs");
     defer freeDialogMetaList(testing.allocator, list);
     try testing.expectEqual(@as(usize, 0), list.len);
 }
@@ -561,6 +572,9 @@ test "listDialogs: returns empty list on missing dir" {
 // ---------------------------------------------------------------------
 
 test "pruneOldest: drops the oldest entries past keep_count" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
     var name_buf: [96]u8 = undefined;
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
@@ -588,9 +602,9 @@ test "pruneOldest: drops the oldest entries past keep_count" {
         _ = std.c.close(fd);
     }
 
-    pruneOldest(testing.allocator, dir, 3);
+    pruneOldest(testing.allocator, real_io, dir, 3);
 
-    const remaining = try listDialogs(testing.allocator, dir);
+    const remaining = try listDialogs(testing.allocator, real_io, dir);
     defer freeDialogMetaList(testing.allocator, remaining);
     try testing.expectEqual(@as(usize, 3), remaining.len);
     // Newest 3 survive.

@@ -192,14 +192,14 @@ pub const Action = union(enum) {
     /// `ghost_accept` so the modified arrow form is the only
     /// non-conflicting option.
     chat_scroll_to_tail,
-    /// Open the chat-recall picker — an alt-screen overlay listing
-    /// recently persisted dialogs (newest first, one row per
-    /// session: timestamp + first-user-turn snippet + conclusion
-    /// snippet). Arrow Up/Down to highlight, Enter to load the
-    /// selected dialog into the in-memory ring + open the inline
-    /// chat panel, Esc to close without picking. Default
-    /// **Alt+R** while no chat surface is open; otherwise the
-    /// keystroke falls through to the shell.
+    /// Recall the most recent persisted dialog — loads its turns
+    /// + conclusion into the in-memory ring and opens the inline
+    /// chat panel. Refuses (with a hint) when a chat surface is
+    /// already open or persistence is disabled / has no
+    /// archived dialogs. Default **Alt+R**. A picker overlay
+    /// surfacing the FULL archive (not just the newest) is a
+    /// future follow-up; this binding lands the "resume the
+    /// conversation I just had" use case.
     chat_recall,
     /// Grow / shrink the inline chat panel by one row. Hardcoded
     /// minimum is 3 rows (divider + ≥1 scrollback + input — same

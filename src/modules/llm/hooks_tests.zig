@@ -2123,18 +2123,28 @@ test "chat_recall: loads a pre-existing dialog file end-to-end" {
     // Stages a JSONL file in chat_persist_dir, fires Alt+R via
     // onAction, asserts the load loop populated rt.turns +
     // conclusion + opened the inline panel.
+    //
+    // Fixed dir — comptime cfg requires a literal string, and
+    // Zig's test runner is single-threaded within a process so
+    // sequential tests don't race on /tmp paths. Per-test
+    // suffix would still be useful for parallel `zig test` runs;
+    // not addressed here since the dev workflow is sequential.
     const dir: []const u8 = "/tmp/atty-recall-load-test";
     const dz = try testing.allocator.dupeZ(u8, dir);
     defer testing.allocator.free(dz);
-    _ = std.c.rmdir(dz.ptr); // pre-cleanup
-    // Recreate the dir + stage one dialog file before attach so
-    // listDialogs surfaces it.
-    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
     const dialog_path = try std.fmt.allocPrint(
         testing.allocator,
         "{s}/20260101T000000-aaaaaa.jsonl",
         .{dir},
     );
+    // Pre-cleanup: unlink the staged file from a possible prior
+    // crashed run (so the rmdir below isn't blocked by ENOTEMPTY),
+    // then drop the dir, then recreate clean.
+    const pre_dpz = try testing.allocator.dupeZ(u8, dialog_path);
+    _ = std.c.unlink(pre_dpz.ptr);
+    testing.allocator.free(pre_dpz);
+    _ = std.c.rmdir(dz.ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
     defer testing.allocator.free(dialog_path);
     const dpz = try testing.allocator.dupeZ(u8, dialog_path);
     defer testing.allocator.free(dpz);

@@ -39,16 +39,6 @@ extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
-extern "c" fn opendir(path: [*:0]const u8) ?*anyopaque;
-extern "c" fn closedir(dir: *anyopaque) c_int;
-extern "c" fn readdir(dir: *anyopaque) ?*Dirent;
-
-const Dirent = extern struct {
-    _pad0: [18]u8, // d_ino + d_off + d_reclen
-    d_type: u8,
-    d_name: [256]u8, // 256 is the glibc max; longer entries are truncated
-};
-const DT_REG: u8 = 8; // regular file
 extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn getpid() c_int;
@@ -521,13 +511,17 @@ pub fn freeDialogMetaList(allocator: std.mem.Allocator, list: []DialogMeta) void
 /// `YYYYMMDDTHHMMSS-XXXXXX.jsonl` shape sorts chronologically by
 /// string comparison). Skips files that don't match the shape;
 /// skips zero-byte files (unused reservations).
-pub fn listDialogs(allocator: std.mem.Allocator, dir: []const u8) ![]DialogMeta {
+///
+/// Uses `std.Io.Dir` (NOT a hand-rolled libc `struct dirent`) so
+/// the directory layout stays correct across glibc / musl /
+/// x86_64 / aarch64 — Zig handles the per-libc ABI shifts.
+pub fn listDialogs(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) ![]DialogMeta {
     if (dir.len == 0) return allocator.alloc(DialogMeta, 0);
 
-    const dir_z = try allocator.dupeZ(u8, dir);
-    defer allocator.free(dir_z);
-    const handle = opendir(dir_z.ptr) orelse return allocator.alloc(DialogMeta, 0);
-    defer _ = closedir(handle);
+    var d = std.Io.Dir.openDirAbsolute(io, dir, .{ .iterate = true }) catch {
+        return allocator.alloc(DialogMeta, 0);
+    };
+    defer d.close(io);
 
     var list: std.ArrayList(DialogMeta) = .empty;
     errdefer {
@@ -535,20 +529,15 @@ pub fn listDialogs(allocator: std.mem.Allocator, dir: []const u8) ![]DialogMeta 
         list.deinit(allocator);
     }
 
-    while (readdir(handle)) |entry| {
-        // Find the trailing NUL in d_name (truncated to ≤ 256).
-        const name_slice = blk: {
-            const buf = &entry.d_name;
-            var n: usize = 0;
-            while (n < buf.len and buf[n] != 0) : (n += 1) {}
-            break :blk buf[0..n];
-        };
-        if (name_slice.len == 0) continue;
-        if (entry.d_type != DT_REG) continue;
-        if (!std.mem.endsWith(u8, name_slice, ".jsonl")) continue;
+    var it = d.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
 
-        // Skip zero-byte reservations.
-        const child_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name_slice });
+        // Skip zero-byte reservations via direct open+fstat: that
+        // path is still libc-only because the rest of the module
+        // is, but the layout-fragile `struct dirent` is gone.
+        const child_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, entry.name });
         const child_z = try allocator.dupeZ(u8, child_path);
         defer allocator.free(child_z);
         const fd_check = open(child_z.ptr, O_RDONLY);
@@ -564,27 +553,27 @@ pub fn listDialogs(allocator: std.mem.Allocator, dir: []const u8) ![]DialogMeta 
             continue;
         }
 
-        const stem_len = name_slice.len - ".jsonl".len;
-        const name_owned = try allocator.dupe(u8, name_slice[0..stem_len]);
+        const stem_len = entry.name.len - ".jsonl".len;
+        const name_owned = try allocator.dupe(u8, entry.name[0..stem_len]);
         try list.append(allocator, .{ .path = child_path, .name = name_owned });
     }
 
     const result = try list.toOwnedSlice(allocator);
     // Newest-first: lexicographic descending on basename.
-    std.mem.sort(DialogMeta, result, {}, struct {
-        fn less(_: void, a: DialogMeta, b: DialogMeta) bool {
-            return std.mem.lessThan(u8, b.name, a.name);
-        }
-    }.less);
+    std.mem.sort(DialogMeta, result, {}, sortDialogMetaNewestFirst);
     return result;
+}
+
+fn sortDialogMetaNewestFirst(_: void, a: DialogMeta, b: DialogMeta) bool {
+    return std.mem.lessThan(u8, b.name, a.name);
 }
 
 /// Best-effort retention sweep. Drops the OLDEST entries beyond
 /// `keep_count` by `unlink`ing them. Caller invokes from `attach`
 /// before reserving the new session path.
-pub fn pruneOldest(allocator: std.mem.Allocator, dir: []const u8, keep_count: usize) void {
+pub fn pruneOldest(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, keep_count: usize) void {
     if (dir.len == 0 or keep_count == 0) return;
-    const list = listDialogs(allocator, dir) catch return;
+    const list = listDialogs(allocator, io, dir) catch return;
     defer freeDialogMetaList(allocator, list);
     if (list.len <= keep_count) return;
     // listDialogs is newest-first; oldest live at the tail.

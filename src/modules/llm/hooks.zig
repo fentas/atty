@@ -1252,7 +1252,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         return true;
                     }
 
-                    const list = chat_persist.listDialogs(rt.allocator, rt.chat_persist_dir) catch {
+                    const list = chat_persist.listDialogs(rt.allocator, ctx.io, rt.chat_persist_dir) catch {
                         latchHint(rt, "couldn't read dialog archive — see chat_persist_dir");
                         return true;
                     };
