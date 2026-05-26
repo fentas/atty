@@ -344,6 +344,19 @@ pub struct DriftEntry {
     pub behind_since: Option<String>,
 }
 
+impl DriftEntry {
+    /// Matches `atom_drift::DriftSource::is_behind` — only true
+    /// when BOTH pinned and upstream are known and differ. Lives
+    /// here (not on DriftSource) so CLI clients can call it
+    /// without pulling in the atom_drift module.
+    pub fn is_behind(&self) -> bool {
+        matches!(
+            (&self.pinned, &self.upstream),
+            (Some(p), Some(u)) if p != u,
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UrlDecisionEntry {
     pub host: String,

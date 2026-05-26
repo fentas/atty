@@ -242,16 +242,12 @@ fn handle_session_list(socket: &Path, target_uid: Option<u32>) -> std::io::Resul
 /// file (some package managers strip docs / examples).
 const PIN_FILE_TEMPLATE: &str = include_str!("../contrib/atoms.pins.toml.example");
 
-/// Default destination for `atoms pin-init`. Matches
-/// `atom_fetcher::DEFAULT_PIN_FILE` — the daemon reads from the
-/// same path.
-const PIN_INIT_DEST: &str = "/etc/atty-guard/atoms.pins.toml";
-
-/// Render the drift snapshot. Exits 2 when at least one source has
-/// drifted (CI-gateable); exits 0 when in-sync, live-tracking, or
-/// no snapshot has been written yet. Json mode emits the raw wire
-/// payload so jq pipelines see the same shape as the daemon
-/// stores on disk.
+/// Render the drift snapshot. Exit codes:
+///   0 — in-sync, live-tracking, or no snapshot available yet.
+///   1 — daemon error / unexpected response (CLI-wide convention).
+///   2 — at least one source is drifted. Honored by BOTH the human
+///       and `--json` modes so CI gates work either way:
+///       `atty-guard atoms drift --json | jq ... ; [ $? -eq 0 ]`.
 fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
     let response = send_request(socket, Request::AtomsDrift)?;
     match response {
@@ -260,6 +256,7 @@ fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
             updated_at,
             sources,
         } => {
+            let behind_count = sources.iter().filter(|s| s.is_behind()).count();
             if json {
                 #[derive(serde::Serialize)]
                 struct WirePayload<'a> {
@@ -276,6 +273,9 @@ fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
                     std::io::Error::new(std::io::ErrorKind::Other, e)
                 })?;
                 println!("{s}");
+                if behind_count > 0 {
+                    std::process::exit(2);
+                }
                 return Ok(());
             }
             if !available {
@@ -284,28 +284,18 @@ fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
                      /var/lib/atty-guard/atoms.drift.json after the first \
                      successful atom refresh tick. Wait for the next \
                      `--atoms-update-interval` cycle, or trigger one with \
-                     `sudo atty-guard --update-atoms-now`."
+                     `sudo atty-guard --update-atoms-now`. If atty-guard \
+                     was built without the `atoms-fetch` feature the cron \
+                     is disabled and this message is expected."
                 );
                 return Ok(());
             }
             if let Some(ts) = &updated_at {
                 println!("# snapshot updated at {ts}");
             }
-            let mut behind_count = 0usize;
             for src in &sources {
                 let pinned = src.pinned.as_deref().unwrap_or("(live tracking)");
                 let upstream = src.upstream.as_deref().unwrap_or("(probe failed)");
-                // Mirror `atom_drift::DriftSource::is_behind` logic
-                // for the wire-side `DriftEntry` (no shared trait
-                // because the protocol module deliberately doesn't
-                // depend on atom_drift's internals).
-                let behind = matches!(
-                    (&src.pinned, &src.upstream),
-                    (Some(p), Some(u)) if p != u,
-                );
-                if behind {
-                    behind_count += 1;
-                }
                 let status = match (&src.pinned, &src.upstream) {
                     (Some(p), Some(u)) if p == u => "in-sync",
                     (Some(_), Some(_)) => "BEHIND",
@@ -346,9 +336,15 @@ fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
 /// Local file op — does NOT round-trip through the daemon, because
 /// the file lives at a root-owned path and the daemon's job is to
 /// READ this file, not write it.
+///
+/// Writes are atomic: tmp + rename. If the operator hits Ctrl-C
+/// mid-write the destination either contains the full template or
+/// the prior file (or nothing on a fresh install). A truncated
+/// pins.toml would brick the cron tick because `load_pins`
+/// hard-fails on an empty file.
 fn handle_pin_init(force: bool) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let path = std::path::Path::new(PIN_INIT_DEST);
+    let path = std::path::Path::new(crate::atom_fetcher::DEFAULT_PIN_FILE);
     // /etc/atty-guard/atoms.pins.toml is root:root by the install
     // script's posture; non-root callers can't write it. Surface
     // the missing-sudo case cleanly rather than letting the
@@ -363,8 +359,8 @@ fn handle_pin_init(force: bool) -> std::io::Result<()> {
     };
     if euid != 0 {
         eprintln!(
-            "atty-guard: `atoms pin-init` writes /etc/atty-guard/atoms.pins.toml — \
-             run via `sudo`."
+            "atty-guard: `atoms pin-init` writes {} — run via `sudo`.",
+            path.display()
         );
         std::process::exit(1);
     }
@@ -384,14 +380,36 @@ fn handle_pin_init(force: bool) -> std::io::Result<()> {
             )
         })?;
     }
-    std::fs::write(path, PIN_FILE_TEMPLATE).map_err(|e| {
-        std::io::Error::new(e.kind(), format!("write {}: {}", path.display(), e))
+    // PID-suffixed tmp + create_new closes the symlink-pre-create
+    // race AND the parallel-invocation race in one move (matches
+    // the posture used by `atom_drift::write_snapshot` and
+    // `trust_store::write_atomic`).
+    let pid = std::process::id();
+    let tmp = path.with_file_name(format!("atoms.pins.toml.tmp.{pid}"));
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| {
+                std::io::Error::new(e.kind(), format!("create {}: {}", tmp.display(), e))
+            })?;
+        f.write_all(PIN_FILE_TEMPLATE.as_bytes()).map_err(|e| {
+            // Best-effort cleanup on partial write — a stale .tmp
+            // shouldn't survive a failed pin-init.
+            let _ = std::fs::remove_file(&tmp);
+            std::io::Error::new(e.kind(), format!("write {}: {}", tmp.display(), e))
+        })?;
+        // 0644 matches `atom_fetcher::check_pin_file_perms` (root-
+        // owned, no group/world-write). 0600 also passes the check;
+        // we pick 0644 so a non-root operator can `cat` the file.
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        std::io::Error::new(e.kind(), format!("rename {}: {}", path.display(), e))
     })?;
-    // 0644 matches the perms check in `atom_fetcher::check_pin_file_perms`
-    // (root-owned, no group/world-write). Tighter (0600) is also
-    // accepted by the daemon; we pick 0644 so a non-root operator
-    // can `cat` the file to read pin values without sudo.
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
     println!(
         "atty-guard: created {} from the bundled template. Edit it to uncomment \
          + fill the [gtfobins] / [sigma] sections, then `sudo systemctl reload \

@@ -102,6 +102,14 @@ fn head_sha_url(repo: &str) -> String {
 /// Used by `compute_snapshot`. Best-effort — returns `None` on
 /// any network / parse failure so the snapshot still records the
 /// known-pinned commit even when the probe is down.
+///
+/// HTTP non-2xx outcomes are logged to stderr separately from
+/// network errors so journald can distinguish them. 403/404 vs.
+/// "DNS down" matters operationally: a 404 means the repo was
+/// renamed (operator action required), 403 means rate-limit
+/// (transient), connect-refused means the IP is offline. Without
+/// the split, all three render as "(probe failed)" with no
+/// breadcrumb.
 #[cfg(feature = "atoms-fetch")]
 pub fn probe_head_sha(repo: &str, user_agent: &str, timeout: Duration) -> Option<String> {
     let agent = ureq::AgentBuilder::new()
@@ -109,7 +117,21 @@ pub fn probe_head_sha(repo: &str, user_agent: &str, timeout: Duration) -> Option
         .user_agent(user_agent)
         .build();
     let url = head_sha_url(repo);
-    let resp = agent.get(&url).set("Accept", "application/vnd.github+json").call().ok()?;
+    let resp = match agent
+        .get(&url)
+        .set("Accept", "application/vnd.github+json")
+        .call()
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) => {
+            eprintln!("atty-guard: drift probe for {repo}: HTTP {code}");
+            return None;
+        }
+        Err(e) => {
+            eprintln!("atty-guard: drift probe for {repo}: {e}");
+            return None;
+        }
+    };
     // The /repos/<owner>/<repo>/commits/master endpoint returns a
     // SINGLE commit object (HEAD) — NOT an array. `per_page=1` is
     // belt-and-braces for older API behavior but the field shape is
@@ -118,15 +140,71 @@ pub fn probe_head_sha(repo: &str, user_agent: &str, timeout: Duration) -> Option
     struct CommitResponse {
         sha: String,
     }
-    let body = resp.into_string().ok()?;
-    let commit: CommitResponse = serde_json::from_str(&body).ok()?;
-    Some(commit.sha)
+    let body = match resp.into_string() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("atty-guard: drift probe for {repo}: body read failed — {e}");
+            return None;
+        }
+    };
+    match serde_json::from_str::<CommitResponse>(&body) {
+        Ok(c) => Some(c.sha),
+        Err(e) => {
+            eprintln!("atty-guard: drift probe for {repo}: JSON parse — {e}");
+            None
+        }
+    }
+}
+
+/// Pure decision step for the `behind_since` anchor — extracted
+/// so tests can pin the four edge cases (fresh drift, sustained
+/// drift, recovery, probe-failure-while-drifted) without a real
+/// network probe.
+///
+/// Rules:
+/// - `pinned=None` (live tracking): always `None`. There is no
+///   "behind" notion for live tracking.
+/// - `pinned=Some & upstream=Some & pinned==upstream`: `None`
+///   (in-sync; clear any prior anchor — the operator caught up).
+/// - `pinned=Some & upstream=Some & pinned!=upstream` (DRIFTED):
+///   carry `prev_behind_since` forward when present, else stamp
+///   `now`.
+/// - `pinned=Some & upstream=None` (probe failed mid-drift): the
+///   operator IS still behind (their pin is `pinned`, the world
+///   moved on — we just can't confirm against upstream this
+///   tick). Carry `prev_behind_since` forward UNCHANGED. Critical:
+///   prior shape cleared the anchor in this branch, which made
+///   the operator's UI flip to "behind since <today>" every time
+///   the network blipped — losing the audit trail of "I've been
+///   behind for 3 weeks." See finding #2 on PR #243.
+#[cfg(any(feature = "atoms-fetch", test))]
+pub fn diff_step(
+    prev_behind_since: Option<&str>,
+    pinned: Option<&str>,
+    upstream: Option<&str>,
+    now: &str,
+) -> Option<String> {
+    match (pinned, upstream) {
+        (None, _) => None,
+        (Some(p), Some(u)) if p == u => None,
+        (Some(_), Some(_)) => {
+            // Pinned + drifted: preserve, else stamp.
+            Some(prev_behind_since.map(str::to_owned).unwrap_or_else(|| now.to_owned()))
+        }
+        (Some(_), None) => {
+            // Probe failure while pinned: preserve UNCHANGED. Do
+            // NOT stamp `now` here — we can't confirm we're behind,
+            // only that we can't tell. If we were already known to
+            // be behind (prev_behind_since=Some), keep that anchor;
+            // if we weren't (prev=None), stay at None.
+            prev_behind_since.map(str::to_owned)
+        }
+    }
 }
 
 /// Build a snapshot for the given source list. Probes each
-/// source's head SHA, compares to the operator's pin (when
-/// present), preserves `behind_since` from `prev` so a multi-day
-/// drift window stays anchored to its first observation.
+/// source's head SHA, runs `diff_step` per-source to decide the
+/// `behind_since` anchor.
 #[cfg(feature = "atoms-fetch")]
 pub fn compute_snapshot(
     pins: Option<&AtomPins>,
@@ -141,20 +219,10 @@ pub fn compute_snapshot(
         let name = source_name(sid).to_owned();
         let pinned = pin_for(pins, sid);
         let upstream = probe_head_sha(source_repo(sid), user_agent, timeout);
-        // Preserve behind_since across ticks when still drifted;
-        // clear when in-sync or when no pin (live tracking has no
-        // "behind" notion).
-        let behind_since = if let (Some(p), Some(u)) = (&pinned, &upstream) {
-            if p != u {
-                prev.and_then(|s| s.sources.iter().find(|e| e.name == name))
-                    .and_then(|e| e.behind_since.clone())
-                    .or_else(|| Some(now.clone()))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let prev_anchor = prev
+            .and_then(|s| s.sources.iter().find(|e| e.name == name))
+            .and_then(|e| e.behind_since.as_deref());
+        let behind_since = diff_step(prev_anchor, pinned.as_deref(), upstream.as_deref(), &now);
         entries.push(DriftSource {
             name,
             pinned,
@@ -230,15 +298,36 @@ pub fn write_snapshot(path: &Path, snapshot: &DriftSnapshot) -> std::io::Result<
     use std::io::Write;
     if let Some(parent) = path.parent() {
         if !parent.exists() {
-            // Best-effort dir create. The install path expects the
-            // directory to exist (systemd unit's ReadWritePaths
-            // creates it); this catches dev / test envs that don't.
-            let _ = std::fs::create_dir_all(parent);
+            // Bubble create errors up: if the parent can't be
+            // made, the subsequent File::create gives a less
+            // useful "ENOENT on .tmp" error.
+            std::fs::create_dir_all(parent)?;
         }
     }
-    let tmp = path.with_extension("json.tmp");
+    // PID-suffixed tmp filename to (a) avoid two daemon instances
+    // racing on the same tmp slot when both write to the same
+    // STATE_DIRECTORY (dev / hand-rolled setups), and (b) raise
+    // the bar on a symlink-pre-creation attack against a tmp file
+    // with a predictable name. Mirrors trust_store::write_atomic's
+    // pattern.
+    let pid = std::process::id();
+    let tmp_name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => format!("{n}.tmp.{pid}"),
+        None => format!("atoms.drift.json.tmp.{pid}"),
+    };
+    let tmp = match path.parent() {
+        Some(p) => p.join(tmp_name),
+        None => std::path::PathBuf::from(tmp_name),
+    };
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        // create_new=true refuses to follow an existing symlink at
+        // the tmp path. Combined with the PID suffix this closes
+        // the symlink-target-chmod race that std::fs::File::create
+        // would otherwise leave open.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
         let bytes = serde_json::to_vec_pretty(snapshot).map_err(std::io::Error::other)?;
         f.write_all(&bytes)?;
         // Match the rest of /var/lib/atty-guard's 0640 posture so
@@ -250,8 +339,15 @@ pub fn write_snapshot(path: &Path, snapshot: &DriftSnapshot) -> std::io::Result<
             let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640));
         }
     }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Best-effort cleanup so a failed rename doesn't leave
+            // a stale .tmp.<pid> sitting around forever.
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Read the snapshot. Returns `Ok(None)` when the file doesn't
@@ -303,6 +399,69 @@ mod tests {
             behind_since: Some("2026-01-01T00:00:00Z".into()),
         };
         assert!(drifted.is_behind());
+    }
+
+    #[test]
+    fn diff_step_live_tracking_never_anchors() {
+        assert_eq!(diff_step(None, None, Some("abc"), "now"), None);
+        assert_eq!(
+            diff_step(Some("2026-01-01T00:00:00Z"), None, Some("abc"), "now"),
+            None,
+            "switching from pinned to live clears any anchor"
+        );
+    }
+
+    #[test]
+    fn diff_step_in_sync_clears_anchor() {
+        assert_eq!(diff_step(None, Some("abc"), Some("abc"), "now"), None);
+        assert_eq!(
+            diff_step(Some("2026-01-01T00:00:00Z"), Some("abc"), Some("abc"), "now"),
+            None,
+            "operator caught up → clear anchor"
+        );
+    }
+
+    #[test]
+    fn diff_step_fresh_drift_stamps_now() {
+        assert_eq!(
+            diff_step(None, Some("aaa"), Some("bbb"), "now"),
+            Some("now".to_owned())
+        );
+    }
+
+    #[test]
+    fn diff_step_sustained_drift_preserves_anchor() {
+        assert_eq!(
+            diff_step(
+                Some("2026-05-20T14:00:00Z"),
+                Some("aaa"),
+                Some("bbb"),
+                "2026-05-26T08:00:00Z"
+            ),
+            Some("2026-05-20T14:00:00Z".to_owned())
+        );
+    }
+
+    #[test]
+    fn diff_step_probe_failure_preserves_drift_anchor() {
+        // Critical: when previously drifted and the probe now
+        // fails, the anchor must be carried forward — we ARE
+        // still behind, we just can't confirm against upstream
+        // this tick. Earlier behavior cleared the anchor here,
+        // making the operator's "behind since" stamp reset every
+        // network blip.
+        assert_eq!(
+            diff_step(
+                Some("2026-05-20T14:00:00Z"),
+                Some("aaa"),
+                None,
+                "2026-05-26T08:00:00Z"
+            ),
+            Some("2026-05-20T14:00:00Z".to_owned())
+        );
+        // Probe failure with no prior anchor stays at None — we
+        // can't fabricate an anchor we don't know.
+        assert_eq!(diff_step(None, Some("aaa"), None, "now"), None);
     }
 
     #[test]
