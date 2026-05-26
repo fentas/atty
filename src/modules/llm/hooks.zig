@@ -95,6 +95,99 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.chat_persist_conclusion_pending = false;
         }
 
+        /// Free the recall picker's owned state + arm the close
+        /// paint. Used by Enter (after a successful load) and Esc.
+        /// Idempotent — safe to call when the picker isn't open.
+        fn closeRecallPicker(rt: *Runtime) void {
+            if (rt.chat_recall_items.len > 0) {
+                chat_persist.freeDialogMetaList(rt.allocator, rt.chat_recall_items);
+                rt.chat_recall_items = &.{};
+            }
+            rt.chat_recall_selected_idx = 0;
+            if (rt.chat_recall_open) {
+                rt.chat_recall_open = false;
+                rt.chat_recall_paint_pending = true;
+            }
+        }
+
+        /// Load a persisted dialog file's records into the in-memory
+        /// ring. Wipes the current turns + conclusion first. Returns
+        /// true on success; on failure latches a hint + returns
+        /// false (caller decides whether to keep the picker open).
+        ///
+        /// Direct `dialog_helpers.pushTurn` bypasses the disk-write
+        /// wrapper — load must not re-append to the current session
+        /// file.
+        fn loadDialogFromMeta(rt: *Runtime, meta: chat_persist.DialogMeta) bool {
+            const path_z = rt.allocator.dupeZ(u8, meta.path) catch {
+                latchHint(rt, "out of memory loading dialog");
+                return false;
+            };
+            defer rt.allocator.free(path_z);
+            const fd = chat_persist.openReadOnly(path_z.ptr);
+            if (fd < 0) {
+                latchHint(rt, "couldn't open the dialog file");
+                return false;
+            }
+            defer _ = chat_persist.closeFd(fd);
+            var raw: std.ArrayList(u8) = .empty;
+            defer raw.deinit(rt.allocator);
+            var chunk: [8 * 1024]u8 = undefined;
+            const max_bytes: usize = 4 * 1024 * 1024;
+            while (raw.items.len < max_bytes) {
+                const want: usize = @min(chunk.len, max_bytes - raw.items.len);
+                const got = chat_persist.readBytes(fd, &chunk, want);
+                if (got <= 0) break;
+                raw.appendSlice(rt.allocator, chunk[0..@as(usize, @intCast(got))]) catch {
+                    latchHint(rt, "out of memory loading dialog");
+                    return false;
+                };
+            }
+
+            // Wipe current state so a partial parse doesn't mix in.
+            dialog_helpers.freeTurns(rt);
+            if (rt.conclusion_formatted) |old| {
+                rt.allocator.free(old);
+                rt.conclusion_formatted = null;
+            }
+            rt.chat_persist_conclusion_pending = false;
+
+            var line_start: usize = 0;
+            var i: usize = 0;
+            var oom_during_load = false;
+            while (i <= raw.items.len) : (i += 1) {
+                if (i == raw.items.len or raw.items[i] == '\n') {
+                    const line = raw.items[line_start..i];
+                    line_start = i + 1;
+                    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+                    if (trimmed.len == 0) continue;
+                    const rec = chat_persist.parseRecord(rt.allocator, trimmed) catch |err| switch (err) {
+                        error.OutOfMemory => {
+                            oom_during_load = true;
+                            break;
+                        },
+                        else => continue,
+                    };
+                    switch (rec) {
+                        .turn => |t| {
+                            dialog_helpers.pushTurn(rt, t.kind, t.content) catch {
+                                rt.allocator.free(t.content);
+                            };
+                        },
+                        .conclusion => |c| {
+                            if (rt.conclusion_formatted) |old| rt.allocator.free(old);
+                            rt.conclusion_formatted = c;
+                        },
+                    }
+                }
+            }
+            if (oom_during_load) {
+                latchHint(rt, "out of memory loading dialog — partial state may remain");
+                return false;
+            }
+            return true;
+        }
+
         /// dialogReset wrapper — flushes the captured conclusion to
         /// the current session file (the `.done` path sets
         /// `conclusion_formatted` BEFORE calling dialogReset), then
@@ -622,6 +715,90 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 rt.chat_inline_input_dirty = true;
                             }
                         },
+                    }
+                }
+                return .swallow;
+            }
+
+            if (rt.chat_recall_open) {
+                // Recall picker — alt-screen overlay. Swallow every
+                // keystroke; only arrows / Enter / Esc do anything.
+                var i: usize = 0;
+                while (i < input.len) {
+                    const key = parseChatKey(input, &i);
+                    switch (key) {
+                        .move_up => {
+                            if (rt.chat_recall_selected_idx > 0) {
+                                rt.chat_recall_selected_idx -= 1;
+                                rt.chat_recall_paint_pending = true;
+                            }
+                        },
+                        .move_down => {
+                            if (rt.chat_recall_items.len > 0 and rt.chat_recall_selected_idx + 1 < rt.chat_recall_items.len) {
+                                rt.chat_recall_selected_idx += 1;
+                                rt.chat_recall_paint_pending = true;
+                            }
+                        },
+                        .enter => {
+                            // Snapshot the chosen meta before close
+                            // frees the list. Then load + open the
+                            // inline panel + reset session-toggle
+                            // bookkeeping (mirror llm_inline_chat_toggle).
+                            if (rt.chat_recall_selected_idx >= rt.chat_recall_items.len) {
+                                closeRecallPicker(rt);
+                                continue;
+                            }
+                            const sel = rt.chat_recall_items[rt.chat_recall_selected_idx];
+                            const path_copy = rt.allocator.dupe(u8, sel.path) catch {
+                                latchErr(rt, "out of memory loading dialog");
+                                closeRecallPicker(rt);
+                                continue;
+                            };
+                            const name_copy = rt.allocator.dupe(u8, sel.name) catch {
+                                // Name dupe is the second alloc — path
+                                // succeeded so the load CAN proceed,
+                                // but the user-facing hint would print
+                                // a blank name without this fallback.
+                                rt.allocator.free(path_copy);
+                                latchErr(rt, "out of memory loading dialog");
+                                closeRecallPicker(rt);
+                                continue;
+                            };
+                            const meta_copy = chat_persist.DialogMeta{
+                                .path = path_copy,
+                                .name = name_copy,
+                            };
+                            defer {
+                                rt.allocator.free(meta_copy.path);
+                                rt.allocator.free(meta_copy.name);
+                            }
+                            closeRecallPicker(rt);
+
+                            if (loadDialogFromMeta(rt, meta_copy)) {
+                                rt.chat_inline_open = true;
+                                rt.chat_inline_paint_pending = true;
+                                rt.chat_focus_in_panel = true;
+                                rt.chat_refocus_pending = false;
+                                rt.chat_inline_rows_override = null;
+                                rt.conclusion_pending = false;
+                                const loaded_any = rt.turns_len > 0 or rt.conclusion_formatted != null;
+                                var name_buf: [128]u8 = undefined;
+                                const msg = if (loaded_any)
+                                    std.fmt.bufPrint(&name_buf, "recalled dialog: {s}", .{meta_copy.name}) catch "recalled dialog"
+                                else
+                                    std.fmt.bufPrint(&name_buf, "dialog {s} is empty or corrupted", .{meta_copy.name}) catch "dialog empty or corrupted";
+                                latchHint(rt, msg);
+                            }
+                            // Stop processing the rest of this input
+                            // chunk — focus has moved to the inline
+                            // panel; let the next read drive it.
+                            return .swallow;
+                        },
+                        .escape => {
+                            closeRecallPicker(rt);
+                            return .swallow;
+                        },
+                        else => {},
                     }
                 }
                 return .swallow;
@@ -1234,7 +1411,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 .chat_recall => {
                     // Refuse if a chat surface is already open — Alt+R
                     // is a fetch, not a discard.
-                    if (rt.chat_overlay_open or rt.chat_inline_open) {
+                    if (rt.chat_overlay_open or rt.chat_inline_open or rt.chat_recall_open) {
                         latchHint(rt, "close the chat panel first, then Alt+R to recall a past dialog");
                         return true;
                     }
@@ -1256,122 +1433,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         latchHint(rt, "couldn't read dialog archive — see chat_persist_dir");
                         return true;
                     };
-                    defer chat_persist.freeDialogMetaList(rt.allocator, list);
 
                     if (list.len == 0) {
+                        chat_persist.freeDialogMetaList(rt.allocator, list);
                         latchHint(rt, "no past dialogs to recall — run an Alt+S dialog first");
                         return true;
                     }
 
-                    // Load the most recent dialog. A full picker
-                    // overlay is the follow-up PR; this minimal
-                    // recall lands the "resume the conversation I
-                    // just had" use case without the UI surface.
-                    const newest = list[0];
-                    const path_z = rt.allocator.dupeZ(u8, newest.path) catch {
-                        latchHint(rt, "out of memory loading dialog");
-                        return true;
-                    };
-                    defer rt.allocator.free(path_z);
-                    const fd = chat_persist.openReadOnly(path_z.ptr);
-                    if (fd < 0) {
-                        latchHint(rt, "couldn't open the dialog file");
-                        return true;
-                    }
-                    defer _ = chat_persist.closeFd(fd);
-                    // Read the whole file — capped at the typical
-                    // session size; truncate beyond.
-                    var raw: std.ArrayList(u8) = .empty;
-                    defer raw.deinit(rt.allocator);
-                    var chunk: [8 * 1024]u8 = undefined;
-                    const max_bytes: usize = 4 * 1024 * 1024;
-                    while (raw.items.len < max_bytes) {
-                        const want: usize = @min(chunk.len, max_bytes - raw.items.len);
-                        const got = chat_persist.readBytes(fd, &chunk, want);
-                        if (got <= 0) break;
-                        raw.appendSlice(rt.allocator, chunk[0..@as(usize, @intCast(got))]) catch {
-                            latchHint(rt, "out of memory loading dialog");
-                            return true;
-                        };
-                    }
-
-                    // Wipe current turns + conclusion before loading
-                    // so a partial parse doesn't mix with stale state.
-                    freeTurns(rt);
-                    if (rt.conclusion_formatted) |old| {
-                        rt.allocator.free(old);
-                        rt.conclusion_formatted = null;
-                    }
-                    rt.chat_persist_conclusion_pending = false;
-
-                    // Walk every line and dispatch to pushTurn /
-                    // conclusion as parseRecord classifies. Direct
-                    // `dialog_helpers.pushTurn` bypasses the
-                    // disk-write wrapper — load must not re-append.
-                    //
-                    // OOM aborts the load (the in-memory ring is
-                    // already in an inconsistent state — partially
-                    // loaded — but the next captureConclusion +
-                    // dialogReset rotation will clean it up).
-                    // Other parseRecord errors (JSON shape,
-                    // UnknownTurnKind) are forward-compat skips.
-                    var line_start: usize = 0;
-                    var i: usize = 0;
-                    var oom_during_load = false;
-                    while (i <= raw.items.len) : (i += 1) {
-                        if (i == raw.items.len or raw.items[i] == '\n') {
-                            const line = raw.items[line_start..i];
-                            line_start = i + 1;
-                            const trimmed = std.mem.trimEnd(u8, line, "\r\n");
-                            if (trimmed.len == 0) continue;
-                            const rec = chat_persist.parseRecord(rt.allocator, trimmed) catch |err| switch (err) {
-                                error.OutOfMemory => {
-                                    oom_during_load = true;
-                                    break;
-                                },
-                                else => continue,
-                            };
-                            switch (rec) {
-                                .turn => |t| {
-                                    dialog_helpers.pushTurn(rt, t.kind, t.content) catch {
-                                        rt.allocator.free(t.content);
-                                    };
-                                },
-                                .conclusion => |c| {
-                                    if (rt.conclusion_formatted) |old| rt.allocator.free(old);
-                                    rt.conclusion_formatted = c;
-                                },
-                            }
-                        }
-                    }
-                    if (oom_during_load) {
-                        latchHint(rt, "out of memory loading dialog — partial state may remain");
-                        return true;
-                    }
-
-                    // Open the inline panel + reset session-toggle
-                    // bookkeeping (mirror llm_inline_chat_toggle:
-                    // refocus latch, height override, conclusion
-                    // auto-emit). Without this a stale override or
-                    // refocus from a previous session would leak
-                    // into the recalled panel.
-                    rt.chat_inline_open = true;
-                    rt.chat_inline_paint_pending = true;
-                    rt.chat_focus_in_panel = true;
-                    rt.chat_refocus_pending = false;
-                    rt.chat_inline_rows_override = null;
-                    rt.conclusion_pending = false;
-
-                    // Distinguish a successfully-loaded dialog from a
-                    // corrupted/empty file so the user knows whether
-                    // to expect content in the panel.
-                    var name_buf: [128]u8 = undefined;
-                    const loaded_any = rt.turns_len > 0 or rt.conclusion_formatted != null;
-                    const msg = if (loaded_any)
-                        std.fmt.bufPrint(&name_buf, "recalled dialog: {s}", .{newest.name}) catch "recalled dialog"
-                    else
-                        std.fmt.bufPrint(&name_buf, "dialog {s} is empty or corrupted", .{newest.name}) catch "dialog empty or corrupted";
-                    latchHint(rt, msg);
+                    // Transfer ownership of the list to the Runtime;
+                    // closeRecallPicker frees on Enter/Esc.
+                    rt.chat_recall_items = list;
+                    rt.chat_recall_selected_idx = 0;
+                    rt.chat_recall_open = true;
+                    rt.chat_recall_paint_pending = true;
                     return true;
                 },
                 .chat_scroll_to_tail => {
