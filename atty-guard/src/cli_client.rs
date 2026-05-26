@@ -274,6 +274,15 @@ fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
                 })?;
                 println!("{s}");
                 if behind_count > 0 {
+                    // Explicit stdout flush before exit — `println!`
+                    // is line-buffered on TTYs but BLOCK-buffered
+                    // when stdout is piped (the CI usage path
+                    // `atoms drift --json | jq`). `process::exit`
+                    // doesn't run Rust's stdout LineWriter Drop, so
+                    // a piped consumer could see an empty stdin
+                    // before the exit code lands.
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
                     std::process::exit(2);
                 }
                 return Ok(());
@@ -315,7 +324,11 @@ fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
             if behind_count > 0 {
                 // Exit 2 distinguishes "drift detected" from "I/O
                 // error" (1) — CI scripts can gate on it without
-                // having to parse the human output.
+                // having to parse the human output. Flush stdout
+                // first; the human-mode println lines above go to
+                // a piped consumer's stdout buffer too.
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
                 std::process::exit(2);
             }
             Ok(())

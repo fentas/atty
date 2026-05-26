@@ -1102,8 +1102,10 @@ mod imp {
                         // diff it against the operator's pin. Read
                         // the prior snapshot first so `behind_since`
                         // anchors to the first observed drift, not
-                        // each tick. Best-effort; a probe failure
-                        // leaves the existing file in place.
+                        // each tick. A probe failure renders the
+                        // affected source's `upstream` as null in
+                        // the NEW snapshot AND preserves the prior
+                        // `behind_since` anchor via `diff_step`.
                         let drift_path = std::path::Path::new(
                             crate::atom_drift::DEFAULT_DRIFT_FILE,
                         );

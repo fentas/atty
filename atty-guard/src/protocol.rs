@@ -323,9 +323,9 @@ pub enum ResponseBody {
     /// from the caller's persistent `commands.trusted.txt`.
     TrustList { trust: Vec<String> },
     /// Reply to AtomsDrift. `available` is false when the cron has
-    /// not yet written a snapshot (fresh daemon, drift-fetch
-    /// disabled, etc.); `sources` is the per-source comparison
-    /// from the latest snapshot file.
+    /// not yet written a snapshot (fresh daemon, the `atoms-fetch`
+    /// build feature is disabled, etc.); `sources` is the
+    /// per-source comparison from the latest snapshot file.
     AtomsDrift {
         available: bool,
         updated_at: Option<String>,

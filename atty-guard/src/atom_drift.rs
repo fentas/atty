@@ -13,12 +13,14 @@
 //! operators when their pin is N commits behind upstream so they
 //! can decide whether to bump.
 //!
-//! Failure posture: best-effort throughout. A network blip during
-//! the head-SHA probe leaves the previous snapshot unchanged
-//! (the file isn't rewritten, the `atty-guard atoms drift`
-//! reader just sees stale data + a `updated_at` timestamp the
-//! operator can spot). A snapshot-write failure logs to journald
-//! and continues; classifier behavior is unaffected.
+//! Failure posture: best-effort throughout. A network blip
+//! during the head-SHA probe renders the affected source's
+//! `upstream` as `null` in the new snapshot AND preserves the
+//! `behind_since` anchor from the prior snapshot via
+//! `diff_step` rule 4 — so a transient outage doesn't reset the
+//! operator's "behind since" audit trail. A snapshot-write
+//! failure logs to journald and leaves the prior snapshot file
+//! in place; classifier behavior is unaffected throughout.
 
 use std::path::Path;
 #[cfg(feature = "atoms-fetch")]
@@ -484,11 +486,17 @@ mod tests {
 
     #[test]
     fn write_then_read_round_trip() {
+        // Per-process + per-nanosecond suffix so repeated `cargo
+        // test` runs (or two flavors of the same binary) can't
+        // collide on a fixed slot.
         let dir = std::env::temp_dir().join(format!(
-            "atty-guard-drift-test-{}",
-            std::process::id()
+            "atty-guard-drift-rt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
         ));
-        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.drift.json");
         let snap = DriftSnapshot {
@@ -508,10 +516,23 @@ mod tests {
 
     #[test]
     fn read_snapshot_missing_returns_none() {
-        let path = std::path::Path::new("/tmp/atty-guard-drift-nonexistent-test.json");
-        let _ = std::fs::remove_file(path);
-        let r = read_snapshot(path).unwrap();
+        // Unique-per-process path under the OS tempdir so parallel
+        // test runs (or repeated invocations) don't collide on a
+        // fixed `/tmp/...` slot — and a stale leftover with the
+        // wrong perms can't accidentally make the test green.
+        let dir = std::env::temp_dir().join(format!(
+            "atty-guard-drift-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nonexistent.json");
+        let r = read_snapshot(&path).unwrap();
         assert!(r.is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
