@@ -32,6 +32,10 @@ const appendConclusion = mod.appendConclusion;
 const LoadedTurn = mod.LoadedTurn;
 const loadLastTurns = mod.loadLastTurns;
 const parseLine = mod.parseLine;
+const parseRecord = mod.parseRecord;
+const listDialogs = mod.listDialogs;
+const freeDialogMetaList = mod.freeDialogMetaList;
+const pruneOldest = mod.pruneOldest;
 const resolveDir = mod.resolveDir;
 const createSessionPath = mod.createSessionPath;
 
@@ -425,4 +429,193 @@ test "loadLastTurns: skips malformed lines (forward-compat)" {
     try testing.expectEqual(@as(usize, 2), loaded.items.len);
     try testing.expectEqualStrings("valid1", loaded.items[0].content);
     try testing.expectEqualStrings("valid2", loaded.items[1].content);
+}
+
+// ---------------------------------------------------------------------
+// parseRecord — recognises conclusion records that parseLine rejects
+// ---------------------------------------------------------------------
+
+test "parseRecord: turn line round-trips through the .turn arm" {
+    const line = "{\"kind\":\"user\",\"content\":\"hello\"}";
+    const rec = try parseRecord(testing.allocator, line);
+    defer rec.deinit(testing.allocator);
+    switch (rec) {
+        .turn => |t| {
+            try testing.expectEqual(dialog.TurnKind.user, t.kind);
+            try testing.expectEqualStrings("hello", t.content);
+        },
+        .conclusion => return error.UnexpectedRecord,
+    }
+}
+
+test "parseRecord: conclusion line round-trips through the .conclusion arm" {
+    const line = "{\"kind\":\"conclusion\",\"content\":\"\u{2713} done \u{2014} listed 2 zig files\"}";
+    const rec = try parseRecord(testing.allocator, line);
+    defer rec.deinit(testing.allocator);
+    switch (rec) {
+        .turn => return error.UnexpectedRecord,
+        .conclusion => |c| try testing.expect(std.mem.indexOf(u8, c, "listed 2 zig files") != null),
+    }
+}
+
+test "parseRecord: unknown kind still errors (forward-compat sentinel)" {
+    const line = "{\"kind\":\"weather_forecast\",\"content\":\"sunny\"}";
+    try testing.expectError(error.UnknownTurnKind, parseRecord(testing.allocator, line));
+}
+
+// ---------------------------------------------------------------------
+// listDialogs — surface .jsonl files sorted newest-first
+// ---------------------------------------------------------------------
+
+test "listDialogs: returns matching files sorted newest-first" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    var name_buf: [96]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-list-dialogs-{x}", .{seed});
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+
+    // Create three files: old, mid, new. Each gets at least one
+    // byte so listDialogs's "skip 0-byte" filter keeps them.
+    const names = [_][]const u8{
+        "20260101T000000-aaaaaa.jsonl",
+        "20260201T000000-bbbbbb.jsonl",
+        "20260301T000000-cccccc.jsonl",
+    };
+    for (names) |n| {
+        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, n });
+        defer testing.allocator.free(path);
+        const pz = try testing.allocator.dupeZ(u8, path);
+        defer testing.allocator.free(pz);
+        const fd = std.c.open(pz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+        try testing.expect(fd >= 0);
+        _ = std.c.write(fd, "x", 1);
+        _ = std.c.close(fd);
+    }
+
+    const list = try listDialogs(testing.allocator, real_io, dir);
+    defer freeDialogMetaList(testing.allocator, list);
+
+    try testing.expectEqual(@as(usize, 3), list.len);
+    // Newest first — March → February → January.
+    try testing.expect(std.mem.startsWith(u8, list[0].name, "20260301"));
+    try testing.expect(std.mem.startsWith(u8, list[1].name, "20260201"));
+    try testing.expect(std.mem.startsWith(u8, list[2].name, "20260101"));
+
+    // Cleanup.
+    for (names) |n| {
+        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, n });
+        defer testing.allocator.free(path);
+        const pz = try testing.allocator.dupeZ(u8, path);
+        defer testing.allocator.free(pz);
+        _ = std.c.unlink(pz.ptr);
+    }
+    _ = std.c.rmdir(dz.ptr);
+}
+
+test "listDialogs: skips zero-byte reservations" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    var name_buf: [96]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-list-skip-empty-{x}", .{seed});
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+
+    // One file with content, one empty (simulating an unused
+    // O_EXCL reservation).
+    const real = try std.fmt.allocPrint(testing.allocator, "{s}/20260101T000000-aaaaaa.jsonl", .{dir});
+    defer testing.allocator.free(real);
+    const empty = try std.fmt.allocPrint(testing.allocator, "{s}/20260101T000000-bbbbbb.jsonl", .{dir});
+    defer testing.allocator.free(empty);
+    const rz = try testing.allocator.dupeZ(u8, real);
+    defer testing.allocator.free(rz);
+    const ez = try testing.allocator.dupeZ(u8, empty);
+    defer testing.allocator.free(ez);
+    const fd1 = std.c.open(rz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+    _ = std.c.write(fd1, "x", 1);
+    _ = std.c.close(fd1);
+    const fd2 = std.c.open(ez.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+    _ = std.c.close(fd2);
+    defer _ = std.c.unlink(rz.ptr);
+    defer _ = std.c.unlink(ez.ptr);
+    defer _ = std.c.rmdir(dz.ptr);
+
+    const list = try listDialogs(testing.allocator, real_io, dir);
+    defer freeDialogMetaList(testing.allocator, list);
+    try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expect(std.mem.endsWith(u8, list[0].name, "aaaaaa"));
+}
+
+test "listDialogs: returns empty list on missing dir" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    const list = try listDialogs(testing.allocator, real_io, "/tmp/atty-nonexistent-list-dialogs");
+    defer freeDialogMetaList(testing.allocator, list);
+    try testing.expectEqual(@as(usize, 0), list.len);
+}
+
+// ---------------------------------------------------------------------
+// pruneOldest — drop entries beyond keep_count
+// ---------------------------------------------------------------------
+
+test "pruneOldest: drops the oldest entries past keep_count" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var name_buf: [96]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-prune-{x}", .{seed});
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+    defer _ = std.c.rmdir(dz.ptr);
+
+    const names = [_][]const u8{
+        "20260101T000000-aaaaaa.jsonl",
+        "20260102T000000-bbbbbb.jsonl",
+        "20260103T000000-cccccc.jsonl",
+        "20260104T000000-dddddd.jsonl",
+        "20260105T000000-eeeeee.jsonl",
+    };
+    for (names) |n| {
+        const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, n });
+        defer testing.allocator.free(path);
+        const pz = try testing.allocator.dupeZ(u8, path);
+        defer testing.allocator.free(pz);
+        const fd = std.c.open(pz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+        _ = std.c.write(fd, "x", 1);
+        _ = std.c.close(fd);
+    }
+
+    pruneOldest(testing.allocator, real_io, dir, 3);
+
+    const remaining = try listDialogs(testing.allocator, real_io, dir);
+    defer freeDialogMetaList(testing.allocator, remaining);
+    try testing.expectEqual(@as(usize, 3), remaining.len);
+    // Newest 3 survive.
+    try testing.expect(std.mem.startsWith(u8, remaining[0].name, "20260105"));
+    try testing.expect(std.mem.startsWith(u8, remaining[1].name, "20260104"));
+    try testing.expect(std.mem.startsWith(u8, remaining[2].name, "20260103"));
+
+    // Cleanup remaining.
+    for (remaining) |m| {
+        const pz = try testing.allocator.dupeZ(u8, m.path);
+        defer testing.allocator.free(pz);
+        _ = std.c.unlink(pz.ptr);
+    }
 }
