@@ -697,74 +697,40 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 c[0] == '{' and
                 std.mem.indexOf(u8, c, "\"action\"") != null;
             if (looks_like_envelope) {
-                // `done` envelopes' free-prose reason renders via
-                // md_render and can span many rows; exec + question
-                // still take exactly one row (compact summary).
-                // Cheap shape-check via `envelopeActionIsDone`
-                // rather than a full JSON parse — back-walk anchor
-                // math only needs a row-count estimate.
                 if (envelopeActionIsDone(c)) {
-                    // Estimate row count by walking the wrap iterator
-                    // over the WHOLE envelope content. Two corrections
-                    // applied so the estimate stays a safe upper bound
-                    // for what the render path actually emits:
-                    //
-                    //   1. The wrap iterator sees JSON `\n` escapes
-                    //      as two literal chars; the render path
-                    //      parses the JSON value and feeds md_render
-                    //      which hard-breaks on real newlines. Each
-                    //      escape corresponds to AT LEAST one extra
-                    //      rendered row that the raw wrap count
-                    //      would miss. Adding `escapes_n` to the
-                    //      row total bounds this — over-counts
-                    //      slightly (the escape's 2 bytes are also
-                    //      counted in the wrap rows) but the
-                    //      direction is safe: the back-walk anchor
-                    //      reserves enough room for the newest turn
-                    //      rather than letting it get clipped.
-                    //   2. Min 1 row for empty content (matches the
-                    //      existing fallthrough at the bottom).
-                    var it = pw.wrapIter(c, cols);
-                    var rows: usize = 0;
-                    while (it.next()) |_| {
-                        rows += 1;
-                        if (rows >= max_rows) break;
+                    // Parse the envelope so we count the rendered
+                    // reason via the SAME md_render row math the
+                    // paint path uses. The previous wrap-iter +
+                    // escapes_n heuristic was a safe upper bound for
+                    // the back-walk anchor but over-counted for the
+                    // per-row windowing (#213's offset clamp).
+                    const R = dialog.Response(cfg.max_response_bytes);
+                    var parsed: R = .{};
+                    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                    defer arena.deinit();
+                    dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
+                        // Parse failure falls through to raw render in
+                        // renderTurnContent — count that path too.
+                        const raw = md_render.countRows(c, cols);
+                        return @min(raw, max_rows);
+                    };
+                    if (parsed.action == .done) {
+                        const reason = parsed.reason();
+                        const wrap_cols: usize = if (cols > 2) cols - 2 else cols;
+                        return @min(md_render.countRows(reason, wrap_cols), max_rows);
                     }
-                    if (rows < max_rows) {
-                        var escapes_n: usize = 0;
-                        var i: usize = 0;
-                        while (i + 1 < c.len) : (i += 1) {
-                            if (c[i] == '\\' and c[i + 1] == 'n') {
-                                escapes_n += 1;
-                                i += 1; // skip past the `n`
-                            }
-                        }
-                        rows = @min(max_rows, rows + escapes_n);
-                    }
-                    return if (rows == 0) 1 else rows;
+                    // Parsed but not actually done (rare — envelope-
+                    // action mismatch): fall through.
                 }
-                // Envelope-shaped but NOT confidently `done`. Two
-                // cases this path needs to cover:
-                //   - Real exec/question envelopes: `renderTurnContent`
-                //     emits 1 row each.
-                //   - Malformed / trailing-prose envelopes that fail
-                //     to parse: `renderTurnContent` falls through to
-                //     `renderWrappedRaw` which can span MULTIPLE rows.
-                // Returning 1 here under-counts the malformed case,
-                // which under back-walk pressure clips the newest
-                // turn. Fall through to the wrap-iter estimate
-                // instead: slight over-count for valid exec/question
-                // (1-2 extra rows reserved per turn) but safe for
-                // malformed.
+                // Envelope-shaped exec/question/malformed: real
+                // envelopes emit 1 compact row; malformed cases
+                // fall through to renderWrappedRaw and span N.
+                // md_render.countRows mirrors the wrap+newline
+                // path the renderer uses; safe upper bound for
+                // both valid (1) and malformed (N) cases.
             }
             if (c.len == 0) return 1;
-            var it = pw.wrapIter(c, cols);
-            var rows: usize = 0;
-            while (it.next()) |_| {
-                rows += 1;
-                if (rows >= max_rows) break;
-            }
-            return if (rows == 0) 1 else rows;
+            return @min(md_render.countRows(c, cols), max_rows);
         }
 
         /// Render a raw (non-envelope) turn via the markdown-aware
@@ -1232,18 +1198,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // unbounded estimate (`maxInt(u16)`) so the offset
             // clamp + window slicing see the TRUE row totals.
             const big: usize = std.math.maxInt(u16);
-            var turn_row_buf: [256]usize = undefined;
-            const max_tracked = @min(rt.turns_len, turn_row_buf.len);
+            // Sized from cfg.history_turns_max so any future config
+            // bump above the previous 256-row cap surfaces at
+            // compile time instead of silent panel-truncation.
+            comptime std.debug.assert(cfg.history_turns_max <= 256);
+            var turn_row_buf: [cfg.history_turns_max]usize = undefined;
             var content_total_rows: usize = 0;
-            for (rt.turns[0..max_tracked], 0..) |t, idx| {
+            for (rt.turns[0..rt.turns_len], 0..) |t, idx| {
                 turn_row_buf[idx] = countTurnRows(t, max_inline_visible, big);
                 content_total_rows += turn_row_buf[idx];
             }
-            // Turns past the tracked cap (theoretically unreachable
-            // — history_turns_max defaults far below 256) get
-            // estimated at 1 row each so the total stays a usable
-            // lower bound.
-            if (rt.turns_len > max_tracked) content_total_rows += rt.turns_len - max_tracked;
 
             // Header row reserved when scrolled back. Decrement
             // scrollback budget by 1 IF offset > 0.
@@ -1278,7 +1242,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // (possibly with skip_rows at the top + a row budget
             // at the bottom).
             var cumulative_top: usize = 0;
-            for (rt.turns[0..max_tracked], 0..) |turn, idx| {
+            for (rt.turns[0..rt.turns_len], 0..) |turn, idx| {
                 const turn_rows = turn_row_buf[idx];
                 const turn_top = cumulative_top;
                 const turn_bot = cumulative_top + turn_rows;

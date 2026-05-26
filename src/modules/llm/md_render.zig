@@ -53,6 +53,40 @@ pub fn render(
     return renderWithSkip(w, content, cols, 0, max_rows, writeSanitizedFn);
 }
 
+/// Count exactly the rows `render(content, cols, maxInt(usize))`
+/// would emit — same `\n` hard-break + wrap-at-cols loop, but
+/// without writing any bytes. Used by the inline-panel per-row
+/// windowing (#213) to compute accurate offset clamps + window
+/// slices. The earlier estimate-via-wrap-iter heuristic over-
+/// counted for multi-line content (each `\n` was 1 extra row on
+/// top of the wrap rows that already covered the same bytes),
+/// leading to phantom scroll positions past actual content.
+pub fn countRows(content: []const u8, cols: usize) usize {
+    if (content.len == 0 or cols == 0) return 1;
+    var rows: usize = 0;
+    var line_iter = std.mem.splitScalar(u8, content, '\n');
+    var pending_blank = false;
+    while (line_iter.next()) |raw_line| {
+        var line = raw_line;
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        if (line.len == 0) {
+            // Same as `render`: blank lines go through pending; the
+            // trailing empty is dropped at end-of-stream.
+            if (pending_blank) rows += 1; // flush the previous blank
+            pending_blank = true;
+            continue;
+        }
+        if (pending_blank) {
+            rows += 1; // the blank was real (followed by content)
+            pending_blank = false;
+        }
+        var wrap = pw.wrapIter(line, cols);
+        while (wrap.next()) |_| rows += 1;
+    }
+    // Trailing blank is dropped per render's "pending=null" sweep.
+    return if (rows == 0) 1 else rows;
+}
+
 /// Render `content` skipping the FIRST `skip_rows` produced rows,
 /// then emitting up to `max_rows` more. Per-row scrolling
 /// (`chat_inline_view_offset` in row units) uses this to slice
