@@ -255,15 +255,23 @@ pub const LineState = struct {
             self.uncertain = false;
             return;
         }
+        const cursor_was_at_eol = self.cursor_pos == self.len;
+        const prior_cursor = self.cursor_pos;
         @memcpy(self.buffer[0..n], content[0..n]);
         self.len = n;
         self.uncertain = false;
-        // Bash's redraw lands the cursor at the EOL of the input
-        // region by the time `;B` fires + the input is echoed.
-        // Clamp cursor_pos to len so callers see "cursor at EOL"
-        // after a successful sync. (If something downstream knows
-        // better — e.g. a DSR-6n reply — it can overwrite.)
-        self.cursor_pos = n;
+        // OSC 133 carries content but not cursor position. Two cases:
+        //   1. Cursor was at EOL before the change (typical append-
+        //      at-end like typing or tab-completion that grew the
+        //      buffer). New cursor lands at the new EOL.
+        //   2. Cursor was mid-line (Arrow-Left × N → backspace or
+        //      Delete or mid-line paste). The redraw moves chars but
+        //      the cursor stays at the edit position. Clamping to
+        //      EOL here lets `cursor_moved` flip false → ghost
+        //      re-engages and paints over the text-to-right.
+        //      Preserve the prior cursor, clamped into the new
+        //      range. Best we can do without a DSR-6n reply.
+        self.cursor_pos = if (cursor_was_at_eol) n else @min(prior_cursor, n);
         self.syncCursorMoved();
         self.generation +%= 1;
     }
