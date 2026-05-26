@@ -884,34 +884,40 @@ test "syncFromCapture preserves cursor when mid-line delete shrinks the buffer" 
     //      post-delete content shorter by one byte ("comand tes
     //      aaa").
     //
-    // Invariant under test: after the sync the cursor stays at
-    // the mid-line edit position (10), `cursor_moved` stays
-    // true, ghost remains suppressed. Clamping cursor to EOL
-    // (the new len) would flip `cursor_moved` false and let
-    // ghost paint over the live characters to the cursor's
-    // right.
+    // Invariant under test: after the sync the cursor stays
+    // mid-line, `cursor_moved` stays true, ghost remains
+    // suppressed. Clamping cursor to EOL (the new len) would
+    // flip `cursor_moved` false and let ghost paint over the
+    // live characters to the cursor's right.
     var l = LineState{};
-    // Simulate the in-flight "comand tesd aaa" state.
+    // Simulate the in-flight "comand tesd aaa" state (15 bytes).
     l.syncFromCapture("comand tesd aaa");
-    // Arrow-Left × 5 to land cursor at position 10 (between 's'
-    // and 'd'). Left = `\x1B[D`; applyInput's modeled-CSI branch
-    // decrements cursor_pos without touching uncertain.
-    _ = l.applyInput("\x1B[D\x1B[D\x1B[D\x1B[D\x1B[D");
-    try std.testing.expectEqual(@as(usize, 10), l.cursor_pos);
+    // Arrow-Left × 4 lands cursor at position 11 (between 'd' at
+    // byte[10] and ' ' at byte[11]). Left = `\x1B[D`;
+    // applyInput's modeled-CSI branch decrements cursor_pos
+    // without touching uncertain.
+    _ = l.applyInput("\x1B[D\x1B[D\x1B[D\x1B[D");
+    try std.testing.expectEqual(@as(usize, 11), l.cursor_pos);
     try std.testing.expect(!l.uncertain);
     try std.testing.expect(l.cursor_moved);
 
-    // Backspace (0x7F) mid-line — applyInput's backspace handler
-    // sees cursor_pos != len and marks uncertain.
+    // Backspace (0x7F) mid-line — readline removes the byte
+    // BEFORE the cursor (the 'd' at byte[10]). applyInput's
+    // backspace handler sees cursor_pos != len and marks
+    // uncertain (it can't model which byte readline removed).
     _ = l.applyInput("\x7F");
     try std.testing.expect(l.uncertain);
     try std.testing.expect(l.cursor_moved);
 
-    // PS1 redraw delivers "comand tes aaa" (one byte shorter).
+    // PS1 redraw delivers "comand tes aaa" — 14 bytes, 'd' gone.
     l.syncFromCapture("comand tes aaa");
     try std.testing.expect(!l.uncertain);
-    try std.testing.expect(l.cursor_moved); // cursor still mid-line; ghost still suppressed
-    try std.testing.expectEqual(@as(usize, 10), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved); // 11 != 14 → mid-line → ghost still suppressed
+    // Modeled cursor sits at 11 (drifts 1 right of physical pos
+    // 10 where the readline cursor actually landed post-delete
+    // — documented in syncFromCapture's docstring). Harmless for
+    // ghost gating.
+    try std.testing.expectEqual(@as(usize, 11), l.cursor_pos);
 }
 
 test "syncFromCapture lands cursor at new EOL when prior cursor WAS at EOL" {
