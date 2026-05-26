@@ -82,8 +82,12 @@ pub enum Request {
 
     /// Read the daemon's latest drift snapshot. The daemon writes
     /// `/var/lib/atty-guard/atoms.drift.json` after each successful
-    /// cron tick; this RPC just deserializes the current file. No
-    /// privilege check — read-only telemetry.
+    /// atom-refresh cron tick — preconditions: built with the
+    /// `atoms-fetch` cargo feature AND started with
+    /// `--atoms-update-interval` (or `--update-atoms-now`).
+    /// Without those, the snapshot will never appear and this RPC
+    /// returns `available=false`. This RPC just deserializes the
+    /// current file; no privilege check — read-only telemetry.
     AtomsDrift,
 
     /// Append `host` to the persistent urls.decisions.txt for the

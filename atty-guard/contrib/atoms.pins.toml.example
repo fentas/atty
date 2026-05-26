@@ -33,9 +33,10 @@
 #   atty-guard atoms drift            # human-readable summary
 #   atty-guard atoms drift --json     # raw JSON for scripting
 #
-# Exits 2 when at least one source has drifted (CI-gateable). The
-# `atty doctor` integration surfaces the same signal as a warning
-# when your pin is behind upstream.
+# Exits 2 when at least one source has drifted (CI-gateable). A
+# follow-up release will add an `atty doctor` Zig-side surface that
+# turns drift into a yellow warning during health checks; until
+# then, the CLI exit code is the canonical signal.
 #
 # IMPORTANT: a file with no uncommented sections is treated as
 # "operator opted in with nothing" and rejected as a hard error.

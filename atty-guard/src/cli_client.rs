@@ -246,8 +246,12 @@ const PIN_FILE_TEMPLATE: &str = include_str!("../contrib/atoms.pins.toml.example
 ///   0 — in-sync, live-tracking, or no snapshot available yet.
 ///   1 — daemon error / unexpected response (CLI-wide convention).
 ///   2 — at least one source is drifted. Honored by BOTH the human
-///       and `--json` modes so CI gates work either way:
-///       `atty-guard atoms drift --json | jq ... ; [ $? -eq 0 ]`.
+///       and `--json` modes so CI gates work either way. Mind the
+///       shell: in a pipeline `... | jq ...`, `$?` reflects jq's
+///       exit code unless `set -o pipefail` is on. Either:
+///         `set -o pipefail; atty-guard atoms drift --json | jq .`
+///       or capture the status directly with the non-pipe form:
+///         `atty-guard atoms drift --json > out.json; [ $? -eq 0 ]`.
 fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
     let response = send_request(socket, Request::AtomsDrift)?;
     match response {
@@ -289,13 +293,18 @@ fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
             }
             if !available {
                 println!(
-                    "atty-guard: no drift snapshot yet — the daemon writes \
+                    "atty-guard: no drift snapshot yet. The daemon writes \
                      /var/lib/atty-guard/atoms.drift.json after the first \
-                     successful atom refresh tick. Wait for the next \
-                     `--atoms-update-interval` cycle, or trigger one with \
-                     `sudo atty-guard --update-atoms-now`. If atty-guard \
-                     was built without the `atoms-fetch` feature the cron \
-                     is disabled and this message is expected."
+                     successful atom-refresh tick, which requires:\n\
+                     \n  \
+                     1. the daemon built with the `atoms-fetch` cargo \
+                     feature\n  \
+                     2. started with `--atoms-update-interval <N>` (or \
+                     trigger a one-shot fetch via `sudo atty-guard \
+                     --update-atoms-now`)\n\
+                     \n\
+                     If neither is configured, this is the expected \
+                     steady state."
                 );
                 return Ok(());
             }

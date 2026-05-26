@@ -334,11 +334,24 @@ pub fn write_snapshot(path: &Path, snapshot: &DriftSnapshot) -> std::io::Result<
         f.write_all(&bytes)?;
         // Match the rest of /var/lib/atty-guard's 0640 posture so
         // any user in the atty group can read but only the daemon
-        // can write.
+        // can write. A chmod failure is logged but not propagated:
+        // the snapshot CONTENT is operator-readable telemetry (no
+        // secrets), and on a system where chmod fails the operator
+        // already has bigger problems than a slightly-loose drift
+        // file. Surfacing the warning means they can tighten by
+        // hand or investigate; failing the whole tick would block
+        // a chmod hiccup from being seen at all.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640));
+            if let Err(e) =
+                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640))
+            {
+                eprintln!(
+                    "atty-guard: drift snapshot chmod 0640 failed on {} — {e}",
+                    tmp.display()
+                );
+            }
         }
     }
     match std::fs::rename(&tmp, path) {
