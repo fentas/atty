@@ -32,6 +32,13 @@ pub fn shutdownAndFree(comptime L: type, rt: *L.Runtime, io: std.Io) void {
     // paintChatOverlay; freed here so tests don't leak when they
     // exercise the open/close cycle without running detach.
     if (rt.chat_overlay_buf) |slice| rt.allocator.free(slice);
+    // Same shape for the recall picker overlay's paint buffer +
+    // its owned items list.
+    if (rt.chat_recall_buf) |slice| rt.allocator.free(slice);
+    if (rt.chat_recall_items.len > 0) {
+        const chat_persist = @import("chat_persist.zig");
+        chat_persist.freeDialogMetaList(rt.allocator, rt.chat_recall_items);
+    }
     // Per-session NDJSON path — allocated by attach when
     // chat_persist_enabled is on (default). The path is an
     // `O_EXCL`-reserved file on disk; unlink before freeing so

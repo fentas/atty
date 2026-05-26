@@ -2195,8 +2195,19 @@ test "chat_recall: loads a pre-existing dialog file end-to-end" {
         .statusbar_reserve = 2, // satisfy the chat_recall statusbar guard
     };
 
+    // Alt+R opens the picker (NOT the load directly — the picker
+    // overlay UI landed in PR 2c after the initial recall slice).
     const consumed = try L.onAction(&rt, &ctx, .chat_recall);
     try testing.expect(consumed);
+    try testing.expect(rt.chat_recall_open);
+    try testing.expectEqual(@as(usize, 1), rt.chat_recall_items.len);
+    try testing.expect(rt.chat_recall_paint_pending);
+
+    // Press Enter on the picker — fires the load + opens inline.
+    const Action = @import("../../keymap.zig").Action;
+    _ = Action;
+    _ = try L.onInput(&rt, &ctx, "\r");
+    try testing.expect(!rt.chat_recall_open);
     try testing.expect(rt.chat_inline_open);
     try testing.expect(rt.chat_focus_in_panel);
     try testing.expectEqual(@as(usize, 3), rt.turns_len);
@@ -2214,6 +2225,72 @@ test "chat_recall: loads a pre-existing dialog file end-to-end" {
         testing.allocator.free(c);
         rt.conclusion_formatted = null;
     }
+}
+
+test "chat_recall picker: Esc cancels without loading" {
+    // Picker opens, user presses Esc — picker closes, no load
+    // happens, in-memory ring stays empty.
+    const dir: []const u8 = "/tmp/atty-recall-esc-test";
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    const dialog_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/20260101T000000-aaaaaa.jsonl",
+        .{dir},
+    );
+    defer testing.allocator.free(dialog_path);
+    const pre_dpz = try testing.allocator.dupeZ(u8, dialog_path);
+    _ = std.c.unlink(pre_dpz.ptr);
+    testing.allocator.free(pre_dpz);
+    _ = std.c.rmdir(dz.ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+    const dpz = try testing.allocator.dupeZ(u8, dialog_path);
+    defer testing.allocator.free(dpz);
+    const fd = std.c.open(dpz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+    try testing.expect(fd >= 0);
+    _ = std.c.write(fd, "{\"kind\":\"user\",\"content\":\"hi\"}\n", 31);
+    _ = std.c.close(fd);
+    defer _ = std.c.rmdir(dz.ptr);
+    defer _ = std.c.unlink(dpz.ptr);
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .chat_persist_enabled = true,
+        .chat_persist_dir = dir,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_reserve = 2,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .chat_recall);
+    try testing.expect(rt.chat_recall_open);
+
+    // Press Esc — picker closes, no load.
+    _ = try L.onInput(&rt, &ctx, "\x1b");
+    try testing.expect(!rt.chat_recall_open);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expectEqual(@as(usize, 0), rt.turns_len);
+    try testing.expect(rt.conclusion_formatted == null);
 }
 
 test "chat_recall: refuses with statusbar hint when statusbar_reserve is null" {

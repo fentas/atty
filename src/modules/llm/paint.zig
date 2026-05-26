@@ -307,6 +307,106 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return true;
         }
 
+        /// Paint the recall picker — an alt-screen overlay listing
+        /// `rt.chat_recall_items` (newest first). One row per
+        /// dialog: timestamp + 6-hex suffix. The currently
+        /// highlighted row (`rt.chat_recall_selected_idx`) gets
+        /// reverse-video styling. Footer hints at the navigation
+        /// keys (↑↓ select, Enter load, Esc cancel).
+        ///
+        /// Same alt-screen scaffold as `paintChatOverlay`: emit
+        /// `\x1B[?1049h` on open + `\x1B[?1049l` on close, with the
+        /// content payload between them. Heap-allocated buffer
+        /// transferred to `rt.chat_recall_buf` so
+        /// `provideTermBytes` can hand it off to the consumer
+        /// without a copy.
+        fn paintChatRecall(rt: *Runtime, _: *m.Context) bool {
+            if (rt.chat_recall_buf) |old| {
+                rt.allocator.free(old);
+                rt.chat_recall_buf = null;
+            }
+            var aw = std.Io.Writer.Allocating.initCapacity(rt.allocator, 4 * 1024) catch return false;
+            const w = &aw.writer;
+
+            if (!rt.chat_recall_open) {
+                // Close: leave alt-screen, restore cursor.
+                w.writeAll("\x1B[r\x1B[?25h\x1B[?1049l") catch {
+                    aw.deinit();
+                    return false;
+                };
+                rt.chat_recall_buf = aw.toOwnedSlice() catch {
+                    aw.deinit();
+                    return false;
+                };
+                return true;
+            }
+
+            // Open: enter alt-screen, hide cursor, clear, paint.
+            w.writeAll("\x1B[?1049h\x1B[?25l\x1B[H\x1B[2J") catch {
+                aw.deinit();
+                return false;
+            };
+            // Header.
+            w.writeAll("\x1B[22;1;38;5;14m  Recall a dialog\x1B[0m\r\n") catch {
+                aw.deinit();
+                return false;
+            };
+            w.writeAll("\x1B[2m  \u{2191}\u{2193} select \u{00B7} Enter load \u{00B7} Esc cancel\x1B[0m\r\n\r\n") catch {
+                aw.deinit();
+                return false;
+            };
+            // Items. Format the timestamp portion of the basename
+            // ("YYYYMMDDTHHMMSS-XXXXXX") as a human-friendly
+            // "YYYY-MM-DD HH:MM:SS" string + the 6-hex suffix.
+            const items = rt.chat_recall_items;
+            if (items.len == 0) {
+                w.writeAll("  \x1B[2m(no past dialogs to recall)\x1B[0m\r\n") catch {
+                    aw.deinit();
+                    return false;
+                };
+            } else {
+                for (items, 0..) |m_meta, idx| {
+                    const is_selected = idx == rt.chat_recall_selected_idx;
+                    const sel_open: []const u8 = if (is_selected) "\x1B[7m" else "";
+                    const sel_close: []const u8 = if (is_selected) "\x1B[27m" else "";
+                    // Defensive: name should match the shape
+                    // listDialogs filters for, but bail gracefully
+                    // if it doesn't.
+                    if (m_meta.name.len < 22) {
+                        w.print("  {s}  {s}{s}\r\n", .{ sel_open, m_meta.name, sel_close }) catch {
+                            aw.deinit();
+                            return false;
+                        };
+                        continue;
+                    }
+                    const n = m_meta.name;
+                    w.print(
+                        "  {s}  {s}-{s}-{s} {s}:{s}:{s}  \x1B[2m{s}\x1B[0m{s}\r\n",
+                        .{
+                            sel_open,
+                            n[0..4],
+                            n[4..6],
+                            n[6..8],
+                            n[9..11],
+                            n[11..13],
+                            n[13..15],
+                            n[16..22],
+                            sel_close,
+                        },
+                    ) catch {
+                        aw.deinit();
+                        return false;
+                    };
+                }
+            }
+
+            rt.chat_recall_buf = aw.toOwnedSlice() catch {
+                aw.deinit();
+                return false;
+            };
+            return true;
+        }
+
         /// Overlay-mode structured turn rendering. The overlay has
         /// the full screen, so assistant_exec turns get spread across
         /// multiple rows: description on row 1, command on row 2
@@ -1366,6 +1466,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // sees Alt+C do nothing with no diagnostic.
                     const overflow_msg = "atty: chat overlay too big to render — buffer overflow\n";
                     _ = std.c.write(2, overflow_msg, overflow_msg.len);
+                }
+            }
+            // Recall picker paint — same alt-screen scaffolding
+            // pattern as the chat overlay. Mutually exclusive with
+            // the chat surfaces (the action handler refuses to open
+            // when any chat surface is active).
+            if (rt.chat_recall_paint_pending) {
+                rt.chat_recall_paint_pending = false;
+                if (paintChatRecall(rt, ctx)) {
+                    if (rt.chat_recall_buf) |slice| return slice;
+                }
+                if (rt.chat_recall_open) {
+                    rt.chat_recall_open = false;
+                    latchErr(rt, "recall picker render failed");
                 }
             }
             // Conclusion banner emission takes precedence over the

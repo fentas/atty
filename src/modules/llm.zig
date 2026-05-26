@@ -826,6 +826,23 @@ pub fn configure(comptime cfg: Config) type {
             /// allocator grows the buffer to whatever the actual
             /// content needs.
             chat_overlay_buf: ?[]u8 = null,
+            /// Recall picker overlay state — when open, the user is
+            /// browsing the persisted-dialog archive (alt-screen,
+            /// arrows + Enter + Esc). Mutually exclusive with
+            /// `chat_overlay_open` / `chat_inline_open`. Set by the
+            /// `chat_recall` action; cleared on Enter (after
+            /// loading the selected dialog) or Esc.
+            chat_recall_open: bool = false,
+            chat_recall_paint_pending: bool = false,
+            chat_recall_buf: ?[]u8 = null,
+            /// Loaded list of DialogMeta entries for the picker.
+            /// Owned by the runtime — `chat_persist.freeDialogMetaList`
+            /// releases on close. Empty slice when the picker is
+            /// closed.
+            chat_recall_items: []chat_persist.DialogMeta = &.{},
+            /// Currently highlighted index in `chat_recall_items`.
+            /// Clamped to `[0, items.len - 1]` by the arrow handler.
+            chat_recall_selected_idx: usize = 0,
             /// Chat input buffer — keystrokes accumulated while
             /// the overlay is open. Enter submits as a new
             /// `.user` turn and fires a dialog request; the
@@ -1134,6 +1151,15 @@ pub fn configure(comptime cfg: Config) type {
             if (rt.chat_overlay_buf) |slice| {
                 rt.allocator.free(slice);
                 rt.chat_overlay_buf = null;
+            }
+            // Recall picker state — items list owned by Runtime.
+            if (rt.chat_recall_items.len > 0) {
+                chat_persist.freeDialogMetaList(rt.allocator, rt.chat_recall_items);
+                rt.chat_recall_items = &.{};
+            }
+            if (rt.chat_recall_buf) |slice| {
+                rt.allocator.free(slice);
+                rt.chat_recall_buf = null;
             }
             rt.osc133_capture.deinit();
             // Heap-promoted Runtime buffers are owned by the main
