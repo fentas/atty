@@ -2119,6 +2119,135 @@ test "chat_scroll_to_tail snaps inline_view_offset to 0 when focus is in panel" 
     try testing.expectEqual(false, rt.chat_inline_paint_pending);
 }
 
+test "chat_recall: loads a pre-existing dialog file end-to-end" {
+    // Stages a JSONL file in chat_persist_dir, fires Alt+R via
+    // onAction, asserts the load loop populated rt.turns +
+    // conclusion + opened the inline panel.
+    const dir: []const u8 = "/tmp/atty-recall-load-test";
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    _ = std.c.rmdir(dz.ptr); // pre-cleanup
+    // Recreate the dir + stage one dialog file before attach so
+    // listDialogs surfaces it.
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+    const dialog_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/20260101T000000-aaaaaa.jsonl",
+        .{dir},
+    );
+    defer testing.allocator.free(dialog_path);
+    const dpz = try testing.allocator.dupeZ(u8, dialog_path);
+    defer testing.allocator.free(dpz);
+    const fd = std.c.open(dpz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+    try testing.expect(fd >= 0);
+    const payload =
+        "{\"kind\":\"user\",\"content\":\"list files\"}\n" ++
+        "{\"kind\":\"assistant_exec\",\"content\":\"{\\\"action\\\":\\\"exec\\\",\\\"command\\\":\\\"ls\\\"}\"}\n" ++
+        "{\"kind\":\"observation\",\"content\":\"a.txt\\nb.txt\"}\n" ++
+        "{\"kind\":\"conclusion\",\"content\":\"\u{2713} done\"}\n";
+    _ = std.c.write(fd, payload.ptr, payload.len);
+    _ = std.c.close(fd);
+    defer _ = std.c.unlink(dpz.ptr);
+    defer _ = std.c.rmdir(dz.ptr);
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .chat_persist_enabled = true,
+        .chat_persist_dir = dir,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_reserve = 2, // satisfy the chat_recall statusbar guard
+    };
+
+    const consumed = try L.onAction(&rt, &ctx, .chat_recall);
+    try testing.expect(consumed);
+    try testing.expect(rt.chat_inline_open);
+    try testing.expect(rt.chat_focus_in_panel);
+    try testing.expectEqual(@as(usize, 3), rt.turns_len);
+    try testing.expect(rt.conclusion_formatted != null);
+    if (rt.conclusion_formatted) |c| {
+        try testing.expect(std.mem.indexOf(u8, c, "done") != null);
+    }
+    try testing.expect(rt.hint_pending);
+    rt.hint_pending = false;
+
+    // dialogReset on rt cleanup expects conclusion freed by detach;
+    // shutdownAndFree handles chat_persist_path/dir but doesn't
+    // free the heap-owned conclusion banner.
+    if (rt.conclusion_formatted) |c| {
+        testing.allocator.free(c);
+        rt.conclusion_formatted = null;
+    }
+}
+
+test "chat_recall: refuses with statusbar hint when statusbar_reserve is null" {
+    // Mirror the inline-toggle path's statusbar prerequisite: a
+    // user with chat_persist_enabled but statusbar.enabled = false
+    // would otherwise open the inline panel without a reserved
+    // row + the shell would scroll through it.
+    const dir: []const u8 = "/tmp/atty-recall-no-sb-test";
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    _ = std.c.rmdir(dz.ptr);
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .chat_persist_enabled = true,
+        .chat_persist_dir = dir,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        // statusbar_reserve deliberately null
+    };
+
+    const consumed = try L.onAction(&rt, &ctx, .chat_recall);
+    try testing.expect(consumed);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(rt.hint_pending);
+    rt.hint_pending = false;
+}
+
 test "chat_recall: latches hint and refuses cleanly when no dialogs exist" {
     const dir: []const u8 = "/tmp/atty-recall-empty-test";
     const dz = try testing.allocator.dupeZ(u8, dir);

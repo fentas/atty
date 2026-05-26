@@ -1232,11 +1232,19 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     return true;
                 },
                 .chat_recall => {
-                    // Refuse if a chat surface is already open — the
-                    // user's expecting Alt+R to FETCH a dialog, not to
-                    // discard whatever's in the live panel.
+                    // Refuse if a chat surface is already open — Alt+R
+                    // is a fetch, not a discard.
                     if (rt.chat_overlay_open or rt.chat_inline_open) {
                         latchHint(rt, "close the chat panel first, then Alt+R to recall a past dialog");
+                        return true;
+                    }
+                    // Same statusbar prerequisite as the inline-chat
+                    // toggle: opening without a reserved row would let
+                    // the shell scroll through the panel.
+                    if (ctx.statusbar_reserve == null) {
+                        latchHint(rt, "inline chat needs the statusbar — set `config.statusbar.enabled = true`");
+                        const no_sb_msg = "atty: inline chat needs the statusbar — set `config.statusbar.enabled = true`\n";
+                        _ = std.c.write(2, no_sb_msg, no_sb_msg.len);
                         return true;
                     }
                     if (rt.chat_persist_dir.len == 0) {
@@ -1287,9 +1295,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         };
                     }
 
-                    // Wipe current turns + conclusion before loading.
-                    // (No conclusion would be set here since the chat
-                    // surface was closed — defensive.)
+                    // Wipe current turns + conclusion before loading
+                    // so a partial parse doesn't mix with stale state.
                     freeTurns(rt);
                     if (rt.conclusion_formatted) |old| {
                         rt.allocator.free(old);
@@ -1298,7 +1305,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     rt.chat_persist_conclusion_pending = false;
 
                     // Walk every line and dispatch to pushTurn /
-                    // conclusion as parseRecord classifies.
+                    // conclusion as parseRecord classifies. Direct
+                    // `dialog_helpers.pushTurn` bypasses the
+                    // disk-write wrapper — load must not re-append.
                     var line_start: usize = 0;
                     var i: usize = 0;
                     while (i <= raw.items.len) : (i += 1) {
@@ -1310,14 +1319,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             const rec = chat_persist.parseRecord(rt.allocator, trimmed) catch continue;
                             switch (rec) {
                                 .turn => |t| {
-                                    // pushTurn takes ownership of t.content
-                                    // on success. Passing ctx so the
-                                    // disk-write wrapper sees ctx.incognito —
-                                    // but we DON'T want the loaded turns to
-                                    // re-append to the current session file.
-                                    // dialog_helpers.pushTurn bypasses the
-                                    // wrapper (no ctx) so the load doesn't
-                                    // duplicate to disk.
                                     dialog_helpers.pushTurn(rt, t.kind, t.content) catch {
                                         rt.allocator.free(t.content);
                                     };
@@ -1330,14 +1331,28 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         }
                     }
 
-                    // Open the inline panel so the loaded history is
-                    // visible. statusbar requirement is enforced by
-                    // the existing inline-open path.
+                    // Open the inline panel + reset session-toggle
+                    // bookkeeping (mirror llm_inline_chat_toggle:
+                    // refocus latch, height override, conclusion
+                    // auto-emit). Without this a stale override or
+                    // refocus from a previous session would leak
+                    // into the recalled panel.
                     rt.chat_inline_open = true;
                     rt.chat_inline_paint_pending = true;
                     rt.chat_focus_in_panel = true;
-                    var name_buf: [96]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&name_buf, "recalled dialog: {s}", .{newest.name}) catch "recalled dialog";
+                    rt.chat_refocus_pending = false;
+                    rt.chat_inline_rows_override = null;
+                    rt.conclusion_pending = false;
+
+                    // Distinguish a successfully-loaded dialog from a
+                    // corrupted/empty file so the user knows whether
+                    // to expect content in the panel.
+                    var name_buf: [128]u8 = undefined;
+                    const loaded_any = rt.turns_len > 0 or rt.conclusion_formatted != null;
+                    const msg = if (loaded_any)
+                        std.fmt.bufPrint(&name_buf, "recalled dialog: {s}", .{newest.name}) catch "recalled dialog"
+                    else
+                        std.fmt.bufPrint(&name_buf, "dialog {s} is empty or corrupted", .{newest.name}) catch "dialog empty or corrupted";
                     latchHint(rt, msg);
                     return true;
                 },
