@@ -941,16 +941,16 @@ test "syncFromCapture lands cursor at new EOL when prior cursor WAS at EOL" {
 
 test "syncFromCapture: mid-line GROW (paste) clamps cursor to min(prior, n) — still mid-line" {
     // Strengthens the @min(prior, n) branch beyond the shrink
-    // case. Mid-line paste: cursor at pos 4 of an 8-byte buffer;
-    // OSC 133 redraw arrives 6 bytes longer (paste inserted). The
-    // modeled cursor stays at 4 (drifts left of the physical one;
+    // case. Mid-line paste at cursor pos 4: buffer grows by 3
+    // bytes. The modeled cursor stays at 4 (drifts left of the
+    // physical cursor — which lands at 7 after the paste —
     // documented in syncFromCapture's docstring), critically
     // STAYS mid-line so ghost suppression holds. A regression
-    // that flipped the if-condition would land cursor at n=14
+    // that flipped the if-condition would land cursor at n=11
     // and cursor_moved would falsely clear.
     var l = LineState{};
-    l.syncFromCapture("ls a.txt"); // 8 bytes, cursor at 8.
-    _ = l.applyInput("\x1B[D\x1B[D\x1B[D\x1B[D"); // ← × 4 → pos 4
+    l.syncFromCapture("ls a.txt"); // 8 bytes: l s _ a . t x t — cursor at 8 (EOL).
+    _ = l.applyInput("\x1B[D\x1B[D\x1B[D\x1B[D"); // ← × 4 → pos 4 (between 'a' and '.').
     try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
     try std.testing.expect(l.cursor_moved);
 
@@ -960,9 +960,10 @@ test "syncFromCapture: mid-line GROW (paste) clamps cursor to min(prior, n) — 
     _ = l.applyInput("\x09");
     try std.testing.expect(l.uncertain);
 
-    // Bash redraws longer (paste inserted 6 bytes mid-line).
-    l.syncFromCapture("ls XYZabca.txt"); // 14 bytes
+    // Bash redraws longer (paste of "XYZ" inserted at cursor
+    // pos 4): "ls a" + "XYZ" + ".txt" = "ls aXYZ.txt" (11 bytes).
+    l.syncFromCapture("ls aXYZ.txt");
     try std.testing.expect(!l.uncertain);
-    try std.testing.expect(l.cursor_moved); // 4 != 14 → mid-line → ghost suppressed
+    try std.testing.expect(l.cursor_moved); // 4 != 11 → mid-line → ghost suppressed
     try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
 }
