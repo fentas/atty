@@ -870,3 +870,106 @@ test "setCommitted with non-empty content does not snapshot pending_author" {
     try std.testing.expectEqual(Author.user, l.committedAuthor());
     try std.testing.expectEqual(Author.llm, l.pending_author);
 }
+
+test "syncFromCapture preserves cursor when mid-line delete shrinks the buffer" {
+    // Reproduction of the user-reported "ghost re-engages after
+    // mid-line backspace" bug. Sequence:
+    //   1. Buffer matches an in-flight line ("comand tesd aaa").
+    //   2. User Arrow-Lefts back across whitespace + cursor lands
+    //      mid-line.
+    //   3. Backspace marks `uncertain` (mid-line edits aren't
+    //      modeled — the byte-level applyInput can't tell which
+    //      byte readline removed).
+    //   4. Bash's PS1 redraw triggers `syncFromCapture` with the
+    //      post-delete content shorter by one byte ("comand tes
+    //      aaa").
+    //
+    // Invariant under test: after the sync the cursor stays
+    // mid-line, `cursor_moved` stays true, ghost remains
+    // suppressed. Clamping cursor to EOL (the new len) would
+    // flip `cursor_moved` false and let ghost paint over the
+    // live characters to the cursor's right.
+    var l = LineState{};
+    // Simulate the in-flight "comand tesd aaa" state (15 bytes).
+    l.syncFromCapture("comand tesd aaa");
+    // Arrow-Left × 4 lands cursor at position 11 (between 'd' at
+    // byte[10] and ' ' at byte[11]). Left = `\x1B[D`;
+    // applyInput's modeled-CSI branch decrements cursor_pos
+    // without touching uncertain.
+    _ = l.applyInput("\x1B[D\x1B[D\x1B[D\x1B[D");
+    try std.testing.expectEqual(@as(usize, 11), l.cursor_pos);
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expect(l.cursor_moved);
+
+    // Backspace (0x7F) mid-line — readline removes the byte
+    // BEFORE the cursor (the 'd' at byte[10]). applyInput's
+    // backspace handler sees cursor_pos != len and marks
+    // uncertain (it can't model which byte readline removed).
+    _ = l.applyInput("\x7F");
+    try std.testing.expect(l.uncertain);
+    try std.testing.expect(l.cursor_moved);
+
+    // PS1 redraw delivers "comand tes aaa" — 14 bytes, 'd' gone.
+    l.syncFromCapture("comand tes aaa");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expect(l.cursor_moved); // 11 != 14 → mid-line → ghost still suppressed
+    // Modeled cursor sits at 11 (drifts 1 right of physical pos
+    // 10 where the readline cursor actually landed post-delete
+    // — documented in syncFromCapture's docstring). Harmless for
+    // ghost gating.
+    try std.testing.expectEqual(@as(usize, 11), l.cursor_pos);
+}
+
+test "syncFromCapture lands cursor at new EOL when prior cursor WAS at EOL" {
+    // Sibling of the mid-line-delete test above: when the cursor
+    // was at EOL before the sync (typical append-at-end path —
+    // tab-completion that grew the buffer, paste at the end), the
+    // new cursor lands at the new EOL. Without this branch the
+    // ghost wouldn't re-engage after a successful completion.
+    var l = LineState{};
+    l.syncFromCapture("ls "); // cursor at EOL (pos 3)
+    try std.testing.expectEqual(@as(usize, 3), l.cursor_pos);
+    try std.testing.expect(!l.cursor_moved);
+
+    // Tab keystroke (0x09) lands here — applyInput marks
+    // uncertain because Tab triggers completion, an
+    // unmodelled buffer change.
+    _ = l.applyInput("\x09");
+    try std.testing.expect(l.uncertain);
+
+    // Completion succeeded: bash redraws with "ls foo.txt"
+    // (longer; cursor at the new EOL).
+    l.syncFromCapture("ls foo.txt");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expect(!l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 10), l.cursor_pos);
+}
+
+test "syncFromCapture: mid-line GROW (paste) clamps cursor to min(prior, n) — still mid-line" {
+    // Strengthens the @min(prior, n) branch beyond the shrink
+    // case. Mid-line paste at cursor pos 4: buffer grows by 3
+    // bytes. The modeled cursor stays at 4 (drifts left of the
+    // physical cursor — which lands at 7 after the paste —
+    // documented in syncFromCapture's docstring), critically
+    // STAYS mid-line so ghost suppression holds. A regression
+    // that flipped the if-condition would land cursor at n=11
+    // and cursor_moved would falsely clear.
+    var l = LineState{};
+    l.syncFromCapture("ls a.txt"); // 8 bytes: l s _ a . t x t — cursor at 8 (EOL).
+    _ = l.applyInput("\x1B[D\x1B[D\x1B[D\x1B[D"); // ← × 4 → pos 4 (between 'a' and '.').
+    try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+
+    // Simulate a paste — applyInput would mark uncertain for an
+    // unmodelled buffer change; reuse the Tab byte for the same
+    // effect since both reach the markUncertain abort branch.
+    _ = l.applyInput("\x09");
+    try std.testing.expect(l.uncertain);
+
+    // Bash redraws longer (paste of "XYZ" inserted at cursor
+    // pos 4): "ls a" + "XYZ" + ".txt" = "ls aXYZ.txt" (11 bytes).
+    l.syncFromCapture("ls aXYZ.txt");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expect(l.cursor_moved); // 4 != 11 → mid-line → ghost suppressed
+    try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
+}
