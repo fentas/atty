@@ -80,7 +80,19 @@ pub fn resolveDir(allocator: std.mem.Allocator, explicit_dir: []const u8) ![]u8 
     defer dir_buf.deinit();
 
     if (explicit_dir.len > 0) {
-        try dir_buf.writer.writeAll(explicit_dir);
+        // Normalize to absolute — `listDialogs` uses
+        // `openDirAbsolute` which rejects relative paths. A
+        // user config supplying e.g. `dialogs/` would otherwise
+        // silently fall through to "no dialogs" + retention
+        // never running.
+        if (explicit_dir[0] == '/') {
+            try dir_buf.writer.writeAll(explicit_dir);
+        } else {
+            const home_p = getenv("HOME") orelse return allocator.dupe(u8, "");
+            const home = std.mem.span(home_p);
+            if (home.len == 0) return allocator.dupe(u8, "");
+            try dir_buf.writer.print("{s}/{s}", .{ home, explicit_dir });
+        }
     } else {
         const xdg = blk: {
             const p = getenv("XDG_STATE_HOME") orelse break :blk null;
@@ -506,15 +518,25 @@ pub fn freeDialogMetaList(allocator: std.mem.Allocator, list: []DialogMeta) void
     allocator.free(list);
 }
 
-/// List all `*.jsonl` files in `dir`, sorted newest-first.
-/// "Newest" = basename lexical descending (the file format's
-/// `YYYYMMDDTHHMMSS-XXXXXX.jsonl` shape sorts chronologically by
-/// string comparison). Skips files that don't match the shape;
-/// skips zero-byte files (unused reservations).
+/// List dialog files in `dir`, sorted newest-first.
 ///
-/// Uses `std.Io.Dir` (NOT a hand-rolled libc `struct dirent`) so
-/// the directory layout stays correct across glibc / musl /
-/// x86_64 / aarch64 — Zig handles the per-libc ABI shifts.
+/// Only filenames matching the exact `YYYYMMDDTHHMMSS-XXXXXX
+/// .jsonl` shape that `createSessionPath` emits are surfaced —
+/// stray files (e.g. a hand-pasted `notes.jsonl`) get ignored
+/// so the retention sweep never touches them. "Newest" =
+/// basename lexical descending, which equals chronological
+/// order for the timestamp-prefixed format.
+///
+/// Skips zero-byte files (unused O_EXCL reservations).
+///
+/// `dir` must be an ABSOLUTE path — `openDirAbsolute` rejects
+/// relative paths. `resolveDir` normalizes to absolute on the
+/// happy path; user configs supplying a relative
+/// `chat_persist_dir` get the normalized result.
+///
+/// Uses `std.Io.Dir` + `std.Io.File.stat` (NOT a hand-rolled
+/// libc `struct dirent`/`struct stat`) so the layouts stay
+/// correct across glibc / musl / x86_64 / aarch64.
 pub fn listDialogs(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) ![]DialogMeta {
     if (dir.len == 0) return allocator.alloc(DialogMeta, 0);
 
@@ -532,27 +554,19 @@ pub fn listDialogs(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) ![
     var it = d.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+        if (!matchesDialogStem(entry.name)) continue;
 
-        // Skip zero-byte reservations via direct open+fstat: that
-        // path is still libc-only because the rest of the module
-        // is, but the layout-fragile `struct dirent` is gone.
+        // Skip zero-byte reservations. `std.Io.File.stat` uses
+        // Zig's per-arch Stat plumbing — no manual layout
+        // assumptions. The previous direct-fstat path embedded a
+        // glibc-x86_64-specific Stat shape that misread st_size
+        // on aarch64-musl.
+        var file = d.openFile(io, entry.name, .{}) catch continue;
+        defer file.close(io);
+        const st = file.stat(io) catch continue;
+        if (st.size == 0) continue;
+
         const child_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, entry.name });
-        const child_z = try allocator.dupeZ(u8, child_path);
-        defer allocator.free(child_z);
-        const fd_check = open(child_z.ptr, O_RDONLY);
-        if (fd_check < 0) {
-            allocator.free(child_path);
-            continue;
-        }
-        var st: Stat = undefined;
-        const size_ok = fstat(fd_check, &st) == 0 and st.size > 0;
-        _ = close(fd_check);
-        if (!size_ok) {
-            allocator.free(child_path);
-            continue;
-        }
-
         const stem_len = entry.name.len - ".jsonl".len;
         const name_owned = try allocator.dupe(u8, entry.name[0..stem_len]);
         try list.append(allocator, .{ .path = child_path, .name = name_owned });
@@ -566,6 +580,28 @@ pub fn listDialogs(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) ![
 
 fn sortDialogMetaNewestFirst(_: void, a: DialogMeta, b: DialogMeta) bool {
     return std.mem.lessThan(u8, b.name, a.name);
+}
+
+/// `YYYYMMDDTHHMMSS-XXXXXX.jsonl` — 15 + 1 + 6 + 6 = 28 bytes.
+/// Locks `listDialogs` (and therefore `pruneOldest`) to the
+/// format `createSessionPath` emits, so a stray `notes.jsonl`
+/// in the same directory doesn't get sorted, recalled, or
+/// unlinked by the retention sweep.
+fn matchesDialogStem(name: []const u8) bool {
+    if (name.len != 28) return false;
+    if (!std.mem.endsWith(u8, name, ".jsonl")) return false;
+    const stem = name[0 .. name.len - ".jsonl".len];
+    if (stem.len != 22) return false;
+    // YYYYMMDDTHHMMSS — 8 digits, 'T', 6 digits.
+    for (stem[0..8]) |c| if (c < '0' or c > '9') return false;
+    if (stem[8] != 'T') return false;
+    for (stem[9..15]) |c| if (c < '0' or c > '9') return false;
+    if (stem[15] != '-') return false;
+    // 6 hex chars.
+    for (stem[16..22]) |c| {
+        if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F'))) return false;
+    }
+    return true;
 }
 
 /// Best-effort retention sweep. Drops the OLDEST entries beyond

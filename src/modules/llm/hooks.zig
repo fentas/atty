@@ -1308,15 +1308,29 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // conclusion as parseRecord classifies. Direct
                     // `dialog_helpers.pushTurn` bypasses the
                     // disk-write wrapper — load must not re-append.
+                    //
+                    // OOM aborts the load (the in-memory ring is
+                    // already in an inconsistent state — partially
+                    // loaded — but the next captureConclusion +
+                    // dialogReset rotation will clean it up).
+                    // Other parseRecord errors (JSON shape,
+                    // UnknownTurnKind) are forward-compat skips.
                     var line_start: usize = 0;
                     var i: usize = 0;
+                    var oom_during_load = false;
                     while (i <= raw.items.len) : (i += 1) {
                         if (i == raw.items.len or raw.items[i] == '\n') {
                             const line = raw.items[line_start..i];
                             line_start = i + 1;
                             const trimmed = std.mem.trimEnd(u8, line, "\r\n");
                             if (trimmed.len == 0) continue;
-                            const rec = chat_persist.parseRecord(rt.allocator, trimmed) catch continue;
+                            const rec = chat_persist.parseRecord(rt.allocator, trimmed) catch |err| switch (err) {
+                                error.OutOfMemory => {
+                                    oom_during_load = true;
+                                    break;
+                                },
+                                else => continue,
+                            };
                             switch (rec) {
                                 .turn => |t| {
                                     dialog_helpers.pushTurn(rt, t.kind, t.content) catch {
@@ -1329,6 +1343,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 },
                             }
                         }
+                    }
+                    if (oom_during_load) {
+                        latchHint(rt, "out of memory loading dialog — partial state may remain");
+                        return true;
                     }
 
                     // Open the inline panel + reset session-toggle

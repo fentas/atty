@@ -2157,8 +2157,12 @@ test "chat_recall: loads a pre-existing dialog file end-to-end" {
         "{\"kind\":\"conclusion\",\"content\":\"\u{2713} done\"}\n";
     _ = std.c.write(fd, payload.ptr, payload.len);
     _ = std.c.close(fd);
-    defer _ = std.c.unlink(dpz.ptr);
+    // Defers run LIFO — declare rmdir BEFORE unlink so unlink
+    // fires first (removes the file) and rmdir runs second
+    // (against the now-empty directory). Otherwise rmdir hits
+    // ENOTEMPTY and leaves the test dir behind.
     defer _ = std.c.rmdir(dz.ptr);
+    defer _ = std.c.unlink(dpz.ptr);
 
     const L = configure(.{
         .provider = .{ .http = .{
