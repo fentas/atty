@@ -80,6 +80,16 @@ pub enum Request {
         target_uid: Option<u32>,
     },
 
+    /// Read the daemon's latest drift snapshot. The daemon writes
+    /// `/var/lib/atty-guard/atoms.drift.json` after each successful
+    /// atom-refresh cron tick — preconditions: built with the
+    /// `atoms-fetch` cargo feature AND started with
+    /// `--atoms-update-interval` (or `--update-atoms-now`).
+    /// Without those, the snapshot will never appear and this RPC
+    /// returns `available=false`. This RPC just deserializes the
+    /// current file; no privilege check — read-only telemetry.
+    AtomsDrift,
+
     /// Append `host` to the persistent urls.decisions.txt for the
     /// target UID as an "allow" decision. EUID 0 required.
     UrlsAllow {
@@ -316,6 +326,39 @@ pub enum ResponseBody {
     /// Reply to TrustList. Sorted list of hex SHA-256 hashes
     /// from the caller's persistent `commands.trusted.txt`.
     TrustList { trust: Vec<String> },
+    /// Reply to AtomsDrift. `available` is false when the cron has
+    /// not yet written a snapshot (fresh daemon, the `atoms-fetch`
+    /// build feature is disabled, etc.); `sources` is the
+    /// per-source comparison from the latest snapshot file.
+    AtomsDrift {
+        available: bool,
+        updated_at: Option<String>,
+        sources: Vec<DriftEntry>,
+    },
+}
+
+/// Per-source drift entry. Mirrors `atom_drift::DriftSource` but
+/// owns its own serde shape so the wire surface is stable even if
+/// the on-disk JSON layout grows internal fields later.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DriftEntry {
+    pub name: String,
+    pub pinned: Option<String>,
+    pub upstream: Option<String>,
+    pub behind_since: Option<String>,
+}
+
+impl DriftEntry {
+    /// Matches `atom_drift::DriftSource::is_behind` — only true
+    /// when BOTH pinned and upstream are known and differ. Lives
+    /// here (not on DriftSource) so CLI clients can call it
+    /// without pulling in the atom_drift module.
+    pub fn is_behind(&self) -> bool {
+        matches!(
+            (&self.pinned, &self.upstream),
+            (Some(p), Some(u)) if p != u,
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

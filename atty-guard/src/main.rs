@@ -26,6 +26,7 @@
 //! - ONNX-runtime SLM (SecureBERT-class) integration in the
 //!   `classifier::tier2` slot.
 
+mod atom_drift;
 mod atom_fetcher;
 mod atom_matcher;
 mod classifier;
@@ -190,6 +191,28 @@ enum AtomsOp {
         user: bool,
         #[arg(long, conflicts_with_all = &["system", "user"])]
         session: bool,
+    },
+    /// Show the daemon's latest drift snapshot (per-source pin vs.
+    /// upstream HEAD). Read-only; no sudo required. Exits 0 when
+    /// in-sync or live-tracking, 2 when one or more sources have
+    /// drifted (so CI checks can gate on it).
+    Drift {
+        /// Emit the raw JSON snapshot instead of the human-readable
+        /// summary. Useful for scripting (jq pipelines).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Seed `/etc/atty-guard/atoms.pins.toml` from the bundled
+    /// template so the operator can edit-in-place to opt into
+    /// pinned-commit tracking. Refuses to overwrite an existing
+    /// file (rm it first if you want a clean reset). Requires sudo
+    /// because `/etc/atty-guard/` is root-owned.
+    PinInit {
+        /// Overwrite the file if it already exists. Off by default
+        /// so a casual mistype can't clobber an operator's hand-
+        /// edited pin list.
+        #[arg(long)]
+        force: bool,
     },
 }
 

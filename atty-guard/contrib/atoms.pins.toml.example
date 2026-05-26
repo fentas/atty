@@ -26,10 +26,17 @@
 # Missing per-source entries fall back to live tracking for that
 # source — partial pinning is supported.
 #
-# A follow-up release adds drift detection: the daemon will write
-# `/var/lib/atty-guard/atoms.drift.json` after each tick and
-# `atty doctor` will surface a yellow warning when your pin is N
-# commits behind upstream. Until that lands, audit by hand.
+# Drift detection (#209): after each successful refresh tick the
+# daemon writes `/var/lib/atty-guard/atoms.drift.json` with the
+# per-source pinned-vs-upstream diff. Inspect any time with:
+#
+#   atty-guard atoms drift            # human-readable summary
+#   atty-guard atoms drift --json     # raw JSON for scripting
+#
+# Exits 2 when at least one source has drifted (CI-gateable). A
+# follow-up release will add an `atty doctor` Zig-side surface that
+# turns drift into a yellow warning during health checks; until
+# then, the CLI exit code is the canonical signal.
 #
 # IMPORTANT: a file with no uncommented sections is treated as
 # "operator opted in with nothing" and rejected as a hard error.
