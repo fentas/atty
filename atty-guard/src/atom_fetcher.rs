@@ -1096,6 +1096,47 @@ mod imp {
                                 eprintln!("atty-guard: atoms.system.txt reload failed — {e}");
                             }
                         }
+                        // V2-I drift snapshot (#209): after a
+                        // successful fetch, probe each source's
+                        // current `refs/heads/master` head SHA and
+                        // diff it against the operator's pin. Read
+                        // the prior snapshot first so `behind_since`
+                        // anchors to the first observed drift, not
+                        // each tick. Best-effort; a probe failure
+                        // leaves the existing file in place.
+                        let drift_path = std::path::Path::new(
+                            crate::atom_drift::DEFAULT_DRIFT_FILE,
+                        );
+                        let prev = crate::atom_drift::read_snapshot(drift_path).ok().flatten();
+                        let snapshot = crate::atom_drift::compute_snapshot(
+                            cfg.pins.as_ref(),
+                            &sources,
+                            &cfg.user_agent,
+                            cfg.timeout,
+                            prev.as_ref(),
+                        );
+                        // Log a journald breadcrumb on drift onset
+                        // (in-sync → behind) so operators see the
+                        // signal without polling `atoms drift`. We
+                        // only log the transition, not every tick,
+                        // to keep logs quiet during a long-running
+                        // drift window.
+                        let was_behind = prev.as_ref().map(|s| s.any_behind()).unwrap_or(false);
+                        if !was_behind && snapshot.any_behind() {
+                            eprintln!(
+                                "atty-guard: atom pin drift detected — run \
+                                 `atty-guard atoms drift` for details. Bump pins in \
+                                 /etc/atty-guard/atoms.pins.toml when ready."
+                            );
+                        }
+                        if let Err(e) =
+                            crate::atom_drift::write_snapshot(drift_path, &snapshot)
+                        {
+                            eprintln!(
+                                "atty-guard: drift snapshot write failed — {e} \
+                                 (telemetry only; classifier unaffected)"
+                            );
+                        }
                     }
                     Err(e) => {
                         eprintln!("atty-guard: atom refresh failed — {e}");

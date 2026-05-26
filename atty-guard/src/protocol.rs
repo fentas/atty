@@ -80,6 +80,12 @@ pub enum Request {
         target_uid: Option<u32>,
     },
 
+    /// Read the daemon's latest drift snapshot. The daemon writes
+    /// `/var/lib/atty-guard/atoms.drift.json` after each successful
+    /// cron tick; this RPC just deserializes the current file. No
+    /// privilege check — read-only telemetry.
+    AtomsDrift,
+
     /// Append `host` to the persistent urls.decisions.txt for the
     /// target UID as an "allow" decision. EUID 0 required.
     UrlsAllow {
@@ -316,6 +322,26 @@ pub enum ResponseBody {
     /// Reply to TrustList. Sorted list of hex SHA-256 hashes
     /// from the caller's persistent `commands.trusted.txt`.
     TrustList { trust: Vec<String> },
+    /// Reply to AtomsDrift. `available` is false when the cron has
+    /// not yet written a snapshot (fresh daemon, drift-fetch
+    /// disabled, etc.); `sources` is the per-source comparison
+    /// from the latest snapshot file.
+    AtomsDrift {
+        available: bool,
+        updated_at: Option<String>,
+        sources: Vec<DriftEntry>,
+    },
+}
+
+/// Per-source drift entry. Mirrors `atom_drift::DriftSource` but
+/// owns its own serde shape so the wire surface is stable even if
+/// the on-disk JSON layout grows internal fields later.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DriftEntry {
+    pub name: String,
+    pub pinned: Option<String>,
+    pub upstream: Option<String>,
+    pub behind_since: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

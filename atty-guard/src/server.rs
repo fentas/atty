@@ -678,6 +678,32 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 },
             }
         }
+        Request::AtomsDrift => match crate::atom_drift::read_snapshot(std::path::Path::new(
+            crate::atom_drift::DEFAULT_DRIFT_FILE,
+        )) {
+            Ok(Some(snapshot)) => ResponseBody::AtomsDrift {
+                available: true,
+                updated_at: Some(snapshot.updated_at),
+                sources: snapshot
+                    .sources
+                    .into_iter()
+                    .map(|s| crate::protocol::DriftEntry {
+                        name: s.name,
+                        pinned: s.pinned,
+                        upstream: s.upstream,
+                        behind_since: s.behind_since,
+                    })
+                    .collect(),
+            },
+            Ok(None) => ResponseBody::AtomsDrift {
+                available: false,
+                updated_at: None,
+                sources: Vec::new(),
+            },
+            Err(e) => ResponseBody::Error {
+                message: format!("drift snapshot unreadable: {e}"),
+            },
+        },
         Request::UrlsAllow { host, target_uid } => {
             if !peer.is_root {
                 return require_root_error("urls allow");
