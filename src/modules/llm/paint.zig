@@ -1307,6 +1307,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     w.writeAll(prefix) catch return false;
                 }
                 const rows_used = renderTurnContentWithSkip(&w, turn, max_inline_visible, skip, budget) catch 1;
+                // 0 means countTurnRows over-counted vs md_render's
+                // actual emission (the wrap-iter heuristic
+                // over-estimates for some done envelopes). Rewind
+                // the row cursor so the blank slot is reusable
+                // instead of leaving a gap in the panel.
+                if (rows_used == 0) {
+                    // Already emitted the CUP+clear above; that's
+                    // fine — the next loop iteration overwrites
+                    // the same row via its own CUP.
+                    continue;
+                }
                 row += @intCast(rows_used);
             }
             if (rt.turns_len == 0 and scrollback_rows > 0) {

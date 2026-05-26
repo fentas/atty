@@ -1998,13 +1998,18 @@ test "inline scroll: per-row offset scrolls THROUGH a single tall turn" {
     try testing.expect(std.mem.indexOf(u8, tail.?, "P4-BOTTOM") != null);
     try testing.expect(std.mem.indexOf(u8, tail.?, "P1-TOP") == null);
 
-    // Offset 2: cut at row 2 of the turn — P1-TOP + P2-MID-A
-    // are above the cut. Header "↑ 2 below" eats 1 row of the
-    // budget, P3 + P4 scrolled off the bottom edge.
+    // Offset 2: visible_end_row=total-2=2; indicator reserves
+    // 1 row of the 2-row budget, visible_start_row=max(0,2-1)=1.
+    // Window [1, 2) — md_render.renderWithSkip(skip=1, max=1)
+    // emits exactly P2-MID-A. Bit-flip checks pin every other
+    // row absent so an off-by-one in either bound flips fails.
     rt.chat_inline_view_offset = 2;
     rt.chat_inline_paint_pending = true;
     const mid = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(mid != null);
     try testing.expect(std.mem.indexOf(u8, mid.?, "\u{2191} 2 below") != null);
+    try testing.expect(std.mem.indexOf(u8, mid.?, "P2-MID-A") != null);
+    try testing.expect(std.mem.indexOf(u8, mid.?, "P1-TOP") == null);
+    try testing.expect(std.mem.indexOf(u8, mid.?, "P3-MID-B") == null);
     try testing.expect(std.mem.indexOf(u8, mid.?, "P4-BOTTOM") == null);
 }

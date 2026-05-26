@@ -97,7 +97,14 @@ pub fn renderWithSkip(
         pending = null;
     };
     _ = try flushOrSkip(w, &pending, &emitted, &skipped, skip_rows, max_rows, cols, writeSanitizedFn, false);
-    return if (emitted == 0) 1 else emitted;
+    // When the caller asked to skip past everything (skip_rows >=
+    // available rows), return 0 so the inline-paint sweep can
+    // advance to the next turn without leaving a blank slot.
+    // The 1-row floor only applies to the no-skip path so an
+    // empty-content turn still consumes a panel row instead of
+    // collapsing onto the next turn's render.
+    if (emitted == 0 and skip_rows == 0) return 1;
+    return emitted;
 }
 
 fn flushOrSkip(
