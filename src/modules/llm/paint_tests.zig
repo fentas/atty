@@ -1030,10 +1030,11 @@ test "overlay scroll: nonzero view offset hides tail turns AND emits indicator" 
 
 test "inline scroll: nonzero inline offset windows the visible turns + emits indicator" {
     // Invariant for the inline panel: when
-    // `chat_inline_view_offset > 0` the scrollback walker must
-    // window further back (suppress recent turns) and the first
-    // scrollback row must carry the dim "↑ N more turn(s) below"
-    // header.
+    // `chat_inline_view_offset > 0` the row-window walker (per
+    // #213's per-row refactor) must drop newest content from the
+    // bottom + the first scrollback row must carry the dim
+    // "↑ N below" header. Tight 3-row budget so 3 single-row
+    // turns overflow and the offset has somewhere to scroll to.
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -1041,6 +1042,7 @@ test "inline scroll: nonzero inline offset windows the visible turns + emits ind
             .api_base_fallback_env = "ATTY_TEST_NEVER",
             .api_key_env = "ATTY_TEST_NEVER",
         } },
+        .inline_chat_rows = 5,
     });
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -1937,4 +1939,77 @@ test "inline chat: adversarial escaped `\\\"action\\\":` in reason doesn't shado
     try testing.expect(painted != null);
 
     try testing.expect(std.mem.indexOf(u8, painted.?, "TAIL-SENTINEL") != null);
+}
+
+test "inline scroll: per-row offset scrolls THROUGH a single tall turn" {
+    // Per-#213: when a single turn is taller than the visible
+    // panel, the per-row offset must walk it row-by-row. The
+    // top of the turn becomes visible as offset grows; the
+    // kind-prefix ("atty:") suppresses when row 1 of the turn
+    // is above the cut.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .inline_chat_rows = 4,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    // Single done envelope whose reason is several hard-break
+    // lines. Each line becomes one row; the panel budget (2
+    // rows after the input + divider) shows 2 at a time.
+    const envelope = "{\"reason\":\"P1-TOP\\nP2-MID-A\\nP3-MID-B\\nP4-BOTTOM\",\"action\":\"done\"}";
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // Offset 0: tail visible (P4-BOTTOM at the bottom of the panel).
+    rt.chat_inline_view_offset = 0;
+    rt.chat_inline_paint_pending = true;
+    const tail = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(tail != null);
+    try testing.expect(std.mem.indexOf(u8, tail.?, "P4-BOTTOM") != null);
+    try testing.expect(std.mem.indexOf(u8, tail.?, "P1-TOP") == null);
+
+    // Offset 2: visible_end_row=total-2=2; indicator reserves
+    // 1 row of the 2-row budget, visible_start_row=max(0,2-1)=1.
+    // Window [1, 2) — md_render.renderWithSkip(skip=1, max=1)
+    // emits exactly P2-MID-A. Bit-flip checks pin every other
+    // row absent so an off-by-one in either bound flips fails.
+    rt.chat_inline_view_offset = 2;
+    rt.chat_inline_paint_pending = true;
+    const mid = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(mid != null);
+    try testing.expect(std.mem.indexOf(u8, mid.?, "\u{2191} 2 below") != null);
+    try testing.expect(std.mem.indexOf(u8, mid.?, "P2-MID-A") != null);
+    try testing.expect(std.mem.indexOf(u8, mid.?, "P1-TOP") == null);
+    try testing.expect(std.mem.indexOf(u8, mid.?, "P3-MID-B") == null);
+    try testing.expect(std.mem.indexOf(u8, mid.?, "P4-BOTTOM") == null);
 }
