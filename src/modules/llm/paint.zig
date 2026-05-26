@@ -18,6 +18,7 @@ const pw = @import("paint_width.zig");
 const md_render = @import("md_render.zig");
 const pty_mod = @import("../../pty.zig");
 const Pty = pty_mod.Pty;
+const chat_persist = @import("chat_persist.zig");
 
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {
@@ -346,8 +347,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 aw.deinit();
                 return false;
             };
-            // Header.
-            w.writeAll("\x1B[22;1;38;5;14m  Recall a dialog\x1B[0m\r\n") catch {
+            // Header — uses the same chat mauve (38;5;141) the
+            // overlay + statusbar AI hint use so the visual
+            // vocabulary stays consistent across the LLM surfaces.
+            w.writeAll("\x1B[22;1;38;5;141m  Recall a dialog\x1B[0m\r\n") catch {
                 aw.deinit();
                 return false;
             };
@@ -1477,8 +1480,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 if (paintChatRecall(rt, ctx)) {
                     if (rt.chat_recall_buf) |slice| return slice;
                 }
+                // Paint failed — free the items list (would otherwise
+                // leak until detach), reset open state, and arm a
+                // final close-path paint so the alt-screen exit
+                // sequence still lands on the user's terminal.
                 if (rt.chat_recall_open) {
+                    if (rt.chat_recall_items.len > 0) {
+                        chat_persist.freeDialogMetaList(rt.allocator, rt.chat_recall_items);
+                        rt.chat_recall_items = &.{};
+                    }
+                    rt.chat_recall_selected_idx = 0;
                     rt.chat_recall_open = false;
+                    rt.chat_recall_paint_pending = true;
                     latchErr(rt, "recall picker render failed");
                 }
             }

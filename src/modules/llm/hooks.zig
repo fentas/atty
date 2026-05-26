@@ -748,17 +748,29 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 closeRecallPicker(rt);
                                 continue;
                             }
+                            const sel = rt.chat_recall_items[rt.chat_recall_selected_idx];
+                            const path_copy = rt.allocator.dupe(u8, sel.path) catch {
+                                latchErr(rt, "out of memory loading dialog");
+                                closeRecallPicker(rt);
+                                continue;
+                            };
+                            const name_copy = rt.allocator.dupe(u8, sel.name) catch {
+                                // Name dupe is the second alloc — path
+                                // succeeded so the load CAN proceed,
+                                // but the user-facing hint would print
+                                // a blank name without this fallback.
+                                rt.allocator.free(path_copy);
+                                latchErr(rt, "out of memory loading dialog");
+                                closeRecallPicker(rt);
+                                continue;
+                            };
                             const meta_copy = chat_persist.DialogMeta{
-                                .path = rt.allocator.dupe(u8, rt.chat_recall_items[rt.chat_recall_selected_idx].path) catch {
-                                    latchErr(rt, "out of memory loading dialog");
-                                    closeRecallPicker(rt);
-                                    continue;
-                                },
-                                .name = rt.allocator.dupe(u8, rt.chat_recall_items[rt.chat_recall_selected_idx].name) catch &.{},
+                                .path = path_copy,
+                                .name = name_copy,
                             };
                             defer {
                                 rt.allocator.free(meta_copy.path);
-                                if (meta_copy.name.len > 0) rt.allocator.free(meta_copy.name);
+                                rt.allocator.free(meta_copy.name);
                             }
                             closeRecallPicker(rt);
 
