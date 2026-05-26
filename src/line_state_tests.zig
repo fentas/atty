@@ -884,13 +884,12 @@ test "syncFromCapture preserves cursor when mid-line delete shrinks the buffer" 
     //      post-delete content shorter by one byte ("comand tes
     //      aaa").
     //
-    // Pre-fix, syncFromCapture clamped `cursor_pos = n` in the
-    // rewrite branch — flipping `cursor_moved` false so ghost
-    // re-engaged and painted suggestion text over the line.
-    // Post-fix: when the cursor wasn't at EOL before the sync,
-    // preserve the prior cursor (clamped). cursor_moved stays
-    // true → ghost stays suppressed until the user really moves
-    // the cursor back to EOL.
+    // Invariant under test: after the sync the cursor stays at
+    // the mid-line edit position (10), `cursor_moved` stays
+    // true, ghost remains suppressed. Clamping cursor to EOL
+    // (the new len) would flip `cursor_moved` false and let
+    // ghost paint over the live characters to the cursor's
+    // right.
     var l = LineState{};
     // Simulate the in-flight "comand tesd aaa" state.
     l.syncFromCapture("comand tesd aaa");
