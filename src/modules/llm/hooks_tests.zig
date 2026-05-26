@@ -2118,3 +2118,124 @@ test "chat_scroll_to_tail snaps inline_view_offset to 0 when focus is in panel" 
     try testing.expectEqual(true, try L.onAction(&rt, &ctx, .chat_scroll_to_tail));
     try testing.expectEqual(false, rt.chat_inline_paint_pending);
 }
+
+test "persistence: retained conclusion from prior dialog does NOT leak into the next session file on cancel" {
+    // Regression for Copilot's round-2 finding on PR #238:
+    // conclusion_formatted survives dialogReset (overlay recall);
+    // without the `_pending` gate, a later cancel of the NEXT
+    // dialog would re-flush the prior banner into the new file.
+    // Comptime-known dir — Zig's test runner is sequential within
+    // a process, so the fixed path is collision-safe across the
+    // 800+ tests in one run. Pre-cleanup catches stale files from
+    // a previous crash.
+    const dir: []const u8 = "/tmp/atty-pers-regress-test";
+    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dir_z);
+    // Best-effort pre-cleanup: ignore errors; if the dir doesn't
+    // exist, mkdir during attach handles it.
+    _ = std.c.rmdir(dir_z.ptr);
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .chat_persist_enabled = true,
+        .chat_persist_dir = dir,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // attach reserved file A.
+    try testing.expect(rt.chat_persist_path.len > 0);
+
+    // Simulate dialog 1's outcome AFTER the wrapper's .done flush:
+    // banner is in memory (overlay recall), but it has already been
+    // persisted — pending=false.
+    rt.conclusion_formatted = try testing.allocator.dupe(u8, "✓ done — dialog 1 banner");
+    rt.chat_persist_conclusion_pending = false;
+    rt.chat_persist_has_writes = true; // pretend turn was appended
+
+    // Manually rotate to file B (the wrapper does this on
+    // dialogReset; we skip the helper here because driving a real
+    // .done needs a worker round-trip). After the rotate the path
+    // changes and has_writes resets to false.
+    const file_b_path = blk: {
+        // Free file A's reservation (with its 0-byte file —
+        // but our manual path says writes happened, so just free).
+        testing.allocator.free(rt.chat_persist_path);
+        rt.chat_persist_path = &.{};
+        // Reserve a new one inside the same dir.
+        const chat_persist = @import("chat_persist.zig");
+        const new_path = try chat_persist.createSessionPath(testing.allocator, rt.chat_persist_dir);
+        rt.chat_persist_path = new_path;
+        rt.chat_persist_has_writes = false;
+        break :blk try testing.allocator.dupe(u8, new_path);
+    };
+    defer testing.allocator.free(file_b_path);
+
+    // Dialog 2 has work to cancel.
+    rt.dialog_persistent_mode = .dialog;
+    rt.dialog_state = .generating;
+
+    // Cancel — wrapper flushes ONLY if pending. Since we set
+    // pending=false above, file B should NOT receive a conclusion
+    // record. The cancel also rotates the path again, so we
+    // captured file_b_path beforehand.
+    _ = try L.onAction(&rt, &ctx, .llm_exec_cancel);
+
+    // Read file B and assert no conclusion record landed.
+    const file_b_z = try testing.allocator.dupeZ(u8, file_b_path);
+    defer testing.allocator.free(file_b_z);
+    defer _ = std.c.unlink(file_b_z.ptr);
+    const fd = std.c.open(file_b_z.ptr, .{ .ACCMODE = .RDONLY });
+    if (fd >= 0) {
+        defer _ = std.c.close(fd);
+        var buf: [512]u8 = undefined;
+        const n = std.c.read(fd, &buf, buf.len);
+        if (n > 0) {
+            const slice = buf[0..@as(usize, @intCast(n))];
+            try testing.expect(std.mem.indexOf(u8, slice, "\"kind\":\"conclusion\"") == null);
+        }
+        // n == 0 (empty file) is also acceptable — the dialog-2
+        // cancel unlinks the unused reservation; the open might
+        // race with that. Either way: no conclusion record.
+    }
+    // fd < 0 means dropUnusedReservation already unlinked file B
+    // (correct cancel-path behavior). Test still passes.
+
+    // Cleanup the new (third) reservation the wrapper made on
+    // rotation after the cancel.
+    if (rt.chat_persist_path.len > 0) {
+        const z = try testing.allocator.dupeZ(u8, rt.chat_persist_path);
+        defer testing.allocator.free(z);
+        _ = std.c.unlink(z.ptr);
+    }
+    // dialogReset preserves conclusion_formatted (overlay recall);
+    // shutdownAndFree doesn't free it. Drop it explicitly so the
+    // testing allocator doesn't flag a leak.
+    if (rt.conclusion_formatted) |buf| {
+        testing.allocator.free(buf);
+        rt.conclusion_formatted = null;
+    }
+
+    // Best-effort dir cleanup so subsequent test runs start clean.
+    _ = std.c.rmdir(dir_z.ptr);
+}

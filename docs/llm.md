@@ -435,11 +435,14 @@ streaming when wired up.
 
 ### Persistence — survive across sessions
 
+Each dialog session writes its own NDJSON file. Files are named `YYYYMMDDTHHMMSS-XXXXXX.jsonl` (timestamp + 6 hex chars of in-second uniqueness; uniqueness enforced via `O_CREAT|O_EXCL` retry). Turns append on every `pushTurn`; the captured conclusion banner is appended as a final `{"kind":"conclusion",...}` record when the dialog completes (`.done` → `dialogReset` rotation), with `detach` catching the rare mid-dialog-exit case. Incognito sessions (Ctrl+Shift+I) skip the disk path entirely — `incognito` gates local recording, matching the `🕶` inline-panel indicator.
+
+> **Migrating from a pre-multi-dialog atty?** If your previous build wrote `~/.local/share/atty/chat.jsonl`, that file is left untouched but no longer read. The new home is `~/.local/state/atty/dialogs/`. Move or `cat` the old NDJSON into a single dated file under the new directory if you want it surfaced by the (upcoming) recall picker.
+
 | Field                         | Default                                  | What it does                                                                          |
 |-------------------------------|------------------------------------------|---------------------------------------------------------------------------------------|
-| `chat_persist_enabled`        | `false`                                  | Master switch. Default off — chat lives in RAM only.                                  |
-| `chat_persist_path`           | `""`                                     | NDJSON file path. Empty + enabled → `${XDG_DATA_HOME}/atty/chat.jsonl` (fallback `${HOME}/.local/share/atty/chat.jsonl`); parent directory is auto-created. |
-| `chat_persist_max_bytes`      | `0`                                      | Soft cap. When the file grows past this, atty rewrites it tail-truncated at a line boundary (atomic tmp+rename) on the next append. `0` disables rotation. |
+| `chat_persist_enabled`        | `true`                                   | Master switch. Default ON — every chat session leaves an artifact on disk.            |
+| `chat_persist_dir`            | `""`                                     | Dialog archive directory. Empty + enabled → `${XDG_STATE_HOME}/atty/dialogs/` (fallback `${HOME}/.local/state/atty/dialogs/`); directory tree is auto-created (mode 0700). |
 
 ### Visual signals
 

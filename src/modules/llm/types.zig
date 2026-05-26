@@ -661,51 +661,47 @@ pub const Config = struct {
     /// Set to 0 to disable retry (revert to the pre-retry abort
     /// behaviour).
     dialog_parse_retry_max: u8 = 2,
-    /// Persist the LLM chat history to a file on disk so it
-    /// survives across atty sessions. Default OFF.
+    /// Persist each dialog session to its own NDJSON file under
+    /// `chat_persist_dir`. Default ON.
     ///
-    /// When enabled:
-    ///   • At attach: load the LAST `history_turns_max` turns from
-    ///     `chat_persist_path` into the in-memory ring (so chat
-    ///     scrollback + dialog context pick up where the previous
-    ///     session left off).
-    ///   • On every `pushTurn`: append the new turn as one NDJSON
-    ///     line to the file.
-    ///   • On `dialogReset` (`.done` / `Ctrl+Shift+X`): in-memory
-    ///     ring clears, FILE is preserved.
-    chat_persist_enabled: bool = false,
-    /// Path to the chat-history file. Used only when
-    /// `chat_persist_enabled = true`. Empty string + enabled →
-    /// atty picks `${XDG_DATA_HOME}/atty/chat.jsonl` (or
-    /// `${HOME}/.local/share/atty/chat.jsonl` if XDG isn't set).
+    /// On `attach`: resolve the directory + ATOMICALLY reserve a
+    /// unique session path via `O_CREAT|O_EXCL` — this leaves a
+    /// 0-byte file on disk until either a turn appends to it OR
+    /// the reservation gets `unlink`ed at rotation/detach time
+    /// (cancel paths with no turns DO clean themselves up). Every
+    /// `pushTurn` appends a JSONL line; every `dialogReset`
+    /// flushes a captured conclusion record, drops the unused
+    /// reservation if no record was written, and rotates to a
+    /// fresh path for the next dialog.
+    ///
+    /// Files appear as `<chat_persist_dir>/YYYYMMDDTHHMMSS-XXXXXX
+    /// .jsonl` — distinct per session so a recall picker (PR 2
+    /// follow-up) can surface them as discrete artifacts.
+    chat_persist_enabled: bool = true,
+    /// Directory holding per-session NDJSON files. Empty string +
+    /// `chat_persist_enabled = true` → atty picks
+    /// `${XDG_STATE_HOME}/atty/dialogs/` (or
+    /// `${HOME}/.local/state/atty/dialogs/` if XDG isn't set).
     ///
     /// **Tilde NOT expanded**: write the full path or use `$HOME`
-    /// at config-write time. The path is opened with `O_APPEND |
-    /// O_CREAT`; parent directories ARE created when atty owns the
-    /// default path, but a user-supplied path expects the directory
-    /// to already exist.
+    /// at config-write time. The directory tree is created with
+    /// mode 0700 on first resolve.
     ///
-    /// **File format**:
+    /// **File format** (one per session):
     /// ```
     /// {"kind":"user","content":"list zig files"}
     /// {"kind":"assistant_exec","content":"{...JSON envelope...}"}
     /// {"kind":"observation","content":"main.zig\nbuild.zig"}
+    /// {"kind":"conclusion","content":"Listed 2 zig files."}
     /// ```
-    /// One turn per line. `kind` ∈ {`user`, `assistant_exec`,
-    /// `observation`}. Unknown kinds are silently skipped on load
-    /// (forward-compat for future Turn taxonomy).
-    chat_persist_path: []const u8 = "",
-    /// Soft cap on the persistence file's size, in bytes. When the
-    /// file grows past this AND a new turn is being appended, atty
-    /// rewrites the file in place keeping only the most recent
-    /// content (tail-truncation that preserves whole NDJSON lines).
-    /// `0` (the default) disables rotation — the file grows
-    /// unbounded.
-    ///
-    /// Typical value: 8 MB (`8 * 1024 * 1024`) — about ~20k average
-    /// turns at 400 B/turn. The rotation uses a tmp+rename atomic
-    /// swap so a crash mid-rewrite leaves the original intact.
-    chat_persist_max_bytes: usize = 0,
+    /// `kind` ∈ {`user`, `assistant_exec`, `observation`,
+    /// `conclusion`}. `conclusion` is currently **write-only** —
+    /// `loadLastTurns` parses only the three turn kinds; the
+    /// recall picker (follow-up PR) extends the loader to
+    /// surface conclusion records as the "summary" preview line.
+    /// Unknown kinds are silently skipped on load (forward-compat
+    /// for future taxonomy).
+    chat_persist_dir: []const u8 = "",
     /// Inline chat panel — how many rows the panel claims above
     /// the statusbar when `Alt+C` opens it. The bottom row is the
     /// input prompt (`> _`), the rows above it scroll back through

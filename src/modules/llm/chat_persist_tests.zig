@@ -28,11 +28,12 @@ const O_APPEND: c_int = 0o2000;
 
 // Re-binds of pub decls so test bodies stay short.
 const appendTurn = mod.appendTurn;
+const appendConclusion = mod.appendConclusion;
 const LoadedTurn = mod.LoadedTurn;
 const loadLastTurns = mod.loadLastTurns;
 const parseLine = mod.parseLine;
-const resolvePath = mod.resolvePath;
-const rotateIfExceeded = mod.rotateIfExceeded;
+const resolveDir = mod.resolveDir;
+const createSessionPath = mod.createSessionPath;
 
 test "parseLine: user turn round-trips through JSON" {
     const line = "{\"kind\":\"user\",\"content\":\"list files\"}";
@@ -264,62 +265,126 @@ test "loadLastTurns: caps at max_turns (keeps newest)" {
     try testing.expectEqualStrings("t5", loaded.items[2].content);
 }
 
-test "rotateIfExceeded: trims to keep_bytes worth of whole lines" {
+test "appendConclusion: lands AFTER appendTurn (tail position pinned)" {
     var name_buf: [64]u8 = undefined;
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
-    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-rotate-{x}.jsonl", .{seed});
+    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-conclude-{x}.jsonl", .{seed});
     const name_z = try testing.allocator.dupeZ(u8, name);
     defer testing.allocator.free(name_z);
     defer _ = std.c.unlink(name_z.ptr);
 
-    // Write 10 turns. Each NDJSON line is roughly 40 bytes
-    // (`{"kind":"user","content":"tN"}\n`).
-    var i: u8 = 0;
-    while (i < 10) : (i += 1) {
-        var content_buf: [4]u8 = undefined;
-        const c = std.fmt.bufPrint(&content_buf, "t{d:0>2}", .{i}) catch unreachable;
-        _ = appendTurn(testing.allocator, name, .user, c);
-    }
+    try testing.expect(appendTurn(testing.allocator, name, .user, "list zig files"));
+    try testing.expect(appendConclusion(testing.allocator, name, "Listed 2 zig files."));
 
-    // Rotate to keep ~200 bytes — should drop the oldest entries.
-    const rotated = rotateIfExceeded(testing.allocator, name, 200);
-    try testing.expect(rotated);
-
-    var loaded = try loadLastTurns(testing.allocator, name, 100, 1 << 20);
-    defer {
-        for (loaded.items) |t| testing.allocator.free(t.content);
-        loaded.deinit(testing.allocator);
-    }
-    // Expect fewer than 10 turns and the newest (t09) to be the
-    // last one. The boundary is "first whole line at or after
-    // (cur_size - keep_bytes)" — exact count depends on byte
-    // layout, so we assert the bound + newest-preserved invariant.
-    try testing.expect(loaded.items.len > 0);
-    try testing.expect(loaded.items.len < 10);
-    try testing.expectEqualStrings("t09", loaded.items[loaded.items.len - 1].content);
+    const fd = std.c.open(name_z.ptr, .{ .ACCMODE = .RDONLY });
+    try testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    var buf: [512]u8 = undefined;
+    const n = std.c.read(fd, &buf, buf.len);
+    try testing.expect(n > 0);
+    const slice = buf[0..@as(usize, @intCast(n))];
+    // Pin ORDER, not just presence: user record must precede the
+    // conclusion record (the conclusion appends — never inserts).
+    const user_at = std.mem.indexOf(u8, slice, "\"kind\":\"user\"") orelse return error.UserRecordMissing;
+    const concl_at = std.mem.indexOf(u8, slice, "\"kind\":\"conclusion\"") orelse return error.ConclusionMissing;
+    try testing.expect(user_at < concl_at);
+    try testing.expect(std.mem.indexOf(u8, slice, "Listed 2 zig files.") != null);
 }
 
-test "rotateIfExceeded: no-op when file size <= keep_bytes" {
+test "resolveDir: explicit dir is returned verbatim AND mkdir-p actually ran" {
     var name_buf: [64]u8 = undefined;
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec)) +% 17;
-    const name = try std.fmt.bufPrint(&name_buf, "/tmp/atty-chat-rotate-noop-{x}.jsonl", .{seed});
-    const name_z = try testing.allocator.dupeZ(u8, name);
-    defer testing.allocator.free(name_z);
-    defer _ = std.c.unlink(name_z.ptr);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-resolveDir-{x}", .{seed});
 
-    _ = appendTurn(testing.allocator, name, .user, "short");
-    // Cap is generous; nothing to do.
-    try testing.expect(!rotateIfExceeded(testing.allocator, name, 1 << 20));
+    const got = try resolveDir(testing.allocator, dir);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(dir, got);
+
+    // Cleanup; rmdir returns 0 ONLY when the dir actually exists and
+    // is empty — pins that resolveDir performed the mkdir.
+    const z = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(z);
+    try testing.expectEqual(@as(c_int, 0), std.c.rmdir(z.ptr));
 }
 
-test "resolvePath: explicit path is returned verbatim" {
-    const path = try resolvePath(testing.allocator, "/tmp/explicit-test.jsonl");
+test "resolveDir: missing-and-uncreatable dir surfaces an error" {
+    // Try to create a subdir under a non-traversable path. /proc/1
+    // exists but is owned by root + non-traversable to regular users;
+    // mkdir under it fails EACCES, the final stat fails ENOENT, and
+    // resolveDir must surface that — silent success here is what the
+    // High finding caught.
+    const got = resolveDir(testing.allocator, "/proc/1/atty-cannot-create");
+    try testing.expectError(error.PersistenceDirUnavailable, got);
+}
+
+test "createSessionPath: timestamp + suffix shape AND reserves the file via O_EXCL" {
+    var name_buf: [64]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-create-sess-{x}", .{seed});
+    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dir_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir_z.ptr, 0o700));
+    defer _ = std.c.rmdir(dir_z.ptr);
+
+    const path = try createSessionPath(testing.allocator, dir);
     defer testing.allocator.free(path);
-    try testing.expectEqualStrings("/tmp/explicit-test.jsonl", path);
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    try testing.expect(std.mem.startsWith(u8, path, dir));
+    try testing.expect(std.mem.endsWith(u8, path, ".jsonl"));
+    const stem_start = dir.len + 1;
+    const stem_end = path.len - ".jsonl".len;
+    const stem = path[stem_start..stem_end];
+    // YYYYMMDDTHHMMSS = 15 chars, '-' = 1, 6 hex chars = 6 → 22.
+    try testing.expectEqual(@as(usize, 22), stem.len);
+    try testing.expectEqual(@as(u8, 'T'), stem[8]);
+    try testing.expectEqual(@as(u8, '-'), stem[15]);
+
+    // The file MUST exist on disk: createSessionPath's contract is
+    // atomic reservation via O_EXCL, not just path-string generation.
+    const verify_fd = std.c.open(path_z.ptr, .{ .ACCMODE = .RDONLY });
+    try testing.expect(verify_fd >= 0);
+    _ = std.c.close(verify_fd);
+}
+
+test "createSessionPath: two back-to-back calls produce distinct paths (no overwrite)" {
+    var name_buf: [64]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-create-sess-distinct-{x}", .{seed});
+    const dir_z = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dir_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir_z.ptr, 0o700));
+    defer _ = std.c.rmdir(dir_z.ptr);
+
+    const a = try createSessionPath(testing.allocator, dir);
+    defer testing.allocator.free(a);
+    const az = try testing.allocator.dupeZ(u8, a);
+    defer testing.allocator.free(az);
+    defer _ = std.c.unlink(az.ptr);
+
+    const b = try createSessionPath(testing.allocator, dir);
+    defer testing.allocator.free(b);
+    const bz = try testing.allocator.dupeZ(u8, b);
+    defer testing.allocator.free(bz);
+    defer _ = std.c.unlink(bz.ptr);
+
+    try testing.expect(!std.mem.eql(u8, a, b));
+}
+
+test "createSessionPath: empty dir returns empty path (no file created)" {
+    const path = try createSessionPath(testing.allocator, "");
+    defer testing.allocator.free(path);
+    try testing.expectEqual(@as(usize, 0), path.len);
 }
 
 test "loadLastTurns: skips malformed lines (forward-compat)" {

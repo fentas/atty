@@ -1,33 +1,31 @@
-//! Chat-history persistence — NDJSON load/append.
+//! Chat-history persistence — NDJSON, one file per dialog session.
 //!
-//! When `cfg.chat_persist_path` is set, atty loads the last N turns
-//! from the file at attach AND appends every new turn to it. The
-//! file format is one JSON object per line:
+//! Each atty session that opens a chat surface gets its own
+//! timestamped file under `${XDG_STATE_HOME:-~/.local/state}/atty/
+//! dialogs/`. Every `pushTurn` appends one JSON line; on dialog
+//! close the conclusion banner is appended as a final record:
 //!
 //!     {"kind":"user","content":"list zig files"}
 //!     {"kind":"assistant_exec","content":"{...}"}
 //!     {"kind":"observation","content":"main.zig\nbuild.zig"}
+//!     {"kind":"conclusion","content":"Listed 2 zig files."}
 //!
-//! Two design choices worth flagging:
+//! Design choices:
 //!
-//! 1. **Append-only with no rotation.** Atty doesn't try to cap the
-//!    file. The user is responsible for managing growth (logrotate,
-//!    periodic truncation, a separate per-session file). Atty only
-//!    reads the tail at startup, so a multi-GB file is fine at
-//!    runtime — just slow to attach.
+//! 1. **One file per session.** A picker (future PR) needs distinct
+//!    artifacts to surface; rolling-history-in-one-file foreclosed
+//!    that UX. Per-file means O(N) directory entries — see the
+//!    retention sweep on the picker side.
 //!
-//! 2. **No content escaping beyond what JSON requires.** Atty uses
-//!    `std.json.Stringify.encodeJsonString` on write and the standard
-//!    parser on read. Multi-line content (assistant envelopes,
-//!    observation output) round-trips through the JSON string
-//!    encoding cleanly.
+//! 2. **No content escaping beyond what JSON requires.** Write via
+//!    `std.json.Stringify.encodeJsonString`, read via the standard
+//!    parser. Multi-line content round-trips cleanly.
 //!
-//! 3. **`rt.session_id` is intentionally NOT persisted.** Native
-//!    CLI session continuation (`--resume <id>`) is per-process —
-//!    the CLI may garbage-collect ids between atty runs, and a
-//!    stale id from a prior session would either error or resume
-//!    state the user doesn't remember. Restart begins a fresh CLI
-//!    session even though the chat ring loads prior turns.
+//! 3. **`rt.session_id` (provider-side) is intentionally NOT
+//!    persisted.** Provider CLIs garbage-collect ids between runs;
+//!    a stale id would error or resume state the user doesn't
+//!    remember. Restart begins a fresh provider session even when
+//!    the chat ring loads prior turns.
 
 const std = @import("std");
 
@@ -39,10 +37,15 @@ extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
-extern "c" fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) c_int;
+extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+extern "c" fn getpid() c_int;
+extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
+const CLOCK_REALTIME: c_int = 0;
+const O_EXCL: c_int = 0o200;
+const O_DIRECTORY: c_int = 0o200000;
 
 const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;
@@ -51,114 +54,138 @@ const O_APPEND: c_int = 0o2000;
 const FILE_MODE: c_int = 0o600;
 const DIR_MODE: c_uint = 0o700;
 
-// Minimal stat struct — we only need st_size. Layout matches Linux's
-// `struct stat` (the kernel definition; libc passes it through). On
-// non-Linux this would need to be revisited; atty is Linux-only.
+// glibc x86_64 `struct stat` — we only need `size` for
+// `loadLastTurns`'s tail seek. The 48-byte pad matches the
+// offset of `st_size` in this libc/arch combo. Dir validation
+// uses `open(O_RDONLY|O_DIRECTORY)` instead of stat to dodge
+// the per-arch layout drift entirely (mode lives at a
+// different offset on aarch64 vs x86_64).
 const Stat = extern struct {
     _pad: [48]u8,
     size: i64,
     _pad2: [80]u8,
 };
 
-/// Resolve the persistence file path. Returns owned memory.
+/// Resolve the dialogs directory. Returns owned memory; creates
+/// the directory tree on disk (mode 0700) so later opens succeed.
 ///
-///   • `explicit_path` non-empty → use verbatim (no tilde expansion).
-///   • `explicit_path` empty → derive `${XDG_DATA_HOME}/atty/chat.jsonl`,
-///     falling back to `${HOME}/.local/share/atty/chat.jsonl`. Creates
-///     the parent directory (mode 0700) so the first append succeeds.
+///   • `explicit_dir` non-empty → use verbatim (no tilde expansion).
+///   • `explicit_dir` empty → derive `${XDG_STATE_HOME}/atty/dialogs`,
+///     falling back to `${HOME}/.local/state/atty/dialogs`.
 ///
-/// Returns an empty slice when neither XDG_DATA_HOME nor HOME is set.
-pub fn resolvePath(allocator: std.mem.Allocator, explicit_path: []const u8) ![]u8 {
-    if (explicit_path.len > 0) return allocator.dupe(u8, explicit_path);
-
-    const xdg = blk: {
-        const p = getenv("XDG_DATA_HOME") orelse break :blk null;
-        const s = std.mem.span(p);
-        if (s.len == 0) break :blk null;
-        break :blk s;
-    };
+/// Returns an empty slice when neither XDG_STATE_HOME nor HOME is
+/// set (caller treats as "persistence unavailable").
+pub fn resolveDir(allocator: std.mem.Allocator, explicit_dir: []const u8) ![]u8 {
     var dir_buf: std.Io.Writer.Allocating = .init(allocator);
     defer dir_buf.deinit();
-    if (xdg) |x| {
-        try dir_buf.writer.print("{s}/atty", .{x});
+
+    if (explicit_dir.len > 0) {
+        try dir_buf.writer.writeAll(explicit_dir);
     } else {
-        const home_p = getenv("HOME") orelse return allocator.dupe(u8, "");
-        const home = std.mem.span(home_p);
-        if (home.len == 0) return allocator.dupe(u8, "");
-        try dir_buf.writer.print("{s}/.local/share/atty", .{home});
+        const xdg = blk: {
+            const p = getenv("XDG_STATE_HOME") orelse break :blk null;
+            const s = std.mem.span(p);
+            if (s.len == 0) break :blk null;
+            break :blk s;
+        };
+        if (xdg) |x| {
+            try dir_buf.writer.print("{s}/atty/dialogs", .{x});
+        } else {
+            const home_p = getenv("HOME") orelse return allocator.dupe(u8, "");
+            const home = std.mem.span(home_p);
+            if (home.len == 0) return allocator.dupe(u8, "");
+            try dir_buf.writer.print("{s}/.local/state/atty/dialogs", .{home});
+        }
     }
     const dir = dir_buf.written();
 
-    // Create the directory tree (idempotent; ignore EEXIST).
+    // mkdir -p the path one segment at a time so the parents exist.
+    // Single-pass (no per-segment retry on EEXIST): a fresh mkdir
+    // failing for any reason other than "already exists" surfaces
+    // via the final stat check below.
+    var i: usize = 1;
+    while (i <= dir.len) : (i += 1) {
+        if (i == dir.len or dir[i] == '/') {
+            const seg = try allocator.dupeZ(u8, dir[0..i]);
+            defer allocator.free(seg);
+            _ = mkdir(seg.ptr, DIR_MODE);
+        }
+    }
+
+    // Verify the final segment actually exists AND is a directory.
+    // Probing via open(O_DIRECTORY) instead of stat() because the
+    // `struct stat` layout drifts across libc + arch combos (mode
+    // at offset 24 on x86_64, offset 16 on aarch64-musl), and we
+    // don't want a release binary to silently mis-decode the type
+    // bits and disable persistence. O_DIRECTORY's contract is
+    // kernel-level: success ↔ path is a directory; ENOTDIR ↔ not
+    // a dir; ENOENT / EACCES ↔ doesn't exist or unreachable.
     const dir_z = try allocator.dupeZ(u8, dir);
     defer allocator.free(dir_z);
-    _ = mkdir(dir_z.ptr, DIR_MODE);
+    const probe = open(dir_z.ptr, O_RDONLY | O_DIRECTORY);
+    if (probe < 0) return error.PersistenceDirUnavailable;
+    _ = close(probe);
 
-    return std.fmt.allocPrint(allocator, "{s}/chat.jsonl", .{dir});
+    return allocator.dupe(u8, dir);
 }
 
-/// Truncate the persistence file to its newest content, keeping at
-/// most `keep_bytes` worth of full NDJSON lines. Atomic via
-/// tmp+rename so a crash mid-rotation can't corrupt the file.
-/// Caller invokes BEFORE appending the next line.
-///
-/// Best-effort: any error (file missing, rename fails) is swallowed
-/// — the worst case is the file growing past the cap for another
-/// turn until the next call. Returns true when rotation actually
-/// ran (file exceeded the cap AND truncation succeeded).
-pub fn rotateIfExceeded(allocator: std.mem.Allocator, path: []const u8, keep_bytes: usize) bool {
-    if (path.len == 0 or keep_bytes == 0) return false;
-    const path_z = allocator.dupeZ(u8, path) catch return false;
-    defer allocator.free(path_z);
+/// Reserve a fresh per-session file path inside `dir` by
+/// creating an empty file with `O_CREAT|O_EXCL`. Format:
+/// `<dir>/YYYYMMDDTHHMMSS-<suffix>.jsonl`. The suffix mixes
+/// nanoseconds with pid for an initial guess, then retries
+/// (up to 64 times) on EEXIST by tweaking the suffix — that
+/// closes the two-atty-processes-collide-on-(ns,pid) window
+/// completely. Trade-off: every session leaves an artifact on
+/// disk, even ones that never push a turn. Worth it for the
+/// no-overwrite guarantee.
+pub fn createSessionPath(allocator: std.mem.Allocator, dir: []const u8) ![]u8 {
+    if (dir.len == 0) return allocator.dupe(u8, "");
+    var ts: std.posix.timespec = undefined;
+    _ = clock_gettime(CLOCK_REALTIME, &ts);
+    const epoch_secs: u64 = if (ts.sec > 0) @intCast(ts.sec) else 0;
+    const ep = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const yd = ep.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = ep.getDaySeconds();
+    const ns: u64 = if (ts.nsec > 0) @intCast(ts.nsec) else 0;
+    const pid: u32 = @bitCast(getpid());
 
-    // Check current size — open + fstat.
-    const fd_r = open(path_z.ptr, O_RDONLY);
-    if (fd_r < 0) return false;
-    var st: Stat = undefined;
-    if (fstat(fd_r, &st) != 0) {
-        _ = close(fd_r);
-        return false;
+    var attempt: u32 = 0;
+    while (attempt < 64) : (attempt += 1) {
+        const mix: u32 = @as(u32, @truncate(ns)) ^ pid ^ attempt;
+        const r0: u8 = @truncate(mix >> 16);
+        const r1: u8 = @truncate(mix >> 8);
+        const r2: u8 = @truncate(mix);
+        const candidate = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}-{x:0>2}{x:0>2}{x:0>2}.jsonl",
+            .{
+                dir,
+                @as(u16, yd.year),
+                md.month.numeric(),
+                md.day_index + 1,
+                ds.getHoursIntoDay(),
+                ds.getMinutesIntoHour(),
+                ds.getSecondsIntoMinute(),
+                r0,
+                r1,
+                r2,
+            },
+        );
+        errdefer allocator.free(candidate);
+
+        const cz = try allocator.dupeZ(u8, candidate);
+        defer allocator.free(cz);
+        const fd = open(cz.ptr, O_WRONLY | O_CREAT | O_EXCL, FILE_MODE);
+        if (fd >= 0) {
+            _ = close(fd);
+            return candidate;
+        }
+        // open failed — most likely EEXIST. Free this attempt and
+        // try the next suffix.
+        allocator.free(candidate);
     }
-    const cur_size: usize = if (st.size > 0) @intCast(st.size) else 0;
-    if (cur_size <= keep_bytes) {
-        _ = close(fd_r);
-        return false;
-    }
-
-    // Seek to the keep window, read forward to find the first \n
-    // (so we keep WHOLE lines), then read the rest into memory and
-    // rewrite the file.
-    const start_off: i64 = @intCast(cur_size - keep_bytes);
-    _ = lseek(fd_r, start_off, 0); // SEEK_SET = 0
-    var tail: std.ArrayList(u8) = .empty;
-    defer tail.deinit(allocator);
-    var chunk: [16 * 1024]u8 = undefined;
-    while (true) {
-        const got = read(fd_r, &chunk, chunk.len);
-        if (got <= 0) break;
-        tail.appendSlice(allocator, chunk[0..@as(usize, @intCast(got))]) catch {
-            _ = close(fd_r);
-            return false;
-        };
-    }
-    _ = close(fd_r);
-
-    // Drop everything up to the first \n to ensure we start at a
-    // full-line boundary.
-    const trim_at = std.mem.indexOfScalar(u8, tail.items, '\n');
-    const kept: []const u8 = if (trim_at) |i| tail.items[i + 1 ..] else &.{};
-
-    // Atomic rewrite: write to tmp, fsync (best-effort), rename.
-    const tmp_path = std.fmt.allocPrint(allocator, "{s}.atty-tmp", .{path}) catch return false;
-    defer allocator.free(tmp_path);
-    const tmp_z = allocator.dupeZ(u8, tmp_path) catch return false;
-    defer allocator.free(tmp_z);
-    const fd_w = open(tmp_z.ptr, O_WRONLY | O_CREAT | 0o1000, FILE_MODE); // 0o1000 = O_TRUNC
-    if (fd_w < 0) return false;
-    const wn = write(fd_w, kept.ptr, kept.len);
-    _ = close(fd_w);
-    if (wn != @as(isize, @intCast(kept.len))) return false;
-    return rename(tmp_z.ptr, path_z.ptr) == 0;
+    return error.PersistencePathCollision;
 }
 
 /// Append one turn to the file as a single NDJSON line. Best-effort:
@@ -167,6 +194,18 @@ pub fn rotateIfExceeded(allocator: std.mem.Allocator, path: []const u8, keep_byt
 /// success so callers can log when they care.
 pub fn appendTurn(allocator: std.mem.Allocator, path: []const u8, kind: dialog.TurnKind, content: []const u8) bool {
     if (path.len == 0) return false;
+    return appendRecord(allocator, path, turnKindStr(kind), content);
+}
+
+/// Append a final `kind:"conclusion"` record. Called once per dialog
+/// when the conclusion banner has been captured. Same best-effort
+/// semantics as appendTurn.
+pub fn appendConclusion(allocator: std.mem.Allocator, path: []const u8, text: []const u8) bool {
+    if (path.len == 0) return false;
+    return appendRecord(allocator, path, "conclusion", text);
+}
+
+fn appendRecord(allocator: std.mem.Allocator, path: []const u8, kind_str: []const u8, content: []const u8) bool {
     const path_z = allocator.dupeZ(u8, path) catch return false;
     defer allocator.free(path_z);
 
@@ -178,11 +217,6 @@ pub fn appendTurn(allocator: std.mem.Allocator, path: []const u8, kind: dialog.T
     defer buf.deinit();
     const w = &buf.writer;
 
-    const kind_str: []const u8 = switch (kind) {
-        .user => "user",
-        .assistant_exec => "assistant_exec",
-        .observation => "observation",
-    };
     w.writeAll("{\"kind\":\"") catch return false;
     w.writeAll(kind_str) catch return false;
     w.writeAll("\",\"content\":") catch return false;
@@ -194,11 +228,30 @@ pub fn appendTurn(allocator: std.mem.Allocator, path: []const u8, kind: dialog.T
     return n == @as(isize, @intCast(bytes.len));
 }
 
+fn turnKindStr(kind: dialog.TurnKind) []const u8 {
+    return switch (kind) {
+        .user => "user",
+        .assistant_exec => "assistant_exec",
+        .observation => "observation",
+    };
+}
+
+/// Best-effort `unlink(2)` on a null-terminated path. Used by the
+/// detach + dialog-rotation paths to drop unused 0-byte session
+/// reservations. Failures are silent — the only consequence is a
+/// stale 0-byte file the user (or PR 2's retention sweep) sweeps later.
+pub fn unlinkPath(path_z: [*:0]const u8) c_int {
+    return unlink(path_z);
+}
+
 /// Load the LAST `max_turns` turns from `path`. Returns the turns
 /// in original order (oldest first) so the caller can pushTurn them
 /// directly. Caller owns each returned slice + the outer ArrayList
 /// (allocated via `allocator`). Returns an empty list when the file
 /// is missing / unreadable / empty.
+///
+/// Reserved for the recall picker landing in a follow-up PR — no
+/// production caller invokes this in the per-dialog-file design.
 ///
 /// Implementation: when the file is larger than `max_bytes`, seek
 /// to `size - max_bytes` and discard the (necessarily-partial)
@@ -239,10 +292,10 @@ pub fn loadLastTurns(
     // The head-read is exactly the bug we're fixing; silently
     // re-introducing it on a syscall failure would be a worse
     // failure mode than "no history loaded".
-    var stat: Stat = undefined;
+    var st_info: Stat = undefined;
     var skip_partial_line = false;
-    if (fstat(fd, &stat) == 0) {
-        const size: u64 = if (stat.size > 0) @intCast(stat.size) else 0;
+    if (fstat(fd, &st_info) == 0) {
+        const size: u64 = if (st_info.size > 0) @intCast(st_info.size) else 0;
         if (size > max_bytes) {
             const off: i64 = @intCast(size - max_bytes);
             // Peek the byte at `off - 1` to detect whether the

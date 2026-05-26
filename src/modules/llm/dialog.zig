@@ -1075,6 +1075,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const used = w.end;
             if (rt.allocator.realloc(buf, used)) |shrunk| {
                 rt.conclusion_formatted = shrunk;
+                // Mark the banner as needs-persisting so the
+                // dialogReset wrapper appendConclusion-s it exactly
+                // once. Without this, a retained banner from a
+                // PREVIOUS dialog could leak into the current
+                // dialog's session file on cancel/abort.
+                if (comptime @hasField(Runtime, "chat_persist_conclusion_pending")) {
+                    rt.chat_persist_conclusion_pending = true;
+                }
             } else |_| {
                 rt.allocator.free(buf);
                 const msg = "atty: captureConclusion realloc failed — banner skipped\n";

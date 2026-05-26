@@ -157,17 +157,12 @@ const atty = @import("atty");
 //         //                           // incognito mode (Ctrl+Shift+I).
 //         // .inline_chat_rows = 10,   // Alt+C panel height in rows (>=3)
 //         // .chat_persist_enabled = true,
-//         //                           // Persist chat history across atty
-//         //                           // sessions. NDJSON, one turn/line.
-//         // .chat_persist_path = "",  // Empty → atty picks
-//         //                           // $XDG_DATA_HOME/atty/chat.jsonl
-//         //                           // (fallback $HOME/.local/share/atty/).
-//         //                           // Override for per-project log files.
-//         // .chat_persist_max_bytes = 8 * 1024 * 1024,
-//         //                           // Soft cap. When exceeded atty
-//         //                           // tail-truncates at a line boundary
-//         //                           // on the next append (atomic
-//         //                           // tmp+rename). 0 = no cap.
+//         //                           // Persist each dialog to its own
+//         //                           // NDJSON file. ON by default.
+//         // .chat_persist_dir = "",   // Empty → atty picks
+//         //                           // $XDG_STATE_HOME/atty/dialogs/
+//         //                           // (fallback $HOME/.local/state/atty/).
+//         //                           // Override for per-project archives.
 //     }),
 // };
 
