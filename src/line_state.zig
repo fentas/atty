@@ -263,14 +263,20 @@ pub const LineState = struct {
         // OSC 133 carries content but not cursor position. Two cases:
         //   1. Cursor was at EOL before the change (typical append-
         //      at-end like typing or tab-completion that grew the
-        //      buffer). New cursor lands at the new EOL.
+        //      buffer, or Ctrl+W from end shrinking it). New cursor
+        //      lands at the new EOL.
         //   2. Cursor was mid-line (Arrow-Left × N → backspace or
         //      Delete or mid-line paste). The redraw moves chars but
         //      the cursor stays at the edit position. Clamping to
         //      EOL here lets `cursor_moved` flip false → ghost
         //      re-engages and paints over the text-to-right.
-        //      Preserve the prior cursor, clamped into the new
-        //      range. Best we can do without a DSR-6n reply.
+        //      Preserve the prior cursor, clamped into the new range.
+        //
+        // Mid-line GROW (e.g. paste) drifts the modeled cursor
+        // `len_grew` bytes left of the physical cursor — bash put it
+        // after the pasted text. Harmless for ghost gating because
+        // both positions land mid-line (cursor_moved stays true).
+        // The next applyInput cursor-motion CSI re-syncs.
         self.cursor_pos = if (cursor_was_at_eol) n else @min(prior_cursor, n);
         self.syncCursorMoved();
         self.generation +%= 1;
