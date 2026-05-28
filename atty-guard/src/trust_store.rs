@@ -1139,13 +1139,18 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
         pid,
         seq,
     ));
-    // `create_new(true)` refuses to follow an attacker-pre-created
-    // symlink at the tmp path AND surfaces a hard error if our own
-    // counter collides (it can't — `AtomicU64::fetch_add` is
-    // monotonic per process — but the assertion is free). On error
-    // a stale tmp from a crashed prior run would NOT pass through
-    // since the counter advances every call; the worst case is
-    // disk cruft, never a corrupted target.
+    // `create_new(true)` is the real guard here. It refuses to:
+    //   - follow an attacker-pre-created symlink at the tmp path,
+    //   - clobber a stale `<file>.tmp.<pid>.<seq>` left by a
+    //     crashed prior daemon if the OS happens to recycle our
+    //     PID into a new daemon process (Linux pid_max is bounded;
+    //     wrap is rare but possible after long uptime).
+    // The per-process counter advances every call so two threads
+    // in the SAME daemon process can't pick the same `<seq>`.
+    // The combination (PID + per-process counter + create_new) is
+    // collision-proof from atty-guard's side; the only remaining
+    // window is the PID-recycle case above, which create_new
+    // surfaces as a hard EEXIST instead of silent data loss.
     {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
