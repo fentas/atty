@@ -38,15 +38,32 @@ pub trait Tier2Backend: Send + Sync {
     fn classify(&self, command: &str, hint_offset: Option<usize>) -> Option<ClassifyResult>;
 }
 
-/// Backend selector. `Onnx` is feature-gated; constructing it with
-/// `--features tier2-onnx` off OR with a misconfigured model path
-/// falls back to `Stub` with a startup log line.
+/// Backend selector. `Onnx` is feature-gated. Two construction
+/// paths exist:
+///   * `try_new_with_backend` — fallible. Returns
+///     `Err(onnx_backend::LoadError)` when an explicit operator
+///     request (CLI/config) can't be honored. main.rs uses this
+///     for explicit selections so `--tier2 onnx` against a binary
+///     built without the feature (or with a missing model file)
+///     exits non-zero rather than silently serving Stub under an
+///     `tier2=onnx` log line.
+///   * `new_with_backend` — best-effort. Logs + falls back to
+///     Stub on ONNX load failure. Used by the default
+///     (operator didn't request anything) path and by tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     Stub,
     Heuristic,
     Onnx,
 }
+
+/// Re-export `onnx_backend::LoadError` so callers of
+/// `try_new_with_backend` don't need to depend on
+/// `onnx_backend` directly. The error already covers every
+/// failure mode that can come out of backend construction
+/// (`FeatureNotBuilt` / `ModelMissing` / `TokenizerMissing` /
+/// `InitFailed`); no need for a wrapper enum.
+pub use crate::onnx_backend::LoadError;
 
 impl BackendKind {
     pub fn parse(s: &str) -> Option<BackendKind> {
@@ -128,7 +145,18 @@ impl Classifier {
         Self::new_with_backend(BackendKind::Stub, &crate::config::OnnxConfig::default())
     }
 
-    pub fn new_with_backend(kind: BackendKind, onnx_cfg: &crate::config::OnnxConfig) -> Self {
+    /// Fallible constructor — returns `Err(LoadError)` when the
+    /// requested backend can't be loaded. Use this for paths where
+    /// the operator EXPLICITLY chose the backend (CLI flag or
+    /// config-file `[tier2] backend = ...`); a silent fallback to
+    /// Stub there would lie about the security policy the operator
+    /// asked for. The default-backend path uses `new_with_backend`
+    /// instead so a missing model file doesn't refuse to start
+    /// when no explicit choice was made.
+    pub fn try_new_with_backend(
+        kind: BackendKind,
+        onnx_cfg: &crate::config::OnnxConfig,
+    ) -> Result<Self, LoadError> {
         let tier2: Box<dyn Tier2Backend> = match kind {
             BackendKind::Stub => Box::new(StubBackend),
             BackendKind::Heuristic => Box::new(HeuristicBackend::new()),
@@ -137,16 +165,35 @@ impl Classifier {
                 Ok(b) => Box::new(b),
                 #[cfg(not(feature = "tier2-onnx"))]
                 Ok(_) => unreachable!("OnnxBackend::open is Err in non-feature builds"),
-                Err(e) => {
-                    eprintln!("atty-guard: ONNX backend unavailable ({e}) — falling back to Stub");
-                    Box::new(StubBackend)
-                }
+                Err(e) => return Err(e),
             },
         };
-        Self {
+        Ok(Self {
             tier1: Tier1::new(),
             tier2,
             block_threshold: None,
+        })
+    }
+
+    /// Best-effort constructor — logs + falls back to Stub on
+    /// ONNX load failure. Kept for the default-backend startup
+    /// path (no explicit operator request) and for tests that
+    /// want a Classifier without caring about backend
+    /// availability. main.rs uses `try_new_with_backend` for
+    /// CLI/config-sourced backends to fail-closed on load errors.
+    pub fn new_with_backend(kind: BackendKind, onnx_cfg: &crate::config::OnnxConfig) -> Self {
+        match Self::try_new_with_backend(kind, onnx_cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "atty-guard: {e} — falling back to Stub backend"
+                );
+                Self {
+                    tier1: Tier1::new(),
+                    tier2: Box::new(StubBackend),
+                    block_threshold: None,
+                }
+            }
         }
     }
 
@@ -176,11 +223,10 @@ impl Classifier {
         self
     }
 
-    /// Backend label getter — surface for the planned `atty doctor`
-    /// reporter ("which Tier-2 backend is the daemon running?").
-    /// Not consumed by the dispatch path today; `#[allow(dead_code)]`
-    /// until that lands.
-    #[allow(dead_code)]
+    /// Backend label getter — main.rs uses this for the effective-
+    /// backend startup log (gpt-review #026) so the operator can
+    /// tell at a glance whether a Default-path fallback degraded a
+    /// requested `onnx` to `stub`. Also planned for `atty doctor`.
     pub fn tier2_name(&self) -> &'static str {
         self.tier2.name()
     }
@@ -854,6 +900,84 @@ mod tests {
         );
         assert_eq!(BackendKind::parse("onnx"), Some(BackendKind::Onnx));
         assert_eq!(BackendKind::parse(""), None);
+    }
+
+    #[test]
+    fn try_new_with_backend_stub_and_heuristic_succeed() {
+        // Pin that non-ONNX backends never fail construction so
+        // their `try_new_with_backend` arms are dependable for
+        // CLI/config-sourced operator requests too.
+        let cfg = crate::config::OnnxConfig::default();
+        assert!(Classifier::try_new_with_backend(BackendKind::Stub, &cfg).is_ok());
+        assert!(Classifier::try_new_with_backend(BackendKind::Heuristic, &cfg).is_ok());
+    }
+
+    #[cfg(not(feature = "tier2-onnx"))]
+    #[test]
+    fn try_new_with_backend_onnx_without_feature_returns_error() {
+        // gpt-review #026: explicit operator request for ONNX
+        // against a binary built without --features tier2-onnx
+        // must fail at construction so main.rs can exit non-zero
+        // rather than silently serving Stub under a `tier2=onnx`
+        // log line.
+        let cfg = crate::config::OnnxConfig::default();
+        match Classifier::try_new_with_backend(BackendKind::Onnx, &cfg) {
+            Ok(_) => panic!("expected LoadError, got Ok"),
+            Err(LoadError::FeatureNotBuilt) => {}
+            Err(other) => panic!("expected FeatureNotBuilt, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tier2-onnx")]
+    #[test]
+    fn try_new_with_backend_onnx_with_missing_model_returns_error() {
+        // gpt-review #026 companion: with the feature ON but
+        // `[tier2.onnx]` model_path/tokenizer_path empty/missing,
+        // construction still fails. The legacy `new_with_backend`
+        // would have silently fallen back to Stub in this case
+        // — the new path must propagate the failure.
+        let cfg = crate::config::OnnxConfig::default();
+        // Default OnnxConfig has empty model_path/tokenizer_path,
+        // so OnnxBackend::open returns LoadError::ModelMissing("")
+        // (or TokenizerMissing depending on check order). Either
+        // is acceptable for this contract test — what matters is
+        // that we get an Err, not a silent stub.
+        assert!(Classifier::try_new_with_backend(BackendKind::Onnx, &cfg).is_err());
+    }
+
+    #[test]
+    fn new_with_backend_onnx_load_failure_falls_back_to_stub() {
+        // Counterpart to the try_ test: the best-effort
+        // `new_with_backend` path used by the DEFAULT (no operator
+        // request) startup branch must still degrade gracefully so
+        // a fresh install with no ONNX model doesn't refuse to boot.
+        let cfg = crate::config::OnnxConfig::default();
+        let c = Classifier::new_with_backend(BackendKind::Onnx, &cfg);
+        // The effective backend label flips to "stub" — that's the
+        // observable signal main.rs surfaces in its `effective=`
+        // startup log line.
+        assert_eq!(c.tier2_name(), "stub");
+    }
+
+    #[test]
+    fn resolve_backend_source_drives_fallback_policy() {
+        // Glue test: `resolve_backend` returns the right
+        // `BackendSource` so main.rs's match-arm policy
+        // (`Default` → best-effort, `Cli`/`Config` → fail-closed)
+        // picks the intended path. Cheap to pin here so a future
+        // refactor of `BackendSource` can't silently re-route
+        // an explicit request through the fallback arm.
+        let (k, s) = resolve_backend(Some("onnx"), None).unwrap();
+        assert_eq!(k, BackendKind::Onnx);
+        assert_eq!(s, BackendSource::Cli);
+
+        let (k, s) = resolve_backend(None, Some("onnx")).unwrap();
+        assert_eq!(k, BackendKind::Onnx);
+        assert_eq!(s, BackendSource::Config);
+
+        let (k, s) = resolve_backend(None, None).unwrap();
+        assert_eq!(k, BackendKind::Stub);
+        assert_eq!(s, BackendSource::Default);
     }
 
     #[test]

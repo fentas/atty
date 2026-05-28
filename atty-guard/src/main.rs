@@ -707,10 +707,47 @@ fn main() -> std::io::Result<()> {
         classifier::BackendKind::Heuristic => "heuristic",
         classifier::BackendKind::Onnx => "onnx",
     };
+    // gpt-review #026 — backend construction here so explicit
+    // operator requests (CLI / config) FAIL CLOSED on load failure
+    // instead of silently degrading to Stub under an `tier2=onnx`
+    // log line. The default path (no operator request) keeps the
+    // legacy best-effort fallback so a fresh install doesn't refuse
+    // to start because of a missing model file.
+    let classifier = match backend_source {
+        classifier::BackendSource::Default => {
+            classifier::Classifier::new_with_backend(backend, &file_cfg.tier2.onnx)
+        }
+        classifier::BackendSource::Cli | classifier::BackendSource::Config => {
+            match classifier::Classifier::try_new_with_backend(
+                backend,
+                &file_cfg.tier2.onnx,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "atty-guard: tier2={} requested from {} but backend load failed: {}",
+                        backend_str,
+                        backend_source.as_str(),
+                        e,
+                    );
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("tier2 backend load failed: {e}"),
+                    ));
+                }
+            }
+        }
+    }
+    .with_block_threshold(file_cfg.accumulator.block_threshold);
     if cli.verbosity >= 1 {
+        // Log BOTH requested + effective so the operator can spot a
+        // silent default-path fallback (the Cli/Config paths above
+        // refuse to start on mismatch, so effective == requested for
+        // those; only the Default path can downgrade to stub).
         eprintln!(
-            "atty-guard: tier2={} (source={})",
+            "atty-guard: tier2={} effective={} (source={})",
             backend_str,
+            classifier.tier2_name(),
             backend_source.as_str(),
         );
     }
@@ -919,9 +956,7 @@ fn main() -> std::io::Result<()> {
     server::serve(
         &socket,
         cli.verbosity,
-        backend,
-        &file_cfg.tier2.onnx,
-        file_cfg.accumulator.block_threshold,
+        classifier,
         ebpf_state,
         osv_client,
         trust_store,
