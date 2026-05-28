@@ -146,11 +146,11 @@ fn handle_trust_list(socket: &Path, target_uid: Option<u32>) -> std::io::Result<
 /// with root anyway. The check raises the bar against env-confusion
 /// mistakes and casual `sudo -E` patterns.
 fn sudo_target_uid() -> Option<u32> {
-    let sudo_uid_str = std::env::var("SUDO_UID").ok()?;
-    let sudo_uid: u32 = sudo_uid_str.parse().ok()?;
-    let sudo_user = std::env::var("SUDO_USER").ok()?;
-    let _sudo_gid: u32 = std::env::var("SUDO_GID").ok()?.parse().ok()?;
-
+    // Cheapest gate first: a non-root caller has no business
+    // forwarding a target_uid — the daemon's SO_PEERCRED check
+    // would reject the mutating RPC anyway, and short-circuiting
+    // here avoids the eprintln spam path when a non-root user
+    // happens to have stale SUDO_* env vars (e.g. custom prompts).
     let euid = unsafe {
         extern "C" {
             fn geteuid() -> u32;
@@ -160,6 +160,13 @@ fn sudo_target_uid() -> Option<u32> {
     if euid != 0 {
         return None;
     }
+
+    let sudo_uid: u32 = std::env::var("SUDO_UID").ok()?.parse().ok()?;
+    let sudo_user = std::env::var("SUDO_USER").ok()?;
+    // Presence check only — pre-1.8 sudo skipped SUDO_GID, but
+    // any sudo from the past 15 years sets all three. Parsing
+    // is redundant; checking ok() is the meaningful posture.
+    std::env::var("SUDO_GID").ok()?;
 
     if !sudo_user_matches_uid(&sudo_user, sudo_uid) {
         eprintln!(
@@ -176,6 +183,16 @@ fn sudo_target_uid() -> Option<u32> {
 /// passwd database has a user named `name` with the claimed `uid`.
 /// Returns false on any lookup failure (no such user, NSS error,
 /// `name` contains a NUL byte).
+///
+/// THREAD-SAFETY: `getpwnam(3)` returns a pointer to a static
+/// buffer that subsequent calls in the same process clobber.
+/// The CLI is single-threaded (one-shot `fn main()` invocation,
+/// no async runtime), so production use is fine. Unit tests
+/// running in parallel `cargo test` workers technically race on
+/// the static buffer, but the only field read here is `pw_uid`
+/// (a `u32` copied by value before this function returns), so
+/// the data race is benign on glibc/musl. Swap to `getpwnam_r`
+/// if this function ever moves into a multi-threaded caller.
 fn sudo_user_matches_uid(name: &str, uid: u32) -> bool {
     use std::ffi::CString;
     // libc::passwd layout. Only `pw_uid` is read so the trailing
