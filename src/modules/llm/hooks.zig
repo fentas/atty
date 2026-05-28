@@ -19,25 +19,18 @@ const worker_mod_ns = @import("worker.zig");
 const chat_persist = @import("chat_persist.zig");
 const keymap = @import("../../keymap.zig");
 const nowMs = @import("../_lib.zig").nowMs;
+const parse = @import("parse.zig");
 
-/// Strip C0/C1 control bytes from a user-visible status line.
-/// Anything `< 0x20` or `0x7F` (DEL) is replaced with `?`; printable
-/// ASCII and UTF-8 continuation bytes pass through unchanged. The
-/// status bar is a single physical row — an unsanitized ESC could
-/// reposition the cursor, clear the screen, or splice arbitrary
-/// SGR styling, turning a benign env-var display into an injection
-/// vector.
-fn sanitizeForStatus(buf: []u8, raw: []const u8) []const u8 {
-    var n: usize = 0;
-    for (raw) |c| {
-        if (n >= buf.len) break;
-        if (c < 0x20 or c == 0x7F) {
-            buf[n] = '?';
-        } else {
-            buf[n] = c;
-        }
-        n += 1;
-    }
+/// Strip C0 + C1 control bytes from a user-visible status line.
+/// Delegates to `parse.stripControlBytes` so the C1 handling
+/// (raw 0x80–0x9F, UTF-8-encoded 0xC2 0x80–0x9F) matches the
+/// sibling sanitizers used on PTY- and terminal-bound LLM output.
+/// The status bar is a single physical row — an unsanitized ESC,
+/// CSI (0x9B), or SS3 could reposition the cursor, clear the
+/// screen, or splice arbitrary SGR styling, turning a benign env-
+/// var display into an injection vector.
+pub fn sanitizeForStatus(buf: []u8, raw: []const u8) []const u8 {
+    const n = parse.stripControlBytes(raw, buf);
     return buf[0..n];
 }
 
