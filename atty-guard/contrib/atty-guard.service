@@ -1,6 +1,6 @@
 [Unit]
 Description=atty security guard sidecar
-Documentation=https://github.com/fentas/atty/blob/master/atty-guard/README.md
+Documentation=https://github.com/fentas/atty/blob/master/docs/operator-workflow.md
 After=network.target
 
 [Service]

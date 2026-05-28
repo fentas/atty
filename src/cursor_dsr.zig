@@ -71,8 +71,9 @@ pub const DsrParser = struct {
     /// while passing through stray ESCs unchanged.
     ///
     /// Worst-case window where a user-typed Esc would still be eaten:
-    /// `proxy.tick_interval_ms` (100 ms by default) between the
-    /// `writeQuery` and the next poll wake that delivers the reply.
+    /// `config.proxy.tick_interval_ms` between the `writeQuery` and
+    /// the next poll wake that delivers the reply (see
+    /// `src/defaults.zig` for the current default).
     /// Two of atty's query-emit sites fire at known-cool moments
     /// (reserve-rows toggle, OSC 133 `;C` cmd_end); the window is
     /// also bounded by clearing the gate on abort so a user's stray
