@@ -8,7 +8,7 @@
 //! at the expected scale (one atty session ≈ one or two open
 //! connections at most).
 
-use crate::classifier::{BackendKind, Classifier};
+use crate::classifier::Classifier;
 use crate::protocol::{
     Category, ClassifyContext, ClassifyResult, Envelope, Request, ResponseBody, ThreatLevel,
     Verdict,
@@ -30,9 +30,11 @@ const MAX_LINE_BYTES: u64 = 64 * 1024;
 pub fn serve(
     socket: &Path,
     verbosity: u8,
-    backend: BackendKind,
-    onnx_cfg: &crate::config::OnnxConfig,
-    block_threshold: Option<f32>,
+    // Caller-built classifier — gpt-review #026 moves backend
+    // construction into main.rs so it can choose between fail-loud
+    // (operator explicitly requested ONNX) and fall-back-to-stub
+    // (default path) per BackendSource. serve() stays agnostic.
+    classifier: Classifier,
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
     osv: Option<Arc<crate::osv::OsvClient>>,
     trust_store: Arc<crate::trust_store::TrustStore>,
@@ -65,8 +67,7 @@ pub fn serve(
     }
 
     let state = Arc::new(State {
-        classifier: Classifier::new_with_backend(backend, onnx_cfg)
-            .with_block_threshold(block_threshold),
+        classifier,
         threat,
         verbosity,
         trust_store,
@@ -1105,14 +1106,13 @@ mod tests {
         let trust_tmp = tempfile::tempdir().expect("tempdir");
         let trust_root = trust_tmp.path().to_path_buf();
         let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
+        let classifier = Classifier::new();
         let handle = thread::spawn(move || {
             let _trust_tmp_owned = trust_tmp;
             let _ = serve(
                 &socket_for_thread,
                 0,
-                BackendKind::Stub,
-                &crate::config::OnnxConfig::default(),
-                None,
+                classifier,
                 None,
                 None,
                 trust_store,
@@ -1149,13 +1149,12 @@ mod tests {
     ) -> (std::path::PathBuf, thread::JoinHandle<()>) {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
+        let classifier = Classifier::new();
         let handle = thread::spawn(move || {
             let _ = serve(
                 &socket_for_thread,
                 0,
-                BackendKind::Stub,
-                &crate::config::OnnxConfig::default(),
-                None,
+                classifier,
                 None,
                 None,
                 trust_store,
@@ -1182,14 +1181,13 @@ mod tests {
         let trust_tmp = tempfile::tempdir().expect("tempdir");
         let trust_root = trust_tmp.path().to_path_buf();
         let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
+        let classifier = Classifier::new();
         let handle = thread::spawn(move || {
             let _trust_tmp_owned = trust_tmp; // moved-in, Drop on exit
             let _ = serve(
                 &socket_for_thread,
                 0,
-                BackendKind::Stub,
-                &crate::config::OnnxConfig::default(),
-                None, // accumulator block_threshold
+                classifier,
                 None, // ebpf
                 None, // osv
                 trust_store,
