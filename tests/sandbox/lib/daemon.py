@@ -1,0 +1,129 @@
+"""Daemon lifecycle helper for sandbox scenarios.
+
+Starts atty-guard under the `atty` user (matching production —
+the daemon refuses to load atom files that aren't atty-owned, so
+running as root would silently skip a real gate).
+"""
+from __future__ import annotations
+
+import os
+import re
+import signal
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+
+DEFAULT_SOCKET = "/run/atty-guard/atty-guard.sock"
+
+
+class Daemon:
+    """Context manager wrapping a backgrounded atty-guard process.
+
+    Usage:
+        with Daemon() as d:
+            assert d.socket_ready()
+            # … scenario body …
+
+    Per-scenario customisation:
+        with Daemon(config_path=Path("/sandbox/fixtures/strict.toml"),
+                    env={"ATTY_GUARD_BLOCK_THRESHOLD": "3"},
+                    extra_args=["--max-cmd-bytes", "4096"]) as d: …
+    """
+
+    def __init__(
+        self,
+        socket: str = DEFAULT_SOCKET,
+        verbosity: int = 1,
+        extra_args: list[str] | None = None,
+        config_path: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self.socket = socket
+        self.verbosity = verbosity
+        self.extra_args = list(extra_args or [])
+        if config_path is not None:
+            self.extra_args.extend(["--config", str(config_path)])
+        self.env = env
+        self.proc: subprocess.Popen | None = None
+        # Per-instance log so restart-style scenarios can compare
+        # pre/post output without clobbering.
+        fd, log_path = tempfile.mkstemp(prefix="atty-guard.", suffix=".log")
+        os.close(fd)
+        self.stderr_log = Path(log_path)
+        self._log_fd = None
+
+    def __enter__(self) -> "Daemon":
+        cmd = [
+            "runuser",
+            "-u",
+            "atty",
+            "--",
+            "/usr/local/bin/atty-guard",
+            "--socket",
+            self.socket,
+            "-v",
+            str(self.verbosity),
+            *self.extra_args,
+        ]
+        run_env = {**os.environ, **(self.env or {})}
+        self._log_fd = open(self.stderr_log, "w")
+        self.proc = subprocess.Popen(
+            cmd,
+            stdout=self._log_fd,
+            stderr=subprocess.STDOUT,
+            env=run_env,
+            preexec_fn=os.setsid,
+        )
+        if not self.wait_socket(timeout=5.0):
+            self.dump_log()
+            raise RuntimeError(f"daemon socket {self.socket} not ready within 5s")
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self.proc is not None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+                self.proc.wait(timeout=3.0)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        if self._log_fd is not None:
+            try:
+                self._log_fd.close()
+            except OSError:
+                pass
+            self._log_fd = None
+
+    def wait_socket(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if os.path.exists(self.socket):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def socket_ready(self) -> bool:
+        return os.path.exists(self.socket)
+
+    def read_log(self) -> str:
+        try:
+            return self.stderr_log.read_text()
+        except FileNotFoundError:
+            return ""
+
+    def log_matches(self, pattern: str | re.Pattern[str]) -> bool:
+        """Regex search over captured daemon stderr. Pass MULTILINE
+        + line-anchored patterns for failure-signature checks —
+        substring search has too many false positives for words
+        like 'error' / 'failed'."""
+        rx = pattern if isinstance(pattern, re.Pattern) else re.compile(pattern, re.MULTILINE)
+        return rx.search(self.read_log()) is not None
+
+    def dump_log(self) -> None:
+        print("---- atty-guard log ----")
+        print(self.read_log())
+        print("---- end log ----")

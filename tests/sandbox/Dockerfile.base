@@ -1,0 +1,98 @@
+# Sandbox base image for atty end-to-end scenarios (#329).
+#
+# Builder + runtime both run Ubuntu 24.04 so the glibc the binary
+# is linked against matches the glibc it executes against —
+# host-built atty-guard (Arch glibc 2.43) would fail to load on
+# Ubuntu's 2.39.
+#
+# atty itself is host-built (musl-static, portable) and staged
+# into the context by runner.py; only atty-guard needs in-container
+# build because its tract + tokenizers chain doesn't cleanly
+# cross-build to musl.
+ARG GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch
+
+FROM ubuntu:24.04 AS guard-builder
+
+ARG GUARD_FEATURES
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
+
+# Distro cargo (1.75) can't parse current Cargo.lock; rustup gets
+# stable rust without leaving the Ubuntu base.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/* && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+
+# atty-guard's classifier + atom_matcher reach across the repo via
+# `include_str!("../../src/modules/security_guard/data/<file>")`,
+# so the atty-pxy data dir has to sit next to atty-guard/ at build
+# time. `.dockerignore` keeps the rest of the repo out.
+WORKDIR /src
+COPY atty-guard /src/atty-guard
+COPY src/modules/security_guard/data /src/src/modules/security_guard/data
+
+RUN cd /src/atty-guard && \
+    cargo build --release --no-default-features --features "$GUARD_FEATURES"
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        coreutils \
+        less \
+        procps \
+        python3 \
+        python3-pip \
+        sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# --break-system-packages because Ubuntu 24.04's pip3 refuses
+# global installs by default; a venv inside a throwaway test image
+# is over-engineering. Version pinned so rebuilds are reproducible.
+RUN pip3 install --no-cache-dir --break-system-packages ptyprocess==0.7.0
+
+# Mirrors what contrib/install.sh sets up on a real install: system
+# atty user/group, mode-0750 atty-owned state + run dirs.
+RUN groupadd --system atty && \
+    useradd --system --gid atty --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin \
+        --comment "atty-guard sandbox daemon user" atty
+
+# UIDs pinned so per-UID state dirs at /var/lib/atty-guard/users/<uid>/
+# are predictable across runs.
+RUN useradd -m -u 1001 -s /bin/bash -G atty alice && \
+    useradd -m -u 1002 -s /bin/bash -G atty bob
+
+# NOPASSWD because scenarios drive the mediated CLI without a TTY
+# (no place to satisfy a password prompt). Scoped to atty-guard
+# only — we don't want a stray `sudo bash` to work.
+RUN echo 'alice ALL=(ALL) NOPASSWD: /usr/local/bin/atty-guard' >> /etc/sudoers.d/atty-sandbox && \
+    echo 'bob ALL=(ALL) NOPASSWD: /usr/local/bin/atty-guard' >> /etc/sudoers.d/atty-sandbox && \
+    chmod 0440 /etc/sudoers.d/atty-sandbox
+
+# /run/atty-guard is intentionally not a tmpfs — the daemon creates
+# the socket here and the runner.py mount config gives every
+# scenario a fresh writable layer.
+RUN install -d -o atty -g atty -m 0750 /var/lib/atty-guard && \
+    install -d -o atty -g atty -m 0750 /var/lib/atty-guard/users && \
+    install -d -o atty -g atty -m 0750 /run/atty-guard
+
+COPY tests/sandbox/.build/atty /usr/local/bin/atty
+COPY --from=guard-builder /src/atty-guard/target/release/atty-guard /usr/local/bin/atty-guard
+RUN chmod 0755 /usr/local/bin/atty /usr/local/bin/atty-guard
+
+WORKDIR /home/alice

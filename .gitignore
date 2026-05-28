@@ -49,3 +49,5 @@ coverage/
 
 # ignore review folders but keep for reference
 /gpt-review
+# Sandbox build context (binaries staged for docker build).
+/tests/sandbox/.build/
