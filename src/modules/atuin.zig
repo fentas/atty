@@ -98,9 +98,11 @@ pub const Config = struct {
     /// Bounded record queue depth (gpt-review #027). The committed-
     /// command path now uses FIFO semantics so two Enters arriving
     /// before the worker drains don't lose the first. At cap, the
-    /// newest commit is dropped + a counter surfaces in the status
-    /// bar. Per-slot footprint is ~max_query + max_cwd + 256
-    /// (intent) + author tag, ≈ 770 bytes; default 16 = ~13 KB.
+    /// newest commit is dropped + `rec_dropped` surfaces in the
+    /// status bar as `atuin (N dropped)`. Per-slot footprint at
+    /// defaults is max_query (256) + max_cwd (1024) + intent (256)
+    /// + author tag = ~1552 B; default 16 ≈ 25 KB. Compile-time
+    /// asserted ≥ 2 — capacity 1 would collapse to latest-wins.
     record_queue_capacity: comptime_int = 16,
     /// Fire `atuin sync` after this many recorded commits (per session).
     /// 0 disables the count-based trigger.
@@ -160,6 +162,17 @@ pub const Config = struct {
 };
 
 pub fn configure(comptime cfg: Config) type {
+    // gpt-review #027: a 0-capacity FIFO would underflow the
+    // `(idx + 1) % 0` modulo. Catch the misconfiguration at
+    // compile time. Capacity 1 collapses to drop-newest-on-second-
+    // push but is a legal degenerate; require at least 2 for FIFO
+    // semantics to hold (otherwise consumers expecting "preserves
+    // burst of 2 commits" see the prior latest-wins shape).
+    comptime {
+        if (cfg.record_queue_capacity < 2) {
+            @compileError("atuin: record_queue_capacity must be >= 2 — use the default (16) or pick a higher value");
+        }
+    }
     return struct {
         pub const name = "atuin";
         pub const config = cfg;
@@ -217,6 +230,11 @@ pub fn configure(comptime cfg: Config) type {
             /// returned slice-of-slices from the worker's next write
             /// to `Shared.res_buf`.
             list_copy: [cfg.max_result]u8 = undefined,
+            /// Buffer for `statusText`'s formatted output when
+            /// `rec_dropped > 0` (gpt-review #027). Bounded — the
+            /// longest expected string is `atuin (4294967295 dropped)`
+            /// = 26 chars.
+            status_buf: [32]u8 = undefined,
             /// Slice-of-slices into `list_copy`, populated by
             /// `provideGhostList` via `_lib.ListBuilder`.
             list_slices: [cfg.list_count_max][]const u8 = undefined,
@@ -269,7 +287,42 @@ pub fn configure(comptime cfg: Config) type {
                     shared.cv.waitUncancelable(io, &shared.mutex);
                 }
                 if (shared.shutdown) {
+                    // Drain any queued records BEFORE the final
+                    // sync so a burst of commits in the last 50ms
+                    // doesn't vanish (subagent round-1 finding —
+                    // checking shutdown before the drain dropped
+                    // in-flight records, contradicting #027's
+                    // "preserves all commits" claim). Pop slots
+                    // under the lock into a local buffer, release,
+                    // then `runRecord` each without the lock held.
+                    var drain_local: [cfg.record_queue_capacity]RecordSlot = undefined;
+                    var drain_n: usize = 0;
+                    while (shared.rec_count > 0 and drain_n < drain_local.len) {
+                        drain_local[drain_n] = shared.rec_queue[shared.rec_head];
+                        shared.rec_head = (shared.rec_head + 1) % cfg.record_queue_capacity;
+                        shared.rec_count -= 1;
+                        drain_n += 1;
+                    }
                     shared.mutex.unlock(io);
+                    if (cfg.record) {
+                        var i: usize = 0;
+                        while (i < drain_n) : (i += 1) {
+                            const s = &drain_local[i];
+                            const intent_slice: ?[]const u8 = if (s.intent_len > 0)
+                                s.intent_buf[0..s.intent_len]
+                            else
+                                null;
+                            runRecord(
+                                gpa,
+                                io,
+                                s.cmd_buf[0..s.cmd_len],
+                                s.cwd_buf[0..s.cwd_len],
+                                s.author,
+                                intent_slice,
+                            );
+                            total_records += 1;
+                        }
+                    }
                     // gpt-review #030: BLOCKING final sync so the
                     // promised flush actually lands. main.zig calls
                     // std.process.exit immediately after proxy.run
@@ -580,16 +633,25 @@ pub fn configure(comptime cfg: Config) type {
                 }
                 _ = std.c.nanosleep(&sleep_ts, null);
             }
+            // Deadline expired. Re-check the flag once more before
+            // committing to the leak path — a sync that completed
+            // between the last load and the deadline check is
+            // perfectly joinable (subagent round-1 race finding).
+            if (done.flag.load(.acquire)) {
+                t.join();
+                gpa.destroy(done);
+                return;
+            }
             // Timeout: leak the thread + heap done (it'll set the
             // flag and exit on its own when sync completes; we just
             // can't reclaim it without blocking past the deadline).
             t.detach();
             // `done` is intentionally NOT destroyed — the leaked
-            // thread still owns a pointer to it. Tradeoff: one
-            // ~80-byte leak per timed-out final sync (so at most
-            // once per session). Acceptable for an interactive
-            // tool's shutdown path; the process exits shortly
-            // after either way.
+            // thread still owns a pointer to it. The struct is
+            // ~40-64 bytes (AtomicValue(bool) + std.mem.Allocator
+            // + std.Io); we leak at most once per session.
+            // Acceptable for an interactive tool's shutdown path —
+            // the process exits shortly after either way.
         }
 
         fn syncOnThread(gpa: std.mem.Allocator, io: std.Io) void {
@@ -735,26 +797,38 @@ pub fn configure(comptime cfg: Config) type {
             const intent = ctx.line.committedIntent();
             const author = ctx.line.committedAuthor();
 
-            rt.shared.mutex.lockUncancelable(ctx.io);
-            defer rt.shared.mutex.unlock(ctx.io);
-            // gpt-review #027: FIFO ring push. Drop-newest on overflow
-            // — preserves the order of in-flight commits and surfaces
-            // the loss via `rec_dropped` instead of silently
-            // overwriting (the prior latest-wins slot lost everything
-            // between two rapid Enters). Drop-newest beats drop-oldest
-            // here because the OLDEST record is presumably already on
-            // its way to atuin's local store via runRecord; the newer
-            // arrival is the one in jeopardy of vanishing.
-            if (rt.shared.rec_count >= cfg.record_queue_capacity) {
-                rt.shared.rec_dropped +%= 1;
+            pushRecord(rt.shared, ctx.io, line, resolved_cwd, author, intent);
+        }
+
+        /// Test-visible push helper — gpt-review #027 FIFO ring
+        /// push. Returns no value; overflow bumps `rec_dropped`
+        /// silently (caller-side error handling would just discard
+        /// the line anyway). Drop-newest on overflow because the
+        /// oldest record is presumably already enroute to atuin's
+        /// local store via the worker's drain; the new arrival is
+        /// the one in jeopardy. Holds `shared.mutex` for the full
+        /// push so a concurrent worker drain sees a consistent
+        /// head/tail/count triple.
+        pub fn pushRecord(
+            shared: *Shared,
+            io: std.Io,
+            line: []const u8,
+            cwd: []const u8,
+            author: m.Author,
+            intent: ?[]const u8,
+        ) void {
+            shared.mutex.lockUncancelable(io);
+            defer shared.mutex.unlock(io);
+            if (shared.rec_count >= cfg.record_queue_capacity) {
+                shared.rec_dropped +%= 1;
                 return;
             }
-            const slot = &rt.shared.rec_queue[rt.shared.rec_tail];
+            const slot = &shared.rec_queue[shared.rec_tail];
             @memcpy(slot.cmd_buf[0..line.len], line);
             slot.cmd_len = line.len;
-            if (resolved_cwd.len > 0 and resolved_cwd.len <= slot.cwd_buf.len) {
-                @memcpy(slot.cwd_buf[0..resolved_cwd.len], resolved_cwd);
-                slot.cwd_len = resolved_cwd.len;
+            if (cwd.len > 0 and cwd.len <= slot.cwd_buf.len) {
+                @memcpy(slot.cwd_buf[0..cwd.len], cwd);
+                slot.cwd_len = cwd.len;
             } else {
                 slot.cwd_len = 0;
             }
@@ -766,9 +840,9 @@ pub fn configure(comptime cfg: Config) type {
             } else {
                 slot.intent_len = 0;
             }
-            rt.shared.rec_tail = (rt.shared.rec_tail + 1) % cfg.record_queue_capacity;
-            rt.shared.rec_count += 1;
-            rt.shared.cv.signal(ctx.io);
+            shared.rec_tail = (shared.rec_tail + 1) % cfg.record_queue_capacity;
+            shared.rec_count += 1;
+            shared.cv.signal(io);
         }
 
         /// Fired by Ctrl+Shift+D (default binding for
@@ -835,14 +909,27 @@ pub fn configure(comptime cfg: Config) type {
             rt.allocator.free(result.stderr);
         }
 
-        /// Status-bar segment. The runtime caches the rendered string
-        /// so we don't reformat per render cycle.
+        /// Status-bar segment. Defaults to the bare `atuin` label;
+        /// if any committed records were dropped because the FIFO
+        /// hit cap (gpt-review #027), append `(N dropped)` so the
+        /// operator notices their commits aren't being recorded.
+        /// Cleared back to `atuin` only on detach — the count is
+        /// session-cumulative because there's no obvious "ack" event
+        /// from the operator side.
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             _ = ctx;
-            _ = rt;
-            // Static label for now — future: surface queued records,
-            // last-sync age, sync-in-progress, etc.
-            return "atuin";
+            rt.shared.mutex.lockUncancelable(rt.io);
+            const dropped = rt.shared.rec_dropped;
+            rt.shared.mutex.unlock(rt.io);
+            if (dropped == 0) return "atuin";
+            // Format into the runtime's status_buf so the returned
+            // slice survives until the next statusText call.
+            const written = std.fmt.bufPrint(
+                &rt.status_buf,
+                "atuin ({d} dropped)",
+                .{dropped},
+            ) catch return "atuin";
+            return written;
         }
     };
 }

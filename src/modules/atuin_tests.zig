@@ -213,68 +213,61 @@ test "config exposes record_queue_capacity + sync_on_detach_timeout_ms knobs" {
     try testing.expectEqual(@as(u64, 500), A.config.sync_on_detach_timeout_ms);
 }
 
-test "rec_queue FIFO push+drain preserves order across multiple commits (gpt-review #027)" {
-    // The prior latest-wins shape lost cmd1 if cmd2 landed before
-    // the worker drained. With the FIFO ring two pushes leave both
-    // entries readable in commit order — verified by simulating
-    // the producer side directly (the worker drain logic just
-    // pops head, no behavior to mock).
+test "pushRecord FIFO preserves order across multiple commits (gpt-review #027)" {
+    // Drive the REAL production push path (`pushRecord`, used by
+    // `onLineCommit`) rather than inlining the FIFO math. Pre-fix
+    // the single-slot mailbox overwrote "first" when "second"
+    // landed; this assertion would have failed.
     const A = configure(.{ .record_queue_capacity = 4 });
     var shared: A.Shared = .{};
-    // Push 3 entries
-    inline for ([_][]const u8{ "first", "second", "third" }, 0..) |cmd, i| {
-        const slot = &shared.rec_queue[shared.rec_tail];
-        @memcpy(slot.cmd_buf[0..cmd.len], cmd);
-        slot.cmd_len = cmd.len;
-        slot.cwd_len = 0;
-        slot.author = .user;
-        slot.intent_len = 0;
-        shared.rec_tail = (shared.rec_tail + 1) % A.config.record_queue_capacity;
-        shared.rec_count += 1;
-        try testing.expectEqual(i + 1, shared.rec_count);
-    }
-    // Drain in order
+    A.pushRecord(&shared, test_io, "first", "", .user, null);
+    A.pushRecord(&shared, test_io, "second", "", .user, null);
+    A.pushRecord(&shared, test_io, "third", "", .user, null);
+    try testing.expectEqual(@as(usize, 3), shared.rec_count);
+    try testing.expectEqual(@as(u32, 0), shared.rec_dropped);
+    // Drain in FIFO order — head walks the ring.
     inline for ([_][]const u8{ "first", "second", "third" }) |expected| {
-        try testing.expect(shared.rec_count > 0);
         const slot = shared.rec_queue[shared.rec_head];
         try testing.expectEqualStrings(expected, slot.cmd_buf[0..slot.cmd_len]);
         shared.rec_head = (shared.rec_head + 1) % A.config.record_queue_capacity;
-        shared.rec_count -= 1;
     }
-    try testing.expectEqual(@as(usize, 0), shared.rec_count);
 }
 
-test "rec_queue overflow drops newest and bumps rec_dropped (gpt-review #027)" {
-    // At cap, drop-newest semantics + counter increment. Pre-fix
-    // a single slot would silently overwrite; this test would
-    // have failed with len-mismatch on the asserted FIFO content.
+test "pushRecord overflow drops newest and bumps rec_dropped (gpt-review #027)" {
+    // Hits the real overflow branch inside `pushRecord`. Pre-fix
+    // the latest-wins shape would have OVERWRITTEN "a" with "c";
+    // the FIFO drop-newest leaves "a" at head + bumps the counter
+    // so the operator can spot the loss via statusText.
     const A = configure(.{ .record_queue_capacity = 2 });
     var shared: A.Shared = .{};
-    // Fill the ring (capacity 2).
-    const fillers = [_][]const u8{ "a", "b" };
-    inline for (fillers) |cmd| {
-        const slot = &shared.rec_queue[shared.rec_tail];
-        @memcpy(slot.cmd_buf[0..cmd.len], cmd);
-        slot.cmd_len = cmd.len;
-        slot.cwd_len = 0;
-        slot.author = .user;
-        slot.intent_len = 0;
-        shared.rec_tail = (shared.rec_tail + 1) % A.config.record_queue_capacity;
-        shared.rec_count += 1;
-    }
+    A.pushRecord(&shared, test_io, "a", "", .user, null);
+    A.pushRecord(&shared, test_io, "b", "", .user, null);
     try testing.expectEqual(@as(usize, 2), shared.rec_count);
-    // Simulate the overflow branch from onLineCommit: count == cap
-    // → bump rec_dropped, return without writing.
-    const at_cap = shared.rec_count >= A.config.record_queue_capacity;
-    try testing.expect(at_cap);
-    shared.rec_dropped +%= 1;
-    // FIFO contents are unchanged — head is still "a", tail still
-    // points at the slot AFTER "b".
+    A.pushRecord(&shared, test_io, "c", "", .user, null); // overflow
+    try testing.expectEqual(@as(u32, 1), shared.rec_dropped);
+    try testing.expectEqual(@as(usize, 2), shared.rec_count);
+    // Head still points at the OLDEST ("a"). The "c" never landed.
     try testing.expectEqualStrings(
         "a",
         shared.rec_queue[shared.rec_head].cmd_buf[0..shared.rec_queue[shared.rec_head].cmd_len],
     );
-    try testing.expectEqual(@as(u32, 1), shared.rec_dropped);
+    A.pushRecord(&shared, test_io, "d", "", .user, null);
+    A.pushRecord(&shared, test_io, "e", "", .user, null);
+    try testing.expectEqual(@as(u32, 3), shared.rec_dropped);
+}
+
+test "pushRecord round-trips cwd + author + intent into the slot (gpt-review #027)" {
+    // Pin that the four non-cmd fields each make it through
+    // unmodified so a future RecordSlot refactor doesn't silently
+    // drop intent/author/cwd from records.
+    const A = configure(.{ .record_queue_capacity = 4 });
+    var shared: A.Shared = .{};
+    A.pushRecord(&shared, test_io, "ls -la", "/tmp/x", .llm, "explore the dir");
+    const slot = shared.rec_queue[shared.rec_head];
+    try testing.expectEqualStrings("ls -la", slot.cmd_buf[0..slot.cmd_len]);
+    try testing.expectEqualStrings("/tmp/x", slot.cwd_buf[0..slot.cwd_len]);
+    try testing.expectEqual(m.Author.llm, slot.author);
+    try testing.expectEqualStrings("explore the dir", slot.intent_buf[0..slot.intent_len]);
 }
 
 test "config default record_queue_capacity is sane (gpt-review #027)" {
