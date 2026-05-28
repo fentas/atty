@@ -367,618 +367,720 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
 }
 
 fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
-    use crate::protocol::{AtomScope, UrlDecisionEntry};
-    use crate::trust_store::{ListScope, UrlDecision};
     match req {
-        Request::Health => ResponseBody::Health {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-        },
-        Request::Classify { command, context } => {
-            // Tier-1 (and Tier-2 stub) classification.
-            let mut result = state.classifier.classify(&command);
-
-            // PR #141 — per-UID atom overlay. Persistent atoms
-            // (from `atoms add`) + session atoms (from the proxy's
-            // `[A]llow always` taps — PR #142 wires the proxy side)
-            // get checked as substrings. A hit upgrades a Safe
-            // verdict to Warn; existing Warn/Block are left alone
-            // (no point fighting V2-J's accumulator with a single
-            // overlay hit).
-            //
-            // Substring scan rather than a per-UID AC automaton is
-            // an explicit trade-off: the overlay is typically
-            // dozens of atoms per user, AC build cost would dwarf
-            // the scan savings. Re-evaluate if a user's overlay
-            // grows past ~100 atoms (none today).
-            if matches!(result.verdict, Verdict::Safe) {
-                // ensure_loaded is a no-op after first call per UID
-                // per daemon lifetime — keeps the hot path off disk.
-                // Mutations re-load the cache directly. System-
-                // fetched is a separate one-shot init that runs
-                // once per daemon lifetime; explicit reload happens
-                // on SIGHUP / after the fetcher thread writes.
-                let _ = state.trust_store.ensure_loaded(peer.uid);
-                state.trust_store.ensure_system_fetched_loaded();
-                let system_fetched = state.trust_store.list_system_fetched();
-                let overlay_persistent = state.trust_store.list_atoms(
-                    peer.uid,
-                    crate::trust_store::ListScope::Persistent,
-                );
-                let overlay_session = state.trust_store.list_atoms(
-                    peer.uid,
-                    crate::trust_store::ListScope::Session,
-                );
-                // Scan order: system-fetched (shared, daemon-managed)
-                // → user persistent (per-UID, sudo-mediated) → user
-                // session (per-UID, banner-driven). First-match-wins;
-                // each branch labels its own `reason` so the operator
-                // sees which scope fired (helps debug "why is this
-                // command being flagged?").
-                let mut hit: Option<(&'static str, String)> = None;
-                for atom in system_fetched.iter() {
-                    if command.contains(atom.as_str()) {
-                        hit = Some(("system-fetched", atom.clone()));
-                        break;
-                    }
-                }
-                if hit.is_none() {
-                    for atom in overlay_persistent.iter() {
-                        if command.contains(atom.as_str()) {
-                            hit = Some(("user-persistent", atom.clone()));
-                            break;
-                        }
-                    }
-                }
-                if hit.is_none() {
-                    for atom in overlay_session.iter() {
-                        if command.contains(atom.as_str()) {
-                            hit = Some(("user-session", atom.clone()));
-                            break;
-                        }
-                    }
-                }
-                if let Some((scope, atom)) = hit {
-                    result = ClassifyResult {
-                        verdict: Verdict::Warn,
-                        category: Category::None,
-                        confidence: 0.6,
-                        reason: format!("{scope} atom matched: `{atom}`"),
-                        matched: atom,
-                    };
-                }
-            }
-
-            // V2-F live OSV lookup. Runs only when Tier-1 said Safe
-            // AND the command is an `npm install <pkg>` shape AND
-            // the daemon was started with --enable-osv. Catches
-            // packages that landed on OSV's advisory list AFTER
-            // atty-guard's last bundled-data update.
-            //
-            // Walks every parsed package token (not just the first)
-            // to defeat the prepend-a-benign-pkg attacker bypass,
-            // and keeps the strictest verdict via
-            // `verdict_strictly_worse` so a Malicious (Block) pkg
-            // after a Vulnerable (Warn) pkg isn't lost to an early
-            // first-non-Safe exit. Short-circuit only on Block —
-            // the strictest possible outcome; further OSV calls
-            // can't escalate further.
-            if matches!(result.verdict, Verdict::Safe) {
-                if let Some(osv) = &state.osv {
-                    for pkg in crate::npm_parser::extract_npm_install_pkgs(&command) {
-                        match osv.lookup_npm(pkg) {
-                            Ok(verdict) => {
-                                if let Some(r) = crate::osv::osv_verdict_to_result(verdict, pkg) {
-                                    if verdict_strictly_worse(&result.verdict, &r.verdict) {
-                                        result = r;
-                                    }
-                                    if matches!(result.verdict, Verdict::Block) {
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                if state.verbosity >= 2 {
-                                    eprintln!("atty-guard: OSV lookup failed for {pkg}: {e}");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Threat-map upgrade: a PID already marked High/Critical
-            // by an earlier command can escalate the verdict for the
-            // CURRENT command. Worst-wins via verdict_strictly_worse
-            // so a Critical-marked PID with an existing atom-overlay
-            // Warn becomes Block (the strictest signal wins), not
-            // a stuck Warn — same invariant the OSV multi-package
-            // loop above relies on. Without this, the prior shape
-            // gated on `result.verdict == Safe` and silently lost
-            // Critical→Block escalation when ANY upstream signal
-            // had already nudged Safe to Warn.
-            if let ClassifyContext { pid: Some(pid), .. } = context {
-                let level = state.threat.get(pid);
-                if matches!(level, ThreatLevel::High | ThreatLevel::Critical) {
-                    let candidate = ClassifyResult {
-                        verdict: if matches!(level, ThreatLevel::Critical) {
-                            Verdict::Block
-                        } else {
-                            Verdict::Warn
-                        },
-                        category: Category::PidHighThreat,
-                        confidence: 1.0,
-                        reason:
-                            "this PID's process tree was marked high-risk by an earlier command"
-                                .into(),
-                        matched: command.clone(),
-                    };
-                    if verdict_strictly_worse(&result.verdict, &candidate.verdict) {
-                        result = candidate;
-                    }
-                }
-            }
-
-            ResponseBody::Classify(result)
-        }
-        Request::SetThreatLevel { pid, level } => {
-            // SetThreatLevel can promote a PID into the eBPF
-            // threat_map (when V2-B is enabled), and a Critical
-            // level forces later classifies for that PID's tree to
-            // Block. Because the socket is group-accessible (0660
-            // + the `atty` group), any same-group client could
-            // otherwise mark another user's PID — a cross-user
-            // DoS / privilege violation. Gate: root may set any
-            // PID; a non-root caller may set only PIDs owned by
-            // their own UID. PID reuse: ThreatMap stores the PID's
-            // starttime alongside the level so a later `get` can
-            // detect recycled PIDs and evict the stale entry — see
-            // `ThreatMap::set` / `get`.
-            // Identity validated by the non-root + non-Low gate
-            // gets passed straight into ThreatMap so the map's
-            // commit uses the same (pid, starttime) the gate
-            // authorized — closes the residual TOCTOU window
-            // between the gate's read and the map's internal read.
-            let mut validated_starttime: Option<u64> = None;
-            if !peer.is_root && !matches!(level, ThreatLevel::Low) {
-                // TOCTOU defense: read starttime BEFORE the
-                // ownership check and AGAIN AFTER, and reject if
-                // they differ. Otherwise an attacker could win
-                // the race between `pid_owner_uid` (sees the old
-                // process, owned by attacker's UID) and a later
-                // /proc read (sees a recycled PID now owned by a
-                // different user) — installing a non-Low mark +
-                // BPF entry against someone else's process.
-                // Identity = (pid, starttime) on Linux within one
-                // boot.
-                let start1 = match crate::threat_map::pid_starttime(pid) {
-                    crate::threat_map::ProcRead::Found(t) => t,
-                    crate::threat_map::ProcRead::NotFound => {
-                        return ResponseBody::Error {
-                            message: format!(
-                                "pid {pid} no longer exists — cannot set non-Low threat level"
-                            ),
-                        };
-                    }
-                    crate::threat_map::ProcRead::Error(msg) => {
-                        return ResponseBody::Error { message: msg };
-                    }
-                };
-                match pid_owner_uid(pid) {
-                    OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
-                        return ResponseBody::Error {
-                            message: format!(
-                                "non-root caller (uid {}) cannot set threat level for pid {pid} (owned by uid {owner_uid})",
-                                peer.uid
-                            ),
-                        };
-                    }
-                    OwnerLookup::NotFound => {
-                        return ResponseBody::Error {
-                            message: format!(
-                                "pid {pid} no longer exists — cannot set non-Low threat level"
-                            ),
-                        };
-                    }
-                    OwnerLookup::Error(msg) => {
-                        return ResponseBody::Error { message: msg };
-                    }
-                    OwnerLookup::Owner(_) => {}
-                }
-                let start2 = match crate::threat_map::pid_starttime(pid) {
-                    crate::threat_map::ProcRead::Found(t) => t,
-                    crate::threat_map::ProcRead::NotFound => {
-                        return ResponseBody::Error {
-                            message: format!("pid {pid} disappeared mid-request"),
-                        };
-                    }
-                    crate::threat_map::ProcRead::Error(msg) => {
-                        return ResponseBody::Error { message: msg };
-                    }
-                };
-                if start1 != start2 {
-                    return ResponseBody::Error {
-                        message: format!(
-                            "pid {pid} was recycled mid-request — refusing to set threat level"
-                        ),
-                    };
-                }
-                validated_starttime = Some(start2);
-            } else if !peer.is_root {
-                // Non-root + Low: pure eviction. Permit even when
-                // the PID is gone; reject only when the ownership
-                // lookup itself fails or returns a different live
-                // UID (clearing someone else's live mark would
-                // still be a cross-user policy violation).
-                match pid_owner_uid(pid) {
-                    OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
-                        return ResponseBody::Error {
-                            message: format!(
-                                "non-root caller (uid {}) cannot clear threat level for pid {pid} (owned by uid {owner_uid})",
-                                peer.uid
-                            ),
-                        };
-                    }
-                    OwnerLookup::Error(msg) => {
-                        return ResponseBody::Error { message: msg };
-                    }
-                    OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
-                }
-            }
-            // Use the validated starttime when we have one so the
-            // map's commit can't race against PID recycling
-            // between the gate and the map's own /proc read. Other
-            // paths (root, Low) fall through to `set` which reads
-            // starttime internally; those paths don't carry the
-            // cross-user gate that needed the lock-step identity.
-            match validated_starttime {
-                Some(start) => {
-                    state.threat.set_with_starttime(pid, level, start);
-                    ResponseBody::Ok
-                }
-                None => {
-                    if !state.threat.set(pid, level) {
-                        return ResponseBody::Error {
-                            message: format!(
-                                "unable to read /proc/{pid}/stat (pid may have exited) — threat level not set"
-                            ),
-                        };
-                    }
-                    ResponseBody::Ok
-                }
-            }
-        }
-        Request::GetThreatLevel { pid } => {
-            // Gate cross-UID reads the same way SetThreatLevel gates
-            // cross-UID writes: without this, any same-host caller
-            // can probe arbitrary PIDs and learn whether they're
-            // marked High/Critical — a cross-tenant info leak on
-            // multi-user systems. Root reads everything; non-root
-            // sees only its own PIDs. NotFound (already-dead PID)
-            // is allowed since the threat level is just an in-memory
-            // value with no useful signal for an exited process.
-            //
-            // Error case (e.g. hidepid=2 hiding /proc/<pid>/status,
-            // or a transient read failure) is rejected — without
-            // this, the same probing attack would succeed whenever
-            // pid_owner_uid couldn't decide. Mirrors SetThreatLevel's
-            // shape exactly so the read gate doesn't lag the write
-            // gate.
-            if !peer.is_root {
-                match pid_owner_uid(pid) {
-                    OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
-                        return ResponseBody::Error {
-                            message: format!(
-                                "non-root caller (uid {}) cannot read threat level for pid {pid} (owned by uid {owner_uid})",
-                                peer.uid
-                            ),
-                        };
-                    }
-                    OwnerLookup::Error(msg) => {
-                        return ResponseBody::Error { message: msg };
-                    }
-                    OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
-                }
-            }
-            ResponseBody::ThreatLevel {
-                level: state.threat.get(pid),
-            }
-        }
+        Request::Health => handle_health(),
+        Request::Classify { command, context } => handle_classify(state, peer, command, context),
+        Request::SetThreatLevel { pid, level } => handle_set_threat_level(state, peer, pid, level),
+        Request::GetThreatLevel { pid } => handle_get_threat_level(state, peer, pid),
 
         // --- PR #141 mediated trust-state ops ---
         Request::AtomsAdd {
             pattern,
             target_uid,
-        } => {
-            if !peer.is_root {
-                return require_root_error("atoms add");
-            }
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            match state.trust_store.persistent_add_atom(uid, &pattern) {
-                Ok(()) => ResponseBody::Ok,
-                Err(e) => ResponseBody::Error {
-                    message: e.to_string(),
-                },
-            }
-        }
+        } => handle_atoms_add(state, peer, pattern, target_uid),
         Request::AtomsRemove {
             pattern,
             target_uid,
-        } => {
-            if !peer.is_root {
-                return require_root_error("atoms remove");
-            }
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            match state.trust_store.persistent_remove_atom(uid, &pattern) {
-                Ok(true) => ResponseBody::Ok,
-                Ok(false) => ResponseBody::Error {
-                    message: format!("atom not present: `{pattern}`"),
-                },
-                Err(e) => ResponseBody::Error {
-                    message: e.to_string(),
-                },
-            }
-        }
+        } => handle_atoms_remove(state, peer, pattern, target_uid),
         Request::AtomsList { scope, target_uid } => {
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            match scope {
-                AtomScope::System => ResponseBody::AtomsList {
-                    atoms: state.classifier.system_atoms_snapshot(),
-                },
-                AtomScope::Fetched => {
-                    // GPT-review #023: expose the runtime-fetched
-                    // corpus separately so operators chasing a
-                    // `system-fetched atom matched: <atom>` reason
-                    // can verify which atom triggered. Lazy-load
-                    // first so a fresh daemon that hasn't run its
-                    // classify-hot-path lazy-init yet still returns
-                    // a populated list.
-                    state.trust_store.ensure_system_fetched_loaded();
-                    let arc = state.trust_store.list_system_fetched();
-                    ResponseBody::AtomsList {
-                        atoms: arc.as_ref().clone(),
-                    }
-                }
-                AtomScope::User => {
-                    let _ = state.trust_store.ensure_loaded(uid);
-                    ResponseBody::AtomsList {
-                        atoms: state.trust_store.list_atoms(uid, ListScope::Persistent),
-                    }
-                }
-                AtomScope::Session => ResponseBody::AtomsList {
-                    atoms: state.trust_store.list_atoms(uid, ListScope::Session),
-                },
-            }
+            handle_atoms_list(state, peer, scope, target_uid)
         }
-        Request::AtomsDrift => match crate::atom_drift::read_snapshot(std::path::Path::new(
-            crate::atom_drift::DEFAULT_DRIFT_FILE,
-        )) {
-            Ok(Some(snapshot)) => ResponseBody::AtomsDrift {
-                available: true,
-                updated_at: Some(snapshot.updated_at),
-                sources: snapshot
-                    .sources
-                    .into_iter()
-                    .map(|s| crate::protocol::DriftEntry {
-                        name: s.name,
-                        pinned: s.pinned,
-                        upstream: s.upstream,
-                        behind_since: s.behind_since,
-                    })
-                    .collect(),
-            },
-            Ok(None) => ResponseBody::AtomsDrift {
-                available: false,
-                updated_at: None,
-                sources: Vec::new(),
-            },
-            Err(e) => ResponseBody::Error {
-                message: format!("drift snapshot unreadable: {e}"),
-            },
-        },
-        Request::UrlsAllow { host, target_uid } => {
-            if !peer.is_root {
-                return require_root_error("urls allow");
-            }
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            match state
-                .trust_store
-                .persistent_add_url(uid, &host, UrlDecision::Allow)
-            {
-                Ok(()) => ResponseBody::Ok,
-                Err(e) => ResponseBody::Error {
-                    message: e.to_string(),
-                },
-            }
-        }
-        Request::UrlsBlock { host, target_uid } => {
-            if !peer.is_root {
-                return require_root_error("urls block");
-            }
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            match state
-                .trust_store
-                .persistent_add_url(uid, &host, UrlDecision::Block)
-            {
-                Ok(()) => ResponseBody::Ok,
-                Err(e) => ResponseBody::Error {
-                    message: e.to_string(),
-                },
-            }
-        }
-        Request::UrlsList { target_uid } => {
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            let _ = state.trust_store.ensure_loaded(uid);
-            let entries: Vec<UrlDecisionEntry> = state
-                .trust_store
-                .list_urls(uid)
-                .into_iter()
-                .map(|(host, dec)| UrlDecisionEntry {
-                    host,
-                    decision: dec.as_wire_str().to_owned(),
-                })
-                .collect();
-            ResponseBody::UrlsList { entries }
-        }
-        Request::SessionList { target_uid } => {
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            let (atoms, urls_allow, urls_block, trust) =
-                state.trust_store.session_summary(uid);
-            ResponseBody::SessionList {
-                atoms,
-                urls_allow,
-                urls_block,
-                trust,
-            }
-        }
-        Request::SessionClear { target_uid } => {
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            state.trust_store.session_clear(uid);
-            ResponseBody::Ok
-        }
+        Request::AtomsDrift => handle_atoms_drift(),
+        Request::UrlsAllow { host, target_uid } => handle_urls_allow(state, peer, host, target_uid),
+        Request::UrlsBlock { host, target_uid } => handle_urls_block(state, peer, host, target_uid),
+        Request::UrlsList { target_uid } => handle_urls_list(state, peer, target_uid),
+        Request::SessionList { target_uid } => handle_session_list(state, peer, target_uid),
+        Request::SessionClear { target_uid } => handle_session_clear(state, peer, target_uid),
         Request::SessionAddTrust { hash, target_uid } => {
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            match state.trust_store.session_add_trust(uid, &hash) {
-                Ok(()) => ResponseBody::Ok,
-                Err(e) => ResponseBody::Error { message: e },
-            }
+            handle_session_add_trust(state, peer, hash, target_uid)
         }
         Request::SessionAddUrlBlock { host, target_uid } => {
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            match state.trust_store.session_add_url_block(uid, &host) {
-                Ok(()) => ResponseBody::Ok,
-                Err(e) => ResponseBody::Error { message: e },
+            handle_session_add_url_block(state, peer, host, target_uid)
+        }
+        Request::TrustAdd { hash, target_uid } => handle_trust_add(state, peer, hash, target_uid),
+        Request::TrustList { target_uid } => handle_trust_list(state, peer, target_uid),
+        Request::SessionWrite { target_uid } => handle_session_write(state, peer, target_uid),
+    }
+}
+
+// ===========================================================================
+// Per-request handlers — extracted from dispatch arms (#280)
+// ===========================================================================
+
+fn handle_health() -> ResponseBody {
+    ResponseBody::Health {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
+fn handle_classify(
+    state: &State,
+    peer: PeerCred,
+    command: String,
+    context: ClassifyContext,
+) -> ResponseBody {
+    // Tier-1 (and Tier-2 stub) classification.
+    let mut result = state.classifier.classify(&command);
+
+    // PR #141 — per-UID atom overlay. Persistent atoms
+    // (from `atoms add`) + session atoms (from the proxy's
+    // `[A]llow always` taps — PR #142 wires the proxy side)
+    // get checked as substrings. A hit upgrades a Safe
+    // verdict to Warn; existing Warn/Block are left alone
+    // (no point fighting V2-J's accumulator with a single
+    // overlay hit).
+    //
+    // Substring scan rather than a per-UID AC automaton is
+    // an explicit trade-off: the overlay is typically
+    // dozens of atoms per user, AC build cost would dwarf
+    // the scan savings. Re-evaluate if a user's overlay
+    // grows past ~100 atoms (none today).
+    if matches!(result.verdict, Verdict::Safe) {
+        // ensure_loaded is a no-op after first call per UID
+        // per daemon lifetime — keeps the hot path off disk.
+        // Mutations re-load the cache directly. System-
+        // fetched is a separate one-shot init that runs
+        // once per daemon lifetime; explicit reload happens
+        // on SIGHUP / after the fetcher thread writes.
+        let _ = state.trust_store.ensure_loaded(peer.uid);
+        state.trust_store.ensure_system_fetched_loaded();
+        let system_fetched = state.trust_store.list_system_fetched();
+        let overlay_persistent = state.trust_store.list_atoms(
+            peer.uid,
+            crate::trust_store::ListScope::Persistent,
+        );
+        let overlay_session = state.trust_store.list_atoms(
+            peer.uid,
+            crate::trust_store::ListScope::Session,
+        );
+        // Scan order: system-fetched (shared, daemon-managed)
+        // → user persistent (per-UID, sudo-mediated) → user
+        // session (per-UID, banner-driven). First-match-wins;
+        // each branch labels its own `reason` so the operator
+        // sees which scope fired (helps debug "why is this
+        // command being flagged?").
+        let mut hit: Option<(&'static str, String)> = None;
+        for atom in system_fetched.iter() {
+            if command.contains(atom.as_str()) {
+                hit = Some(("system-fetched", atom.clone()));
+                break;
             }
         }
-        Request::TrustAdd { hash, target_uid } => {
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            match state.trust_store.persistent_add_trust(uid, &hash) {
-                Ok(()) => ResponseBody::Ok,
-                Err(e) => ResponseBody::Error {
-                    message: e.to_string(),
-                },
+        if hit.is_none() {
+            for atom in overlay_persistent.iter() {
+                if command.contains(atom.as_str()) {
+                    hit = Some(("user-persistent", atom.clone()));
+                    break;
+                }
             }
         }
-        Request::TrustList { target_uid } => {
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
-            };
-            let _ = state.trust_store.ensure_loaded(uid);
-            ResponseBody::TrustList {
-                trust: state.trust_store.list_persistent_trust(uid),
+        if hit.is_none() {
+            for atom in overlay_session.iter() {
+                if command.contains(atom.as_str()) {
+                    hit = Some(("user-session", atom.clone()));
+                    break;
+                }
             }
         }
-        Request::SessionWrite { target_uid } => {
-            if !peer.is_root {
-                return require_root_error("session write");
-            }
-            let uid = match resolve_target_uid(peer, target_uid) {
-                Ok(u) => u,
-                Err(msg) => return ResponseBody::Error { message: msg },
+        if let Some((scope, atom)) = hit {
+            result = ClassifyResult {
+                verdict: Verdict::Warn,
+                category: Category::None,
+                confidence: 0.6,
+                reason: format!("{scope} atom matched: `{atom}`"),
+                matched: atom,
             };
-            match state.trust_store.session_write(uid) {
-                Ok(report) => {
-                    if state.verbosity >= 1 {
-                        eprintln!(
-                            "atty-guard: session write uid={} atoms={} allow={} block={} \
-                             trust={} invalid={} not_persisted={}",
-                            uid,
-                            report.atoms_added,
-                            report.urls_allow_added,
-                            report.urls_block_added,
-                            report.trust_added,
-                            report.invalid.len(),
-                            report.not_persisted.len(),
-                        );
+        }
+    }
+
+    // V2-F live OSV lookup. Runs only when Tier-1 said Safe
+    // AND the command is an `npm install <pkg>` shape AND
+    // the daemon was started with --enable-osv. Catches
+    // packages that landed on OSV's advisory list AFTER
+    // atty-guard's last bundled-data update.
+    //
+    // Walks every parsed package token (not just the first)
+    // to defeat the prepend-a-benign-pkg attacker bypass,
+    // and keeps the strictest verdict via
+    // `verdict_strictly_worse` so a Malicious (Block) pkg
+    // after a Vulnerable (Warn) pkg isn't lost to an early
+    // first-non-Safe exit. Short-circuit only on Block —
+    // the strictest possible outcome; further OSV calls
+    // can't escalate further.
+    if matches!(result.verdict, Verdict::Safe) {
+        if let Some(osv) = &state.osv {
+            for pkg in crate::npm_parser::extract_npm_install_pkgs(&command) {
+                match osv.lookup_npm(pkg) {
+                    Ok(verdict) => {
+                        if let Some(r) = crate::osv::osv_verdict_to_result(verdict, pkg) {
+                            if verdict_strictly_worse(&result.verdict, &r.verdict) {
+                                result = r;
+                            }
+                            if matches!(result.verdict, Verdict::Block) {
+                                break;
+                            }
+                        }
                     }
-                    // Surface BOTH the invalid AND not_persisted
-                    // lists to the CLI via a structured error so the
-                    // operator sees exactly which entries stayed in
-                    // session AND why — malformed entries need
-                    // fixing, cap-blocked entries need the trust
-                    // file pruned and a retry (GPT-review #025).
-                    if report.invalid.is_empty() && report.not_persisted.is_empty() {
-                        ResponseBody::Ok
-                    } else {
-                        let mut sections: Vec<String> = Vec::new();
-                        if !report.invalid.is_empty() {
-                            let lines: Vec<String> = report
-                                .invalid
-                                .iter()
-                                .map(|(e, r)| format!("  `{e}` — {r}"))
-                                .collect();
-                            sections.push(format!(
-                                "kept {} invalid entr{} in session for review:\n{}",
-                                report.invalid.len(),
-                                if report.invalid.len() == 1 { "y" } else { "ies" },
-                                lines.join("\n"),
-                            ));
-                        }
-                        if !report.not_persisted.is_empty() {
-                            let lines: Vec<String> = report
-                                .not_persisted
-                                .iter()
-                                .map(|(e, r)| format!("  `{e}` — {r}"))
-                                .collect();
-                            sections.push(format!(
-                                "kept {} valid entr{} in session for retry (resolve the \
-                                 cause, then re-run `session write`):\n{}",
-                                report.not_persisted.len(),
-                                if report.not_persisted.len() == 1 { "y" } else { "ies" },
-                                lines.join("\n"),
-                            ));
-                        }
-                        ResponseBody::Error {
-                            message: format!(
-                                "session write partial — atoms={} allow={} block={} \
-                                 trust={}\n{}",
-                                report.atoms_added,
-                                report.urls_allow_added,
-                                report.urls_block_added,
-                                report.trust_added,
-                                sections.join("\n"),
-                            ),
+                    Err(e) => {
+                        if state.verbosity >= 2 {
+                            eprintln!("atty-guard: OSV lookup failed for {pkg}: {e}");
                         }
                     }
                 }
-                Err(e) => ResponseBody::Error {
-                    message: e.to_string(),
-                },
             }
         }
+    }
+
+    // Threat-map upgrade: a PID already marked High/Critical
+    // by an earlier command can escalate the verdict for the
+    // CURRENT command. Worst-wins via verdict_strictly_worse
+    // so a Critical-marked PID with an existing atom-overlay
+    // Warn becomes Block (the strictest signal wins), not
+    // a stuck Warn — same invariant the OSV multi-package
+    // loop above relies on. Without this, the prior shape
+    // gated on `result.verdict == Safe` and silently lost
+    // Critical→Block escalation when ANY upstream signal
+    // had already nudged Safe to Warn.
+    if let ClassifyContext { pid: Some(pid), .. } = context {
+        let level = state.threat.get(pid);
+        if matches!(level, ThreatLevel::High | ThreatLevel::Critical) {
+            let candidate = ClassifyResult {
+                verdict: if matches!(level, ThreatLevel::Critical) {
+                    Verdict::Block
+                } else {
+                    Verdict::Warn
+                },
+                category: Category::PidHighThreat,
+                confidence: 1.0,
+                reason:
+                    "this PID's process tree was marked high-risk by an earlier command"
+                        .into(),
+                matched: command.clone(),
+            };
+            if verdict_strictly_worse(&result.verdict, &candidate.verdict) {
+                result = candidate;
+            }
+        }
+    }
+
+    ResponseBody::Classify(result)
+}
+
+fn handle_set_threat_level(
+    state: &State,
+    peer: PeerCred,
+    pid: u32,
+    level: ThreatLevel,
+) -> ResponseBody {
+    // SetThreatLevel can promote a PID into the eBPF
+    // threat_map (when V2-B is enabled), and a Critical
+    // level forces later classifies for that PID's tree to
+    // Block. Because the socket is group-accessible (0660
+    // + the `atty` group), any same-group client could
+    // otherwise mark another user's PID — a cross-user
+    // DoS / privilege violation. Gate: root may set any
+    // PID; a non-root caller may set only PIDs owned by
+    // their own UID. PID reuse: ThreatMap stores the PID's
+    // starttime alongside the level so a later `get` can
+    // detect recycled PIDs and evict the stale entry — see
+    // `ThreatMap::set` / `get`.
+    // Identity validated by the non-root + non-Low gate
+    // gets passed straight into ThreatMap so the map's
+    // commit uses the same (pid, starttime) the gate
+    // authorized — closes the residual TOCTOU window
+    // between the gate's read and the map's internal read.
+    let mut validated_starttime: Option<u64> = None;
+    if !peer.is_root && !matches!(level, ThreatLevel::Low) {
+        // TOCTOU defense: read starttime BEFORE the
+        // ownership check and AGAIN AFTER, and reject if
+        // they differ. Otherwise an attacker could win
+        // the race between `pid_owner_uid` (sees the old
+        // process, owned by attacker's UID) and a later
+        // /proc read (sees a recycled PID now owned by a
+        // different user) — installing a non-Low mark +
+        // BPF entry against someone else's process.
+        // Identity = (pid, starttime) on Linux within one
+        // boot.
+        let start1 = match crate::threat_map::pid_starttime(pid) {
+            crate::threat_map::ProcRead::Found(t) => t,
+            crate::threat_map::ProcRead::NotFound => {
+                return ResponseBody::Error {
+                    message: format!(
+                        "pid {pid} no longer exists — cannot set non-Low threat level"
+                    ),
+                };
+            }
+            crate::threat_map::ProcRead::Error(msg) => {
+                return ResponseBody::Error { message: msg };
+            }
+        };
+        match pid_owner_uid(pid) {
+            OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+                return ResponseBody::Error {
+                    message: format!(
+                        "non-root caller (uid {}) cannot set threat level for pid {pid} (owned by uid {owner_uid})",
+                        peer.uid
+                    ),
+                };
+            }
+            OwnerLookup::NotFound => {
+                return ResponseBody::Error {
+                    message: format!(
+                        "pid {pid} no longer exists — cannot set non-Low threat level"
+                    ),
+                };
+            }
+            OwnerLookup::Error(msg) => {
+                return ResponseBody::Error { message: msg };
+            }
+            OwnerLookup::Owner(_) => {}
+        }
+        let start2 = match crate::threat_map::pid_starttime(pid) {
+            crate::threat_map::ProcRead::Found(t) => t,
+            crate::threat_map::ProcRead::NotFound => {
+                return ResponseBody::Error {
+                    message: format!("pid {pid} disappeared mid-request"),
+                };
+            }
+            crate::threat_map::ProcRead::Error(msg) => {
+                return ResponseBody::Error { message: msg };
+            }
+        };
+        if start1 != start2 {
+            return ResponseBody::Error {
+                message: format!(
+                    "pid {pid} was recycled mid-request — refusing to set threat level"
+                ),
+            };
+        }
+        validated_starttime = Some(start2);
+    } else if !peer.is_root {
+        // Non-root + Low: pure eviction. Permit even when
+        // the PID is gone; reject only when the ownership
+        // lookup itself fails or returns a different live
+        // UID (clearing someone else's live mark would
+        // still be a cross-user policy violation).
+        match pid_owner_uid(pid) {
+            OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+                return ResponseBody::Error {
+                    message: format!(
+                        "non-root caller (uid {}) cannot clear threat level for pid {pid} (owned by uid {owner_uid})",
+                        peer.uid
+                    ),
+                };
+            }
+            OwnerLookup::Error(msg) => {
+                return ResponseBody::Error { message: msg };
+            }
+            OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
+        }
+    }
+    // Use the validated starttime when we have one so the
+    // map's commit can't race against PID recycling
+    // between the gate and the map's own /proc read. Other
+    // paths (root, Low) fall through to `set` which reads
+    // starttime internally; those paths don't carry the
+    // cross-user gate that needed the lock-step identity.
+    match validated_starttime {
+        Some(start) => {
+            state.threat.set_with_starttime(pid, level, start);
+            ResponseBody::Ok
+        }
+        None => {
+            if !state.threat.set(pid, level) {
+                return ResponseBody::Error {
+                    message: format!(
+                        "unable to read /proc/{pid}/stat (pid may have exited) — threat level not set"
+                    ),
+                };
+            }
+            ResponseBody::Ok
+        }
+    }
+}
+
+fn handle_get_threat_level(state: &State, peer: PeerCred, pid: u32) -> ResponseBody {
+    // Gate cross-UID reads the same way SetThreatLevel gates
+    // cross-UID writes: without this, any same-host caller
+    // can probe arbitrary PIDs and learn whether they're
+    // marked High/Critical — a cross-tenant info leak on
+    // multi-user systems. Root reads everything; non-root
+    // sees only its own PIDs. NotFound (already-dead PID)
+    // is allowed since the threat level is just an in-memory
+    // value with no useful signal for an exited process.
+    //
+    // Error case (e.g. hidepid=2 hiding /proc/<pid>/status,
+    // or a transient read failure) is rejected — without
+    // this, the same probing attack would succeed whenever
+    // pid_owner_uid couldn't decide. Mirrors SetThreatLevel's
+    // shape exactly so the read gate doesn't lag the write
+    // gate.
+    if !peer.is_root {
+        match pid_owner_uid(pid) {
+            OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+                return ResponseBody::Error {
+                    message: format!(
+                        "non-root caller (uid {}) cannot read threat level for pid {pid} (owned by uid {owner_uid})",
+                        peer.uid
+                    ),
+                };
+            }
+            OwnerLookup::Error(msg) => {
+                return ResponseBody::Error { message: msg };
+            }
+            OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
+        }
+    }
+    ResponseBody::ThreatLevel {
+        level: state.threat.get(pid),
+    }
+}
+
+fn handle_atoms_add(
+    state: &State,
+    peer: PeerCred,
+    pattern: String,
+    target_uid: Option<u32>,
+) -> ResponseBody {
+    if !peer.is_root {
+        return require_root_error("atoms add");
+    }
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match state.trust_store.persistent_add_atom(uid, &pattern) {
+        Ok(()) => ResponseBody::Ok,
+        Err(e) => ResponseBody::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+fn handle_atoms_remove(
+    state: &State,
+    peer: PeerCred,
+    pattern: String,
+    target_uid: Option<u32>,
+) -> ResponseBody {
+    if !peer.is_root {
+        return require_root_error("atoms remove");
+    }
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match state.trust_store.persistent_remove_atom(uid, &pattern) {
+        Ok(true) => ResponseBody::Ok,
+        Ok(false) => ResponseBody::Error {
+            message: format!("atom not present: `{pattern}`"),
+        },
+        Err(e) => ResponseBody::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+fn handle_atoms_list(
+    state: &State,
+    peer: PeerCred,
+    scope: crate::protocol::AtomScope,
+    target_uid: Option<u32>,
+) -> ResponseBody {
+    use crate::protocol::AtomScope;
+    use crate::trust_store::ListScope;
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match scope {
+        AtomScope::System => ResponseBody::AtomsList {
+            atoms: state.classifier.system_atoms_snapshot(),
+        },
+        AtomScope::Fetched => {
+            // GPT-review #023: expose the runtime-fetched
+            // corpus separately so operators chasing a
+            // `system-fetched atom matched: <atom>` reason
+            // can verify which atom triggered. Lazy-load
+            // first so a fresh daemon that hasn't run its
+            // classify-hot-path lazy-init yet still returns
+            // a populated list.
+            state.trust_store.ensure_system_fetched_loaded();
+            let arc = state.trust_store.list_system_fetched();
+            ResponseBody::AtomsList {
+                atoms: arc.as_ref().clone(),
+            }
+        }
+        AtomScope::User => {
+            let _ = state.trust_store.ensure_loaded(uid);
+            ResponseBody::AtomsList {
+                atoms: state.trust_store.list_atoms(uid, ListScope::Persistent),
+            }
+        }
+        AtomScope::Session => ResponseBody::AtomsList {
+            atoms: state.trust_store.list_atoms(uid, ListScope::Session),
+        },
+    }
+}
+
+fn handle_atoms_drift() -> ResponseBody {
+    match crate::atom_drift::read_snapshot(std::path::Path::new(
+        crate::atom_drift::DEFAULT_DRIFT_FILE,
+    )) {
+        Ok(Some(snapshot)) => ResponseBody::AtomsDrift {
+            available: true,
+            updated_at: Some(snapshot.updated_at),
+            sources: snapshot
+                .sources
+                .into_iter()
+                .map(|s| crate::protocol::DriftEntry {
+                    name: s.name,
+                    pinned: s.pinned,
+                    upstream: s.upstream,
+                    behind_since: s.behind_since,
+                })
+                .collect(),
+        },
+        Ok(None) => ResponseBody::AtomsDrift {
+            available: false,
+            updated_at: None,
+            sources: Vec::new(),
+        },
+        Err(e) => ResponseBody::Error {
+            message: format!("drift snapshot unreadable: {e}"),
+        },
+    }
+}
+
+fn handle_urls_allow(
+    state: &State,
+    peer: PeerCred,
+    host: String,
+    target_uid: Option<u32>,
+) -> ResponseBody {
+    use crate::trust_store::UrlDecision;
+    if !peer.is_root {
+        return require_root_error("urls allow");
+    }
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match state
+        .trust_store
+        .persistent_add_url(uid, &host, UrlDecision::Allow)
+    {
+        Ok(()) => ResponseBody::Ok,
+        Err(e) => ResponseBody::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+fn handle_urls_block(
+    state: &State,
+    peer: PeerCred,
+    host: String,
+    target_uid: Option<u32>,
+) -> ResponseBody {
+    use crate::trust_store::UrlDecision;
+    if !peer.is_root {
+        return require_root_error("urls block");
+    }
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match state
+        .trust_store
+        .persistent_add_url(uid, &host, UrlDecision::Block)
+    {
+        Ok(()) => ResponseBody::Ok,
+        Err(e) => ResponseBody::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+fn handle_urls_list(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
+    use crate::protocol::UrlDecisionEntry;
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    let _ = state.trust_store.ensure_loaded(uid);
+    let entries: Vec<UrlDecisionEntry> = state
+        .trust_store
+        .list_urls(uid)
+        .into_iter()
+        .map(|(host, dec)| UrlDecisionEntry {
+            host,
+            decision: dec.as_wire_str().to_owned(),
+        })
+        .collect();
+    ResponseBody::UrlsList { entries }
+}
+
+fn handle_session_list(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    let (atoms, urls_allow, urls_block, trust) = state.trust_store.session_summary(uid);
+    ResponseBody::SessionList {
+        atoms,
+        urls_allow,
+        urls_block,
+        trust,
+    }
+}
+
+fn handle_session_clear(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    state.trust_store.session_clear(uid);
+    ResponseBody::Ok
+}
+
+fn handle_session_add_trust(
+    state: &State,
+    peer: PeerCred,
+    hash: String,
+    target_uid: Option<u32>,
+) -> ResponseBody {
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match state.trust_store.session_add_trust(uid, &hash) {
+        Ok(()) => ResponseBody::Ok,
+        Err(e) => ResponseBody::Error { message: e },
+    }
+}
+
+fn handle_session_add_url_block(
+    state: &State,
+    peer: PeerCred,
+    host: String,
+    target_uid: Option<u32>,
+) -> ResponseBody {
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match state.trust_store.session_add_url_block(uid, &host) {
+        Ok(()) => ResponseBody::Ok,
+        Err(e) => ResponseBody::Error { message: e },
+    }
+}
+
+fn handle_trust_add(
+    state: &State,
+    peer: PeerCred,
+    hash: String,
+    target_uid: Option<u32>,
+) -> ResponseBody {
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match state.trust_store.persistent_add_trust(uid, &hash) {
+        Ok(()) => ResponseBody::Ok,
+        Err(e) => ResponseBody::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+fn handle_trust_list(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    let _ = state.trust_store.ensure_loaded(uid);
+    ResponseBody::TrustList {
+        trust: state.trust_store.list_persistent_trust(uid),
+    }
+}
+
+fn handle_session_write(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
+    if !peer.is_root {
+        return require_root_error("session write");
+    }
+    let uid = match resolve_target_uid(peer, target_uid) {
+        Ok(u) => u,
+        Err(msg) => return ResponseBody::Error { message: msg },
+    };
+    match state.trust_store.session_write(uid) {
+        Ok(report) => {
+            if state.verbosity >= 1 {
+                eprintln!(
+                    "atty-guard: session write uid={} atoms={} allow={} block={} \
+                     trust={} invalid={} not_persisted={}",
+                    uid,
+                    report.atoms_added,
+                    report.urls_allow_added,
+                    report.urls_block_added,
+                    report.trust_added,
+                    report.invalid.len(),
+                    report.not_persisted.len(),
+                );
+            }
+            // Surface BOTH the invalid AND not_persisted
+            // lists to the CLI via a structured error so the
+            // operator sees exactly which entries stayed in
+            // session AND why — malformed entries need
+            // fixing, cap-blocked entries need the trust
+            // file pruned and a retry (GPT-review #025).
+            if report.invalid.is_empty() && report.not_persisted.is_empty() {
+                ResponseBody::Ok
+            } else {
+                let mut sections: Vec<String> = Vec::new();
+                if !report.invalid.is_empty() {
+                    let lines: Vec<String> = report
+                        .invalid
+                        .iter()
+                        .map(|(e, r)| format!("  `{e}` — {r}"))
+                        .collect();
+                    sections.push(format!(
+                        "kept {} invalid entr{} in session for review:\n{}",
+                        report.invalid.len(),
+                        if report.invalid.len() == 1 { "y" } else { "ies" },
+                        lines.join("\n"),
+                    ));
+                }
+                if !report.not_persisted.is_empty() {
+                    let lines: Vec<String> = report
+                        .not_persisted
+                        .iter()
+                        .map(|(e, r)| format!("  `{e}` — {r}"))
+                        .collect();
+                    sections.push(format!(
+                        "kept {} valid entr{} in session for retry (resolve the \
+                         cause, then re-run `session write`):\n{}",
+                        report.not_persisted.len(),
+                        if report.not_persisted.len() == 1 { "y" } else { "ies" },
+                        lines.join("\n"),
+                    ));
+                }
+                ResponseBody::Error {
+                    message: format!(
+                        "session write partial — atoms={} allow={} block={} \
+                         trust={}\n{}",
+                        report.atoms_added,
+                        report.urls_allow_added,
+                        report.urls_block_added,
+                        report.trust_added,
+                        sections.join("\n"),
+                    ),
+                }
+            }
+        }
+        Err(e) => ResponseBody::Error {
+            message: e.to_string(),
+        },
     }
 }
 
