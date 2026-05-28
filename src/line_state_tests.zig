@@ -973,3 +973,59 @@ test "syncFromCapture: mid-line GROW (paste) clamps cursor to min(prior, n) — 
     try std.testing.expect(l.cursor_moved); // 4 != 11 → mid-line → ghost suppressed
     try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
 }
+
+test "applyInput: bulk-append printable run matches per-byte semantics" {
+    // Bulk-append (one applyInput call) must produce the same
+    // observable state as N per-byte calls. Run-scan + control-
+    // byte boundary handling must not diverge from the old loop.
+    var bulk = LineState{};
+    _ = bulk.applyInput("hello world");
+    var serial = LineState{};
+    for ("hello world") |c| {
+        var b: [1]u8 = .{c};
+        _ = serial.applyInput(&b);
+    }
+    try std.testing.expectEqualStrings(bulk.current(), serial.current());
+    try std.testing.expectEqual(bulk.cursor_pos, serial.cursor_pos);
+    try std.testing.expectEqual(bulk.uncertain, serial.uncertain);
+}
+
+test "applyInput: bulk-append stops at control byte (Enter mid-paste)" {
+    // Multi-line paste — bulk appends "echo foo", per-byte switch
+    // sees `\n` and submits, next iteration bulk-appends "echo bar".
+    var l = LineState{};
+    _ = l.applyInput("echo foo\necho bar");
+    try std.testing.expectEqualStrings("echo bar", l.current());
+    try std.testing.expectEqualStrings("echo foo", l.lastCommitted().?);
+}
+
+test "applyInput: bulk-append refuses mid-line insertion (uncertain)" {
+    // Mid-line insertion isn't modeled. The bulk path mirrors
+    // `append`'s `markUncertain` bail so an interactive paste
+    // landing mid-line forces an OSC 133 resync.
+    var l = LineState{};
+    _ = l.applyInput("ls foo");
+    _ = l.applyInput("\x1B[D\x1B[D"); // ← × 2: cursor mid-line.
+    try std.testing.expect(!l.uncertain);
+    _ = l.applyInput("INSERT");
+    try std.testing.expect(l.uncertain);
+}
+
+test "applyInput: bulk-append honours max_line capacity gate" {
+    // Buffer overflow: the bulk copy takes only what fits and
+    // sets uncertain for the rest — mirrors `append`'s bail.
+    var l = LineState{};
+    var huge: [4200]u8 = undefined;
+    @memset(&huge, 'a');
+    _ = l.applyInput(&huge);
+    try std.testing.expect(l.uncertain);
+    try std.testing.expect(l.len <= 4096); // max_line cap
+}
+
+test "applyInput: bulk-append accepts high-bit (UTF-8) bytes" {
+    // £ = 0xC2 0xA3 — both bytes ≥ 0x80, pass the printable
+    // filter. Raw bytes land in the buffer unchanged.
+    var l = LineState{};
+    _ = l.applyInput("price: \xc2\xa3" ++ "9");
+    try std.testing.expectEqualStrings("price: \xc2\xa3" ++ "9", l.current());
+}
