@@ -115,13 +115,11 @@ class Daemon:
         except FileNotFoundError:
             return ""
 
-    def log_contains(self, needle: str) -> bool:
-        return needle in self.read_log()
-
     def log_matches(self, pattern: str | re.Pattern[str]) -> bool:
-        """Line-anchored regex match — preferred over log_contains
-        for failure-signature checks (substring match has too many
-        false positives for words like 'error' / 'ERROR')."""
+        """Regex search over captured daemon stderr. Pass MULTILINE
+        + line-anchored patterns for failure-signature checks —
+        substring search has too many false positives for words
+        like 'error' / 'failed'."""
         rx = pattern if isinstance(pattern, re.Pattern) else re.compile(pattern, re.MULTILINE)
         return rx.search(self.read_log()) is not None
 

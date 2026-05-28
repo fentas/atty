@@ -103,11 +103,14 @@ def drive_atty() -> str:
     return bytes(captured).decode("utf-8", errors="replace")
 
 
-# Daemon log lines look like `<ts> <level> atty-guard: <message>`;
-# line-anchored regex avoids substring false positives like
-# "no error:" or "ERROR_NONE" in a future message.
+# atty-guard prefixes every line with `atty-guard:`; failure lines
+# also carry `error:`, `failed`, or `rejected` (per main.rs eprintln
+# sites). Anchoring to line start rules out substring false-positives
+# in benign messages that mention these words mid-line. The panic
+# branch catches catastrophic Rust runtime aborts (no daemon prefix).
 _DAEMON_FAIL_RE = re.compile(
-    r"^.*(?:error:|failed|rejected|ERROR\b)", re.MULTILINE | re.IGNORECASE
+    r"^(?:atty-guard:.*(?:error:|failed|rejected)|thread .*panicked|panic:|fatal:)",
+    re.MULTILINE,
 )
 
 
