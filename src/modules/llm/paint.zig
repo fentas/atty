@@ -383,12 +383,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         continue;
                     }
                     const n = m_meta.name;
-                    // Preview chunk: prepend `· <preview>` after the
-                    // timestamp + 6-hex suffix so the user can pick
-                    // a dialog by its first asked line. Empty preview
-                    // (unreadable file, no user turn in prefix, or
-                    // non-user first record) silently drops the
-                    // chunk — the row degrades to just timestamp+id.
+                    // Empty preview falls back to the timestamp-only
+                    // row so the picker stays scannable when the
+                    // first-user-turn probe couldn't extract content.
                     if (m_meta.preview.len > 0) {
                         w.print(
                             "  {s}  {s}-{s}-{s} {s}:{s}:{s}  \x1B[2m{s} \u{00B7} {s}\x1B[0m{s}\r\n",

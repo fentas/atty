@@ -808,13 +808,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 closeRecallPicker(rt);
                                 continue;
                             };
-                            // loader doesn't read .preview — pass an
-                            // empty owned slice to keep the type
-                            // closed.
+                            // Same alloc-failure shape as path/name
+                            // above: free what we already own + bail
+                            // with a user-facing error so we never
+                            // hand free() a slice we didn't allocate.
+                            const preview_copy = rt.allocator.alloc(u8, 0) catch {
+                                rt.allocator.free(path_copy);
+                                rt.allocator.free(name_copy);
+                                latchErr(rt, "out of memory loading dialog");
+                                closeRecallPicker(rt);
+                                continue;
+                            };
                             const meta_copy = chat_persist.DialogMeta{
                                 .path = path_copy,
                                 .name = name_copy,
-                                .preview = rt.allocator.alloc(u8, 0) catch &[_]u8{},
+                                .preview = preview_copy,
                             };
                             defer {
                                 rt.allocator.free(meta_copy.path);
