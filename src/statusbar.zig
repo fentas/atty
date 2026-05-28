@@ -388,6 +388,33 @@ pub const StatusBar = struct {
         self.last_valid = false;
     }
 
+    /// Issue #249 — defensive re-assertion of atty's DECSTBM when
+    /// the inner app has clobbered it (detected by
+    /// `DecstbmWatcher`). Inline TUIs like Claude Code emit their
+    /// own `\x1B[r` against the primary screen, which evaporates
+    /// atty's reserved region; without this re-assertion, atty's
+    /// statusbar row gets scrolled into the visible scrollback by
+    /// the inner app's next `\n`.
+    ///
+    /// Unlike `reactivate()`, this does NOT erase the reserved
+    /// rows — the inner app may have legitimate content drawn
+    /// across the screen and we don't want to blank it out, just
+    /// constrain future scrolls. The save/restore wrap keeps the
+    /// inner app's cursor exactly where it was.
+    ///
+    /// Also invalidates `last_valid` so the next `render()` call
+    /// re-paints the status text (any prior paint that got scrolled
+    /// into scrollback is gone from row=rows; the cached
+    /// "text_unchanged" check would otherwise no-op and leave the
+    /// reserved row blank until the text content actually changes).
+    pub fn reassertDecstbm(self: *StatusBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll("\x1B[s");
+        try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
+        try w.writeAll("\x1B[u");
+        self.last_valid = false;
+        self.last_hint_valid = false;
+    }
+
     /// Paint the status text into the last reserved row. Idempotent —
     /// if the text matches the last paint we emit zero bytes. When a
     /// transient message is active and not expired, it overrides
