@@ -800,12 +800,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// byte. Lines that exceed `input_row` get clipped — the
         /// caller's `input_lines` math already accounts for the cap.
         fn paintInputBlock(w: *std.Io.Writer, rt: *Runtime, input_top_row: u16, input_row: u16) !void {
-            // Chat-mode question pick-list (#308): when active AND
-            // the free-text row is the selected option, render the
-            // prompt glyph as mauve ▶ instead of cyan ❯ so the
-            // pick-list selection state is visible on the input
-            // row too — matches the overlay's behaviour at
-            // paint.zig:248-254.
+            // When the free-text "type your own answer" row is the
+            // active pick-list option, the prompt glyph switches to
+            // mauve ▶ so the input row mirrors the selection state
+            // visible above it.
             const free_text_selected = rt.chat_focus_in_panel and
                 rt.chat_question_active and
                 rt.chat_question_choice_count > 0 and
@@ -1242,9 +1240,39 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // dim 2-space prefix to keep column alignment.
             if (question_rows > 0) {
                 const sel = rt.chat_question_selected_idx;
-                var qi: u8 = 0;
-                while (qi < question_rows) : (qi += 1) {
-                    const qrow: u16 = question_top_row + qi;
+                // Window the visible slice so the selected choice
+                // always sits inside the rendered rows. Without
+                // this, a half-room cap (question_rows <
+                // choice_count) would hide the selection once the
+                // user navigated past row `question_rows-1` and the
+                // arrow-key feedback would go silent again — the
+                // same UX failure mode the rest of #308 fixed.
+                const total: u8 = rt.chat_question_choice_count;
+                var start: u8 = 0;
+                if (question_rows < total) {
+                    const window: u8 = @intCast(question_rows);
+                    if (sel >= window) {
+                        // Selected fell off the bottom — scroll the
+                        // window so `sel` lands at the last visible
+                        // row.
+                        start = sel - (window - 1);
+                    }
+                    // Cap so we never overscroll past the last
+                    // choice (e.g. sel at the very end).
+                    const max_start: u8 = total - window;
+                    if (start > max_start) start = max_start;
+                }
+                // Choice text is column-budgeted: `▶ ` + `<n>. ` is
+                // a 5-col prefix; truncate the remainder to the
+                // total panel width so a long choice can't wrap +
+                // overwrite the input row below.
+                const prefix_cols: usize = 5;
+                const choice_text_cols: usize = if (cols_usize > prefix_cols) cols_usize - prefix_cols else 1;
+                var rrow: u8 = 0;
+                while (rrow < question_rows) : (rrow += 1) {
+                    const qi: u8 = start + rrow;
+                    if (qi >= total) break;
+                    const qrow: u16 = question_top_row + rrow;
                     w.print("\x1B[{d};1H\x1B[2K", .{qrow}) catch return false;
                     const is_sel = (sel == qi);
                     if (is_sel) {
@@ -1259,7 +1287,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     w.writeAll("\x1B[0m") catch return false;
                     if (is_sel) w.writeAll("\x1B[1m") catch return false;
                     const choice_slice = rt.question_choices_storage[qi][0..rt.question_choices_lens[qi]];
-                    writeSanitized(&w, choice_slice) catch return false;
+                    const trimmed = pw.truncateToCols(choice_slice, choice_text_cols);
+                    writeSanitized(&w, trimmed) catch return false;
                     if (is_sel) w.writeAll("\x1B[0m") catch return false;
                 }
             }

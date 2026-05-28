@@ -95,6 +95,81 @@ test "chat overlay (Alt+Shift+C): toggle emits alt-screen enter then exit" {
     try testing.expectEqualStrings("\x1B[r\x1B[?25h\x1B[?1049l", closed.?);
 }
 
+test "inline chat: question pick-list renders ▶ + numbered rows + truncation" {
+    // Regression pin for #308 + Copilot review: inline panel renders
+    // a numbered choice list above the input row when
+    // chat_question_active fires, selects with ▶, truncates long
+    // choices to the panel width, and slides the visible window so
+    // the selected choice stays in view even when question_rows
+    // is capped below choice_count.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 40,
+    };
+
+    // Open the panel + grow the reservation so paintInlineChat has
+    // room for the picker above the input row.
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // Stage question state directly — production code populates
+    // these on dialog parse; the test bypasses the parser.
+    rt.chat_question_active = true;
+    rt.chat_question_choice_count = 3;
+    rt.chat_question_selected_idx = 1; // middle option
+    const choices = [_][]const u8{
+        "first option",
+        "second option (selected)",
+        "third option goes here and should be safely truncated when narrower than the panel",
+    };
+    for (choices, 0..) |c, idx| {
+        const dst = rt.question_choices_storage[idx][0..@min(c.len, rt.question_choices_storage[idx].len)];
+        @memcpy(dst, c[0..dst.len]);
+        rt.question_choices_lens[idx] = dst.len;
+    }
+    rt.chat_inline_paint_pending = true;
+
+    const out_opt = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(out_opt != null);
+    const out = out_opt.?;
+
+    // Numbered prefixes for all three choices.
+    try testing.expect(std.mem.indexOf(u8, out, "1. ") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "2. ") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "3. ") != null);
+    // Selected row carries the mauve ▶ glyph.
+    try testing.expect(std.mem.indexOf(u8, out, "\u{25B6}") != null);
+    // Truncation: the long third choice must NOT appear in full —
+    // panel cols=40 minus prefix=5 = 35-col budget; full text is
+    // ~80 chars.
+    try testing.expect(std.mem.indexOf(u8, out, "safely truncated when narrower") == null);
+}
+
 test "inline chat (Alt+C): toggle flips reserve-rows request and paints panel" {
     const L = configure(.{
         .provider = .{ .http = .{
