@@ -378,6 +378,17 @@ echo
 echo "  sudo usermod -aG atty \$USER"
 echo "  # log out + back in (or 'newgrp atty' for a single shell)"
 echo
+echo "Threat-model note: members of the 'atty' group can connect to"
+echo "the daemon's UDS socket. They can issue classify requests AND"
+echo "introspect their own per-UID trust state (atoms / URLs / trust"
+echo "hashes) via 'atty-guard session list' or GetThreatLevel for"
+echo "their own PIDs. They CANNOT touch other users' state — the"
+echo "daemon's SO_PEERCRED + pid-owner gates restrict every mutating"
+echo "and cross-UID read RPC to root (sudo) or the owning UID."
+echo "Add ONLY the user accounts that should be able to run atty,"
+echo "and treat the 'atty' group as 'trusted to query the local"
+echo "classifier' rather than 'arbitrary local users'."
+echo
 echo "Then set 'daemon_socket_path' in src/config.zig:"
 echo
 echo "  .daemon_socket_path = \"/run/atty-guard/atty-guard.sock\","
