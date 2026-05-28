@@ -8,25 +8,6 @@ Usage:
     python3 tests/sandbox/runner.py --no-build  # skip image rebuild
 
 Exits 0 if all scenarios pass, 1 if any fail.
-
-Design notes
-------------
-
-Why python+ptyprocess and not bash+expect: keystroke timing and
-PTY assertions are easier to reason about in python (real types,
-proper exception propagation), and we get pytest-grade isolation
-between scenarios without rolling our own framework.
-
-Why containers per scenario (not one container reused): each
-scenario starts from a known-clean state — fresh /var/lib/atty-guard,
-no stale daemon, no leaked PIDs from previous runs. Trade ~3s of
-container startup for deterministic isolation.
-
-Why we don't run systemd inside the container: systemd-in-docker
-is awkward (--privileged + /run/systemd mount + PID 1 dance) and
-scenarios that need to test install.sh's systemd integration can
-verify the FILES + the unit's ExecStart line without actually
-booting the unit. The daemon runs as a plain background process.
 """
 from __future__ import annotations
 
@@ -41,16 +22,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SANDBOX_DIR = REPO_ROOT / "tests" / "sandbox"
 BUILD_DIR = SANDBOX_DIR / ".build"
 IMAGE_TAG = "atty-sandbox:base"
+# Per-scenario wall-clock cap. Without it a hung container blocks
+# the entire runner forever (subprocess.run has no default timeout).
+SCENARIO_TIMEOUT_S = 120
 
 
 def stage_binaries() -> None:
-    """Copy the host-built atty binary into the docker build
-    context. atty is statically-linked musl (per the Makefile's
-    default TARGET=x86_64-linux-musl) so the host binary is
-    portable into the container. atty-guard is built INSIDE the
-    container via the Dockerfile's builder stage so it picks up
-    matching glibc.
-    """
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     atty_src = REPO_ROOT / "zig-out" / "bin" / "atty"
     if not atty_src.exists():
@@ -63,12 +40,6 @@ def stage_binaries() -> None:
 
 def build_image() -> None:
     print(f"[runner] building {IMAGE_TAG} …")
-    # Build context is REPO_ROOT so the builder stage can COPY
-    # atty-guard/. The Dockerfile is referenced explicitly via -f
-    # because docker doesn't look inside tests/sandbox/ by default.
-    # `.dockerignore` at the repo root keeps the context small
-    # (excludes zig-out, target/, .git, etc.) — see file for the
-    # exclude list.
     subprocess.run(
         [
             "docker",
@@ -93,29 +64,31 @@ def discover_scenarios() -> list[Path]:
 def run_scenario(script: Path) -> bool:
     name = script.parent.name
     print(f"\n[runner] === {name} ===")
-    # Mount the sandbox tree read-only at /sandbox so scenarios
-    # can import shared helpers from /sandbox/lib/.
-    # --tmpfs /tmp so atuin / atty caches don't leak between runs.
-    # --network=none so accidental fetches fail fast in the smoke
-    # tier; scenarios that need network override this themselves.
-    result = subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--network=none",
-            "--tmpfs",
-            "/tmp:exec",
-            "-v",
-            f"{SANDBOX_DIR}:/sandbox:ro",
-            "-w",
-            "/sandbox",
-            IMAGE_TAG,
-            "python3",
-            f"/sandbox/scenarios/{name}/scenario.py",
-        ]
-    )
-    ok = result.returncode == 0
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network=none",
+                "--tmpfs",
+                "/tmp:exec",
+                "-v",
+                f"{SANDBOX_DIR}:/sandbox:ro",
+                "-w",
+                "/sandbox",
+                IMAGE_TAG,
+                "python3",
+                f"/sandbox/scenarios/{name}/scenario.py",
+            ],
+            timeout=SCENARIO_TIMEOUT_S,
+        )
+        ok = result.returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"[runner] {name}: TIMEOUT (> {SCENARIO_TIMEOUT_S}s)")
+        # `docker run --rm` cleans the container even on host-side
+        # kill, so no manual `docker rm` needed.
+        return False
     print(f"[runner] {name}: {'PASS' if ok else 'FAIL'}")
     return ok
 

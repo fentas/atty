@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""00-smoke — end-to-end sanity check.
+"""00-smoke — framework liveness check.
 
-Verifies the framework is wired correctly:
-- atty-guard starts cleanly under the `atty` user.
-- /run/atty-guard/atty-guard.sock exists + is reachable.
-- An atty proxy run as `alice` connects to the daemon and runs a
-  simple shell command.
-- No daemon error lines in the captured stderr.
-
-Catches nothing substantive on its own — that's #330's job. This
-scenario's role is to fail loudly if the Dockerfile / runner.py /
-binary-staging pipeline regresses.
+Daemon boots under atty user; UDS appears; alice can drive an atty
+proxy through a shell command via a printed-marker idiom. Fails
+loudly if the Dockerfile / runner.py / binary-staging pipeline
+regresses — that's its only job. Real behaviour coverage lives in
+#330+.
 """
 from __future__ import annotations
 
@@ -24,7 +19,8 @@ from lib.daemon import Daemon  # noqa: E402
 import ptyprocess  # noqa: E402
 
 
-SENTINEL = "sandbox-smoke-ok-7f3c"
+BEGIN = "BEGIN-sandbox-smoke-7f3c"
+END = "END-sandbox-smoke-7f3c"
 
 
 def fail(msg: str) -> None:
@@ -32,10 +28,28 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
+def read_until(proc: "ptyprocess.PtyProcess", marker: bytes, timeout: float,
+               sink: bytearray) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            chunk = proc.read(4096)
+        except EOFError:
+            return marker in bytes(sink)
+        if chunk:
+            sink.extend(chunk)
+            if marker in bytes(sink):
+                return True
+        else:
+            time.sleep(0.05)
+    return marker in bytes(sink)
+
+
 def drive_atty() -> str:
-    """Spawn atty inside a PTY as alice, type a single command, exit."""
-    # atty refuses non-TTY stdio (see src/main.zig), so subprocess.run
-    # with pipes won't work — spawn under ptyprocess instead.
+    # printf wraps the echo with BEGIN/END markers so we can grep
+    # for the *executed* output, not the PTY's echo of the typed
+    # command (which would pass for the wrong reason).
+    cmd = f"printf '%s %s\\n' {BEGIN} {END}"
     proc = ptyprocess.PtyProcess.spawn(
         [
             "runuser",
@@ -57,26 +71,11 @@ def drive_atty() -> str:
     )
 
     captured = bytearray()
-    deadline = time.time() + 8.0
-
-    def read_until(marker: bytes, timeout: float) -> bool:
-        while time.time() < timeout:
-            try:
-                chunk = proc.read(4096)
-            except EOFError:
-                return marker in bytes(captured)
-            if chunk:
-                captured.extend(chunk)
-                if marker in bytes(captured):
-                    return True
-            else:
-                time.sleep(0.05)
-        return marker in bytes(captured)
-
-    # Wait for the prompt to settle, then issue the command.
-    read_until(b"$ ", deadline)
-    proc.write(f"echo {SENTINEL}\r".encode())
-    read_until(SENTINEL.encode(), deadline)
+    read_until(proc, b"$ ", timeout=4.0, sink=captured)
+    proc.write(f"{cmd}\r".encode())
+    if not read_until(proc, f"{BEGIN} {END}".encode(), timeout=4.0, sink=captured):
+        proc.write(b"exit\r")
+        return bytes(captured).decode("utf-8", errors="replace")
     proc.write(b"exit\r")
 
     try:
@@ -101,12 +100,16 @@ def main() -> None:
             fail("daemon socket missing after startup")
 
         out = drive_atty()
-        if SENTINEL not in out:
+        if f"{BEGIN} {END}" not in out:
             fail(f"atty did not propagate child output. captured={out!r}")
 
-        if daemon.log_contains("error:") or daemon.log_contains("ERROR"):
-            daemon._dump_log()
-            fail("daemon logged an error during smoke run")
+        # Daemon emits `atty-guard: <level> — <reason>` style lines;
+        # `error:` / `failed` / `rejected` cover the real failure
+        # signatures in atty-guard/src/main.rs and server.rs.
+        for needle in ("error:", "failed", "rejected"):
+            if daemon.log_contains(needle):
+                daemon._dump_log()
+                fail(f"daemon logged {needle!r} during smoke run")
 
     print("PASS: 00-smoke")
 
