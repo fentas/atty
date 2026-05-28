@@ -70,8 +70,8 @@ pub const TrustCache = struct {
     /// outside [0-9a-fA-F] as a "trust hash" — the runtime
     /// trust-check compares full strings, so a non-hex 64-char
     /// blob would never match a real category-match SHA-256
-    /// anyway, but the load path (`load()` below) already
-    /// rejects them and `add` should match for consistency.
+    /// anyway, but `load()` above already rejects them and `add`
+    /// should match for consistency.
     pub fn add(self: *TrustCache, allocator: std.mem.Allocator, hash: []const u8) !bool {
         if (hash.len != hex_len) return false;
         if (!isHex(hash)) return false;

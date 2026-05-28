@@ -106,7 +106,7 @@ test "TrustCache: persist + load round-trip" {
     try testing.expect(cache2.contains(h2));
 }
 
-test "TrustCache.add rejects non-hex 64-char input (issue #270)" {
+test "TrustCache.add rejects non-hex 64-char input" {
     // A daemon (or a forged UDS reply via socket-redirect) could
     // emit a quoted 64-char string that ISN'T hex. The runtime
     // trust check compares against real SHA-256 digests, so a
@@ -127,7 +127,11 @@ test "TrustCache.add rejects non-hex 64-char input (issue #270)" {
     almost[32] = 'z';
     try testing.expect(!try cache.add(testing.allocator, &almost));
 
-    // Uppercase hex is accepted (load also case-insensitive).
+    // Uppercase hex passes isHex; both `add` and `load` accept it.
+    // `TrustCache.contains` is byte-exact and the canonical write
+    // path (hashCategoryMatch) emits lowercase, so an uppercase
+    // entry only appears via hand-edits and can never match a real
+    // runtime check — but accepting it keeps the parser tolerant.
     const upper = [_]u8{'A'} ** mod.hex_len;
     try testing.expect(try cache.add(testing.allocator, &upper));
 }
