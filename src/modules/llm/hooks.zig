@@ -808,13 +808,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 closeRecallPicker(rt);
                                 continue;
                             };
+                            // loader doesn't read .preview — pass an
+                            // empty owned slice to keep the type
+                            // closed.
                             const meta_copy = chat_persist.DialogMeta{
                                 .path = path_copy,
                                 .name = name_copy,
+                                .preview = rt.allocator.alloc(u8, 0) catch &[_]u8{},
                             };
                             defer {
                                 rt.allocator.free(meta_copy.path);
                                 rt.allocator.free(meta_copy.name);
+                                rt.allocator.free(meta_copy.preview);
                             }
                             closeRecallPicker(rt);
 

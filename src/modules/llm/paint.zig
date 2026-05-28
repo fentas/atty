@@ -383,23 +383,50 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         continue;
                     }
                     const n = m_meta.name;
-                    w.print(
-                        "  {s}  {s}-{s}-{s} {s}:{s}:{s}  \x1B[2m{s}\x1B[0m{s}\r\n",
-                        .{
-                            sel_open,
-                            n[0..4],
-                            n[4..6],
-                            n[6..8],
-                            n[9..11],
-                            n[11..13],
-                            n[13..15],
-                            n[16..22],
-                            sel_close,
-                        },
-                    ) catch {
-                        aw.deinit();
-                        return false;
-                    };
+                    // Preview chunk: prepend `· <preview>` after the
+                    // timestamp + 6-hex suffix so the user can pick
+                    // a dialog by its first asked line. Empty preview
+                    // (unreadable file, no user turn in prefix, or
+                    // non-user first record) silently drops the
+                    // chunk — the row degrades to just timestamp+id.
+                    if (m_meta.preview.len > 0) {
+                        w.print(
+                            "  {s}  {s}-{s}-{s} {s}:{s}:{s}  \x1B[2m{s} \u{00B7} {s}\x1B[0m{s}\r\n",
+                            .{
+                                sel_open,
+                                n[0..4],
+                                n[4..6],
+                                n[6..8],
+                                n[9..11],
+                                n[11..13],
+                                n[13..15],
+                                n[16..22],
+                                m_meta.preview,
+                                sel_close,
+                            },
+                        ) catch {
+                            aw.deinit();
+                            return false;
+                        };
+                    } else {
+                        w.print(
+                            "  {s}  {s}-{s}-{s} {s}:{s}:{s}  \x1B[2m{s}\x1B[0m{s}\r\n",
+                            .{
+                                sel_open,
+                                n[0..4],
+                                n[4..6],
+                                n[6..8],
+                                n[9..11],
+                                n[11..13],
+                                n[13..15],
+                                n[16..22],
+                                sel_close,
+                            },
+                        ) catch {
+                            aw.deinit();
+                            return false;
+                        };
+                    }
                 }
             }
 

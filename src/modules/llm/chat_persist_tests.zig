@@ -519,6 +519,79 @@ test "listDialogs: returns matching files sorted newest-first" {
     _ = std.c.rmdir(dz.ptr);
 }
 
+test "listDialogs: populates DialogMeta.preview from first user turn" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+
+    var name_buf: [96]u8 = undefined;
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    const seed: u64 = @as(u64, @intCast(ts.sec)) *% 1_000_000_000 +% @as(u64, @intCast(ts.nsec));
+    const dir = try std.fmt.bufPrint(&name_buf, "/tmp/atty-preview-{x}", .{seed});
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+
+    // Three fixture files exercising the three preview shapes:
+    //   1. happy path — user turn first → preview = content.
+    //   2. assistant_exec first → preview empty (no user turn in prefix).
+    //   3. user turn with embedded `\n` → newline collapsed to space.
+    const fixtures = [_]struct { name: []const u8, body: []const u8, expect: []const u8 }{
+        .{
+            .name = "20260101T000000-aaaaaa.jsonl",
+            .body = "{\"kind\":\"user\",\"content\":\"list files in cwd\"}\n",
+            .expect = "list files in cwd",
+        },
+        .{
+            .name = "20260102T000000-bbbbbb.jsonl",
+            .body = "{\"kind\":\"assistant_exec\",\"content\":\"{}\"}\n",
+            .expect = "",
+        },
+        .{
+            .name = "20260103T000000-cccccc.jsonl",
+            .body = "{\"kind\":\"user\",\"content\":\"first\\nsecond\"}\n",
+            .expect = "first second",
+        },
+    };
+    for (fixtures) |f| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, f.name });
+        defer testing.allocator.free(p);
+        const pz = try testing.allocator.dupeZ(u8, p);
+        defer testing.allocator.free(pz);
+        const fd = std.c.open(pz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+        try testing.expect(fd >= 0);
+        _ = std.c.write(fd, f.body.ptr, f.body.len);
+        _ = std.c.close(fd);
+    }
+
+    const list = try listDialogs(testing.allocator, real_io, dir);
+    defer freeDialogMetaList(testing.allocator, list);
+    try testing.expectEqual(@as(usize, 3), list.len);
+
+    // Match expected previews by name (newest-first ordering ≠
+    // fixture-creation order).
+    for (list) |m| {
+        const stem = m.name; // e.g. "20260101T000000-aaaaaa"
+        for (fixtures) |f| {
+            const expected_stem = f.name[0 .. f.name.len - ".jsonl".len];
+            if (std.mem.eql(u8, stem, expected_stem)) {
+                try testing.expectEqualStrings(f.expect, m.preview);
+                break;
+            }
+        }
+    }
+
+    for (fixtures) |f| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, f.name });
+        defer testing.allocator.free(p);
+        const pz = try testing.allocator.dupeZ(u8, p);
+        defer testing.allocator.free(pz);
+        _ = std.c.unlink(pz.ptr);
+    }
+    _ = std.c.rmdir(dz.ptr);
+}
+
 test "listDialogs: skips zero-byte reservations" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
