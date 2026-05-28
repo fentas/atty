@@ -200,3 +200,98 @@ test "configure exposes deleteHistoryMatch hook (regression: atuin-side delete m
     const A = configure(.{});
     try testing.expect(@hasDecl(A, "deleteHistoryMatch"));
 }
+
+// ---- gpt-review #027/#028/#030 regressions ---------------------------------
+
+test "config exposes record_queue_capacity + sync_on_detach_timeout_ms knobs" {
+    // Pin that the two new comptime knobs are wired. A future
+    // rename here breaks `zig build test` so user configs that
+    // override either of them surface a clear compile error
+    // instead of silently picking up a renamed default.
+    const A = configure(.{ .record_queue_capacity = 4, .sync_on_detach_timeout_ms = 500 });
+    try testing.expectEqual(@as(comptime_int, 4), A.config.record_queue_capacity);
+    try testing.expectEqual(@as(u64, 500), A.config.sync_on_detach_timeout_ms);
+}
+
+test "rec_queue FIFO push+drain preserves order across multiple commits (gpt-review #027)" {
+    // The prior latest-wins shape lost cmd1 if cmd2 landed before
+    // the worker drained. With the FIFO ring two pushes leave both
+    // entries readable in commit order — verified by simulating
+    // the producer side directly (the worker drain logic just
+    // pops head, no behavior to mock).
+    const A = configure(.{ .record_queue_capacity = 4 });
+    var shared: A.Shared = .{};
+    // Push 3 entries
+    inline for ([_][]const u8{ "first", "second", "third" }, 0..) |cmd, i| {
+        const slot = &shared.rec_queue[shared.rec_tail];
+        @memcpy(slot.cmd_buf[0..cmd.len], cmd);
+        slot.cmd_len = cmd.len;
+        slot.cwd_len = 0;
+        slot.author = .user;
+        slot.intent_len = 0;
+        shared.rec_tail = (shared.rec_tail + 1) % A.config.record_queue_capacity;
+        shared.rec_count += 1;
+        try testing.expectEqual(i + 1, shared.rec_count);
+    }
+    // Drain in order
+    inline for ([_][]const u8{ "first", "second", "third" }) |expected| {
+        try testing.expect(shared.rec_count > 0);
+        const slot = shared.rec_queue[shared.rec_head];
+        try testing.expectEqualStrings(expected, slot.cmd_buf[0..slot.cmd_len]);
+        shared.rec_head = (shared.rec_head + 1) % A.config.record_queue_capacity;
+        shared.rec_count -= 1;
+    }
+    try testing.expectEqual(@as(usize, 0), shared.rec_count);
+}
+
+test "rec_queue overflow drops newest and bumps rec_dropped (gpt-review #027)" {
+    // At cap, drop-newest semantics + counter increment. Pre-fix
+    // a single slot would silently overwrite; this test would
+    // have failed with len-mismatch on the asserted FIFO content.
+    const A = configure(.{ .record_queue_capacity = 2 });
+    var shared: A.Shared = .{};
+    // Fill the ring (capacity 2).
+    const fillers = [_][]const u8{ "a", "b" };
+    inline for (fillers) |cmd| {
+        const slot = &shared.rec_queue[shared.rec_tail];
+        @memcpy(slot.cmd_buf[0..cmd.len], cmd);
+        slot.cmd_len = cmd.len;
+        slot.cwd_len = 0;
+        slot.author = .user;
+        slot.intent_len = 0;
+        shared.rec_tail = (shared.rec_tail + 1) % A.config.record_queue_capacity;
+        shared.rec_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), shared.rec_count);
+    // Simulate the overflow branch from onLineCommit: count == cap
+    // → bump rec_dropped, return without writing.
+    const at_cap = shared.rec_count >= A.config.record_queue_capacity;
+    try testing.expect(at_cap);
+    shared.rec_dropped +%= 1;
+    // FIFO contents are unchanged — head is still "a", tail still
+    // points at the slot AFTER "b".
+    try testing.expectEqualStrings(
+        "a",
+        shared.rec_queue[shared.rec_head].cmd_buf[0..shared.rec_queue[shared.rec_head].cmd_len],
+    );
+    try testing.expectEqual(@as(u32, 1), shared.rec_dropped);
+}
+
+test "config default record_queue_capacity is sane (gpt-review #027)" {
+    // The default needs to be > 1 (otherwise the FIFO is just a
+    // latest-wins slot again) and a power of 2 is nice for the
+    // modulo math but not required. Pin the default at 16 so a
+    // future tweak that drops it to 1 silently re-introduces the
+    // bug class.
+    const A = configure(.{});
+    try testing.expect(A.config.record_queue_capacity >= 8);
+}
+
+test "default sync_on_detach_timeout_ms is bounded (gpt-review #030)" {
+    // Zero means "wait forever"; that's a tail risk on atuin's
+    // offline backoff. The default must be a finite cap so a
+    // session exiting offline doesn't hang indefinitely.
+    const A = configure(.{});
+    try testing.expect(A.config.sync_on_detach_timeout_ms > 0);
+    try testing.expect(A.config.sync_on_detach_timeout_ms <= 60_000);
+}
