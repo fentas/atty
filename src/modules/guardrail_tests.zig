@@ -535,3 +535,145 @@ test "empty rules list always returns null" {
     try testing.expect(G.check("rm -rf /") == null);
     try testing.expect(G.check("") == null);
 }
+
+test "isEnterOnly accepts pure CR/LF, rejects everything else" {
+    const G = configure(.{});
+    try testing.expect(G.isEnterOnly("\r"));
+    try testing.expect(G.isEnterOnly("\n"));
+    try testing.expect(G.isEnterOnly("\r\n"));
+    try testing.expect(G.isEnterOnly("\n\r"));
+    try testing.expect(G.isEnterOnly("\r\r"));
+    try testing.expect(!G.isEnterOnly(""));
+    try testing.expect(!G.isEnterOnly("y\r"));
+    try testing.expect(!G.isEnterOnly("\rx"));
+    try testing.expect(!G.isEnterOnly("; rm -rf /\r"));
+    try testing.expect(!G.isEnterOnly("hi"));
+    // ESC byte is NOT enter — bracketed-paste sequences must
+    // disqualify even if they end in CR/LF.
+    try testing.expect(!G.isEnterOnly("\x1b[200~hi\x1b[201~\r"));
+}
+
+test "armed-state paste with appended CR re-checks rules instead of forwarding" {
+    // Invariant: the rule a confirm grants is only valid for the
+    // exact buffer it was armed against. A mixed chunk (paste
+    // bytes ending in CR) changes the buffer and must trigger a
+    // fresh findRule on the new line. Without this, a paste of
+    // `; <dangerous>` + CR after `sudo apt update` (confirmed)
+    // would execute the combined string with the original
+    // arming's grant.
+    const G = configure(.{});
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    // Step 1: type `sudo apt update` + Enter. Matches the
+    // sudo-prefix rule (.confirm) → arm.
+    _ = line.applyInput("sudo apt update\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    const arm_action = try G.onInput(&rt, &ctx, "\r");
+    try testing.expectEqual(m.Action.swallow, arm_action);
+    try testing.expect(rt.armed);
+
+    // Step 2: paste a fork bomb with trailing CR. applyInput
+    // re-runs first (proxy convention), updating the live buffer
+    // + committing on \r. The CR in the paste must NOT be
+    // honored as a second-press confirm.
+    sink.buf.clearRetainingCapacity();
+    _ = line.applyInput("; :(){ :|:& };:\r");
+    const paste_action = try G.onInput(&rt, &ctx, "; :(){ :|:& };:\r");
+
+    // Fork-bomb rule fires .block → Ctrl+U replaces the chunk so
+    // the shell never sees the dangerous bytes.
+    switch (paste_action) {
+        .replace => |bytes| try testing.expectEqualSlices(u8, "\x15", bytes),
+        else => return error.TestFailedBypassActive,
+    }
+    try testing.expect(!rt.armed);
+    // Banner cites the new rule's reason ("fork bomb"), not the
+    // original sudo-apt-update arming.
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "fork bomb") != null);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "blocked.") != null);
+}
+
+test "armed-state paste with new .confirm rule re-arms instead of forwarding" {
+    // Companion invariant: when the pasted-with-CR content matches
+    // a .confirm rule (not .block), the armed branch must disarm
+    // and RE-ARM on the new rule rather than forwarding the
+    // already-granted (stale) confirmation.
+    const G = configure(.{});
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    _ = line.applyInput("sudo apt update\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    _ = try G.onInput(&rt, &ctx, "\r");
+    try testing.expect(rt.armed);
+
+    // Paste appends `rm -rf` content (matches substring rule
+    // → .confirm for user author). The fix must re-arm on this
+    // new rule, not blindly forward.
+    sink.buf.clearRetainingCapacity();
+    _ = line.applyInput("; rm -rf /home/me\r");
+    const paste_action = try G.onInput(&rt, &ctx, "; rm -rf /home/me\r");
+
+    try testing.expectEqual(m.Action.swallow, paste_action);
+    try testing.expect(rt.armed); // re-armed on the rm-rf rule
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "rm -rf") != null);
+}
+
+test "armed-state pure CR confirms (preserves existing happy path)" {
+    // Regression guard: pure-Enter input on an armed rule still
+    // forwards as confirmation.
+    const G = configure(.{});
+    var rt = try G.attach(testing.allocator, test_io);
+    defer G.detach(&rt, test_io);
+
+    var sink = TestSink{ .buf = .empty };
+    defer sink.buf.deinit(testing.allocator);
+    G.setSink(&rt, &sink, TestSink.write);
+
+    var line = LineState{};
+    _ = line.applyInput("sudo apt update\r");
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = test_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    const first = try G.onInput(&rt, &ctx, "\r");
+    try testing.expectEqual(m.Action.swallow, first);
+    try testing.expect(rt.armed);
+
+    // A FRESH pure CR (single byte) is the legit confirm.
+    const second = try G.onInput(&rt, &ctx, "\r");
+    try testing.expectEqual(m.Action.forward, second);
+    try testing.expect(!rt.armed);
+}

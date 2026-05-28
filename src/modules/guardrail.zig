@@ -105,6 +105,23 @@ pub fn configure(comptime cfg: Config) type {
             return null;
         }
 
+        /// True iff `input` is a non-empty sequence consisting
+        /// ENTIRELY of CR (0x0D) and/or LF (0x0A) bytes. Used to
+        /// distinguish a legitimate "press Enter again to confirm"
+        /// keystroke from a paste that happens to end in Enter:
+        /// the latter contains added bytes that change what the
+        /// shell will execute, so the rule check must re-run.
+        pub fn isEnterOnly(input: []const u8) bool {
+            if (input.len == 0) return false;
+            for (input) |b| {
+                switch (b) {
+                    0x0D, 0x0A => {},
+                    else => return false,
+                }
+            }
+            return true;
+        }
+
         /// Test seam — redirect the warning banner.
         pub fn setSink(
             rt: *Runtime,
@@ -120,12 +137,15 @@ pub fn configure(comptime cfg: Config) type {
             ctx: *m.Context,
             input: []const u8,
         ) m.Error!m.Action {
-            const is_enter = blk: {
+            const has_enter = blk: {
                 for (input) |b| if (b == 0x0D or b == 0x0A) break :blk true;
                 break :blk false;
             };
 
-            if (!is_enter) {
+            if (!has_enter) {
+                // Plain typing invalidates any prior arm: the buffer
+                // shape that was checked is no longer what the shell
+                // will see on the next Enter.
                 rt.armed = false;
                 return .forward;
             }
@@ -146,13 +166,20 @@ pub fn configure(comptime cfg: Config) type {
 
             if (rt.armed) {
                 rt.armed = false;
-                if (rt.armed_rule_idx < effective_rules.len) {
-                    const armed_rule = effective_rules[rt.armed_rule_idx];
-                    if (armed_rule.behavior == .confirm_once) {
-                        rt.confirmed_once[rt.armed_rule_idx] = true;
+                // A confirm consumes the rule's grant only when the
+                // chunk is a pure Enter. Anything else means the
+                // buffer changed since arming, so the previously
+                // checked shape is no longer what the shell will
+                // run — re-classify on the live buffer instead.
+                if (isEnterOnly(input)) {
+                    if (rt.armed_rule_idx < effective_rules.len) {
+                        const armed_rule = effective_rules[rt.armed_rule_idx];
+                        if (armed_rule.behavior == .confirm_once) {
+                            rt.confirmed_once[rt.armed_rule_idx] = true;
+                        }
                     }
+                    return .forward;
                 }
-                return .forward;
             }
 
             const hit = findRule(line, author) orelse return .forward;
