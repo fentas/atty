@@ -800,10 +800,23 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// byte. Lines that exceed `input_row` get clipped — the
         /// caller's `input_lines` math already accounts for the cap.
         fn paintInputBlock(w: *std.Io.Writer, rt: *Runtime, input_top_row: u16, input_row: u16) !void {
-            const prompt_style: []const u8 = if (rt.chat_focus_in_panel)
+            // Chat-mode question pick-list (#308): when active AND
+            // the free-text row is the selected option, render the
+            // prompt glyph as mauve ▶ instead of cyan ❯ so the
+            // pick-list selection state is visible on the input
+            // row too — matches the overlay's behaviour at
+            // paint.zig:248-254.
+            const free_text_selected = rt.chat_focus_in_panel and
+                rt.chat_question_active and
+                rt.chat_question_choice_count > 0 and
+                rt.chat_question_selected_idx == rt.chat_question_choice_count;
+            const prompt_style: []const u8 = if (free_text_selected)
+                "\x1B[22;1;38;5;141m"
+            else if (rt.chat_focus_in_panel)
                 "\x1B[22;1;38;5;14m"
             else
                 "\x1B[2;38;5;14m";
+            const prompt_glyph: []const u8 = if (free_text_selected) "\u{25B6}" else "\u{276F}";
             const buf = rt.chat_inline_input_buf[0..rt.chat_inline_input_len];
             const cur = rt.chat_inline_input_cursor;
             const focus = rt.chat_focus_in_panel;
@@ -825,7 +838,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 try w.print("\x1B[{d};1H\x1B[2K", .{current_row});
                 if (line_idx == 0) {
                     try w.writeAll(prompt_style);
-                    try w.writeAll("\u{276F}\x1B[0m ");
+                    try w.writeAll(prompt_glyph);
+                    try w.writeAll("\x1B[0m ");
                 } else {
                     try w.writeAll("\x1B[2m\u{2026}\x1B[0m ");
                 }
@@ -1197,13 +1211,57 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const input_lines_cap: u16 = if (panel_rows >= 4) @max(@as(u16, 1), panel_rows / 2) else 1;
             const input_lines: u16 = @min(desired_input_lines, input_lines_cap);
             const input_top_row: u16 = input_row - (input_lines - 1);
-            const scrollback_rows: u16 = if (input_top_row > top_row + 1) input_top_row - top_row - 1 else 0;
+            // Chat-mode question pick-list (#308): reserve N rows
+            // immediately above the input area for the choice list.
+            // Mirrors the overlay's reservation at paint.zig:130 —
+            // the inline panel didn't render the picker pre-#308,
+            // so arrow-key navigation worked silently but the user
+            // couldn't see selection. Cap at half the available
+            // space ABOVE input so scrollback isn't fully starved
+            // for tall choice lists on small terminals.
+            const raw_question_rows: u16 = if (rt.chat_question_active and rt.chat_question_choice_count > 0)
+                @intCast(rt.chat_question_choice_count)
+            else
+                0;
+            const room_above_input: u16 = if (input_top_row > top_row + 1) input_top_row - top_row - 1 else 0;
+            const max_question_rows: u16 = if (room_above_input >= 2) room_above_input / 2 else 0;
+            const question_rows: u16 = @min(raw_question_rows, max_question_rows);
+            const question_top_row: u16 = input_top_row - question_rows;
+            const scrollback_rows: u16 = if (question_top_row > top_row + 1) question_top_row - top_row - 1 else 0;
             var row: u16 = top_row + 1;
             // Blank-clear every scrollback row up front so prior
             // chat content doesn't leak when the turns shrink.
             var r: u16 = row;
-            while (r < input_top_row) : (r += 1) {
+            while (r < question_top_row) : (r += 1) {
                 w.print("\x1B[{d};1H\x1B[2K", .{r}) catch return false;
+            }
+            // Paint the question choice list, if active. Renders
+            // bottom-up: choice 0 lands at `question_top_row`,
+            // last choice immediately above `input_top_row`.
+            // Selected row gets the mauve ▶ + bold; others get a
+            // dim 2-space prefix to keep column alignment.
+            if (question_rows > 0) {
+                const sel = rt.chat_question_selected_idx;
+                var qi: u8 = 0;
+                while (qi < question_rows) : (qi += 1) {
+                    const qrow: u16 = question_top_row + qi;
+                    w.print("\x1B[{d};1H\x1B[2K", .{qrow}) catch return false;
+                    const is_sel = (sel == qi);
+                    if (is_sel) {
+                        w.writeAll("\x1B[22;38;5;141m\u{25B6}\x1B[0m ") catch return false;
+                    } else {
+                        w.writeAll("  ") catch return false;
+                    }
+                    var num_buf: [8]u8 = undefined;
+                    const num_str = std.fmt.bufPrint(&num_buf, "{d}. ", .{qi + 1}) catch unreachable;
+                    w.writeAll("\x1B[22;1;38;5;14m") catch return false;
+                    w.writeAll(num_str) catch return false;
+                    w.writeAll("\x1B[0m") catch return false;
+                    if (is_sel) w.writeAll("\x1B[1m") catch return false;
+                    const choice_slice = rt.question_choices_storage[qi][0..rt.question_choices_lens[qi]];
+                    writeSanitized(&w, choice_slice) catch return false;
+                    if (is_sel) w.writeAll("\x1B[0m") catch return false;
+                }
             }
 
             // `chat_inline_view_offset` is in ROWS now (post-#213):
