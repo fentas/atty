@@ -50,13 +50,17 @@ def fail(msg: str) -> None:
 
 def wipe_state() -> None:
     # Base image pre-creates these; install.sh has to be idempotent
-    # over them. To prove install.sh writes the bytes (not just the
-    # base image's bytes), delete the binary + unit file + config
-    # dir first. atty:atty user/group stay (install.sh is idempotent
-    # over them too).
+    # over them. To prove install.sh actually creates them (not
+    # just inherits the base image's bytes), wipe before running
+    # the installer. /var/lib/atty-guard included: without it, a
+    # regression where install.sh stopped creating the state dir
+    # would still pass because the base image pre-created it.
+    # atty:atty user/group stay (install.sh is idempotent over
+    # them too — useradd would refuse to re-create).
     for p in ["/usr/local/bin/atty-guard",
               "/etc/systemd/system/atty-guard.service",
-              "/etc/atty-guard"]:
+              "/etc/atty-guard",
+              "/var/lib/atty-guard"]:
         path = Path(p)
         if path.is_file() or path.is_symlink():
             path.unlink()

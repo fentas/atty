@@ -19,6 +19,8 @@ from pathlib import Path
 sys.path.insert(0, "/sandbox")
 from lib.daemon import Daemon  # noqa: E402
 from lib.users import UID_ALICE, as_user  # noqa: E402
+import json  # noqa: E402
+import subprocess  # noqa: E402
 
 
 PATTERN = "curl evil.example"
@@ -76,6 +78,32 @@ def main() -> None:
         if PATTERN not in alice_list.stdout.decode():
             fail(f"alice can't see her own atom after add: "
                  f"{alice_list.stdout!r}")
+
+        # The list view is one path; the classifier is another.
+        # A regression that kept `atoms list` scoped correctly
+        # while leaking alice's atom into bob's per-UID overlay
+        # at classify-time would still bite production. Send a
+        # classify RPC AS bob and assert no atom hit. UDS peer
+        # cred is what the daemon gates on, so we wrap the
+        # python lib.uds call in runuser.
+        classify = subprocess.run(
+            ["runuser", "-u", "bob", "--", "python3", "-c",
+             "import sys; sys.path.insert(0, '/sandbox'); "
+             "import json; from lib.uds import call; "
+             f"print(json.dumps(call('classify', command={PATTERN!r})))"],
+            capture_output=True,
+            timeout=10,
+        )
+        if classify.returncode != 0:
+            fail(f"bob classify subprocess failed: {classify.stderr!r}")
+        verdict = json.loads(classify.stdout)
+        # ResponseBody::Classify carries verdict + category.
+        # Safe + Category::None means no atom hit. A leak would
+        # surface as verdict=warn + category=none (atom hits go
+        # through the generic AtomMatcher reason).
+        if verdict.get("verdict") != "safe":
+            fail(f"cross-UID atom leak at classify time: bob's "
+                 f"classify of {PATTERN!r} returned {verdict}")
 
     print("PASS: 30-sudo-atoms-add")
 
