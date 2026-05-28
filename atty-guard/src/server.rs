@@ -656,9 +656,16 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // sees only its own PIDs. NotFound (already-dead PID)
             // is allowed since the threat level is just an in-memory
             // value with no useful signal for an exited process.
+            //
+            // Error case (e.g. hidepid=2 hiding /proc/<pid>/status,
+            // or a transient read failure) is rejected — without
+            // this, the same probing attack would succeed whenever
+            // pid_owner_uid couldn't decide. Mirrors SetThreatLevel's
+            // shape exactly so the read gate doesn't lag the write
+            // gate.
             if !peer.is_root {
-                if let OwnerLookup::Owner(owner_uid) = pid_owner_uid(pid) {
-                    if owner_uid != peer.uid {
+                match pid_owner_uid(pid) {
+                    OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
                         return ResponseBody::Error {
                             message: format!(
                                 "non-root caller (uid {}) cannot read threat level for pid {pid} (owned by uid {owner_uid})",
@@ -666,6 +673,10 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                             ),
                         };
                     }
+                    OwnerLookup::Error(msg) => {
+                        return ResponseBody::Error { message: msg };
+                    }
+                    OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
                 }
             }
             ResponseBody::ThreatLevel {
