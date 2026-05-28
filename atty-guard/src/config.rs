@@ -124,6 +124,10 @@ pub struct Tier2Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+// The struct is parsed in every build (so non-ONNX builds reject
+// malformed config consistently), but the FIELDS are only read by
+// the ONNX backend at runtime. Without this allow, the no-feature
+// build warns about unused fields.
 #[cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
 pub struct OnnxConfig {
     /// Model selector — defaults to `securebert2` because it's
@@ -190,7 +194,6 @@ fn default_block_threshold() -> f32 {
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
 pub enum LoadError {
     Io(std::io::Error),
     Parse(String),
@@ -207,34 +210,24 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-#[cfg(feature = "tier2-onnx")]
+/// Parse a TOML config file. Always available (the parser dep
+/// became non-optional after gpt-review #032 — previously the
+/// non-`tier2-onnx` build read the file but discarded its
+/// contents, silently dropping operator `[server]`, `[accumulator]`,
+/// and non-ONNX `[tier2]` policy).
+///
+/// I/O and parse failures are both hard errors so explicit
+/// `--config` consistently fails closed: missing/unreadable path
+/// → `LoadError::Io`, malformed TOML → `LoadError::Parse`.
 pub fn load(path: &Path) -> Result<Config, LoadError> {
     let text = std::fs::read_to_string(path).map_err(LoadError::Io)?;
     toml::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))
-}
-
-/// Stub for builds without the `tier2-onnx` feature.
-///
-/// TOML parsing is gated behind `tier2-onnx`; this stub deliberately
-/// does NOT parse the file even when the `toml` crate is in the dep
-/// tree via another feature (e.g. `atoms-fetch`) — keeping the
-/// parsing surface tied to a single feature flag.
-///
-/// The stub still performs the file read so the I/O failure posture
-/// is identical to the feature-on build: an unreadable `--config
-/// <path>` is a hard error in both flavors. A readable file always
-/// returns `Config::default()` regardless of contents.
-#[cfg(not(feature = "tier2-onnx"))]
-pub fn load(path: &Path) -> Result<Config, LoadError> {
-    std::fs::read_to_string(path).map_err(LoadError::Io)?;
-    Ok(Config::default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "tier2-onnx")]
     #[test]
     fn parses_complete_tier2_onnx_block() {
         let src = r#"
@@ -256,7 +249,6 @@ block_threshold = 0.9
         assert!((cfg.tier2.onnx.block_threshold - 0.9).abs() < 1e-6);
     }
 
-    #[cfg(feature = "tier2-onnx")]
     #[test]
     fn empty_config_yields_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
@@ -264,7 +256,6 @@ block_threshold = 0.9
         assert_eq!(cfg.tier2.onnx.max_tokens, 1024);
     }
 
-    #[cfg(feature = "tier2-onnx")]
     #[test]
     fn missing_onnx_subtable_keeps_defaults() {
         let cfg: Config = toml::from_str("[tier2]\nbackend = \"heuristic\"").unwrap();
@@ -272,33 +263,63 @@ block_threshold = 0.9
         assert_eq!(cfg.tier2.onnx.model, "securebert2");
     }
 
-    #[cfg(not(feature = "tier2-onnx"))]
     #[test]
-    fn no_feature_load_readable_file_returns_defaults() {
-        // Stub builds still perform the I/O so the failure posture
-        // matches the feature-on path; on a readable file the
-        // result is always `Config::default()` since the stub
-        // ignores TOML content (no parser wired through this path
-        // even when `toml` is present via another feature like
-        // `atoms-fetch`).
+    fn load_parses_server_and_accumulator_tables() {
+        // gpt-review #032 regression guard: pre-fix the non-ONNX
+        // build silently discarded these tables. Both must round-
+        // trip through `load` regardless of feature flags.
+        let src = br#"
+[server]
+max_concurrent_connections = 8
+idle_read_timeout_secs = 5
+
+[accumulator]
+block_threshold = 0.97
+"#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         use std::io::Write as _;
-        tmp.write_all(b"anything = \"ignored\"").unwrap();
-        let cfg = load(tmp.path()).expect("readable file should succeed");
-        assert_eq!(cfg.tier2.onnx.model, "securebert2");
+        tmp.write_all(src).unwrap();
+        let cfg = load(tmp.path()).expect("readable + valid TOML");
+        assert_eq!(cfg.server.max_concurrent_connections, 8);
+        assert_eq!(cfg.server.idle_read_timeout_secs, 5);
+        assert!((cfg.accumulator.block_threshold.unwrap() - 0.97).abs() < 1e-6);
     }
 
-    #[cfg(not(feature = "tier2-onnx"))]
     #[test]
-    fn no_feature_load_missing_file_errors() {
-        // Stub I/O failure parity: missing path → LoadError::Io,
-        // same as the feature-on build. Without this the explicit-
-        // --config fail-closed posture only applied to tier2-onnx
-        // builds, defeating it on default builds.
+    fn load_parses_non_onnx_tier2_backend() {
+        // Same regression family — `[tier2] backend = "heuristic"`
+        // pre-fix only landed in `tier2-onnx` builds. Now honored
+        // in every build flavor.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"[tier2]\nbackend = \"heuristic\"").unwrap();
+        let cfg = load(tmp.path()).unwrap();
+        assert_eq!(cfg.tier2.backend.as_deref(), Some("heuristic"));
+    }
+
+    #[test]
+    fn load_rejects_malformed_toml() {
+        // Explicit --config must fail closed on parse errors so the
+        // operator's malformed policy doesn't silently fall through
+        // to defaults. (Pre-fix non-ONNX builds wouldn't even
+        // attempt to parse, so an invalid file silently "succeeded".)
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"this = is = not = valid").unwrap();
+        let err = load(tmp.path()).unwrap_err();
+        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_missing_file_errors() {
+        // Explicit --config with a missing path is always a hard
+        // I/O error, in every build flavor.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.toml");
         assert!(!missing.exists());
-        let cfg = load(&missing);
-        assert!(cfg.is_err(), "missing path should not succeed");
+        match load(&missing) {
+            Err(LoadError::Io(_)) => {}
+            other => panic!("expected LoadError::Io, got {other:?}"),
+        }
     }
 }
