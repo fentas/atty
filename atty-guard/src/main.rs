@@ -868,7 +868,13 @@ fn main() -> std::io::Result<()> {
     }
 
     // --enable-ebpf is the back-compat alias; --ebpf-mode is the
-    // expressive form. They must not disagree.
+    // expressive form. They must not disagree. Caveat: clap's
+    // derive can't tell an explicit `--ebpf-mode=disabled` from
+    // the (Disabled) default — `ArgMatches::value_source` would,
+    // but requires dropping derive. So the (true, Disabled) arm
+    // can't enforce "explicitly disagreeing"; we accept the alias
+    // wins (sensible — if you typed --enable-ebpf you wanted ebpf
+    // on, and the omitted --ebpf-mode just inherits that intent).
     let effective_mode = match (cli.enable_ebpf, cli.ebpf_mode) {
         (true, EbpfMode::Disabled) => EbpfMode::Block,
         (true, mode) if mode != EbpfMode::Block => {
