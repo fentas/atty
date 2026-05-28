@@ -21,15 +21,14 @@ _LSM_FILE = Path("/sys/kernel/security/lsm")
 
 def securityfs_available() -> bool:
     """True iff securityfs is actually mounted at
-    `/sys/kernel/security` AND the per-LSM probe file is readable.
+    `/sys/kernel/security`.
 
     The bare directory can exist without securityfs mounted (the
     kernel pre-creates the mountpoint), so an `is_dir()` check
     isn't enough to distinguish "mount missing" from "kernel
     lacks BPF LSM". Authoritative test: parse /proc/self/mounts
-    and look for a securityfs entry at the path. Fall back to
-    reachability of the lsm file (covers the rare host where
-    /proc/self/mounts is restricted).
+    for a securityfs entry at the path. Fall back to the lsm
+    file's reachability when /proc/self/mounts is restricted.
     """
     mountpoint = str(_LSM_FILE.parent)
     try:
@@ -40,8 +39,6 @@ def securityfs_available() -> bool:
                     return True
     except OSError:
         pass
-    # Fallback: if /proc/self/mounts isn't reachable, accept the
-    # lsm file's reachability as proof the mount is up.
     try:
         return _LSM_FILE.is_file()
     except OSError:
@@ -53,12 +50,15 @@ def kernel_supports_bpf_lsm() -> bool:
     list. `/sys/kernel/security/lsm` is the kernel reporting
     which Security Modules are active; without 'bpf' in that
     list, attaching a `lsm/*` BPF program fails with EINVAL.
+    Returns False on any OSError reading the file — a permission
+    denied (securityfs mounted but not readable in the container)
+    falls into the same "can't tell" bucket as missing.
     """
     if not securityfs_available():
         return False
     try:
         return "bpf" in _LSM_FILE.read_text()
-    except FileNotFoundError:
+    except OSError:
         return False
 
 

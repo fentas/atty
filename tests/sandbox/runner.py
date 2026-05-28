@@ -122,21 +122,37 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
     meta = script.parent / "docker.json"
     if not meta.exists():
         return []
-    cfg = json.loads(meta.read_text())
+    try:
+        cfg = json.loads(meta.read_text())
+    except json.JSONDecodeError as e:
+        die(f"{meta}: invalid JSON — {e}")
     if not isinstance(cfg, dict):
         die(f"{meta}: top-level must be a JSON object, got {type(cfg).__name__}")
     unknown = set(cfg) - _DOCKER_JSON_KEYS - {"_comment"}
     if unknown:
         die(f"{meta}: unknown keys {sorted(unknown)} — "
             f"allowed: {sorted(_DOCKER_JSON_KEYS)} (plus '_comment')")
+
+    def _string_list(name: str) -> list[str]:
+        v = cfg.get(name, [])
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            die(f"{meta}: {name} must be a list of strings, got {v!r}")
+        return v
+
     flags: list[str] = []
-    if cfg.get("privileged"):
-        flags.append("--privileged")
-    for cap in cfg.get("cap_add", []):
+    if "privileged" in cfg:
+        if not isinstance(cfg["privileged"], bool):
+            die(f"{meta}: privileged must be bool, got {cfg['privileged']!r}")
+        if cfg["privileged"]:
+            flags.append("--privileged")
+    for cap in _string_list("cap_add"):
         flags.extend(["--cap-add", cap])
-    for opt in cfg.get("security_opt", []):
+    for opt in _string_list("security_opt"):
         flags.extend(["--security-opt", opt])
-    for vol in cfg.get("volumes", []):
+    volumes = cfg.get("volumes", [])
+    if not isinstance(volumes, list):
+        die(f"{meta}: volumes must be a list, got {volumes!r}")
+    for vol in volumes:
         if not isinstance(vol, dict):
             die(f"{meta}: volume entries must be JSON objects, got {vol!r}")
         bad_keys = set(vol) - _VOLUME_KEYS
