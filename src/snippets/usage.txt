@@ -1,0 +1,17 @@
+Usage: atty [flags] [shell [args...]]
+
+  atty                  spawn $SHELL (default /bin/sh)
+  atty bash             spawn bash
+  atty bash -l          spawn bash with -l
+  atty zsh -c 'cmd'     spawn zsh -c 'cmd'
+  atty init [shell]     print shell-integration snippet
+                          (use as: eval "$(atty init bash)")
+  atty doctor           print health-check snippet
+                          (use as: eval "$(atty doctor)")
+
+Flags:
+  -h, --help            Print this help
+  -V, --version         Print version and exit
+
+Module composition is configured at build time via src/config.zig.
+Use `-Dconfig=path` to point zig build at a different config file.
