@@ -289,6 +289,56 @@ pub const LineState = struct {
         const start_gen = self.generation;
         var i: usize = 0;
         while (i < input.len) {
+            // Fast path: bulk-append printable runs. A paste of a
+            // 4 KiB multi-line script lands here as one long chunk;
+            // the per-byte switch below pays a branch + function-
+            // call per character, which dominates the hot path for
+            // anything bigger than typed-by-hand input. The scan
+            // stops at the first control byte (< 0x20 or DEL); the
+            // switch handles that one byte before we loop back to
+            // scan the next run.
+            //
+            // High-bit bytes (≥ 0x80) are treated as printable: the
+            // buffer stores raw bytes without UTF-8 decoding, so
+            // UTF-8 continuation bytes (0x80..0xBF) and lead bytes
+            // (≥ 0xC2) all flow through `append`'s per-byte path
+            // today and through the bulk path here.
+            if (input[i] >= 0x20 and input[i] != 0x7F) {
+                var run_end = i + 1;
+                while (run_end < input.len) : (run_end += 1) {
+                    const c = input[run_end];
+                    if (c < 0x20 or c == 0x7F) break;
+                }
+                // The per-byte `append` bails in two distinct shapes:
+                // mid-line insertion → `markUncertain()` (drops staged
+                // author + intent); full buffer → bare `uncertain =
+                // true` (keeps staged author so the post-resync line
+                // still carries the LLM tag). Mirror BOTH below so
+                // the bulk path is a pure optimisation with no
+                // behaviour delta vs. N `append` calls.
+                if (self.cursor_pos != self.len) {
+                    self.markUncertain();
+                    i = run_end;
+                    continue;
+                }
+                const want = run_end - i;
+                const room = if (self.len < max_line) max_line - self.len else 0;
+                const take = @min(want, room);
+                if (take > 0) {
+                    @memcpy(self.buffer[self.len .. self.len + take], input[i .. i + take]);
+                    self.len += take;
+                    self.cursor_pos = self.len;
+                    self.syncCursorMoved();
+                    self.generation +%= 1;
+                }
+                if (take < want) {
+                    // Overflow — mirror `append`'s capacity gate.
+                    self.uncertain = true;
+                }
+                i = run_end;
+                continue;
+            }
+
             const b = input[i];
             // Multi-byte escape sequence: ESC [ ...final-byte
             if (b == 0x1B and i + 1 < input.len and input[i + 1] == '[') {
