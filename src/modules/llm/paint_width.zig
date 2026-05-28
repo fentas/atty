@@ -289,6 +289,86 @@ pub fn writeSanitized(w: *std.Io.Writer, bytes: []const u8) anyerror!void {
     }
 }
 
+/// SGR-aware variant for the full-size chat overlay (#311).
+/// Like `writeSanitized`, but lets `ESC [ <params> m` (Select
+/// Graphic Rendition) sequences through unchanged so command
+/// output that uses ANSI colors (cargo, git, grep --color, …)
+/// renders styled in the chat history instead of showing raw
+/// `\x1b[32m` text. Newlines are PRESERVED here (not collapsed
+/// to spaces) so multi-line tool output keeps its row breaks.
+/// Cursor-motion / clear / scroll CSI sequences are stripped —
+/// they'd interfere with the panel's row layout without a real
+/// VT to interpret them.
+pub fn writeSanitizedAllowSgr(w: *std.Io.Writer, bytes: []const u8) anyerror!void {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const b = bytes[i];
+        // SGR pass-through: `ESC [ <params> m`. Scan forward to
+        // the next byte in 0x40..0x7E (CSI final). Only `m`
+        // (SGR) is emitted whole; every other final byte gets
+        // the entire CSI dropped silently.
+        if (b == 0x1B and i + 1 < bytes.len and bytes[i + 1] == '[') {
+            var j: usize = i + 2;
+            while (j < bytes.len) : (j += 1) {
+                const x = bytes[j];
+                if (x >= 0x40 and x <= 0x7E) break;
+                // Param + intermediate bytes only — anything else
+                // is a malformed CSI; bail to skip the lead.
+                if (!(x >= 0x20 and x <= 0x3F)) {
+                    j = bytes.len;
+                    break;
+                }
+            }
+            if (j < bytes.len and bytes[j] == 'm') {
+                try w.writeAll(bytes[i .. j + 1]);
+            }
+            // Either emitted (good SGR) or dropped (other CSI /
+            // malformed) — advance past the terminator or stop.
+            i = if (j < bytes.len) j + 1 else bytes.len;
+            continue;
+        }
+        // Newline + CR: preserve so multi-line output keeps its
+        // shape in the alt-screen chat. The non-SGR sanitizer
+        // collapses these to spaces; here we let the renderer
+        // see the row break.
+        if (b == 0x0A or b == 0x0D) {
+            try w.writeAll(bytes[i .. i + 1]);
+            i += 1;
+            continue;
+        }
+        // Tab: pass.
+        if (b == 0x09) {
+            try w.writeAll("\t");
+            i += 1;
+            continue;
+        }
+        // Other C0 + DEL: drop.
+        if (b < 0x20 or b == 0x7F) {
+            i += 1;
+            continue;
+        }
+        // Raw C1 bytes (0x80-0x9F as standalone): drop. Valid
+        // UTF-8 multi-byte sequences pass through as a whole;
+        // we identify them by their lead byte's range.
+        if (b >= 0x80 and b < 0xC2) {
+            i += 1;
+            continue;
+        }
+        // UTF-8 multi-byte: scan + emit whole sequence.
+        const seq_len: usize = if (b >= 0xC2 and b <= 0xDF)
+            2
+        else if (b >= 0xE0 and b <= 0xEF)
+            3
+        else if (b >= 0xF0 and b <= 0xF4)
+            4
+        else
+            1;
+        const end = @min(i + seq_len, bytes.len);
+        try w.writeAll(bytes[i..end]);
+        i = end;
+    }
+}
+
 test {
     _ = @import("paint_width_tests.zig");
 }

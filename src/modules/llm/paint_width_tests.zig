@@ -6,6 +6,7 @@ const displayWidth = mod.displayWidth;
 const measureCols = mod.measureCols;
 const truncateToCols = mod.truncateToCols;
 const utf8Iter = mod.utf8Iter;
+const writeSanitizedAllowSgr = mod.writeSanitizedAllowSgr;
 
 test "displayWidth: ASCII printable = 1, control = 0" {
     try testing.expectEqual(@as(u8, 1), displayWidth('a'));
@@ -253,4 +254,52 @@ test "writeSanitized: invalid UTF-8 + raw C1 bytes are dropped, not pass-through
     // ASCII context survives.
     try testing.expect(std.mem.indexOf(u8, out, "before") != null);
     try testing.expect(std.mem.indexOf(u8, out, "after") != null);
+}
+
+test "writeSanitizedAllowSgr: passes SGR through unchanged (#311)" {
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeSanitizedAllowSgr(&w, "\x1B[31merror:\x1B[0m bad");
+    try testing.expectEqualStrings("\x1B[31merror:\x1B[0m bad", buf[0..w.end]);
+}
+
+test "writeSanitizedAllowSgr: strips cursor-motion + clear CSIs" {
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    // `\x1B[H` (cursor home), `\x1B[2J` (clear screen),
+    // `\x1B[K` (clear-to-EOL) all dropped; surrounding text + SGR
+    // survive.
+    try writeSanitizedAllowSgr(&w, "\x1B[Hbefore\x1B[2J\x1B[32mok\x1B[0m\x1B[Kafter");
+    try testing.expectEqualStrings("before\x1B[32mok\x1B[0mafter", buf[0..w.end]);
+}
+
+test "writeSanitizedAllowSgr: preserves newlines (unlike strict sanitizer)" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeSanitizedAllowSgr(&w, "line1\nline2\r\nline3");
+    try testing.expectEqualStrings("line1\nline2\r\nline3", buf[0..w.end]);
+}
+
+test "writeSanitizedAllowSgr: drops bare ESC + lone C0 + DEL" {
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeSanitizedAllowSgr(&w, "a\x1Bb\x01c\x7Fd");
+    try testing.expectEqualStrings("abcd", buf[0..w.end]);
+}
+
+test "writeSanitizedAllowSgr: drops malformed CSI (non-final byte in param range)" {
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    // Truncated CSI with no final byte at EOF — the function
+    // should drop the lead and skip the rest.
+    try writeSanitizedAllowSgr(&w, "a\x1B[31");
+    try testing.expectEqualStrings("a", buf[0..w.end]);
+}
+
+test "writeSanitizedAllowSgr: keeps multi-byte UTF-8" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    // £ = 0xC2 0xA3, ✓ = 0xE2 0x9C 0x93 — both pass through.
+    try writeSanitizedAllowSgr(&w, "price \xc2\xa3" ++ "5 \xe2\x9c\x93");
+    try testing.expectEqualStrings("price \xc2\xa3" ++ "5 \xe2\x9c\x93", buf[0..w.end]);
 }
