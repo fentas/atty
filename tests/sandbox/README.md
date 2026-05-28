@@ -73,11 +73,13 @@ Current scenarios:
   scope) needs a separate sandbox image build with libbpf-dev +
   clang + the .bpf.o pre-compiled — deferred to a follow-up
   issue.
-
-Planned (separate PRs):
-
-- `60-onnx-second-stage` / `61-onnx-fbas-sized-buffer` /
-  `62-onnx-fallback` (#333, cached-model base image).
+- **`62-onnx-fallback`** — pins the PR #316 / #026 fail-closed
+  posture: explicit `[tier2] backend = "onnx"` + missing model
+  must refuse to start; default path (no operator request)
+  keeps the legacy degrade-to-stub fallback. Doesn't need a
+  real model file; the actual-classify scenarios (60 / 61
+  from #333's original scope) need model download + cache
+  infrastructure and are deferred to a follow-up issue.
 
 ## Per-scenario docker flags
 
