@@ -295,8 +295,10 @@ reload-guard:
 # ─────────────────────────────────────────────────────────────────
 # atty-guard is built inside the container (see
 # tests/sandbox/Dockerfile.base) so the runtime libc matches the
-# build libc. We only need to stage the host's atty binary.
-sandbox: build-atty
+# build libc. atty is built by the runner with the sandbox config
+# (security_guard daemon enabled at the production socket path)
+# so the developer's src/config.zig stays untouched.
+sandbox:
 	@command -v docker >/dev/null 2>&1 || { \
 	    printf "⚠ docker not on \$$PATH — install docker to run sandbox tests\n"; \
 	    exit 1; \

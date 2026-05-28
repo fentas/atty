@@ -28,14 +28,37 @@ SCENARIO_TIMEOUT_S = 120
 
 
 def stage_binaries() -> None:
+    """Build atty with the sandbox config (daemon enabled at the
+    production socket path) and stage it for the docker build.
+
+    Sandbox can't use the developer's `zig-out/bin/atty` directly
+    because the developer's `src/config.zig` typically has
+    `security_guard.daemon_socket_path = ""` — without that, the
+    auto-block scenario can't see daemon verdicts in PTY output.
+    Build with `-Dconfig=tests/sandbox/config.sandbox.zig` so the
+    developer's config is untouched.
+    """
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    atty_src = REPO_ROOT / "zig-out" / "bin" / "atty"
-    if not atty_src.exists():
-        die(
-            f"atty binary not found at {atty_src}.\n"
-            f"Run `make build` first (or `zig build -Doptimize=ReleaseSafe`)."
-        )
-    shutil.copy2(atty_src, BUILD_DIR / "atty")
+    sandbox_config = SANDBOX_DIR / "config.sandbox.zig"
+    if not sandbox_config.exists():
+        die(f"sandbox config missing: {sandbox_config}")
+    out_prefix = BUILD_DIR / "zig-out"
+    print(f"[runner] building sandbox atty via {sandbox_config.name} …")
+    subprocess.run(
+        [
+            "zig", "build",
+            "-Dtarget=x86_64-linux-musl",
+            "-Doptimize=ReleaseSafe",
+            f"-Dconfig={sandbox_config.relative_to(REPO_ROOT)}",
+            "-p", str(out_prefix.relative_to(REPO_ROOT)),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    built = out_prefix / "bin" / "atty"
+    if not built.exists():
+        die(f"sandbox atty build produced no binary at {built}")
+    shutil.copy2(built, BUILD_DIR / "atty")
 
 
 def build_image() -> None:

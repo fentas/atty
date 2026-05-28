@@ -5,13 +5,19 @@ Real binaries, real users, real UDS — the bits unit tests can't reach.
 ## Running
 
 ```sh
-make build             # zig-out/bin/atty (musl-static, portable)
-make sandbox           # build base image + run all scenarios
+make sandbox           # build sandbox atty + base image + run scenarios
 ```
 
-atty-guard is built **inside the container** (see `Dockerfile.base`'s
-`guard-builder` stage) so its glibc matches the runtime stage's
-glibc; no host-side `make build-guard` step is needed.
+`make sandbox` does three things in order:
+
+1. Builds atty with `-Dconfig=tests/sandbox/config.sandbox.zig` so
+   the binary's `security_guard.daemon_socket_path` points at
+   `/run/atty-guard/atty-guard.sock`. Your `src/config.zig` is
+   untouched. Output goes into `tests/sandbox/.build/zig-out/`.
+2. Builds atty-guard **inside the container** (Ubuntu 24.04
+   builder stage in `Dockerfile.base`) so its glibc matches the
+   runtime stage's glibc — no host-side `make build-guard` step.
+3. Runs each scenario in a fresh container.
 
 `make sandbox` is idempotent: re-running uses cached docker layers
 (< 10s on warm cache). To rebuild from scratch, delete the image:
@@ -48,13 +54,21 @@ Current scenarios:
 
 - **`00-smoke`** — framework liveness check. Daemon starts, UDS
   appears, atty proxy can spawn a child shell.
+- **`10-fresh-install`** — `contrib/install.sh` end-to-end:
+  binary + state dirs + unit file at expected paths with the
+  expected ownership, systemctl call sequence (daemon-reload →
+  enable --now → try-restart) verified via a recorder shim.
+- **`20-cross-uid-threat-level`** — bob can neither set nor read
+  alice's PID threat level via the UDS (issues #271 + #275 gates).
+- **`30-sudo-atoms-add`** — alice's `sudo atty-guard atoms add`
+  lands in her per-UID file (`atty:atty 0640`); bob's list view
+  doesn't see it (cross-UID isolation).
+- **`40-auto-block`** — V2-J-2 accumulator opt-in: with
+  `[accumulator] block_threshold = 0.8`, a multi-Tier-1 command
+  triggers daemon Block + atty paints REFUSED.
 
 Planned (separate PRs):
 
-- `10-fresh-install` — install.sh end-to-end (#330).
-- `20-cross-uid-threat-level` — cross-UID block + read gate (#330).
-- `30-sudo-atoms-add` — mediated CLI + per-UID file isolation (#330).
-- `40-auto-block` — V2-J-2 accumulator threshold (#330).
 - `50-ebpf-loader` / `51-ebpf-threat-map-roundtrip` /
   `52-ebpf-af-alg-tracepoint` (#332, separate non-blocking CI job).
 - `60-onnx-second-stage` / `61-onnx-fbas-sized-buffer` /
