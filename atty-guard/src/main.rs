@@ -923,6 +923,31 @@ fn main() -> std::io::Result<()> {
                             sources
                         );
                     }
+                    // Warn loudly when the pin file is absent or
+                    // has no entries — the daemon will fetch the
+                    // refs/heads/master HEAD with no integrity
+                    // check beyond TLS. A corp MITM with a trusted-
+                    // store cert can poison atoms.system.txt on the
+                    // next fetch. Pinning each source in
+                    // `/etc/atty-guard/atoms.pins.toml` adds sha256
+                    // verification on top of TLS. Always emit
+                    // (regardless of verbosity) — the operator
+                    // needs to see this even at default-quiet.
+                    let pin_status = match &cfg.pins {
+                        None => Some("no pin file at /etc/atty-guard/atoms.pins.toml"),
+                        Some(p) if p.gtfobins.is_none() && p.sigma.is_none() => {
+                            Some("pin file present but no source pinned")
+                        }
+                        _ => None,
+                    };
+                    if let Some(why) = pin_status {
+                        eprintln!(
+                            "atty-guard: WARNING — live-tracking mode ({why}). \
+                             TLS is the only integrity check; a corp MITM with a trusted-store \
+                             cert could poison atoms.system.txt. Pin each source in \
+                             /etc/atty-guard/atoms.pins.toml (sudo atty-guard atoms pin-init seeds it)."
+                        );
+                    }
                     atom_fetcher::spawn_periodic_refresh(cfg, sources, iv, trust_store.clone());
                 }
                 Err(e) => {
