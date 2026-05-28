@@ -1,16 +1,20 @@
-//! Shared `npm`/`pnpm`/`yarn` install-shape parser. Yields every
-//! package token after the install verb, skipping flags and their
-//! values. Used by:
-//!   - `classifier.rs` for the static flagged-package scan,
-//!   - `server.rs` for the V2-F OSV live lookup.
+//! `npm`/`pnpm`/`yarn` install-shape parser. Yields every package
+//! token after the install verb, skipping flags. Currently consumed
+//! by the V2-F OSV live lookup in `server.rs`.
 //!
 //! gpt-review #029: pre-fix the server side called a one-shot
 //! `extract_npm_install_pkg` that returned only the FIRST non-flag
 //! token, so `npm install clean-pkg vulnerable-pkg` would OSV-check
 //! `clean-pkg` and miss the vulnerable one. Attacker bypass: prepend
-//! a benign package. The static classifier already walked all
-//! tokens; this module unifies the parsing so both layers see the
-//! same package set.
+//! a benign package.
+//!
+//! Scope note: `classifier.rs` has its OWN regex-anchored npm walk
+//! for the static flagged-packages lookup. That path already iterates
+//! all tokens (so #029 doesn't bite it), and its emission shape —
+//! per-pkg `ClassifyResult` with a `flagged_npm_packages` membership
+//! test — doesn't substitute cleanly for this Vec-returning helper.
+//! Unifying the two parsers is a deliberate non-goal of this module
+//! and would be a separate refactor.
 //!
 //! Recognised shapes (all left-anchored to start-of-line, semicolon,
 //! ampersand, or pipe to avoid `xnpm` false-positives):

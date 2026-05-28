@@ -442,19 +442,26 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // atty-guard's last bundled-data update.
             //
             // gpt-review #029: walk ALL parsed package tokens (not
-            // just the first). Pre-fix, an attacker could bypass OSV
-            // by prepending a benign package — `npm install lodash
-            // vulnerable-pkg` would only check `lodash`. We stop at
-            // the first non-Safe verdict (worst wins) so a single
-            // OSV hit in a 10-package install upgrades the result.
+            // just the first). TRUE worst-wins — check every
+            // package, keep the strictest verdict so a Malicious
+            // (Block) pkg after a Vulnerable (Warn) pkg isn't lost
+            // to early-exit. Short-circuit only on Block; that's
+            // the strictest possible outcome and further OSV calls
+            // (network round-trips) can't change it. An early
+            // first-non-Safe break would let `npm install lodash
+            // vulnerable evil-malicious` Warn instead of Block.
             if matches!(result.verdict, Verdict::Safe) {
                 if let Some(osv) = &state.osv {
                     for pkg in crate::npm_parser::extract_npm_install_pkgs(&command) {
                         match osv.lookup_npm(pkg) {
                             Ok(verdict) => {
                                 if let Some(r) = crate::osv::osv_verdict_to_result(verdict, pkg) {
-                                    result = r;
-                                    break;
+                                    if verdict_strictly_worse(&result.verdict, &r.verdict) {
+                                        result = r;
+                                    }
+                                    if matches!(result.verdict, Verdict::Block) {
+                                        break;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -995,6 +1002,20 @@ fn require_root_error(op: &str) -> ResponseBody {
              mutating request reaches the daemon with EUID 0 over SO_PEERCRED"
         ),
     }
+}
+
+/// True when `incoming` is a strictly-worse verdict than `current`.
+/// Used by the per-package OSV loop to keep the worst observed
+/// outcome across all packages — pre-fix the loop broke on first
+/// non-Safe, which would mask a `Malicious → Block` after an earlier
+/// `Vulnerable → Warn`. Ordering: Safe < Warn < Block.
+fn verdict_strictly_worse(current: &Verdict, incoming: &Verdict) -> bool {
+    matches!(
+        (current, incoming),
+        (Verdict::Safe, Verdict::Warn)
+            | (Verdict::Safe, Verdict::Block)
+            | (Verdict::Warn, Verdict::Block),
+    )
 }
 
 fn write_response(writer: &mut impl Write, id: u64, body: ResponseBody) -> std::io::Result<()> {
@@ -1772,6 +1793,29 @@ mod tests {
         assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("ls -la"), None);
         assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("npm test"), None);
         assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("npm run build"), None);
+    }
+
+    #[test]
+    fn verdict_strictly_worse_pins_severity_ordering() {
+        use crate::protocol::Verdict;
+        // PR #262 round-1 subagent HIGH finding: the OSV loop
+        // pre-fix broke on first non-Safe, so a Block after a Warn
+        // was missed. The helper that drives the worst-wins
+        // upgrade must reflect Safe < Warn < Block strictly —
+        // ANY regression that flattens the ordering re-introduces
+        // the attacker-can-prepend-a-vulnerable-package bypass.
+        assert!(verdict_strictly_worse(&Verdict::Safe, &Verdict::Warn));
+        assert!(verdict_strictly_worse(&Verdict::Safe, &Verdict::Block));
+        assert!(verdict_strictly_worse(&Verdict::Warn, &Verdict::Block));
+        // Reverse direction never upgrades — a later Safe-/Warn-
+        // pkg can't downgrade a worse earlier verdict.
+        assert!(!verdict_strictly_worse(&Verdict::Warn, &Verdict::Safe));
+        assert!(!verdict_strictly_worse(&Verdict::Block, &Verdict::Safe));
+        assert!(!verdict_strictly_worse(&Verdict::Block, &Verdict::Warn));
+        // Same-level never upgrades.
+        assert!(!verdict_strictly_worse(&Verdict::Safe, &Verdict::Safe));
+        assert!(!verdict_strictly_worse(&Verdict::Warn, &Verdict::Warn));
+        assert!(!verdict_strictly_worse(&Verdict::Block, &Verdict::Block));
     }
 
     #[test]
