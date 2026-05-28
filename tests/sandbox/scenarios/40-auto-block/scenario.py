@@ -21,8 +21,9 @@ Failure modes this catches:
   cross the threshold.
 - REFUSED rendering regression — atty no longer paints the line
   on a Block verdict.
-- single-hit guard regression — threshold drops so low that one
-  atom would Block.
+- ≥ 2 distinct signals guard regression — a single high-conf
+  hit (URL substring at 0.9) gets Block-promoted despite the
+  guard. Tested by direct classify RPC + verdict=warn assertion.
 """
 from __future__ import annotations
 
@@ -32,12 +33,17 @@ from pathlib import Path
 sys.path.insert(0, "/sandbox")
 from lib.daemon import Daemon  # noqa: E402
 from lib.pty import drain, read_until  # noqa: E402
+from lib.uds import call  # noqa: E402
 
 import ptyprocess  # noqa: E402
 
 
 CONFIG = Path("/etc/atty-guard/config.toml")
 DANGER_CMD = "nc -e /bin/sh -i 127.0.0.1 4444"
+# Flagged URL substring (flagged_urls.txt) → 0.9 confidence,
+# single hit. With threshold 0.8 this WOULD auto-Block if the
+# `hits.len() >= 2` guard at classifier.rs:372 regressed away.
+SINGLE_HIT_CMD = "cat copyfail.security"
 
 
 def fail(msg: str) -> None:
@@ -106,6 +112,21 @@ def main() -> None:
         if "nc: command not found" in out or "nc: connect" in out:
             fail(f"command appears to have RUN despite REFUSED line.\n"
                  f"captured: {out!r}")
+
+        # Single-hit-stays-Warn guard: a flagged URL alone is 0.9
+        # confidence — above the 0.8 block_threshold but only ONE
+        # signal. The accumulator's `hits.len() >= 2` guard must
+        # keep this at Warn (banner prompts user) instead of Block.
+        single = call("classify", command=SINGLE_HIT_CMD)
+        if single.get("verdict") == "block":
+            daemon.dump_log()
+            fail(f"single-hit guard regressed: {SINGLE_HIT_CMD!r} "
+                 f"returned verdict=block despite being 1 hit\n"
+                 f"response: {single}")
+        if single.get("verdict") != "warn":
+            fail(f"single-hit baseline broken: {SINGLE_HIT_CMD!r} "
+                 f"returned {single} (expected verdict=warn — if "
+                 f"it's safe, the URL is no longer flagged)")
 
     print("PASS: 40-auto-block")
 
