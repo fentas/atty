@@ -205,16 +205,18 @@ impl TrustStore {
 
     /// Ensure the in-memory copy is loaded at least once (lazy
     /// init from the classify hot path). Idempotent — subsequent
-    /// calls are O(1) flag-check.
+    /// calls are O(1) flag-check on the success path.
     ///
-    /// Flag-on-error semantics: even if `reload_system_fetched`
-    /// fails (file missing, perm-gate refused), the loaded flag
-    /// flips true so the classify hot path doesn't re-stat every
-    /// keystroke. Means a `sudo chown atty:atty atoms.system.txt`
-    /// fix-up doesn't take effect until the daemon's cron thread
-    /// fires the next refresh OR the daemon is restarted. The
-    /// cron path is the normal "I changed something, atoms refresh"
-    /// flow; manual refreshes need a daemon restart.
+    /// Failure path: a failed `reload_system_fetched` leaves the
+    /// `loaded` flag at `false` so a subsequent classify retries
+    /// the file open + perm-gate check. This costs one stat per
+    /// keystroke when the file is genuinely missing / mis-owned,
+    /// but it lets `sudo chown atty:atty atoms.system.txt` take
+    /// effect on the very next classify rather than waiting for a
+    /// daemon restart (or the next `--atoms-update-interval` cron
+    /// tick). Operators running without cron — common on small
+    /// installs — would otherwise have to restart the daemon
+    /// after every chown fix.
     pub fn ensure_system_fetched_loaded(&self) {
         if *self
             .system_fetched_loaded
@@ -223,11 +225,10 @@ impl TrustStore {
         {
             return;
         }
+        // reload_system_fetched flips loaded=true on success.
+        // Drop the result intentionally — failure leaves loaded=false
+        // so the next keystroke retries (see docstring).
         let _ = self.reload_system_fetched();
-        *self
-            .system_fetched_loaded
-            .lock()
-            .expect("system_fetched_loaded poisoned") = true;
     }
 
     /// Snapshot of the system-fetched corpus for classify-time

@@ -774,8 +774,20 @@ mod imp {
             if !pred(&path, etype) {
                 continue;
             }
+            // Per-entry decompressed cap: the outer 32 MiB cap is
+            // on compressed bytes, so a compromised upstream could
+            // ship one entry that decompresses to gigabytes.
+            // 4 MiB is generous for any rule manifest (real GTFOBins
+            // / Sigma files are ~10-50 KiB) but bounds the OOM
+            // vector. take(N).read_to_string truncates on overflow
+            // — accept the truncated content (extract still parses
+            // valid rules from the prefix) and continue.
+            const PER_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
             let mut content = String::new();
-            if entry.read_to_string(&mut content).is_err() {
+            if std::io::Read::take(&mut entry, PER_ENTRY_MAX_BYTES)
+                .read_to_string(&mut content)
+                .is_err()
+            {
                 continue;
             }
             extract(&content, &mut atoms);

@@ -312,10 +312,6 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
         if trimmed.is_empty() {
             continue;
         }
-        if state.verbosity >= 2 {
-            eprintln!("atty-guard: <- {trimmed}");
-        }
-
         let envelope: serde_json::Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(e) => {
@@ -331,6 +327,22 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
         };
 
         let id = envelope.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        if state.verbosity >= 2 {
+            // Redact the payload: log only method + id + byte
+            // count. Full payload would dump typed command lines,
+            // trust hashes, and URL allow/block decisions to
+            // journald, where anyone in `systemd-journal` group
+            // can read them. The threat model says atty IS the
+            // endpoint — verbose payload logging would violate it.
+            let method = envelope
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            eprintln!(
+                "atty-guard: <- method={method} id={id} bytes={}",
+                trimmed.len()
+            );
+        }
         let request: Request = match serde_json::from_value(envelope.clone()) {
             Ok(r) => r,
             Err(e) => {
@@ -635,9 +647,42 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 }
             }
         }
-        Request::GetThreatLevel { pid } => ResponseBody::ThreatLevel {
-            level: state.threat.get(pid),
-        },
+        Request::GetThreatLevel { pid } => {
+            // Gate cross-UID reads the same way SetThreatLevel gates
+            // cross-UID writes: without this, any same-host caller
+            // can probe arbitrary PIDs and learn whether they're
+            // marked High/Critical — a cross-tenant info leak on
+            // multi-user systems. Root reads everything; non-root
+            // sees only its own PIDs. NotFound (already-dead PID)
+            // is allowed since the threat level is just an in-memory
+            // value with no useful signal for an exited process.
+            //
+            // Error case (e.g. hidepid=2 hiding /proc/<pid>/status,
+            // or a transient read failure) is rejected — without
+            // this, the same probing attack would succeed whenever
+            // pid_owner_uid couldn't decide. Mirrors SetThreatLevel's
+            // shape exactly so the read gate doesn't lag the write
+            // gate.
+            if !peer.is_root {
+                match pid_owner_uid(pid) {
+                    OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+                        return ResponseBody::Error {
+                            message: format!(
+                                "non-root caller (uid {}) cannot read threat level for pid {pid} (owned by uid {owner_uid})",
+                                peer.uid
+                            ),
+                        };
+                    }
+                    OwnerLookup::Error(msg) => {
+                        return ResponseBody::Error { message: msg };
+                    }
+                    OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
+                }
+            }
+            ResponseBody::ThreatLevel {
+                level: state.threat.get(pid),
+            }
+        }
 
         // --- PR #141 mediated trust-state ops ---
         Request::AtomsAdd {
@@ -1365,13 +1410,17 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
-        // Confirm the threat map was NOT mutated.
+        // GetThreatLevel is now gated cross-UID the same way Set is
+        // (audit #275). A non-root caller asking for someone else's
+        // PID gets an error rather than a level value — the threat
+        // map itself wasn't mutated by the rejected Set, but the
+        // observable behavior is "no read across UID boundary".
         let level_reply = round_trip(
             &mut stream,
             &format!(r#"{{"id":9,"method":"get_threat_level","pid":{other_pid}}}"#),
         );
         let lv: serde_json::Value = serde_json::from_str(&level_reply).unwrap();
-        assert_eq!(lv["level"], "low");
+        assert_eq!(lv["type"], "error");
         let _ = std::fs::remove_file(socket);
     }
 
