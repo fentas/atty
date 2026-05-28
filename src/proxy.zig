@@ -1878,11 +1878,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         _ = pty.setSize(s) catch {};
                     } else |_| {}
                 } else if (sig == posix.SIG.CHLD) {
-                    var status: u32 = 0;
-                    const wp = std.os.linux.waitpid(child_pid, &status, std.os.linux.W.NOHANG);
-                    if (wp == child_pid) {
-                        child_alive = false;
-                        exit_code = @intCast((status >> 8) & 0xFF);
+                    // Linux coalesces non-RT signals: multiple
+                    // SIGCHLDs that arrive while one is pending
+                    // collapse into a single delivery. Drain
+                    // reapable children rather than only checking
+                    // once, otherwise back-to-back deaths leave
+                    // atty waiting on POLLHUP to notice.
+                    while (true) {
+                        var status: u32 = 0;
+                        const wp = std.os.linux.waitpid(child_pid, &status, std.os.linux.W.NOHANG);
+                        if (wp == child_pid) {
+                            child_alive = false;
+                            exit_code = @intCast((status >> 8) & 0xFF);
+                            break;
+                        }
+                        if (wp <= 0) break;
                     }
                 }
             }
@@ -1988,7 +1998,27 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
     _ = posix.kill(child_pid, posix.SIG.HUP) catch {};
     var status: u32 = 0;
-    _ = std.os.linux.waitpid(child_pid, &status, 0);
+    // SIGHUP is advisory — a `nohup`-wrapped shell or one that
+    // catches/ignores HUP would hang the blocking waitpid forever.
+    // Poll for a graceful exit for up to 2s, then escalate to
+    // SIGKILL (kernel-guaranteed delivery) and reap blocking.
+    const grace_ms: u64 = 2000;
+    const start_ms = nowMs();
+    var reaped = false;
+    while ((nowMs() - start_ms) < grace_ms) {
+        const wp = std.os.linux.waitpid(child_pid, &status, std.os.linux.W.NOHANG);
+        if (wp == child_pid) {
+            reaped = true;
+            break;
+        }
+        if (wp < 0) break;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    if (!reaped) {
+        _ = posix.kill(child_pid, posix.SIG.KILL) catch {};
+        _ = std.os.linux.waitpid(child_pid, &status, 0);
+    }
 
     return .{ .exit_code = exit_code };
 }

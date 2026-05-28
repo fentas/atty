@@ -1015,8 +1015,12 @@ pub fn Module(comptime cfg: Config) type {
                     const deadline_signed: i64 = @intCast(deadline_ms);
                     var slice: std.c.timespec = .{ .sec = 0, .nsec = @intCast(50 * std.time.ns_per_ms) };
                     while ((nowMs() - start_ms) < deadline_signed) {
-                        _ = std.c.nanosleep(&slice, null);
+                        // Check BEFORE sleeping so a sub-50ms task
+                        // doesn't pay a full slice of wall-clock
+                        // latency just because the watchdog was
+                        // mid-thread-spawn when the work finished.
                         if (done.load(.acquire)) return;
+                        _ = std.c.nanosleep(&slice, null);
                     }
                     // Re-check `done` immediately before the kill
                     // closes the race window where the main thread
