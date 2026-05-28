@@ -575,10 +575,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // FixedBufferAllocator on a stack buffer avoids the
             // mmap/munmap per paint that std.heap.page_allocator
             // pays — for a tall scrollback this fires hundreds of
-            // times per frame. The 16 KiB cap fits any envelope
-            // bounded by `cfg.max_response_bytes` (default 4 KiB)
-            // plus the parser's per-field copies, with headroom.
-            var parse_buf: [16 * 1024]u8 = undefined;
+            // times per frame. Size the buffer comptime from
+            // `cfg.max_response_bytes`: the JSON parser uses
+            // `.alloc_always` so every parsed string is copied
+            // out of the input, roughly doubling the byte budget;
+            // 2× plus 4 KiB of AST overhead covers the Parsed
+            // struct + per-choice slice nodes for envelopes at
+            // the configured max size without falling back to
+            // the raw-render path under valid input.
+            var parse_buf: [cfg.max_response_bytes * 2 + 4096]u8 = undefined;
             var parse_fba = std.heap.FixedBufferAllocator.init(&parse_buf);
             dialog.parseResponse(R, parse_fba.allocator(), c, &parsed) catch {
                 return try renderWrappedRawWithSkip(w, c, max_visible, skip_rows, max_rows);
@@ -713,8 +718,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const R = dialog.Response(cfg.max_response_bytes);
                     var parsed: R = .{};
                     // See renderTurnContentWithSkip for the FBA
-                    // rationale — same paint-frame cost concern.
-                    var parse_buf: [16 * 1024]u8 = undefined;
+                    // sizing rationale — same paint-frame cost +
+                    // .alloc_always doubling concern.
+                    var parse_buf: [cfg.max_response_bytes * 2 + 4096]u8 = undefined;
                     var parse_fba = std.heap.FixedBufferAllocator.init(&parse_buf);
                     dialog.parseResponse(R, parse_fba.allocator(), c, &parsed) catch {
                         // Parse failure falls through to raw render in
