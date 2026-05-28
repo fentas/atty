@@ -455,9 +455,12 @@ use. Reach for them rather than re-rolling.
 
 When the user fires `Action.delete_history_match` (default `Ctrl+Shift+D`),
 the proxy calls every module's `deleteHistoryMatch` with the current
-line buffer content. Modules that store entries by content (`history`)
-implement this; modules that store entries by ID without exposing a
-content-based delete (`atuin`) skip it.
+line buffer content. Both built-in record-keeping modules implement
+this — `history` removes matching lines from its in-memory + on-disk
+log, and `atuin` shells out to `atuin search --delete` with the
+caller-selected `delete_scope` (default `.exact`, exploiting fuzzy
+mode's `^...$` anchors for a true exact-match delete since atuin
+v18 has no per-entry-ID delete CLI).
 
 ```zig
 pub fn deleteHistoryMatch(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
