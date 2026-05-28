@@ -103,8 +103,34 @@ struct Cli {
     /// out at startup; without the capability the loader errors
     /// with a pointer to the systemd-user unit's
     /// `AmbientCapabilities` config. See `ebpf/README.md`.
+    ///
+    /// Kept for back-compat: equivalent to `--ebpf-mode=block`.
+    /// New code should use `--ebpf-mode` directly.
     #[arg(long, default_value_t = false)]
     enable_ebpf: bool,
+
+    /// V2-B eBPF mode. Today only the disabled vs non-disabled
+    /// split is behaviorally distinct — `observe` / `warn` /
+    /// `block` all attach + write threat_map + EPERM Critical
+    /// PIDs at the LSM hook. The 4-value enum is plumbed so
+    /// scenarios + operator scripts can pin against the eventual
+    /// split without a CLI break:
+    ///   `disabled` (default) — programs not loaded.
+    ///   `observe`            — programs loaded today; TODO:
+    ///                          classifier should skip set_threat
+    ///                          so the LSM hook never fires (dry-
+    ///                          run "does my kernel support BPF
+    ///                          LSM" probe).
+    ///   `warn`               — programs loaded today; TODO:
+    ///                          atty-side banner instead of LSM
+    ///                          EPERM. Needs cross-cutting atty +
+    ///                          daemon change.
+    ///   `block`              — programs loaded, LSM hook EPERMs
+    ///                          Critical PIDs. Production posture.
+    /// `--enable-ebpf` is a back-compat alias for
+    /// `--ebpf-mode=block`. Specifying both is an error.
+    #[arg(long, value_enum, default_value_t = EbpfMode::Disabled)]
+    ebpf_mode: EbpfMode,
 
     /// Enable V2-F live OSV.dev lookups for `npm install <pkg>`
     /// Tier-1 misses. Off by default (network use is opt-in).
@@ -157,6 +183,14 @@ struct Cli {
     /// daemon's SO_PEERCRED check passes; read-only ones don't.
     #[command(subcommand)]
     command: Option<Subcommand>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum EbpfMode {
+    Disabled,
+    Observe,
+    Warn,
+    Block,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -833,16 +867,41 @@ fn main() -> std::io::Result<()> {
         );
     }
 
+    // --enable-ebpf is the back-compat alias; --ebpf-mode is the
+    // expressive form. They must not disagree. Caveat: clap's
+    // derive can't tell an explicit `--ebpf-mode=disabled` from
+    // the (Disabled) default — `ArgMatches::value_source` would,
+    // but requires dropping derive. So the (true, Disabled) arm
+    // can't enforce "explicitly disagreeing"; we accept the alias
+    // wins (sensible — if you typed --enable-ebpf you wanted ebpf
+    // on, and the omitted --ebpf-mode just inherits that intent).
+    let effective_mode = match (cli.enable_ebpf, cli.ebpf_mode) {
+        (true, EbpfMode::Disabled) => EbpfMode::Block,
+        (true, mode) if mode != EbpfMode::Block => {
+            eprintln!(
+                "atty-guard: --enable-ebpf and --ebpf-mode={:?} disagree; \
+                 --enable-ebpf is an alias for --ebpf-mode=block. \
+                 Use one or the other.",
+                mode
+            );
+            std::process::exit(2);
+        }
+        (_, mode) => mode,
+    };
+
     // eBPF attach is opt-in. Either the feature isn't built (clean
     // error, daemon continues without kernel-side enforcement),
     // OR the feature IS built but the kernel/caps aren't there
     // (also clean — log + continue). V2-A behaviour stays as a
     // graceful fallback for all failure modes.
-    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if cli.enable_ebpf {
+    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode != EbpfMode::Disabled {
         match ebpf::EbpfState::attach() {
             Ok(state) => {
                 if cli.verbosity >= 1 {
-                    eprintln!("atty-guard: eBPF attached (LSM + execve tracepoint)");
+                    eprintln!(
+                        "atty-guard: eBPF attached (LSM + execve tracepoint, mode={:?})",
+                        effective_mode
+                    );
                 }
                 Some(std::sync::Arc::new(state))
             }
