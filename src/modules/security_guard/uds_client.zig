@@ -162,7 +162,18 @@ pub const Client = struct {
         };
 
         const line_len = self.readLine() catch |e| switch (e) {
-            error.Timeout => return Error.Timeout,
+            error.Timeout => {
+                // CRITICAL: close the fd on timeout, not just on I/O
+                // error. The daemon may still be writing its reply
+                // to our buffered fd — if we keep the connection
+                // open, the next classify() will read the STALE
+                // previous response instead of the fresh one,
+                // causing a verdict mismatch (Safe→Block leak in
+                // the worst case). Close-and-reconnect is the only
+                // safe recovery.
+                self.close();
+                return Error.Timeout;
+            },
             else => {
                 self.close();
                 return Error.Unavailable;

@@ -198,3 +198,51 @@ test "buildClassifyJson — incognito only (no pid)" {
         out,
     );
 }
+
+test "classifyOrErr on Timeout closes the fd (issue #272)" {
+    // Spin up a UDS listener that accepts but NEVER writes a reply.
+    // The client's `read_timeout_ms` recv timeout will fire,
+    // returning Error.Timeout. Pre-fix the fd was leaked open and
+    // a stale daemon reply could land on the NEXT classify call,
+    // causing a verdict mismatch. Post-fix, the fd is closed and
+    // the next call cleanly reconnects.
+
+    // pid-suffixed path uniquifies across parallel test runs;
+    // unlink-before-bind covers stale leftovers from prior crashes.
+    var path_buf: [108]u8 = undefined;
+    const pid = std.c.getpid();
+    const path = try std.fmt.bufPrint(
+        &path_buf,
+        "/tmp/atty-uds-test-{d}.sock",
+        .{pid},
+    );
+
+    // Best-effort cleanup; tmp path won't exist on errors.
+    var path_z_buf: [128]u8 = undefined;
+    const path_z = try std.fmt.bufPrintZ(&path_z_buf, "{s}", .{path});
+    _ = std.c.unlink(path_z.ptr);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    const srv_fd = std.c.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    try testing.expect(srv_fd >= 0);
+    defer _ = std.c.close(srv_fd);
+
+    var addr: std.posix.sockaddr.un = std.mem.zeroes(std.posix.sockaddr.un);
+    addr.family = std.posix.AF.UNIX;
+    try testing.expect(path.len < addr.path.len);
+    @memcpy(addr.path[0..path.len], path);
+
+    const addr_len: std.posix.socklen_t = @intCast(@sizeOf(@TypeOf(addr)));
+    try testing.expectEqual(@as(c_int, 0), std.c.bind(srv_fd, @ptrCast(&addr), addr_len));
+    try testing.expectEqual(@as(c_int, 0), std.c.listen(srv_fd, 1));
+
+    var c = mod.Client.init(path);
+    c.read_timeout_ms = 30;
+    defer c.deinit();
+
+    const err = c.classifyOrErr("ls -la", .{});
+    try testing.expectError(mod.Error.Timeout, err);
+    // The post-fix invariant: fd is closed after Timeout so a
+    // follow-up classify reconnects rather than reading stale data.
+    try testing.expectEqual(@as(i32, -1), c.fd);
+}
