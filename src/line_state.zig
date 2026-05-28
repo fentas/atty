@@ -309,10 +309,13 @@ pub const LineState = struct {
                     const c = input[run_end];
                     if (c < 0x20 or c == 0x7F) break;
                 }
-                // The per-byte `append` bails to `markUncertain` on
-                // mid-line insertion or full buffer. Mirror that
-                // here so semantics match exactly — the bulk path
-                // is an optimisation, never a behaviour delta.
+                // The per-byte `append` bails in two distinct shapes:
+                // mid-line insertion → `markUncertain()` (drops staged
+                // author + intent); full buffer → bare `uncertain =
+                // true` (keeps staged author so the post-resync line
+                // still carries the LLM tag). Mirror BOTH below so
+                // the bulk path is a pure optimisation with no
+                // behaviour delta vs. N `append` calls.
                 if (self.cursor_pos != self.len) {
                     self.markUncertain();
                     i = run_end;
