@@ -15,6 +15,19 @@
 //!
 //! Disabled by default. Opt-in via `config.security_guard.enabled
 //! = true` in `src/config.zig`.
+//!
+//! HOT-PATH NOTE: `onInput` blocks on the UDS round-trip to
+//! atty-guard for up to `Client.read_timeout_ms` (50 ms default)
+//! per Enter when the sidecar is reachable. This contradicts
+//! CLAUDE.md's general "no blocking I/O on the hot path" rule and
+//! is deliberate: the classify-before-execute contract requires a
+//! synchronous verdict before the keystroke can be forwarded —
+//! routing through an async worker (atuin's pattern) would let the
+//! dangerous Enter race ahead of the verdict. The 50 ms cap is the
+//! ceiling, not the average; daemon-on-localhost typical round
+//! trips are sub-millisecond. The fd-close-on-timeout fix landed
+//! in PR #302 prevents a single slow verdict from poisoning the
+//! next classify.
 
 const std = @import("std");
 const m = @import("../module.zig");
