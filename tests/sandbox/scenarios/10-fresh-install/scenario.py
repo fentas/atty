@@ -22,7 +22,6 @@ test does — the unit's ExecStart line is what install.sh writes.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import stat
 import subprocess
@@ -102,6 +101,17 @@ def check_files() -> None:
             fail(f"{path_str} mode {oct(mode)} (want {oct(want_mode)})")
 
 
+def check_unit_file() -> None:
+    # The unit file is what systemd would actually ExecStart. If
+    # install.sh installs a unit pointing at /opt/wrong/path, the
+    # systemctl shim happily accepts the enable but boot would
+    # fail with "binary not found". Pin the ExecStart line to the
+    # binary path install.sh actually wrote.
+    unit = Path("/etc/systemd/system/atty-guard.service").read_text()
+    if "ExecStart=/usr/local/bin/atty-guard" not in unit:
+        fail(f"unit file ExecStart wrong / missing.\nunit contents:\n{unit}")
+
+
 def check_systemctl_calls() -> None:
     if not SYSTEMCTL_LOG.exists():
         fail("install.sh did not invoke systemctl at all")
@@ -159,13 +169,8 @@ def main() -> None:
     target = Path("/install-src/atty-guard/target/release/atty-guard")
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
-        # The container's /usr/local/bin/atty-guard is what shipped
-        # in the image; copy it (not symlink — install.sh uses
-        # `install -m`, which dereferences but we want byte-fidelity).
-        # We just removed /usr/local/bin/atty-guard in wipe_state();
-        # restore a copy from the buildtime location.
-        # Image bakes a backup at /var/lib/atty-guard-backup (see
-        # Dockerfile.base) for exactly this restore.
+        # Dockerfile.base bakes a backup at
+        # /opt/atty-guard.image-backup precisely for this restore.
         shutil.copy2("/opt/atty-guard.image-backup", target)
         target.chmod(0o755)
 
@@ -181,6 +186,7 @@ def main() -> None:
              f"stderr={proc.stderr.decode()}")
 
     check_files()
+    check_unit_file()
     check_systemctl_calls()
 
     # Remove the mock so Daemon's real boot uses no systemctl at all.
