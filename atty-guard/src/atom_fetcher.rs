@@ -1156,7 +1156,17 @@ mod imp {
                         eprintln!("atty-guard: atom refresh failed — {e}");
                     }
                 }
-                std::thread::sleep(interval);
+                // Sleep until the next interval — interruptibly,
+                // so a SIGTERM during a 6h sleep wakes the thread
+                // within ~200ms instead of waiting out the full
+                // interval (#276).
+                crate::shutdown::sleep_interruptible(
+                    interval,
+                    std::time::Duration::from_millis(200),
+                );
+                if crate::shutdown::requested() {
+                    break;
+                }
             }
         });
         if let Err(e) = spawn_result {
