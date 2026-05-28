@@ -39,6 +39,7 @@ mod osv;
 mod protocol;
 mod sanitize;
 mod server;
+mod shutdown;
 mod threat_map;
 mod trust_store;
 
@@ -598,6 +599,13 @@ fn main() -> std::io::Result<()> {
         print_compiled_features();
         return Ok(());
     }
+
+    // Wire SIGTERM/SIGINT/SIGHUP so the atoms-refresh cron loop
+    // wakes promptly on shutdown rather than waiting out a
+    // multi-hour sleep interval (#276). Safe to install before
+    // any work threads spawn — the handler only touches a static
+    // AtomicBool.
+    shutdown::install();
 
     let sources = parse_atom_sources(&cli.atoms_sources);
     let interval = parse_interval(&cli.atoms_update_interval)
