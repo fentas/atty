@@ -40,7 +40,8 @@ endif
 
 .PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
-        clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard
+        clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard \
+        sandbox sandbox-rebuild
 
 help:
 	@printf "atty — build targets\n\n"
@@ -285,3 +286,30 @@ reload-guard:
 	    printf "⚠ atty-guard.service not installed at %s or %s — run \`sudo make install-guard\` first\n" "$$sys_unit" "$$user_unit"; \
 	    exit 1; \
 	fi
+
+# ─────────────────────────────────────────────────────────────────
+# Sandbox tests (#329) — end-to-end scenarios in a docker container
+# with real atty + atty-guard binaries. Catches what unit tests
+# can't: cross-UID gates, sudo-mediated CLI, install-script
+# integration, daemon lifecycle. See tests/sandbox/README.md.
+# ─────────────────────────────────────────────────────────────────
+# atty-guard is built inside the container (see
+# tests/sandbox/Dockerfile.base) so the runtime libc matches the
+# build libc. We only need to stage the host's atty binary.
+sandbox: build-atty
+	@command -v docker >/dev/null 2>&1 || { \
+	    printf "⚠ docker not on \$$PATH — install docker to run sandbox tests\n"; \
+	    exit 1; \
+	}
+	@command -v python3 >/dev/null 2>&1 || { \
+	    printf "⚠ python3 not on \$$PATH — sandbox runner needs python3\n"; \
+	    exit 1; \
+	}
+	python3 tests/sandbox/runner.py
+
+# Force a full rebuild — drops the cached base image so a stale
+# Ubuntu layer or apt mirror outage gets surfaced rather than
+# silently reused.
+sandbox-rebuild:
+	-docker image rm atty-sandbox:base 2>/dev/null || true
+	$(MAKE) sandbox

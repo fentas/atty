@@ -1,0 +1,16 @@
+# Sandbox docker build context is REPO_ROOT — keep it small.
+# Dockerfile.base only needs:
+#   - atty-guard/ (Rust sidecar source)
+#   - src/modules/security_guard/data/ (shared atom corpus)
+#   - tests/sandbox/.build/atty (staged host build)
+.git/
+.zig-cache/
+zig-out/
+atty-guard/target/
+dist/
+chat/
+gpt-review/
+tests/e2e/*/golden/
+tests/e2e/*/last/
+tests/integration/tmp/
+tests/sandbox/.build/atty-guard
