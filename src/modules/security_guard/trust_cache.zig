@@ -65,9 +65,16 @@ pub const TrustCache = struct {
     }
 
     /// Adds `hash` to the in-memory list if not already present.
-    /// Returns true when newly added.
+    /// Returns true when newly added. Rejects non-hex input so a
+    /// daemon (or a forged UDS reply) can't inject letters
+    /// outside [0-9a-fA-F] as a "trust hash" — the runtime
+    /// trust-check compares full strings, so a non-hex 64-char
+    /// blob would never match a real category-match SHA-256
+    /// anyway, but the load path (`load()` below) already
+    /// rejects them and `add` should match for consistency.
     pub fn add(self: *TrustCache, allocator: std.mem.Allocator, hash: []const u8) !bool {
         if (hash.len != hex_len) return false;
+        if (!isHex(hash)) return false;
         if (self.contains(hash)) return false;
         var entry: [hex_len]u8 = undefined;
         @memcpy(&entry, hash);

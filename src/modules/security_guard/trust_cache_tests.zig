@@ -105,3 +105,29 @@ test "TrustCache: persist + load round-trip" {
     try testing.expect(cache2.contains(h1));
     try testing.expect(cache2.contains(h2));
 }
+
+test "TrustCache.add rejects non-hex 64-char input (issue #270)" {
+    // A daemon (or a forged UDS reply via socket-redirect) could
+    // emit a quoted 64-char string that ISN'T hex. The runtime
+    // trust check compares against real SHA-256 digests, so a
+    // non-hex blob can never match a legitimate command-hash —
+    // but `add` should refuse it for posture consistency with
+    // `load`, which already rejects non-hex lines.
+    var cache: mod.TrustCache = .{};
+    defer cache.deinit(testing.allocator);
+
+    // 64 chars, all 'g' (out of hex range).
+    const non_hex = [_]u8{'g'} ** mod.hex_len;
+    const added = try cache.add(testing.allocator, &non_hex);
+    try testing.expect(!added);
+    try testing.expectEqual(@as(usize, 0), cache.entries.items.len);
+
+    // 64 chars with one bad byte in the middle.
+    var almost: [mod.hex_len]u8 = ([_]u8{'a'} ** mod.hex_len);
+    almost[32] = 'z';
+    try testing.expect(!try cache.add(testing.allocator, &almost));
+
+    // Uppercase hex is accepted (load also case-insensitive).
+    const upper = [_]u8{'A'} ** mod.hex_len;
+    try testing.expect(try cache.add(testing.allocator, &upper));
+}
