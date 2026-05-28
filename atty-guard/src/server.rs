@@ -667,6 +667,20 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 AtomScope::System => ResponseBody::AtomsList {
                     atoms: state.classifier.system_atoms_snapshot(),
                 },
+                AtomScope::Fetched => {
+                    // GPT-review #023: expose the runtime-fetched
+                    // corpus separately so operators chasing a
+                    // `system-fetched atom matched: <atom>` reason
+                    // can verify which atom triggered. Lazy-load
+                    // first so a fresh daemon that hasn't run its
+                    // classify-hot-path lazy-init yet still returns
+                    // a populated list.
+                    state.trust_store.ensure_system_fetched_loaded();
+                    let arc = state.trust_store.list_system_fetched();
+                    ResponseBody::AtomsList {
+                        atoms: arc.as_ref().clone(),
+                    }
+                }
                 AtomScope::User => {
                     let _ = state.trust_store.ensure_loaded(uid);
                     ResponseBody::AtomsList {
@@ -1097,6 +1111,38 @@ mod tests {
         (socket, handle)
     }
 
+    /// Spin a daemon backed by a caller-provided TrustStore. Lets
+    /// tests pre-populate /var/lib/atty-guard-equivalent state (eg.
+    /// atoms.system.txt) before the daemon accepts its first
+    /// connection. Caller is responsible for keeping any backing
+    /// tempdir alive — the helper doesn't own one.
+    fn spawn_server_with_trust_store(
+        trust_store: Arc<crate::trust_store::TrustStore>,
+    ) -> (std::path::PathBuf, thread::JoinHandle<()>) {
+        let socket = unique_socket();
+        let socket_for_thread = socket.clone();
+        let handle = thread::spawn(move || {
+            let _ = serve(
+                &socket_for_thread,
+                0,
+                BackendKind::Stub,
+                &crate::config::OnnxConfig::default(),
+                None,
+                None,
+                None,
+                trust_store,
+                crate::config::ServerConfig::default(),
+            );
+        });
+        for _ in 0..500 {
+            if UnixStream::connect(&socket).is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        (socket, handle)
+    }
+
     fn spawn_server() -> (std::path::PathBuf, thread::JoinHandle<()>) {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
@@ -1385,6 +1431,99 @@ mod tests {
         assert!(atoms.len() > 50);
         let any_nc_e = atoms.iter().any(|a| a.as_str() == Some("nc -e"));
         assert!(any_nc_e, "expected `nc -e` in bundled corpus");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn atoms_list_fetched_empty_when_no_file() {
+        // GPT-review #023: --fetched scope returns the runtime-fetched
+        // corpus from /var/lib/atty-guard/atoms.system.txt. When no
+        // file exists (fresh daemon, --update-atoms-now hasn't run),
+        // it returns an empty list — NOT the bundled corpus.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"atoms_list","scope":"fetched"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "atoms_list");
+        assert!(
+            v["atoms"].as_array().unwrap().is_empty(),
+            "fetched corpus should be empty without atoms.system.txt; got {:?}",
+            v["atoms"],
+        );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn atoms_list_fetched_returns_runtime_corpus_distinct_from_system() {
+        // PR #250 round-1 review M-1: the empty-when-no-file test
+        // can't discriminate between "wired correctly" and "always
+        // returns empty." Spin a daemon with a populated
+        // atoms.system.txt + assert `--fetched` returns THOSE atoms
+        // AND `--system` returns the bundled set, and they differ.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let users_dir = tmp.path().join("users");
+        std::fs::create_dir_all(&users_dir).unwrap();
+        // The system_fetched_path is `<data_root.parent>/atoms.system.txt`,
+        // so this lands at `<tmp>/atoms.system.txt` — exactly where the
+        // daemon will look.
+        let system_path = tmp.path().join("atoms.system.txt");
+        std::fs::write(
+            &system_path,
+            "fetched-only-marker-001\nfetched-only-marker-002\n",
+        )
+        .unwrap();
+        let trust_store =
+            Arc::new(crate::trust_store::TrustStore::new(users_dir));
+        let (socket, _h) = spawn_server_with_trust_store(trust_store);
+
+        let mut s = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut s,
+            r#"{"id":1,"method":"atoms_list","scope":"fetched"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let fetched: Vec<String> = v["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            fetched.contains(&"fetched-only-marker-001".to_string()),
+            "expected runtime atom in fetched scope; got {fetched:?}",
+        );
+        assert!(
+            fetched.contains(&"fetched-only-marker-002".to_string()),
+            "expected runtime atom in fetched scope; got {fetched:?}",
+        );
+        // Rules out the "--fetched falls back to bundled" regression.
+        assert!(
+            !fetched.contains(&"nc -e".to_string()),
+            "fetched scope leaked bundled atoms; got {fetched:?}",
+        );
+
+        let mut s2 = UnixStream::connect(&socket).expect("connect");
+        let reply2 = round_trip(
+            &mut s2,
+            r#"{"id":2,"method":"atoms_list","scope":"system"}"#,
+        );
+        let v2: serde_json::Value = serde_json::from_str(&reply2).unwrap();
+        let system_atoms: Vec<String> = v2["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap().to_owned())
+            .collect();
+        // The bundled set is non-empty and does NOT contain the
+        // fetched-only markers — confirms the two scopes truly diverge.
+        assert!(system_atoms.len() > 50);
+        assert!(
+            !system_atoms.contains(&"fetched-only-marker-001".to_string()),
+            "system scope leaked fetched atoms",
+        );
         let _ = std::fs::remove_file(socket);
     }
 

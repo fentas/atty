@@ -42,11 +42,14 @@ pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
             ),
             AtomsOp::List {
                 system,
+                fetched,
                 user,
                 session,
             } => {
                 let scope = if system {
                     AtomScope::System
+                } else if fetched {
+                    AtomScope::Fetched
                 } else if session {
                     AtomScope::Session
                 } else {
