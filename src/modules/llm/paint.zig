@@ -553,14 +553,24 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// Used by the per-row scrollback path to slice through a
         /// tall turn that doesn't fit the panel in one shot.
         ///
-        /// Single-row envelopes (`exec` / `question`) return 0
-        /// when `skip_rows >= 1` — the caller should treat that
-        /// as "this turn was fully scrolled past" and not advance
-        /// the panel row counter.
+        /// `skip_rows` semantics differ by envelope shape — both
+        /// are correct for their content, but mixing them in one
+        /// caller without understanding the split has bitten us:
         ///
-        /// Done-envelope skip drops the `✓ ` prefix too (it lives
-        /// on the logical first row alongside the reason text);
-        /// continuation rows then render via `md_render.renderWithSkip`.
+        ///   - `exec` / `question` are single-row envelopes. The
+        ///     skip is a binary gate: `skip_rows >= 1` → return 0
+        ///     ("this turn was fully scrolled past, don't advance
+        ///     the panel row counter"). Their `desc → cmd` shape
+        ///     is intentionally compact so wrapping wouldn't help.
+        ///   - `done` envelopes can be tall (the reason text wraps
+        ///     across many rows). `skip_rows` is row-granular here:
+        ///     the `✓ ` prefix lives on the logical first row, so
+        ///     `skip_rows >= 1` drops the prefix AND the first
+        ///     reason row; subsequent rows render via
+        ///     `md_render.renderWithSkip` with the residual skip.
+        ///   - Non-envelope `assistant_*` content delegates to
+        ///     `renderWrappedRawWithSkip`, which is row-granular
+        ///     in the same way as the `done` arm.
         fn renderTurnContentWithSkip(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize, skip_rows: usize, max_rows: usize) !usize {
             const c = turn.content;
             const looks_like_envelope = turn.kind == .assistant_exec and
