@@ -1848,6 +1848,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             if (rt.chat_inline_open) {
                                 rt.chat_focus_in_panel = true;
                                 rt.chat_inline_paint_pending = true;
+                                // #303 — invalidate the cached prompt-row
+                                // snapshot. The command just ran, output
+                                // scrolled the shell prompt down by N rows;
+                                // the next paint must re-capture from the
+                                // current `ctx.cursor_row/col` instead of
+                                // CUP-ing back to the stale pre-exec row
+                                // (which would land the next insertion on
+                                // top of the previous output).
+                                rt.chat_open_cursor_row = 0;
+                                rt.chat_open_cursor_col = 0;
                             }
                             rt.chat_refocus_pending = false;
                         }
