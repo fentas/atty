@@ -441,15 +441,14 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // packages that landed on OSV's advisory list AFTER
             // atty-guard's last bundled-data update.
             //
-            // gpt-review #029: walk ALL parsed package tokens (not
-            // just the first). TRUE worst-wins — check every
-            // package, keep the strictest verdict so a Malicious
-            // (Block) pkg after a Vulnerable (Warn) pkg isn't lost
-            // to early-exit. Short-circuit only on Block; that's
-            // the strictest possible outcome and further OSV calls
-            // (network round-trips) can't change it. An early
-            // first-non-Safe break would let `npm install lodash
-            // vulnerable evil-malicious` Warn instead of Block.
+            // Walks every parsed package token (not just the first)
+            // to defeat the prepend-a-benign-pkg attacker bypass,
+            // and keeps the strictest verdict via
+            // `verdict_strictly_worse` so a Malicious (Block) pkg
+            // after a Vulnerable (Warn) pkg isn't lost to an early
+            // first-non-Safe exit. Short-circuit only on Block —
+            // the strictest possible outcome; further OSV calls
+            // can't escalate further.
             if matches!(result.verdict, Verdict::Safe) {
                 if let Some(osv) = &state.osv {
                     for pkg in crate::npm_parser::extract_npm_install_pkgs(&command) {

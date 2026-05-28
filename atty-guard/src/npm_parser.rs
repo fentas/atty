@@ -1,38 +1,36 @@
 //! `npm`/`pnpm`/`yarn` install-shape parser. Yields every package
-//! token after the install verb, skipping flags. Currently consumed
-//! by the V2-F OSV live lookup in `server.rs`.
+//! token after the install verb, skipping flag tokens. Currently
+//! consumed by the V2-F OSV live lookup in `server.rs`.
 //!
-//! gpt-review #029: pre-fix the server side called a one-shot
-//! `extract_npm_install_pkg` that returned only the FIRST non-flag
-//! token, so `npm install clean-pkg vulnerable-pkg` would OSV-check
-//! `clean-pkg` and miss the vulnerable one. Attacker bypass: prepend
-//! a benign package.
+//! Pre-refactor the server side returned only the FIRST non-flag
+//! token, so `npm install clean vulnerable` would OSV-check `clean`
+//! and miss the vulnerable one — attacker bypass = prepend a benign
+//! package. The unified parser checks every token, capped at
+//! `MAX_PKGS_PER_COMMAND` to bound work on hostile inputs.
 //!
 //! Scope note: `classifier.rs` has its OWN regex-anchored npm walk
-//! for the static flagged-packages lookup. That path already iterates
-//! all tokens (so #029 doesn't bite it), and its emission shape —
-//! per-pkg `ClassifyResult` with a `flagged_npm_packages` membership
-//! test — doesn't substitute cleanly for this Vec-returning helper.
-//! Unifying the two parsers is a deliberate non-goal of this module
-//! and would be a separate refactor.
+//! for the static flagged-packages lookup. That path already
+//! iterates all tokens, and its emission shape (per-pkg
+//! `ClassifyResult` with `flagged_npm_packages` membership) doesn't
+//! substitute cleanly for this Vec-returning helper. Unifying is a
+//! deliberate non-goal of this module.
 //!
-//! Recognised shapes (all left-anchored to start-of-line, semicolon,
-//! ampersand, or pipe to avoid `xnpm` false-positives):
-//!   npm install <pkgs>       npm i <pkgs>       npm add <pkgs>
-//!   pnpm install <pkgs>      pnpm i <pkgs>      pnpm add <pkgs>
-//!   yarn add <pkgs>
+//! Recognised shapes (verb anchored to start-of-line, `;`, `&`, or
+//! `|` — to avoid `xnpm install` false-positives — with any ASCII
+//! whitespace run between tool and verb):
+//!   npm install / npm i / npm add
+//!   pnpm install / pnpm i / pnpm add
+//!   yarn add
 //!
 //! Token rules per package:
-//!   - leading `-`/`--` flags skip;
-//!   - flag VALUES (the next token after `--save-dev`-style switches
-//!     that take an argument) are NOT consumed because the recognised
-//!     install flags either take no value (`-g`, `--save-dev`,
-//!     `--no-save`) or use `=` (`--prefix=...`). Treat any flag as
-//!     valueless and let the next non-flag token through as a
-//!     package. Better to OSV-check an arg-value-by-mistake than to
-//!     miss a real package;
-//!   - trailing `@version` strips while preserving the leading
-//!     `@scope/` (scoped packages: `@types/node`, `@aws-sdk/client`).
+//!   - tokens starting with `-` are skipped as flags;
+//!   - flag VALUES (the next token after a flag) are NOT consumed:
+//!     known install flags either take no value (`-g`, `--save-dev`,
+//!     `--no-save`) or use `=` (`--prefix=...`). Better to OSV-check
+//!     an arg-value-by-mistake than to miss a real package. This is
+//!     a documented trade-off, not an oversight;
+//!   - trailing `@version` strips while preserving leading `@scope/`
+//!     (scoped packages: `@types/node`, `@aws-sdk/client-s3`).
 
 /// Hard cap on returned package count per command. Keeps a hostile
 /// or pathological input (e.g. `npm install a b c ... <thousand>`)
@@ -43,46 +41,78 @@ pub const MAX_PKGS_PER_COMMAND: usize = 64;
 /// Returns all candidate package names from an install-shape command,
 /// in left-to-right order. Empty Vec when the command doesn't match
 /// a recognised install shape.
+///
+/// Walks all occurrences of each `(tool, verb)` pair so a leading
+/// false-anchor like `xnpm install foo; npm install bar` still
+/// matches the real install farther in. Tolerates any amount of
+/// ASCII whitespace (` `, `\t`) between tool, verb, and args.
 pub fn extract_npm_install_pkgs(line: &str) -> Vec<&str> {
-    let verbs = [
-        ("npm ", "install"),
-        ("npm ", "i "),
-        ("npm ", "add"),
-        ("pnpm ", "install"),
-        ("pnpm ", "i "),
-        ("pnpm ", "add"),
-        ("yarn ", "add"),
+    // `(tool, verb)` — the tool is the bare program name; whitespace
+    // between tool/verb/args is matched by `expect_ws_after`.
+    let shapes: &[(&str, &str)] = &[
+        ("npm", "install"),
+        ("npm", "i"),
+        ("npm", "add"),
+        ("pnpm", "install"),
+        ("pnpm", "i"),
+        ("pnpm", "add"),
+        ("yarn", "add"),
     ];
-    for (cmd, verb) in verbs {
-        let Some(cmd_at) = line.find(cmd) else {
-            continue;
-        };
-        if cmd_at != 0 {
-            let prev = line.as_bytes()[cmd_at - 1];
-            if !matches!(prev, b' ' | b';' | b'&' | b'|') {
+    for &(tool, verb) in shapes {
+        // Walk every occurrence of the tool name so a failed anchor
+        // check (e.g. matching the `npm` inside `xnpm`) doesn't
+        // prevent matching a real later occurrence.
+        for (idx, _) in line.match_indices(tool) {
+            // Anchor: tool must start the line OR follow one of
+            // ` ` / `\t` / `;` / `&` / `|`. Disqualifies `xnpm`.
+            if idx != 0 {
+                let prev = line.as_bytes()[idx - 1];
+                if !matches!(prev, b' ' | b'\t' | b';' | b'&' | b'|') {
+                    continue;
+                }
+            }
+            // Whitespace between tool and verb (≥1 byte).
+            let after_tool = idx + tool.len();
+            let verb_start = match skip_ws(line, after_tool) {
+                Some(p) if p > after_tool => p,
+                _ => continue,
+            };
+            // Verb must match exactly, followed by whitespace OR
+            // end-of-line (the latter being a `npm install` with no
+            // args — returns empty Vec).
+            let verb_end = verb_start + verb.len();
+            if verb_end > line.len() || !line[verb_start..verb_end].eq(verb) {
                 continue;
             }
+            let args_start = match line.as_bytes().get(verb_end).copied() {
+                None => return Vec::new(),
+                Some(c) if matches!(c, b' ' | b'\t') => match skip_ws(line, verb_end) {
+                    Some(p) => p,
+                    None => return Vec::new(),
+                },
+                Some(_) => continue,
+            };
+            return walk_pkgs(&line[args_start..]);
         }
-        let after_cmd = cmd_at + cmd.len();
-        let verb_end = after_cmd + verb.len();
-        if verb_end > line.len() {
-            continue;
-        }
-        if !line[after_cmd..verb_end].eq(verb) {
-            continue;
-        }
-        let args_start = if verb.ends_with(' ') {
-            verb_end
-        } else if verb_end == line.len() {
-            return Vec::new();
-        } else if line.as_bytes()[verb_end] == b' ' {
-            verb_end + 1
-        } else {
-            continue;
-        };
-        return walk_pkgs(&line[args_start..]);
     }
     Vec::new()
+}
+
+/// Returns the offset of the first non-whitespace byte at or after
+/// `start`. `None` if the rest is all whitespace (or `start` is
+/// past end-of-line). Treats ` ` and `\t` as whitespace; newlines
+/// are not expected in single-command input but tolerated.
+fn skip_ws(line: &str, start: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut i = start;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        None
+    } else {
+        Some(i)
+    }
 }
 
 /// Convenience: first parsed package, or `None`. Used by server.rs
@@ -138,8 +168,8 @@ mod tests {
 
     #[test]
     fn multi_package_returns_all_in_order() {
-        // gpt-review #029 core regression: `npm install clean vulnerable`
-        // must return BOTH packages, not just the first.
+        // Core attacker-bypass regression: `npm install clean
+        // vulnerable` must return BOTH packages, not just the first.
         assert_eq!(
             extract_npm_install_pkgs("npm install clean vulnerable"),
             vec!["clean", "vulnerable"],
@@ -202,8 +232,7 @@ mod tests {
     #[test]
     fn leading_separators_anchor_the_install_verb() {
         // The verb must be at start-of-line OR after one of
-        // space/;/&/|, so `xnpm install` is NOT a match (no false
-        // anchor before the verb).
+        // space/tab/;/&/|, so `xnpm install` is NOT a match.
         assert_eq!(
             extract_npm_install_pkgs("ls; npm install pkg"),
             vec!["pkg"],
@@ -212,14 +241,53 @@ mod tests {
             extract_npm_install_pkgs("true && npm install pkg"),
             vec!["pkg"],
         );
-        assert!(extract_npm_install_pkgs("xnpm install pkg").is_empty());
+    }
+
+    #[test]
+    fn anchor_false_positive_skipped_then_real_match_succeeds() {
+        // `find("npm ")` would have matched inside `xnpm install`
+        // first, then bailed; the new walker continues past it and
+        // hits the real `npm install bar` later in the line.
+        assert_eq!(
+            extract_npm_install_pkgs("xnpm install foo; npm install bar"),
+            vec!["bar"],
+        );
+    }
+
+    #[test]
+    fn standalone_xnpm_doesnt_match() {
+        // Same anchor check but with no later real install — must
+        // return empty rather than emitting `foo` from inside
+        // `xnpm install foo`.
+        assert!(extract_npm_install_pkgs("xnpm install foo").is_empty());
+    }
+
+    #[test]
+    fn double_whitespace_between_tool_and_verb_still_matches() {
+        // Subagent flagged `"npm  install pkg"` (double space) and
+        // `"npm\tinstall pkg"` (tab) being rejected by the old
+        // single-` `-separator code path. The new parser uses
+        // skip_ws so both render as the canonical form.
+        assert_eq!(
+            extract_npm_install_pkgs("npm  install pkg"),
+            vec!["pkg"],
+        );
+        assert_eq!(
+            extract_npm_install_pkgs("npm\tinstall pkg"),
+            vec!["pkg"],
+        );
+        assert_eq!(
+            extract_npm_install_pkgs("npm install   pkg"),
+            vec!["pkg"],
+        );
+        assert_eq!(
+            extract_npm_install_pkgs("pnpm  add\treact"),
+            vec!["react"],
+        );
     }
 
     #[test]
     fn version_strip_handles_complex_specs() {
-        // The implementation uses `rfind('@')` — handles trailing
-        // version specs even when the package name itself starts
-        // with `@`. `@scope/name@1.2.3` strips to `@scope/name`.
         assert_eq!(
             extract_npm_install_pkgs("npm install pkg@1.2.3"),
             vec!["pkg"],
@@ -228,10 +296,9 @@ mod tests {
             extract_npm_install_pkgs("npm install @scope/pkg@1.2.3"),
             vec!["@scope/pkg"],
         );
-        // Bare `@` (no version after it) leaves the whole token.
-        // Edge case: `pkg@` is degenerate input. `rfind` returns the
-        // index of the trailing `@`, so we'd strip to `pkg`. That's
-        // a fine outcome.
+        // `pkg@` is degenerate npm input; rfind returns the trailing
+        // `@`, so we strip to `pkg`. OSV will be queried for `pkg`,
+        // which is harmless.
         assert_eq!(
             extract_npm_install_pkgs("npm install pkg@"),
             vec!["pkg"],
@@ -240,8 +307,8 @@ mod tests {
 
     #[test]
     fn cap_bounds_pathological_inputs() {
-        // gpt-review #029 hardening: a hostile command listing 200
-        // packages shouldn't OSV-check all 200. Stop at the cap.
+        // Hostile input listing 200 packages shouldn't trigger 200
+        // OSV round-trips. Stop at the cap.
         let mut cmd = String::from("npm install");
         for i in 0..MAX_PKGS_PER_COMMAND + 5 {
             cmd.push_str(&format!(" p{i}"));
@@ -252,9 +319,6 @@ mod tests {
 
     #[test]
     fn extract_first_pkg_legacy_helper() {
-        // Returns the first non-flag token — preserves the prior
-        // server.rs/classifier.rs API surface for sites that don't
-        // need the full list.
         assert_eq!(
             extract_npm_install_first_pkg("npm install lodash"),
             Some("lodash"),
