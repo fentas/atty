@@ -209,7 +209,7 @@ pub enum Request {
 }
 
 /// Scope selector for `AtomsList`. The matcher serves the union of
-/// all three at classification time; this lets the operator see
+/// all four at classification time; this lets the operator see
 /// where any given atom came from (debugging an unexpected hit).
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -218,6 +218,15 @@ pub enum AtomScope {
     /// `src/modules/security_guard/data/flagged_atoms.txt`. Read-only;
     /// hand-curated by atty maintainers + refreshed pre-release.
     System,
+    /// Runtime-fetched corpus loaded from
+    /// `/var/lib/atty-guard/atoms.system.txt`. Populated by the
+    /// `--atoms-update-interval` cron or `--update-atoms-now`. This
+    /// is the source of `system-fetched atom matched: <atom>`
+    /// classify reasons — listing it via `atoms list --fetched`
+    /// (GPT-review #023) closes the introspection gap where the
+    /// classify path scanned this corpus but `--system` only
+    /// returned the bundled set.
+    Fetched,
     /// Per-UID `atoms.user.txt`. Mutated via `atoms add/remove` or
     /// `session write`. Persisted to /var/lib/atty-guard/users/<uid>/.
     User,

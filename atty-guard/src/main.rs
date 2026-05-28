@@ -72,8 +72,9 @@ struct Cli {
     ///              Qwen2.5-Coder; the model is picked via the
     ///              `[tier2.onnx] model` config key. Requires
     ///              `--config <path>` pointing at a TOML file
-    ///              with `model_path` + `tokenizer_path` set, and
-    ///              `libonnxruntime.so` on the loader path.
+    ///              with `model_path` + `tokenizer_path` set. The
+    ///              ONNX runtime is pure-Rust (`tract-onnx`); no
+    ///              `libonnxruntime.so` system dependency needed.
     /// Omitted → look at config's `[tier2] backend`, then fall
     /// back to `stub`. Use `Option<String>` rather than a clap
     /// `default_value = "stub"` so main can distinguish "operator
@@ -182,14 +183,19 @@ enum AtomsOp {
     Add { pattern: String },
     /// Remove `<pattern>` from the per-user atom list. Requires sudo.
     Remove { pattern: String },
-    /// List atoms. Defaults to `--user`; pass `--system` for the
-    /// bundled corpus or `--session` for the in-memory overlay.
+    /// List atoms. Defaults to `--user`. Other scopes:
+    /// `--system` (compile-time bundled corpus), `--fetched`
+    /// (runtime-fetched corpus at /var/lib/atty-guard/atoms.system.txt
+    /// — the source of `system-fetched atom matched: ...` reasons),
+    /// `--session` (in-memory daemon session overlay).
     List {
-        #[arg(long, conflicts_with_all = &["user", "session"])]
+        #[arg(long, conflicts_with_all = &["fetched", "user", "session"])]
         system: bool,
-        #[arg(long, conflicts_with_all = &["system", "session"])]
+        #[arg(long, conflicts_with_all = &["system", "user", "session"])]
+        fetched: bool,
+        #[arg(long, conflicts_with_all = &["system", "fetched", "session"])]
         user: bool,
-        #[arg(long, conflicts_with_all = &["system", "user"])]
+        #[arg(long, conflicts_with_all = &["system", "fetched", "user"])]
         session: bool,
     },
     /// Show the daemon's latest drift snapshot (per-source pin vs.

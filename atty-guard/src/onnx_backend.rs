@@ -29,8 +29,9 @@
 //! verdict reason + telemetry.
 //!
 //! Build path: `cargo build --release --features tier2-onnx`.
-//! Runtime needs `libonnxruntime.so` on the loader path
-//! (`pacman -S onnxruntime` / etc.).
+//! Runtime is pure-Rust via `tract-onnx` — no system dependency
+//! on `libonnxruntime.so`. Operators only need the ONNX model +
+//! tokenizer files referenced by the `[tier2.onnx]` config.
 
 #[cfg(feature = "tier2-onnx")]
 use crate::classifier::Tier2Backend;

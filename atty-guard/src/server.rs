@@ -667,6 +667,20 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 AtomScope::System => ResponseBody::AtomsList {
                     atoms: state.classifier.system_atoms_snapshot(),
                 },
+                AtomScope::Fetched => {
+                    // GPT-review #023: expose the runtime-fetched
+                    // corpus separately so operators chasing a
+                    // `system-fetched atom matched: <atom>` reason
+                    // can verify which atom triggered. Lazy-load
+                    // first so a fresh daemon that hasn't run its
+                    // classify-hot-path lazy-init yet still returns
+                    // a populated list.
+                    state.trust_store.ensure_system_fetched_loaded();
+                    let arc = state.trust_store.list_system_fetched();
+                    ResponseBody::AtomsList {
+                        atoms: arc.as_ref().clone(),
+                    }
+                }
                 AtomScope::User => {
                     let _ = state.trust_store.ensure_loaded(uid);
                     ResponseBody::AtomsList {
@@ -1385,6 +1399,28 @@ mod tests {
         assert!(atoms.len() > 50);
         let any_nc_e = atoms.iter().any(|a| a.as_str() == Some("nc -e"));
         assert!(any_nc_e, "expected `nc -e` in bundled corpus");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn atoms_list_fetched_empty_when_no_file() {
+        // GPT-review #023: --fetched scope returns the runtime-fetched
+        // corpus from /var/lib/atty-guard/atoms.system.txt. When no
+        // file exists (fresh daemon, --update-atoms-now hasn't run),
+        // it returns an empty list — NOT the bundled corpus.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"atoms_list","scope":"fetched"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "atoms_list");
+        assert!(
+            v["atoms"].as_array().unwrap().is_empty(),
+            "fetched corpus should be empty without atoms.system.txt; got {:?}",
+            v["atoms"],
+        );
         let _ = std::fs::remove_file(socket);
     }
 

@@ -157,7 +157,9 @@ Then `sudo make install-guard` for the new system daemon.
 baked into the binary at compile time (`include_str!` of
 `src/modules/security_guard/data/flagged_atoms.txt`). This is the
 always-on baseline; updates ride atty's release cadence.
-`atty-guard atoms list --system` prints it.
+`atty-guard atoms list --system` prints it. The separate
+runtime-fetched corpus (next paragraph) is listed via
+`atty-guard atoms list --fetched`.
 
 **User overlay** (post-#141) — operators can add per-user atoms via
 the mediated CLI. The user overlay is stored under
@@ -177,9 +179,18 @@ sudo atty-guard atoms remove 'my-internal-tool --insecure-flag'
 
 # List atoms by scope (defaults to --user).
 atty-guard atoms list                # user overlay (no sudo)
-atty-guard atoms list --system       # bundled corpus
+atty-guard atoms list --system       # compile-time bundled corpus
+atty-guard atoms list --fetched      # runtime-fetched corpus from
+                                     # /var/lib/atty-guard/atoms.system.txt
+                                     # (source of `system-fetched atom
+                                     # matched: <atom>` reasons)
 atty-guard atoms list --session      # ephemeral in-memory overlay
 ```
+
+The classify path scans `--system` AND `--fetched` together; the
+two flags split them for introspection because `system-fetched
+atom matched: <atom>` reasons reference the fetched corpus and
+operators need a way to confirm which atom triggered.
 
 **URL decisions** — same pattern, separate file
 (`urls.decisions.txt`). Records `allow <host>` / `block <host>`
