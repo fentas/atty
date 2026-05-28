@@ -833,35 +833,63 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 Ok(report) => {
                     if state.verbosity >= 1 {
                         eprintln!(
-                            "atty-guard: session write uid={} atoms={} allow={} block={} invalid={}",
+                            "atty-guard: session write uid={} atoms={} allow={} block={} \
+                             trust={} invalid={} not_persisted={}",
                             uid,
                             report.atoms_added,
                             report.urls_allow_added,
                             report.urls_block_added,
-                            report.invalid.len()
+                            report.trust_added,
+                            report.invalid.len(),
+                            report.not_persisted.len(),
                         );
                     }
-                    // Surface the invalid list to the CLI via the
-                    // structured response so the operator sees
-                    // exactly which entries stayed in session.
-                    if report.invalid.is_empty() {
+                    // Surface BOTH the invalid AND not_persisted
+                    // lists to the CLI via a structured error so the
+                    // operator sees exactly which entries stayed in
+                    // session AND why — malformed entries need
+                    // fixing, cap-blocked entries need the trust
+                    // file pruned and a retry (GPT-review #025).
+                    if report.invalid.is_empty() && report.not_persisted.is_empty() {
                         ResponseBody::Ok
                     } else {
-                        let lines: Vec<String> = report
-                            .invalid
-                            .iter()
-                            .map(|(e, r)| format!("  `{e}` — {r}"))
-                            .collect();
+                        let mut sections: Vec<String> = Vec::new();
+                        if !report.invalid.is_empty() {
+                            let lines: Vec<String> = report
+                                .invalid
+                                .iter()
+                                .map(|(e, r)| format!("  `{e}` — {r}"))
+                                .collect();
+                            sections.push(format!(
+                                "kept {} invalid entr{} in session for review:\n{}",
+                                report.invalid.len(),
+                                if report.invalid.len() == 1 { "y" } else { "ies" },
+                                lines.join("\n"),
+                            ));
+                        }
+                        if !report.not_persisted.is_empty() {
+                            let lines: Vec<String> = report
+                                .not_persisted
+                                .iter()
+                                .map(|(e, r)| format!("  `{e}` — {r}"))
+                                .collect();
+                            sections.push(format!(
+                                "kept {} valid entr{} in session for retry (resolve the \
+                                 cause, then re-run `session write`):\n{}",
+                                report.not_persisted.len(),
+                                if report.not_persisted.len() == 1 { "y" } else { "ies" },
+                                lines.join("\n"),
+                            ));
+                        }
                         ResponseBody::Error {
                             message: format!(
-                                "session write partial — atoms={} allow={} block={}, kept {} \
-                                 invalid entr{} in session for review:\n{}",
+                                "session write partial — atoms={} allow={} block={} \
+                                 trust={}\n{}",
                                 report.atoms_added,
                                 report.urls_allow_added,
                                 report.urls_block_added,
-                                report.invalid.len(),
-                                if report.invalid.len() == 1 { "y" } else { "ies" },
-                                lines.join("\n")
+                                report.trust_added,
+                                sections.join("\n"),
                             ),
                         }
                     }

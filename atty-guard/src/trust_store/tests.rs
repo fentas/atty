@@ -528,3 +528,142 @@ fn write_includes_metadata_stamp() {
     assert_eq!(parsed.len(), 1);
     assert!(parsed.contains("stamp test"));
 }
+
+#[test]
+fn concurrent_persistent_add_trust_preserves_all_hashes() {
+    // GPT-review #024: thread-per-connection means two
+    // persistent_add_trust calls for the same UID can race their
+    // RMW cycles and lose hashes. Spawn N threads each adding a
+    // distinct hash and assert the final file contains all N.
+    // Pre-fix this would intermittently land at <N entries.
+    let (store, _tmp) = fresh_store();
+    let store = std::sync::Arc::new(store);
+    let uid = 1000;
+    const N: usize = 16;
+    let mut handles = Vec::new();
+    for i in 0..N {
+        let s = store.clone();
+        handles.push(std::thread::spawn(move || {
+            // 64 lowercase hex chars; encode `i` into the prefix
+            // so each thread's hash is distinct + validating.
+            let hash = format!("{:064x}", i + 0x1000);
+            s.persistent_add_trust(uid, &hash).unwrap();
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let listed = store.list_persistent_trust(uid);
+    assert_eq!(
+        listed.len(),
+        N,
+        "concurrent persistent_add_trust lost updates: expected {N}, got {} — {listed:?}",
+        listed.len(),
+    );
+}
+
+#[test]
+fn concurrent_persistent_add_atom_preserves_all_atoms() {
+    // Companion to the trust-hash race test: atoms.user.txt
+    // takes the same per-UID write lock, so concurrent adds
+    // should likewise lose nothing.
+    let (store, _tmp) = fresh_store();
+    let store = std::sync::Arc::new(store);
+    let uid = 1000;
+    const N: usize = 16;
+    let mut handles = Vec::new();
+    for i in 0..N {
+        let s = store.clone();
+        handles.push(std::thread::spawn(move || {
+            let atom = format!("test-atom-{i:03}-with-some-bytes");
+            s.persistent_add_atom(uid, &atom).unwrap();
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let listed = store.list_atoms(uid, ListScope::Persistent);
+    assert_eq!(listed.len(), N, "lost atoms in concurrent add: {listed:?}");
+}
+
+#[test]
+fn session_write_retains_cap_blocked_trust_for_retry() {
+    // GPT-review #025: when commands.trusted.txt is at
+    // PERSISTENT_TRUST_CAP, valid session trust hashes that can't
+    // be persisted should stay in session_trust so the operator
+    // can prune the file + re-run `session write`. Prior shape
+    // dropped them on cleanup (only kept malformed hashes).
+    use std::collections::HashSet;
+    let (store, _tmp) = fresh_store();
+    let uid = 1000;
+
+    // Pre-fill the persistent file to exactly the cap.
+    let pre_hashes: HashSet<String> = (0..PERSISTENT_TRUST_CAP)
+        .map(|i| format!("{:064x}", i))
+        .collect();
+    let trust_path = store
+        .data_root
+        .join(uid.to_string())
+        .join("commands.trusted.txt");
+    ensure_parent_dir(&trust_path).unwrap();
+    write_trust_file(&trust_path, &pre_hashes).unwrap();
+    store.load_persistent(uid).unwrap();
+
+    // Now add a fresh session trust hash that would push the
+    // file past the cap.
+    let extra =
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned();
+    store.session_add_trust(uid, &extra).unwrap();
+
+    let report = store.session_write(uid).unwrap();
+    assert_eq!(report.trust_added, 0, "no new persistence expected");
+    assert_eq!(report.invalid.len(), 0, "hash is well-formed");
+    assert_eq!(
+        report.not_persisted.len(),
+        1,
+        "cap-full hash should land in not_persisted, got {report:?}"
+    );
+    assert!(report.not_persisted[0].1.contains("trust file full"));
+
+    // Session must still contain the unpersisted hash so a future
+    // retry can pick it up.
+    let (_, _, _, session_trust) = store.session_summary(uid);
+    assert!(
+        session_trust.contains(&extra),
+        "cap-blocked hash dropped from session — session_trust={session_trust:?}",
+    );
+}
+
+#[test]
+fn session_write_drops_persisted_trust_keeps_invalid() {
+    // Pin the existing happy-path AND the malformed-hash retention
+    // shape so the #025 fix doesn't accidentally re-introduce
+    // the over-deletion bug.
+    let (store, _tmp) = fresh_store();
+    let uid = 1000;
+    let good = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let bad = "not-a-hash"; // fails validate_trust_hash
+    store.session_add_trust(uid, good).unwrap();
+    // session_add_trust validates shape; for the bad case we
+    // bypass it by inserting directly into the session set.
+    {
+        let mut state = store.state.lock().unwrap();
+        state
+            .entry(uid)
+            .or_default()
+            .session_trust
+            .insert(bad.to_owned());
+    }
+    let report = store.session_write(uid).unwrap();
+    assert_eq!(report.trust_added, 1);
+    assert_eq!(report.invalid.len(), 1, "malformed hash should be invalid");
+    let (_, _, _, session_trust) = store.session_summary(uid);
+    assert!(
+        !session_trust.iter().any(|h| h == good),
+        "persisted hash should clear from session",
+    );
+    assert!(
+        session_trust.iter().any(|h| h == bad),
+        "malformed hash should remain for review",
+    );
+}

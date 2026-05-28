@@ -32,7 +32,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::atom_fetcher::is_placeholder_atom_public;
@@ -83,6 +84,26 @@ pub struct PerUserState {
 pub struct TrustStore {
     data_root: PathBuf,
     state: Mutex<HashMap<u32, PerUserState>>,
+    /// Per-UID serializer for persistent write paths (GPT-review
+    /// #024). The thread-per-connection server allows two writes
+    /// for the same UID to interleave their read-modify-write
+    /// cycles and lose updates. Each persistent_* mutator + the
+    /// session_write flow acquires the per-UID Arc<Mutex<()>> via
+    /// `acquire_write_lock(uid)` BEFORE doing any disk RMW. The
+    /// classify hot path does NOT take this lock — it only reads
+    /// the in-memory layer behind `state`, so write serialization
+    /// has zero impact on dispatch latency.
+    ///
+    /// Lock order, strictly: `write_lock(uid)` → `state` (held
+    /// briefly inside the write-locked region for swap/snapshot).
+    /// Reverse order would deadlock. Classify-only reads of
+    /// `state` are fine because they never reach for `write_locks`.
+    ///
+    /// The outer Mutex is held ONLY for the lazy-insert lookup;
+    /// once the inner `Arc<Mutex<()>>` is cloned out, the outer
+    /// guard drops and the per-UID critical section runs without
+    /// contending against other UIDs' writes.
+    write_locks: Mutex<HashMap<u32, Arc<Mutex<()>>>>,
     /// UIDs whose persistent layer has been loaded from disk at
     /// least once. After a mutation the in-memory layer is updated
     /// in-place (no re-read), so this flag is "have we ever read
@@ -132,11 +153,27 @@ impl TrustStore {
         Self {
             data_root,
             state: Mutex::new(HashMap::new()),
+            write_locks: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashSet::new()),
             system_fetched_atoms: Mutex::new(std::sync::Arc::new(Vec::new())),
             system_fetched_path,
             system_fetched_loaded: Mutex::new(false),
         }
+    }
+
+    /// Look up (or lazily insert) the per-UID write-serialization
+    /// mutex. Outer `write_locks` map is held briefly only for the
+    /// HashMap lookup; the returned `Arc<Mutex<()>>` is owned by
+    /// the caller and can be locked without blocking other UIDs.
+    /// See the `write_locks` field doc-comment for lock ordering.
+    fn acquire_write_lock(&self, uid: u32) -> Arc<Mutex<()>> {
+        let mut map = self
+            .write_locks
+            .lock()
+            .expect("write_locks poisoned");
+        map.entry(uid)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Read `atoms.system.txt` from disk + replace the in-memory
@@ -388,6 +425,11 @@ impl TrustStore {
     pub fn persistent_add_atom(&self, uid: u32, pattern: &str) -> std::io::Result<()> {
         validate_atom(pattern)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        // GPT-review #024: serialize concurrent writers for this
+        // UID so the RMW cycle on `atoms.user.txt` can't interleave
+        // and lose updates.
+        let lock = self.acquire_write_lock(uid);
+        let _guard = lock.lock().expect("per-uid write lock poisoned");
         let path = self.user_atoms_path(uid);
         ensure_parent_dir(&path)?;
         let mut existing = read_atoms_file(&path)?;
@@ -402,6 +444,8 @@ impl TrustStore {
     }
 
     pub fn persistent_remove_atom(&self, uid: u32, pattern: &str) -> std::io::Result<bool> {
+        let lock = self.acquire_write_lock(uid);
+        let _guard = lock.lock().expect("per-uid write lock poisoned");
         let path = self.user_atoms_path(uid);
         if !path.exists() {
             return Ok(false);
@@ -423,6 +467,8 @@ impl TrustStore {
     ) -> std::io::Result<()> {
         validate_host(host)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let lock = self.acquire_write_lock(uid);
+        let _guard = lock.lock().expect("per-uid write lock poisoned");
         let path = self.user_urls_path(uid);
         ensure_parent_dir(&path)?;
         let (mut allow, mut block) = read_urls_file(&path)?;
@@ -443,9 +489,16 @@ impl TrustStore {
     /// write`. Returns the count of entries written across both
     /// files (for the CLI's status output).
     pub fn session_write(&self, uid: u32) -> std::io::Result<SessionWriteReport> {
-        // Snapshot under the lock, do file I/O outside the critical
-        // section, then re-lock to clear the session ONLY if I/O
-        // succeeded. Avoids holding the global mutex during fsync.
+        // GPT-review #024: serialize against concurrent
+        // persistent_add_* + parallel session_write calls for the
+        // same UID so the RMW cycles below can't interleave and
+        // lose updates. Acquired BEFORE any file I/O.
+        let lock = self.acquire_write_lock(uid);
+        let _guard = lock.lock().expect("per-uid write lock poisoned");
+        // Snapshot under the state lock, do file I/O outside the
+        // critical section, then re-lock to clear the session ONLY
+        // for entries we successfully persisted. Avoids holding the
+        // global state mutex during fsync.
         let snapshot = {
             let state = self.state.lock().expect("trust_store poisoned");
             match state.get(&uid) {
@@ -459,6 +512,17 @@ impl TrustStore {
         };
         let (sess_atoms, sess_allow, sess_block) = snapshot;
 
+        // GPT-review #025: track which session entries we actually
+        // persisted (or saw already-present on disk). Cleanup
+        // retains everything NOT in these sets — including valid-
+        // but-not-persisted entries (e.g. trust cap reached). The
+        // prior shape removed all VALIDATING entries unconditionally,
+        // which lost cap-blocked hashes from the session.
+        let mut persisted_atoms: HashSet<String> = HashSet::new();
+        let mut persisted_urls_allow: HashSet<String> = HashSet::new();
+        let mut persisted_urls_block: HashSet<String> = HashSet::new();
+        let mut persisted_trust: HashSet<String> = HashSet::new();
+
         let mut report = SessionWriteReport::default();
 
         if !sess_atoms.is_empty() {
@@ -471,6 +535,10 @@ impl TrustStore {
                         if existing.insert(atom.clone()) {
                             report.atoms_added += 1;
                         }
+                        // Already-present-on-disk counts as
+                        // persisted for the cleanup pass — there's
+                        // no work left to do for this entry.
+                        persisted_atoms.insert(atom.clone());
                     }
                     Err(reason) => {
                         report.invalid.push((atom.clone(), reason));
@@ -492,6 +560,7 @@ impl TrustStore {
                         if allow.insert(h.clone()) {
                             report.urls_allow_added += 1;
                         }
+                        persisted_urls_allow.insert(h.clone());
                     }
                     Err(reason) => {
                         report.invalid.push((h.clone(), reason));
@@ -505,6 +574,7 @@ impl TrustStore {
                         if block.insert(h.clone()) {
                             report.urls_block_added += 1;
                         }
+                        persisted_urls_block.insert(h.clone());
                     }
                     Err(reason) => {
                         report.invalid.push((h.clone(), reason));
@@ -517,8 +587,14 @@ impl TrustStore {
         }
 
         // Trust hashes go to commands.trusted.txt (post-#143
-        // migration). Same valid-stays-out / invalid-stays-in
-        // semantics as atoms / urls. Per-UID cap applies.
+        // migration). Per-UID cap applies. Three outcomes:
+        //  - malformed (validate fails)            → report.invalid
+        //  - cap-full / persist-blocked            → report.not_persisted
+        //                                            (GPT-review #025)
+        //  - already-on-disk OR newly-inserted     → persisted_trust
+        // The retain pass at the end keeps anything NOT in
+        // persisted_trust — including not-persisted entries, so the
+        // operator can retry after pruning commands.trusted.txt.
         let sess_trust = {
             let state = self.state.lock().expect("trust_store poisoned");
             state
@@ -533,20 +609,23 @@ impl TrustStore {
             for h in &sess_trust {
                 match validate_trust_hash(h) {
                     Ok(()) => {
-                        // Duplicate-of-already-persisted is a silent
-                        // no-op (matches persistent_add_trust); we
-                        // only surface "cap full" when adding a NEW
-                        // entry would exceed the cap.
                         if existing.contains(h) {
                             // Already persisted; nothing to do.
+                            persisted_trust.insert(h.clone());
                         } else if existing.len() >= PERSISTENT_TRUST_CAP {
-                            report.invalid.push((
+                            // Valid hash, but the on-disk file is
+                            // full. Surface in `not_persisted` and
+                            // INTENTIONALLY DO NOT add to
+                            // `persisted_trust` so the cleanup pass
+                            // keeps it in session for retry.
+                            report.not_persisted.push((
                                 h.clone(),
                                 format!("trust file full ({PERSISTENT_TRUST_CAP})"),
                             ));
                         } else {
                             existing.insert(h.clone());
                             report.trust_added += 1;
+                            persisted_trust.insert(h.clone());
                         }
                     }
                     Err(reason) => report.invalid.push((h.clone(), reason)),
@@ -557,30 +636,28 @@ impl TrustStore {
             }
         }
 
-        // Re-sync in-memory + clear session, but ONLY for the
-        // entries that actually got persisted — surviving entries
-        // (those that failed validation) stay in the session for
-        // the operator to inspect via `session list`.
+        // Re-sync in-memory + cleanup: drop entries that we
+        // actually persisted (or were already on disk). Everything
+        // else stays in the session — malformed entries for
+        // operator review, cap-blocked entries for retry. This is
+        // the GPT-review #025 fix: prior shape removed ALL
+        // validating entries, losing cap-blocked hashes.
         self.load_persistent(uid)?;
         {
             let mut state = self.state.lock().expect("trust_store poisoned");
             if let Some(entry) = state.get_mut(&uid) {
                 entry
                     .session_atoms
-                    .retain(|a| validate_atom(a).is_err());
+                    .retain(|a| !persisted_atoms.contains(a));
                 entry
                     .session_urls_allow
-                    .retain(|h| validate_host(h).is_err());
+                    .retain(|h| !persisted_urls_allow.contains(h));
                 entry
                     .session_urls_block
-                    .retain(|h| validate_host(h).is_err());
-                // Trust hashes: drop the ones we successfully
-                // persisted (now in persistent_trust); keep
-                // malformed ones for inspection (already in
-                // report.invalid).
+                    .retain(|h| !persisted_urls_block.contains(h));
                 entry
                     .session_trust
-                    .retain(|h| validate_trust_hash(h).is_err());
+                    .retain(|h| !persisted_trust.contains(h));
             }
         }
         Ok(report)
@@ -613,6 +690,8 @@ impl TrustStore {
     pub fn persistent_add_trust(&self, uid: u32, hash: &str) -> std::io::Result<()> {
         validate_trust_hash(hash)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let lock = self.acquire_write_lock(uid);
+        let _guard = lock.lock().expect("per-uid write lock poisoned");
         let path = self.user_trust_path(uid);
         ensure_parent_dir(&path)?;
         let mut existing = read_trust_file(&path)?;
@@ -659,11 +738,20 @@ pub struct SessionWriteReport {
     pub urls_allow_added: usize,
     pub urls_block_added: usize,
     pub trust_added: usize,
-    /// Entries that failed validation and stayed in the session
-    /// for the operator to review/correct. Each `(entry, reason)`
-    /// pair surfaces in the CLI's `session write` output and via
-    /// `session list` until the operator deletes or fixes them.
+    /// Entries that failed VALIDATION (malformed atom / bad hash
+    /// shape / etc) and stayed in the session for the operator to
+    /// review/correct. Each `(entry, reason)` pair surfaces in the
+    /// CLI's `session write` output and via `session list` until
+    /// the operator deletes or fixes them.
     pub invalid: Vec<(String, String)>,
+    /// GPT-review #025: entries that PASSED validation but could
+    /// not be persisted right now (typical reason: trust file at
+    /// cap; possible future reasons: disk full, ENOSPC during
+    /// `write_atomic`'s rename). These stay in the session for
+    /// retry after the operator prunes whatever blocked the write.
+    /// Kept separate from `invalid` so CLI output can distinguish
+    /// "fix the entry" from "fix the destination."
+    pub not_persisted: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1031,17 +1119,50 @@ fn write_urls_file(
     write_atomic(path, content.as_bytes())
 }
 
+/// Monotonic counter used to uniquify temp filenames across
+/// concurrent `write_atomic` calls in the same process. The prior
+/// shape used only PID — fine across processes, but two daemon
+/// threads writing to the same target file collided on the SAME
+/// `<file>.tmp.<pid>` path and could overwrite each other's temp
+/// content before either rename (GPT-review #024).
+static WRITE_ATOMIC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     let pid = std::process::id();
+    let seq = WRITE_ATOMIC_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_file_name(format!(
-        "{}.tmp.{}",
+        "{}.tmp.{}.{}",
         path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("trust_store_tmp"),
-        pid
+        pid,
+        seq,
     ));
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)?;
+    // `create_new(true)` refuses to follow an attacker-pre-created
+    // symlink at the tmp path AND surfaces a hard error if our own
+    // counter collides (it can't — `AtomicU64::fetch_add` is
+    // monotonic per process — but the assertion is free). On error
+    // a stale tmp from a crashed prior run would NOT pass through
+    // since the counter advances every call; the worst case is
+    // disk cruft, never a corrupted target.
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        if let Err(e) = f.write_all(content) {
+            // Best-effort cleanup; if the write half-failed we
+            // shouldn't leave the tmp behind for the next caller
+            // to wonder about.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     // Mode 0640: owner (atty) rw, group (atty) r, others nothing.
     // Group `atty` includes the user accounts that talk to the
     // daemon — they can READ the persisted decisions via the
