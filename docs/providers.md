@@ -59,7 +59,7 @@ pub const Atuin = atty.modules.atuin.configure(.{
     .filter_mode         = .global,
     .suggestion_ttl_ms   = 0,
     .max_query           = 256,
-    .max_result          = 512,
+    .max_result          = 4096,
 
     .record              = true,
     .sync_after_records  = 10,
@@ -75,7 +75,7 @@ pub const Atuin = atty.modules.atuin.configure(.{
 | `search_mode`          | `.prefix`     | `.prefix`, `.full_text`, `.fuzzy`            |
 | `filter_mode`          | `.global`     | `.global`, `.host`, `.session`, `.directory` |
 | `suggestion_ttl_ms`    | 0             | ms of idleness before suggestion fades; 0 disables |
-| `max_query`, `max_result` | 256 / 512  | comptime mailbox sizes                       |
+| `max_query`, `max_result` | 256 / 4096 | comptime mailbox sizes (max_result sized for ~9 newline-separated suggestions) |
 | `record`               | `true`        | shell out to `atuin history start` on Enter  |
 | `sync_after_records`   | 10            | sync after N records; 0 disables             |
 | `sync_interval_ms`     | 60000         | sync if at least this much time elapsed; 0 disables |
