@@ -572,9 +572,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             }
             const R = dialog.Response(cfg.max_response_bytes);
             var parsed: R = .{};
-            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena.deinit();
-            dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
+            // FixedBufferAllocator on a stack buffer avoids the
+            // mmap/munmap per paint that std.heap.page_allocator
+            // pays — for a tall scrollback this fires hundreds of
+            // times per frame. The 16 KiB cap fits any envelope
+            // bounded by `cfg.max_response_bytes` (default 4 KiB)
+            // plus the parser's per-field copies, with headroom.
+            var parse_buf: [16 * 1024]u8 = undefined;
+            var parse_fba = std.heap.FixedBufferAllocator.init(&parse_buf);
+            dialog.parseResponse(R, parse_fba.allocator(), c, &parsed) catch {
                 return try renderWrappedRawWithSkip(w, c, max_visible, skip_rows, max_rows);
             };
             switch (parsed.action) {
@@ -706,9 +712,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // per-row windowing (#213's offset clamp).
                     const R = dialog.Response(cfg.max_response_bytes);
                     var parsed: R = .{};
-                    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-                    defer arena.deinit();
-                    dialog.parseResponse(R, arena.allocator(), c, &parsed) catch {
+                    // See renderTurnContentWithSkip for the FBA
+                    // rationale — same paint-frame cost concern.
+                    var parse_buf: [16 * 1024]u8 = undefined;
+                    var parse_fba = std.heap.FixedBufferAllocator.init(&parse_buf);
+                    dialog.parseResponse(R, parse_fba.allocator(), c, &parsed) catch {
                         // Parse failure falls through to raw render in
                         // renderTurnContent — count that path too.
                         const raw = md_render.countRows(c, cols);
