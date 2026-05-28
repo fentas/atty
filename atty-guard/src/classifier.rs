@@ -185,8 +185,13 @@ impl Classifier {
         match Self::try_new_with_backend(kind, onnx_cfg) {
             Ok(c) => c,
             Err(e) => {
+                let kind_str = match kind {
+                    BackendKind::Stub => "stub",
+                    BackendKind::Heuristic => "heuristic",
+                    BackendKind::Onnx => "onnx",
+                };
                 eprintln!(
-                    "atty-guard: {e} — falling back to Stub backend"
+                    "atty-guard: tier2={kind_str} backend load failed ({e}) — falling back to stub"
                 );
                 Self {
                     tier1: Tier1::new(),
