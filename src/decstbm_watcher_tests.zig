@@ -71,3 +71,24 @@ test "canFastPath true on ground, false inside ESC/CSI" {
     w.feed("[31m"); // back to ground after final byte
     try testing.expect(w.canFastPath());
 }
+
+test "intermediate-byte CSIs ending in r do not flag" {
+    // ECMA-48 intermediate bytes (0x20..0x2F) appearing mid-CSI
+    // disqualify the trailing `r` from being DECSTBM. The canonical
+    // example is `CSI $ r` (DECRQSS response). Without this filter
+    // every DECRQSS reply from the terminal would trigger a
+    // spurious reassert.
+    var w = DecstbmWatcher.init();
+    w.feed("\x1B[$r");
+    try testing.expect(!w.takeClobbered());
+
+    // With parameters before the intermediate.
+    w.feed("\x1B[1;5$r");
+    try testing.expect(!w.takeClobbered());
+
+    // Sanity: a clean DECSTBM after the intermediate-byte CSIs still
+    // flags. Confirms `saw_intermediate` resets per CSI (the `[` arm
+    // clears it on each new sequence).
+    w.feed("\x1B[r");
+    try testing.expect(w.takeClobbered());
+}

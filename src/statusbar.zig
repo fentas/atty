@@ -388,25 +388,13 @@ pub const StatusBar = struct {
         self.last_valid = false;
     }
 
-    /// Issue #249 — defensive re-assertion of atty's DECSTBM when
-    /// the inner app has clobbered it (detected by
-    /// `DecstbmWatcher`). Inline TUIs like Claude Code emit their
-    /// own `\x1B[r` against the primary screen, which evaporates
-    /// atty's reserved region; without this re-assertion, atty's
-    /// statusbar row gets scrolled into the visible scrollback by
-    /// the inner app's next `\n`.
-    ///
-    /// Unlike `reactivate()`, this does NOT erase the reserved
-    /// rows — the inner app may have legitimate content drawn
-    /// across the screen and we don't want to blank it out, just
-    /// constrain future scrolls. The save/restore wrap keeps the
-    /// inner app's cursor exactly where it was.
-    ///
-    /// Also invalidates `last_valid` so the next `render()` call
-    /// re-paints the status text (any prior paint that got scrolled
-    /// into scrollback is gone from row=rows; the cached
-    /// "text_unchanged" check would otherwise no-op and leave the
-    /// reserved row blank until the text content actually changes).
+    /// Re-pin DECSTBM without touching reserved-row content. Used
+    /// when an inline TUI's own DECSTBM has clobbered our region;
+    /// erasing rows here would blank legitimate inner-app content
+    /// on the primary screen. Cache invalidation forces the next
+    /// `render()` to re-paint — a prior status row that got
+    /// scrolled into scrollback is no longer at row=rows, and
+    /// `text_unchanged` would otherwise no-op.
     pub fn reassertDecstbm(self: *StatusBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.writeAll("\x1B[s");
         try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
