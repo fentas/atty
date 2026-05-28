@@ -441,13 +441,27 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             // the daemon was started with --enable-osv. Catches
             // packages that landed on OSV's advisory list AFTER
             // atty-guard's last bundled-data update.
+            //
+            // Walks every parsed package token (not just the first)
+            // to defeat the prepend-a-benign-pkg attacker bypass,
+            // and keeps the strictest verdict via
+            // `verdict_strictly_worse` so a Malicious (Block) pkg
+            // after a Vulnerable (Warn) pkg isn't lost to an early
+            // first-non-Safe exit. Short-circuit only on Block —
+            // the strictest possible outcome; further OSV calls
+            // can't escalate further.
             if matches!(result.verdict, Verdict::Safe) {
                 if let Some(osv) = &state.osv {
-                    if let Some(pkg) = extract_npm_install_pkg(&command) {
+                    for pkg in crate::npm_parser::extract_npm_install_pkgs(&command) {
                         match osv.lookup_npm(pkg) {
                             Ok(verdict) => {
                                 if let Some(r) = crate::osv::osv_verdict_to_result(verdict, pkg) {
-                                    result = r;
+                                    if verdict_strictly_worse(&result.verdict, &r.verdict) {
+                                        result = r;
+                                    }
+                                    if matches!(result.verdict, Verdict::Block) {
+                                        break;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -990,70 +1004,18 @@ fn require_root_error(op: &str) -> ResponseBody {
     }
 }
 
-/// Best-effort extraction of the package name from an
-/// `npm install <pkg>` (or pnpm/yarn variant) shape. Returns
-/// None when the shape doesn't fit OR the first non-flag token
-/// would be empty. Strips a trailing `@version` (with scoped-
-/// package support — matches the in-classifier semantics).
-///
-/// Pulled out as a free fn so the dispatch can call it without
-/// reaching into the Tier-1 internals AND so unit tests cover
-/// it directly.
-fn extract_npm_install_pkg(line: &str) -> Option<&str> {
-    let verbs = [
-        ("npm ", "install"),
-        ("npm ", "i "),
-        ("npm ", "add"),
-        ("pnpm ", "install"),
-        ("pnpm ", "i "),
-        ("pnpm ", "add"),
-        ("yarn ", "add"),
-    ];
-    for (cmd, verb) in verbs {
-        let Some(cmd_at) = line.find(cmd) else {
-            continue;
-        };
-        if cmd_at != 0 {
-            let prev = line.as_bytes()[cmd_at - 1];
-            if !matches!(prev, b' ' | b';' | b'&' | b'|') {
-                continue;
-            }
-        }
-        let after_cmd = cmd_at + cmd.len();
-        let verb_end = after_cmd + verb.len();
-        if verb_end > line.len() {
-            continue;
-        }
-        if !line[after_cmd..verb_end].eq(verb) {
-            continue;
-        }
-        // For verbs that don't already include a trailing space
-        // require one (or EOL) before the args.
-        let args_start = if verb.ends_with(' ') {
-            verb_end
-        } else if verb_end == line.len() {
-            return None;
-        } else if line.as_bytes()[verb_end] == b' ' {
-            verb_end + 1
-        } else {
-            continue;
-        };
-        // Walk to the first non-flag token.
-        for tok in line[args_start..].split_whitespace() {
-            if tok.starts_with('-') {
-                continue;
-            }
-            // Strip `@version` suffix; preserve leading `@scope/`.
-            let name = match tok.rfind('@') {
-                Some(0) | None => tok,
-                Some(i) => &tok[..i],
-            };
-            if !name.is_empty() {
-                return Some(name);
-            }
-        }
-    }
-    None
+/// True when `incoming` is a strictly-worse verdict than `current`.
+/// Used by the per-package OSV loop to keep the worst observed
+/// outcome across all packages — pre-fix the loop broke on first
+/// non-Safe, which would mask a `Malicious → Block` after an earlier
+/// `Vulnerable → Warn`. Ordering: Safe < Warn < Block.
+fn verdict_strictly_worse(current: &Verdict, incoming: &Verdict) -> bool {
+    matches!(
+        (current, incoming),
+        (Verdict::Safe, Verdict::Warn)
+            | (Verdict::Safe, Verdict::Block)
+            | (Verdict::Warn, Verdict::Block),
+    )
 }
 
 fn write_response(writer: &mut impl Write, id: u64, body: ResponseBody) -> std::io::Result<()> {
@@ -1776,7 +1738,7 @@ mod tests {
     #[test]
     fn extract_npm_install_pkg_bare() {
         assert_eq!(
-            extract_npm_install_pkg("npm install lodash"),
+            crate::npm_parser::extract_npm_install_first_pkg("npm install lodash"),
             Some("lodash")
         );
     }
@@ -1784,7 +1746,7 @@ mod tests {
     #[test]
     fn extract_npm_install_pkg_with_version() {
         assert_eq!(
-            extract_npm_install_pkg("npm install lodash@4.17.21"),
+            crate::npm_parser::extract_npm_install_first_pkg("npm install lodash@4.17.21"),
             Some("lodash")
         );
     }
@@ -1792,7 +1754,7 @@ mod tests {
     #[test]
     fn extract_npm_install_pkg_scoped() {
         assert_eq!(
-            extract_npm_install_pkg("npm install @ctrl/tinycolor"),
+            crate::npm_parser::extract_npm_install_first_pkg("npm install @ctrl/tinycolor"),
             Some("@ctrl/tinycolor")
         );
     }
@@ -1800,34 +1762,57 @@ mod tests {
     #[test]
     fn extract_npm_install_pkg_scoped_versioned() {
         assert_eq!(
-            extract_npm_install_pkg("npm install @ctrl/tinycolor@1.0.0"),
+            crate::npm_parser::extract_npm_install_first_pkg("npm install @ctrl/tinycolor@1.0.0"),
             Some("@ctrl/tinycolor")
         );
     }
 
     #[test]
     fn extract_npm_install_pkg_pnpm_add() {
-        assert_eq!(extract_npm_install_pkg("pnpm add react"), Some("react"));
+        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("pnpm add react"), Some("react"));
     }
 
     #[test]
     fn extract_npm_install_pkg_yarn_add() {
-        assert_eq!(extract_npm_install_pkg("yarn add vue"), Some("vue"));
+        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("yarn add vue"), Some("vue"));
     }
 
     #[test]
     fn extract_npm_install_pkg_skips_flags() {
         assert_eq!(
-            extract_npm_install_pkg("npm install --save-dev @types/node"),
+            crate::npm_parser::extract_npm_install_first_pkg("npm install --save-dev @types/node"),
             Some("@types/node")
         );
     }
 
     #[test]
     fn extract_npm_install_pkg_not_install_shape() {
-        assert_eq!(extract_npm_install_pkg("ls -la"), None);
-        assert_eq!(extract_npm_install_pkg("npm test"), None);
-        assert_eq!(extract_npm_install_pkg("npm run build"), None);
+        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("ls -la"), None);
+        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("npm test"), None);
+        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("npm run build"), None);
+    }
+
+    #[test]
+    fn verdict_strictly_worse_pins_severity_ordering() {
+        use crate::protocol::Verdict;
+        // PR #262 round-1 subagent HIGH finding: the OSV loop
+        // pre-fix broke on first non-Safe, so a Block after a Warn
+        // was missed. The helper that drives the worst-wins
+        // upgrade must reflect Safe < Warn < Block strictly —
+        // ANY regression that flattens the ordering re-introduces
+        // the attacker-can-prepend-a-vulnerable-package bypass.
+        assert!(verdict_strictly_worse(&Verdict::Safe, &Verdict::Warn));
+        assert!(verdict_strictly_worse(&Verdict::Safe, &Verdict::Block));
+        assert!(verdict_strictly_worse(&Verdict::Warn, &Verdict::Block));
+        // Reverse direction never upgrades — a later Safe-/Warn-
+        // pkg can't downgrade a worse earlier verdict.
+        assert!(!verdict_strictly_worse(&Verdict::Warn, &Verdict::Safe));
+        assert!(!verdict_strictly_worse(&Verdict::Block, &Verdict::Safe));
+        assert!(!verdict_strictly_worse(&Verdict::Block, &Verdict::Warn));
+        // Same-level never upgrades.
+        assert!(!verdict_strictly_worse(&Verdict::Safe, &Verdict::Safe));
+        assert!(!verdict_strictly_worse(&Verdict::Warn, &Verdict::Warn));
+        assert!(!verdict_strictly_worse(&Verdict::Block, &Verdict::Block));
     }
 
     #[test]
