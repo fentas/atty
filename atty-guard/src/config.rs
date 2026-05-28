@@ -124,10 +124,9 @@ pub struct Tier2Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-// The struct is parsed in every build (so non-ONNX builds reject
-// malformed config consistently), but the FIELDS are only read by
-// the ONNX backend at runtime. Without this allow, the no-feature
-// build warns about unused fields.
+// Fields are only read by the ONNX backend; the struct itself is
+// parsed in every build so config validation is consistent across
+// feature flavors.
 #[cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
 pub struct OnnxConfig {
     /// Model selector — defaults to `securebert2` because it's
@@ -210,22 +209,14 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-/// Hard cap on config file size. Defense-in-depth: even though
-/// the path is operator-set (sudo-only in production), reading
-/// /dev/urandom, a fifo, or a misplaced large file via
-/// `read_to_string` would OOM the daemon at startup or hang
-/// indefinitely. 1 MiB is well past any realistic atty-guard
-/// config (real-world configs are < 4 KiB).
+/// Hard cap on config file size. Real-world atty-guard configs
+/// are <4 KiB; the cap defends against `--config` pointing at
+/// /dev/urandom, a fifo, or a misplaced large file that would
+/// OOM the daemon under an unbounded `read_to_string`.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
-/// Parse a TOML config file. Always available — gpt-review #032
-/// made the parser dep non-optional; previously the non-
-/// `tier2-onnx` build read the file but discarded its contents,
-/// silently dropping operator `[server]`, `[accumulator]`, and
-/// non-ONNX `[tier2]` policy.
-///
-/// Failure modes are all hard errors so explicit `--config`
-/// consistently fails closed:
+/// Parse a TOML config file. Always fails closed so an explicit
+/// `--config` never silently degrades to defaults:
 ///   - missing / unreadable path → `LoadError::Io`
 ///   - non-regular file (fifo, directory, char/block device) →
 ///     `LoadError::Io` with EINVAL — refuses to read from
@@ -300,9 +291,9 @@ block_threshold = 0.9
 
     #[test]
     fn load_parses_server_and_accumulator_tables() {
-        // gpt-review #032 regression guard: pre-fix the non-ONNX
-        // build silently discarded these tables. Both must round-
-        // trip through `load` regardless of feature flags.
+        // Invariant: `load` honors non-ONNX policy tables in every
+        // build flavor. Drives `load` (not bare `toml::from_str`)
+        // so a future cfg-gate on the parser regresses loudly.
         let src = br#"
 [server]
 max_concurrent_connections = 8
@@ -322,9 +313,10 @@ block_threshold = 0.97
 
     #[test]
     fn load_parses_non_onnx_tier2_backend() {
-        // Same regression family — `[tier2] backend = "heuristic"`
-        // pre-fix only landed in `tier2-onnx` builds. Now honored
-        // in every build flavor.
+        // Invariant: non-ONNX backend selection round-trips through
+        // `load` in every build flavor. Asserts the parsed Config
+        // field directly so the test fails on a parsing regression
+        // even if downstream `resolve_backend` is also broken.
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         use std::io::Write as _;
         tmp.write_all(b"[tier2]\nbackend = \"heuristic\"").unwrap();
@@ -334,10 +326,9 @@ block_threshold = 0.97
 
     #[test]
     fn load_rejects_malformed_toml() {
-        // Explicit --config must fail closed on parse errors so the
-        // operator's malformed policy doesn't silently fall through
-        // to defaults. (Pre-fix non-ONNX builds wouldn't even
-        // attempt to parse, so an invalid file silently "succeeded".)
+        // Invariant: explicit --config must fail closed on parse
+        // errors so an operator's malformed policy can't silently
+        // fall through to compiled-in defaults.
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         use std::io::Write as _;
         tmp.write_all(b"this = is = not = valid").unwrap();
