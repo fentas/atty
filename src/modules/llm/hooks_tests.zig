@@ -2582,3 +2582,58 @@ test "persistence: retained conclusion from prior dialog does NOT leak into the 
     // Best-effort dir cleanup so subsequent test runs start clean.
     _ = std.c.rmdir(dir_z.ptr);
 }
+
+test "OSC 133 ;D clears cached chat_open_cursor (#303)" {
+    // Pre-fix: `chat_open_cursor_row`/_col was captured ONCE at
+    // first chat-open and never invalidated. After an exec ran +
+    // output scrolled the shell prompt down, the next paint
+    // CUP'd back to the stale (pre-exec) row, landing the second
+    // exec's insertion on top of the first exec's output.
+    //
+    // Fix: ;D handler clears both fields when chat_refocus_pending
+    // fires, so paintInlineChat re-captures from the current
+    // ctx.cursor_row/col on the next tick.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Stage state as if a first exec just ran: chat open, cursor
+    // snapshot recorded from the pre-exec row, refocus pending,
+    // dialog in capturing_output (the only state ;D unwinds).
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    rt.chat_open_cursor_row = 17;
+    rt.chat_open_cursor_col = 1;
+    rt.chat_refocus_pending = true;
+    rt.dialog_state = .capturing_output;
+
+    // Feed an OSC 133 ;C + ;D pair. The ;C transitions into
+    // capturing; ;D fires the refocus arm.
+    _ = try L.onOutput(&rt, &ctx, "\x1B]133;C\x07output\x1B]133;D\x07");
+
+    try testing.expect(rt.chat_focus_in_panel);
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_row);
+    try testing.expectEqual(@as(u16, 0), rt.chat_open_cursor_col);
+    try testing.expect(!rt.chat_refocus_pending);
+}
