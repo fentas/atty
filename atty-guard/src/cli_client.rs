@@ -611,14 +611,27 @@ mod tests {
     }
 
     #[test]
-    fn sudo_target_uid_requires_all_env_vars() {
-        // Smoke test using the public env. We can't fully exercise
-        // the success path under `cargo test` (would need euid=0
-        // AND a writable env shared across threads, which isn't safe
-        // — `std::env::set_var` races with concurrent tests). Instead
-        // verify the function compiles and is callable: the result
-        // depends on the host env state. We just check it doesn't
-        // panic.
-        let _ = sudo_target_uid();
+    fn sudo_target_uid_non_root_caller_returns_none() {
+        // `cargo test` runs under the test runner's UID (non-root).
+        // The euid==0 gate is the first check, so regardless of how
+        // SUDO_* env vars are set on the host (CI might inherit
+        // them, dev shells often don't), a non-root caller must
+        // always get None — daemon-side SO_PEERCRED would reject
+        // the mutating RPC anyway, and the CLI should refuse to
+        // forward a target_uid in that case.
+        //
+        // We can't fully exercise the SUCCESS path under `cargo
+        // test` — it'd require euid=0 AND atomic env-var
+        // manipulation, but `std::env::set_var` is unsafe-since-
+        // Rust-1.74 because parallel test workers race on the
+        // process-wide env. Integration coverage of the happy
+        // path lives in the manual test plan (run as root, set
+        // SUDO_*, verify daemon writes go to the right per-UID
+        // directory).
+        assert_eq!(
+            sudo_target_uid(),
+            None,
+            "non-root callers must always get None"
+        );
     }
 }
