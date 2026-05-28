@@ -2582,3 +2582,153 @@ test "persistence: retained conclusion from prior dialog does NOT leak into the 
     // Best-effort dir cleanup so subsequent test runs start clean.
     _ = std.c.rmdir(dir_z.ptr);
 }
+
+test "chat_recall picker: CSI Up/Down moves the selection (#318)" {
+    // Regression pin: parseChatKey's CSI 3-byte arm was missing
+    // 'A' / 'B' (only SS3 had them). Plain ↑/↓ over the recall
+    // picker did nothing. Verifies both CSI and SS3 forms now
+    // produce a selection change.
+    const dir: []const u8 = "/tmp/atty-recall-arrow-test";
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    _ = std.c.rmdir(dz.ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+    // Stage TWO dialogs so the picker has rows to navigate.
+    const fnames = [_][]const u8{ "20260101T000000-aaaaaa.jsonl", "20260102T000000-bbbbbb.jsonl" };
+    var paths_z: [2][:0]u8 = undefined;
+    for (fnames, 0..) |fname, idx| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, fname });
+        defer testing.allocator.free(p);
+        paths_z[idx] = try testing.allocator.dupeZ(u8, p);
+        const fd = std.c.open(paths_z[idx].ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+        try testing.expect(fd >= 0);
+        const payload = "{\"kind\":\"user\",\"content\":\"x\"}\n";
+        _ = std.c.write(fd, payload.ptr, payload.len);
+        _ = std.c.close(fd);
+    }
+    // Defers run LIFO — rmdir must fire last (against the empty dir).
+    defer _ = std.c.rmdir(dz.ptr);
+    defer for (paths_z) |pz| {
+        _ = std.c.unlink(pz.ptr);
+        testing.allocator.free(pz);
+    };
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .chat_persist_enabled = true,
+        .chat_persist_dir = dir,
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_reserve = 2,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .chat_recall);
+    try testing.expect(rt.chat_recall_open);
+    try testing.expectEqual(@as(usize, 0), rt.chat_recall_selected_idx);
+
+    // CSI Down — `\x1B[B`. Pre-fix this returned .none from
+    // parseChatKey and the selection didn't move.
+    _ = try L.onInput(&rt, &ctx, "\x1B[B");
+    try testing.expectEqual(@as(usize, 1), rt.chat_recall_selected_idx);
+
+    // CSI Up — `\x1B[A`. Symmetric fix.
+    _ = try L.onInput(&rt, &ctx, "\x1B[A");
+    try testing.expectEqual(@as(usize, 0), rt.chat_recall_selected_idx);
+
+    // SS3 Down — `\x1BOB`. Already worked, regression pin.
+    _ = try L.onInput(&rt, &ctx, "\x1BOB");
+    try testing.expectEqual(@as(usize, 1), rt.chat_recall_selected_idx);
+
+    // Close cleanly so dialog reset doesn't leak open recall state.
+    _ = try L.onInput(&rt, &ctx, "\x1B");
+    try testing.expect(!rt.chat_recall_open);
+}
+
+test "chat_recall: Alt+R auto-closes the inline panel instead of refusing (#318)" {
+    // Pre-fix: chat_recall handler refused to open when
+    // chat_inline_open was true ("close the chat panel first").
+    // Post-fix: the inline panel is auto-closed (it doesn't own the
+    // alt-screen; the picker does) and the picker opens.
+    const dir: []const u8 = "/tmp/atty-recall-handoff-test";
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    _ = std.c.rmdir(dz.ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+    const dialog_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/20260101T000000-cccccc.jsonl",
+        .{dir},
+    );
+    defer testing.allocator.free(dialog_path);
+    const dpz = try testing.allocator.dupeZ(u8, dialog_path);
+    defer testing.allocator.free(dpz);
+    const fd = std.c.open(dpz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+    try testing.expect(fd >= 0);
+    _ = std.c.write(fd, "{\"kind\":\"user\",\"content\":\"x\"}\n", 30);
+    _ = std.c.close(fd);
+    defer _ = std.c.unlink(dpz.ptr);
+    defer _ = std.c.rmdir(dz.ptr);
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .chat_persist_enabled = true,
+        .chat_persist_dir = dir,
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_reserve = 2,
+    };
+
+    // Open the inline panel first, then fire Alt+R.
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    _ = try L.onAction(&rt, &ctx, .chat_recall);
+    try testing.expect(rt.chat_recall_open);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(!rt.chat_focus_in_panel);
+
+    // Close cleanly.
+    _ = try L.onInput(&rt, &ctx, "\x1B");
+    try testing.expect(!rt.chat_recall_open);
+}

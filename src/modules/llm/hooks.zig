@@ -385,6 +385,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // handled by the digit branch below.
                     i.* += 3;
                     return switch (c) {
+                        'A' => .move_up,
+                        'B' => .move_down,
                         'D' => .move_left,
                         'C' => .move_right,
                         'H' => .move_home,
@@ -1460,11 +1462,22 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     return true;
                 },
                 .chat_recall => {
-                    // Refuse if a chat surface is already open — Alt+R
-                    // is a fetch, not a discard.
-                    if (rt.chat_overlay_open or rt.chat_inline_open or rt.chat_recall_open) {
+                    // Refuse if the recall picker itself is already
+                    // open or the full-screen overlay is up — those
+                    // own the alt-screen. The inline panel doesn't
+                    // own the alt-screen, so we auto-close it and
+                    // open the picker on top (same handoff shape as
+                    // Alt+Shift+C closing the inline panel). Loading
+                    // a recalled dialog re-opens the inline panel
+                    // anyway, so the user lands in a coherent state.
+                    if (rt.chat_overlay_open or rt.chat_recall_open) {
                         latchHint(rt, "close the chat panel first, then Alt+R to recall a past dialog");
                         return true;
+                    }
+                    if (rt.chat_inline_open) {
+                        rt.chat_inline_open = false;
+                        rt.chat_focus_in_panel = false;
+                        rt.chat_inline_paint_pending = true;
                     }
                     // Same statusbar prerequisite as the inline-chat
                     // toggle: opening without a reserved row would let
