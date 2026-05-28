@@ -54,6 +54,32 @@ test "sanitizeForStatus: empty input produces empty output" {
     try testing.expectEqualStrings("", out);
 }
 
+test "containsClearSequence: CSI 2J detected" {
+    try testing.expect(hooks.containsClearSequence("\x1B[2J"));
+    try testing.expect(hooks.containsClearSequence("foo\x1B[H\x1B[2Jbar"));
+}
+
+test "containsClearSequence: CSI 3J (scrollback) detected" {
+    try testing.expect(hooks.containsClearSequence("\x1B[3J"));
+}
+
+test "containsClearSequence: RIS (ESC c) detected" {
+    try testing.expect(hooks.containsClearSequence("\x1Bcfoo"));
+}
+
+test "containsClearSequence: SGR / cursor-only sequences do NOT trigger" {
+    try testing.expect(!hooks.containsClearSequence("\x1B[31mred\x1B[0m"));
+    try testing.expect(!hooks.containsClearSequence("\x1B[5;10H"));
+    try testing.expect(!hooks.containsClearSequence("\x1B[K"));
+    try testing.expect(!hooks.containsClearSequence("plain text"));
+}
+
+test "containsClearSequence: bare ESC at end-of-buf is not a false positive" {
+    try testing.expect(!hooks.containsClearSequence("foo\x1B"));
+    try testing.expect(!hooks.containsClearSequence("\x1B"));
+    try testing.expect(!hooks.containsClearSequence(""));
+}
+
 test "chat overlay (Alt+Shift+C): opens empty when no conversation exists" {
     const L = configure(.{
         .provider = .{ .http = .{

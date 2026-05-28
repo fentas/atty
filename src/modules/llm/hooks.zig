@@ -34,6 +34,34 @@ pub fn sanitizeForStatus(buf: []u8, raw: []const u8) []const u8 {
     return buf[0..n];
 }
 
+/// True when `bytes` contains a sequence that visibly clears the
+/// primary screen / scrollback. Three shapes the shell's `clear`
+/// utility / ncurses / `Ctrl+L` emit:
+///   - `\x1B[2J`  — erase-in-display (visible area)
+///   - `\x1B[3J`  — erase-in-display (scrollback) — ncurses E3
+///   - `\x1Bc`    — RIS / hard reset
+/// Cursor moves (`\x1B[H`) often accompany the first form; we don't
+/// match them separately because they alone don't wipe content.
+/// False positives would over-close the inline panel; this set
+/// covers the canonical `clear`-style cases without sweeping in
+/// SGR / cursor-only sequences.
+pub fn containsClearSequence(bytes: []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < bytes.len) : (i += 1) {
+        if (bytes[i] != 0x1B) continue;
+        const next = bytes[i + 1];
+        if (next == 'c') return true;
+        if (next == '[' and i + 3 < bytes.len) {
+            // CSI 2J / 3J. Skip optional numeric parameter then look
+            // for the J terminator with the right digit.
+            const p = bytes[i + 2];
+            const t = bytes[i + 3];
+            if ((p == '2' or p == '3') and t == 'J') return true;
+        }
+    }
+    return false;
+}
+
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {
         // worker_mod is the comptime-instantiated request-shaper +
@@ -1695,6 +1723,25 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             _ = ctx;
             rt.osc133_capture.feed(output);
             const edges = rt.osc133_capture.drainEdges();
+
+            // Sync inline panel state with what the user sees (#305).
+            // `clear` (or Ctrl+L) blasts the alt-screen / scrollback,
+            // visually wiping the inline chat area, but the panel's
+            // `chat_inline_open = true` state survives — the next
+            // Alt+C interprets as "toggle closed" and the panel only
+            // truly reopens on the SECOND press. Detecting the clear
+            // sequence here and forcing the state closed makes the
+            // next Alt+C the natural "reopen" gesture.
+            //
+            // Only the inline panel needs this — the full-size overlay
+            // owns the alt-screen and is unaffected by a primary-
+            // screen clear. We don't try to RE-RENDER the panel after
+            // the clear (the rerender path is non-trivial and would
+            // interfere with the user's `clear`); instead the panel
+            // simply matches what the user just observed.
+            if (rt.chat_inline_open and containsClearSequence(output)) {
+                rt.chat_inline_open = false;
+            }
 
             // Outside dialog execution, the only reason to feed was
             // to keep `active` tracking up to date. No state work

@@ -1296,6 +1296,29 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Legacy alias — older code paths in this file use
                 // the original name for the recording-side gate.
                 const shell_saw_enter = recording_should_fire;
+
+                // TOCTOU defense for `slaveIsHiddenInput` (#283). The
+                // gate at the top of this block samples termios ONCE
+                // per stdin read. A paste of `sudo -S\n<password>\n`
+                // straddles the kernel's tcsetattr flip — the first
+                // byte sees visible mode, but by the time we reach
+                // the commit point sudo may already have dropped
+                // ECHO and the captured "line" is password material.
+                // Re-check now; if the slave is hidden, treat any
+                // pending commit as drop_recording AND scrub
+                // line_state so the next read starts clean rather
+                // than leaking the captured buffer into ghost text
+                // on the next paint or into atuin via dispatchLineCommit.
+                //
+                // Partial mitigation: bytes processed in earlier
+                // pipeline stages within this same chunk (applyInput,
+                // module onInput hooks) have already seen the data.
+                // A fully-tight fix would require segmented per-`\n`
+                // re-checks before EACH applyInput call; this
+                // defends the recording path which is the externally-
+                // visible leak (atuin history, ghost suggestions).
+                const post_pipeline_hidden = slaveIsHiddenInput(pty.master);
+
                 if (line_state.lastCommitted()) |committed| {
                     const leading_space = committed.len > 0 and committed[0] == ' ';
                     // Stash the line for the upcoming `;C` edge in
@@ -1381,7 +1404,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         }
                         break :blk false;
                     };
-                    const drop_recording = drop_for_alt or drop_for_unknown_subproc or drop_for_target_incognito;
+                    const drop_recording = drop_for_alt or drop_for_unknown_subproc or drop_for_target_incognito or post_pipeline_hidden;
                     if (!line_state.committed_was_uncertain and
                         !incognito_on and
                         !leading_space and
@@ -1391,6 +1414,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         D.dispatchLineCommit(&runtimes, &ctx, committed) catch {};
                     }
                     line_state.clearLastCommitted();
+                    if (post_pipeline_hidden) {
+                        // Scrub the live buffer too — sudo may not be
+                        // through its tcsetattr yet at this exact
+                        // moment but `slaveIsHiddenInput` returning
+                        // true means the flip has landed. Anything
+                        // else in line_state is contamination from the
+                        // same paste.
+                        line_state.reset();
+                    }
                 }
 
                 // Deliberately NO renderGhost here. The shell hasn't
