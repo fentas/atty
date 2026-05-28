@@ -134,6 +134,54 @@ fn installSignalHandlers() void {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+//
+// run() phase order, load-bearing:
+//
+//   ┌─── once at startup ───────────────────────────────────────────┐
+//   │ pty.open → fork+exec child shell                              │
+//   │ statusbar.init (DECSTBM reserve, slave-rows trim)             │
+//   │ alt_screen.init                                               │
+//   │ dispatcher.attach for each compile-time module                │
+//   │ kitty kbd push (`\x1B[>1u`)                                   │
+//   └───────────────────────────────────────────────────────────────┘
+//
+//   ┌─── per-tick poll() loop ──────────────────────────────────────┐
+//   │ 1. applyReserveRows — re-stamps DECSTBM if statusbar geometry │
+//   │    changed (SIGWINCH); MUST run before any module-emitted     │
+//   │    bytes hit stdout or they land in the wrong scroll region.  │
+//   │ 2. onTick dispatch — modules drive their workers / animations │
+//   │    (atuin worker drains, statusbar repaint, ghost timing).    │
+//   │ 3. stdin → onInput → master_write — read keystrokes, route    │
+//   │    through module chain, write the resolved bytes to PTY.     │
+//   │    `slaveIsHiddenInput` short-circuits the chain when the     │
+//   │    child is in no-echo mode (password capture). TOCTOU        │
+//   │    re-check after the pipeline guards dispatchLineCommit      │
+//   │    against same-chunk mid-flip pastes.                        │
+//   │ 4. master → applyOutput → stdout — read shell output, fan it  │
+//   │    through OSC 133 / alt-screen / SGR trackers, dispatch      │
+//   │    onOutput, write to stdout.                                 │
+//   │ 5. signalfd (SIGCHLD/SIGWINCH/…) — child reap loop drains      │
+//   │    waitpid(NOHANG) until empty (Linux coalesces signals).     │
+//   │ 6. overlay edge-detect — if a module just closed its overlay  │
+//   │    this tick, reactivate the statusbar's scroll region BEFORE │
+//   │    flushing buffered shell bytes (writes-into-wiped-region    │
+//   │    hazard).                                                   │
+//   └───────────────────────────────────────────────────────────────┘
+//
+//   ┌─── teardown ──────────────────────────────────────────────────┐
+//   │ End-of-loop overlay flush (caught-mid-overlay-close cases)    │
+//   │ kitty kbd pop (`\x1B[<1u`)                                    │
+//   │ statusbar.deinit (release DECSTBM, restore slave rows)        │
+//   │ SIGHUP child → polled NOHANG waitpid (2s grace) → SIGKILL     │
+//   │   escalation if still alive (nohup-wrapped shells)            │
+//   │ dispatcher.detach for each module                             │
+//   └───────────────────────────────────────────────────────────────┘
+//
+// Reordering rule: anything that writes to stdout must run AFTER
+// `applyReserveRows` for that tick (steps 2-6 all qualify). Anything
+// that consumes module ownership of the overlay must run BEFORE the
+// edge detector (step 6). The poll() at top of the loop is the only
+// blocking call — everything else is non-blocking.
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // Defensive guard. main.zig is the sole caller and refuses to
