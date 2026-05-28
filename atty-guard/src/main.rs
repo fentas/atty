@@ -103,8 +103,32 @@ struct Cli {
     /// out at startup; without the capability the loader errors
     /// with a pointer to the systemd-user unit's
     /// `AmbientCapabilities` config. See `ebpf/README.md`.
+    ///
+    /// Kept for back-compat: equivalent to `--ebpf-mode=block`.
+    /// New code should use `--ebpf-mode` directly.
     #[arg(long, default_value_t = false)]
     enable_ebpf: bool,
+
+    /// V2-B eBPF mode. Fan-out across the integration matrix for
+    /// operator dry-runs and sandbox testing.
+    ///   `disabled` (default) — programs not loaded.
+    ///   `observe`            — programs loaded, threat_map left
+    ///                          empty by atty-guard (LSM hook
+    ///                          attached but never fires Critical
+    ///                          → "does my kernel even support
+    ///                          BPF LSM?" check).
+    ///   `warn`               — programs loaded, threat_map
+    ///                          written by atty-guard, LSM hook
+    ///                          fires (== `block` today; banner-
+    ///                          only semantics need an atty-side
+    ///                          change and ship separately).
+    ///   `block`              — programs loaded, threat_map
+    ///                          written, LSM hook EPERMs Critical
+    ///                          PIDs. Production posture.
+    /// `--enable-ebpf` is a back-compat alias for
+    /// `--ebpf-mode=block`. Specifying both is an error.
+    #[arg(long, value_enum, default_value_t = EbpfMode::Disabled)]
+    ebpf_mode: EbpfMode,
 
     /// Enable V2-F live OSV.dev lookups for `npm install <pkg>`
     /// Tier-1 misses. Off by default (network use is opt-in).
@@ -157,6 +181,14 @@ struct Cli {
     /// daemon's SO_PEERCRED check passes; read-only ones don't.
     #[command(subcommand)]
     command: Option<Subcommand>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum EbpfMode {
+    Disabled,
+    Observe,
+    Warn,
+    Block,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -833,16 +865,35 @@ fn main() -> std::io::Result<()> {
         );
     }
 
+    // --enable-ebpf is the back-compat alias; --ebpf-mode is the
+    // expressive form. They must not disagree.
+    let effective_mode = match (cli.enable_ebpf, cli.ebpf_mode) {
+        (true, EbpfMode::Disabled) => EbpfMode::Block,
+        (true, mode) if mode != EbpfMode::Block => {
+            eprintln!(
+                "atty-guard: --enable-ebpf and --ebpf-mode={:?} disagree; \
+                 --enable-ebpf is an alias for --ebpf-mode=block. \
+                 Use one or the other.",
+                mode
+            );
+            std::process::exit(2);
+        }
+        (_, mode) => mode,
+    };
+
     // eBPF attach is opt-in. Either the feature isn't built (clean
     // error, daemon continues without kernel-side enforcement),
     // OR the feature IS built but the kernel/caps aren't there
     // (also clean — log + continue). V2-A behaviour stays as a
     // graceful fallback for all failure modes.
-    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if cli.enable_ebpf {
+    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode != EbpfMode::Disabled {
         match ebpf::EbpfState::attach() {
             Ok(state) => {
                 if cli.verbosity >= 1 {
-                    eprintln!("atty-guard: eBPF attached (LSM + execve tracepoint)");
+                    eprintln!(
+                        "atty-guard: eBPF attached (LSM + execve tracepoint, mode={:?})",
+                        effective_mode
+                    );
                 }
                 Some(std::sync::Arc::new(state))
             }

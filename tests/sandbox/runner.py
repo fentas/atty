@@ -12,6 +12,7 @@ Exits 0 if all scenarios pass, 1 if any fail.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -100,9 +101,39 @@ def discover_scenarios() -> list[Path]:
     )
 
 
+def load_scenario_docker_opts(script: Path) -> list[str]:
+    """Load extra `docker run` flags for a scenario from an
+    optional `docker.json` sibling. eBPF scenarios need
+    --privileged + bind mounts the others don't; baking those
+    requirements into the runner would be invasive. The JSON
+    knobs:
+      {"privileged": true, "cap_add": ["BPF", "SYS_ADMIN"],
+       "volumes": [{"src": "/sys/fs/bpf", "dst": "/sys/fs/bpf",
+                    "rw": true}],
+       "security_opt": ["apparmor=unconfined"]}
+    Everything is optional.
+    """
+    meta = script.parent / "docker.json"
+    if not meta.exists():
+        return []
+    cfg = json.loads(meta.read_text())
+    flags: list[str] = []
+    if cfg.get("privileged"):
+        flags.append("--privileged")
+    for cap in cfg.get("cap_add", []):
+        flags.extend(["--cap-add", cap])
+    for opt in cfg.get("security_opt", []):
+        flags.extend(["--security-opt", opt])
+    for vol in cfg.get("volumes", []):
+        suffix = "" if vol.get("rw") else ":ro"
+        flags.extend(["-v", f"{vol['src']}:{vol['dst']}{suffix}"])
+    return flags
+
+
 def run_scenario(script: Path) -> bool:
     name = script.parent.name
     print(f"\n[runner] === {name} ===")
+    extra = load_scenario_docker_opts(script)
     try:
         result = subprocess.run(
             [
@@ -116,6 +147,7 @@ def run_scenario(script: Path) -> bool:
                 f"{SANDBOX_DIR}:/sandbox:ro",
                 "-w",
                 "/sandbox",
+                *extra,
                 IMAGE_TAG,
                 "python3",
                 f"/sandbox/scenarios/{name}/scenario.py",

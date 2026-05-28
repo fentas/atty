@@ -66,13 +66,35 @@ Current scenarios:
 - **`40-auto-block`** — V2-J-2 accumulator opt-in: with
   `[accumulator] block_threshold = 0.8`, a multi-Tier-1 command
   triggers daemon Block + atty paints REFUSED.
+- **`50-ebpf-loader`** — `--ebpf-mode` flag plumbing + graceful
+  fallback. Sandbox image is built without `--features ebpf`
+  on purpose so the FeatureNotBuilt path is the test target.
+  Full kernel-side eBPF testing (51 / 52 in #332's original
+  scope) needs a separate sandbox image build with libbpf-dev +
+  clang + the .bpf.o pre-compiled — deferred to a follow-up
+  issue.
 
 Planned (separate PRs):
 
-- `50-ebpf-loader` / `51-ebpf-threat-map-roundtrip` /
-  `52-ebpf-af-alg-tracepoint` (#332, separate non-blocking CI job).
 - `60-onnx-second-stage` / `61-onnx-fbas-sized-buffer` /
   `62-onnx-fallback` (#333, cached-model base image).
+
+## Per-scenario docker flags
+
+Most scenarios run with the runner's default `docker run` flags
+(`--rm --network=none --tmpfs /tmp:exec`). Scenarios that need
+extra capabilities (eBPF probe needs `CAP_BPF`, etc.) drop a
+`docker.json` sibling next to their `scenario.py`:
+
+```json
+{"privileged": true,
+ "cap_add": ["BPF", "SYS_ADMIN"],
+ "security_opt": ["apparmor=unconfined"],
+ "volumes": [{"src": "/sys/fs/bpf", "dst": "/sys/fs/bpf", "rw": true}]}
+```
+
+The runner merges these into the `docker run` invocation. All
+fields are optional.
 
 ## Image layout
 
