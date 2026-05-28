@@ -73,6 +73,7 @@ the CSI — see the [Keymap](/architecture/#keymap) docs.
 pub const Atuin = atty.modules.atuin.configure(.{
     .backend                    = .subprocess,
     .atuin_binary               = "atuin",
+    .socket_path                = "",
     .search_mode                = .prefix,
     .filter_mode                = .global,
     .suggestion_ttl_ms          = 0,
@@ -98,6 +99,7 @@ pub const Atuin = atty.modules.atuin.configure(.{
 |-----------------------------|---------------|--------------------------------------------------------------|
 | `backend`                   | `.subprocess` | `.subprocess`, `.socket` (stub)                              |
 | `atuin_binary`              | `"atuin"`     | path to atuin executable                                     |
+| `socket_path`               | `""`          | path to atuin's IPC socket; consumed only when `backend = .socket` (stub) — ignored otherwise |
 | `search_mode`               | `.prefix`     | `.prefix`, `.full_text`, `.fuzzy`                            |
 | `filter_mode`               | `.global`     | `.global`, `.host`, `.session`, `.directory`                 |
 | `suggestion_ttl_ms`         | 0             | ms of idleness before suggestion fades; 0 disables           |
@@ -140,6 +142,9 @@ Atuin v18 has no per-entry-ID delete CLI, and its built-in modes
 all over-match for "remove just this line." The implementation
 exploits **fuzzy mode's fzf-style anchors** to express true exact
 match without the side effects:
+
+All variants share the same `--filter-mode <filter_mode>` argument
+(`.global` by default) — omitted from the argv column for brevity:
 
 | `delete_scope` | atuin CLI args | Removes |
 |----------------|----------------|---------|
