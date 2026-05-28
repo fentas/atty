@@ -25,8 +25,12 @@ Status: **All V1 + V2 slices shipped (atty side + sidecar + ONNX SLM + eBPF + OS
 | V2-I-2    | Sigma source (sanitized) — extend the V2-I fetcher with the SigmaHQ Linux rule corpus. (LOLBAS prototyped + dropped: Windows-native, not useful for Linux shells.) | #125  | ✅ merged       |
 | V2-J      | Threat-level accumulator — multi-hit Tier-1 + Tier-2 SLM combined via independent-probability math; multi-atom commands surface a higher combined confidence. | #126  | ✅ merged       |
 | V2-J-2    | Auto-Block escalation — opt-in TOML knob `[accumulator] block_threshold` lets the accumulator escalate Warn → Block when combined confidence reaches the configured value AND ≥ 2 distinct signals fired; atty side renders a red `REFUSED` line + clears readline instead of prompting. | #127  | ✅ merged       |
+| V2-K      | System-daemon install — dedicated `atty:atty` system user/group, idempotent installer, `/var/lib/atty-guard/` state dir with permission-checked atom files at startup. | #140  | ✅ merged       |
+| V2-K-cli  | Mediated CLI — `sudo atty-guard atoms/urls/session …` for per-UID persistent mutations (atoms add/remove, urls allow/block, session write); the SO_PEERCRED-gated daemon rejects non-root peers on these. Read-only RPCs (atoms list, session list) use the connecting UID directly without sudo. | #141  | ✅ merged       |
+| V2-K-ux   | Session UX — `[a]llow always` (in-memory session-trust mirror) + `[B]lock host forever` (in-memory session-block) banner options. Persistence to per-UID files lands in V2-K-trust below. | #142  | ✅ merged       |
+| V2-K-trust | Atty-side trust file removed — `rt.trust` is now in-memory only, seeded lazily from the daemon's `commands.trusted.txt` via `TrustList` on first Enter and mirrored on every `[t]`. `session write` drains session trust into the persistent file. Adds the `trust` subcommand to the mediated CLI (TrustAdd / TrustList). Single source of truth on the daemon side. | #147  | ✅ merged       |
 
-The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-G+H+I are the pattern-matching scale + intelligence-freshness improvements that close the gap between curated bundles and live disclosures.
+The MVP behaviour (Tier-1 + trust cache + confirmation banner) is fully usable today, with or without the sidecar. V2-G+H+I are the pattern-matching scale + intelligence-freshness improvements that close the gap between curated bundles and live disclosures. V2-K hardens deployment by moving every mutable detection-state file under a dedicated system user / sudo-mediated CLI.
 
 ### What V2-G brings (this PR)
 
