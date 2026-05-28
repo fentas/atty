@@ -1768,8 +1768,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         // scroll region BEFORE the next render so the
                         // statusbar row stays pinned to the bottom and
                         // future scrolls from the inner app don't push
-                        // it into the visible scrollback.
-                        if (decstbm_watcher.takeClobbered()) {
+                        // it into the visible scrollback. ALWAYS drain
+                        // the latch (call takeClobbered unconditionally
+                        // for its side effect) so it doesn't fire stale
+                        // on overlay close — but only emit the DECSTBM
+                        // bytes when no module overlay owns stdout, to
+                        // avoid layering scroll-region resets onto an
+                        // overlay-painted alt-screen surface (terminals
+                        // that scope DECSTBM globally would see the
+                        // reset bleed across buffers).
+                        const clobbered = decstbm_watcher.takeClobbered();
+                        if (clobbered and !ctx.module_overlay_active) {
                             var w_decstbm: std.Io.Writer = .fixed(&out_buf);
                             sb.reassertDecstbm(&w_decstbm) catch {};
                             if (w_decstbm.end > 0) {
