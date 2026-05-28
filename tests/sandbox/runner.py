@@ -12,6 +12,7 @@ Exits 0 if all scenarios pass, 1 if any fail.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -63,18 +64,33 @@ def stage_binaries() -> None:
 
 def build_image() -> None:
     print(f"[runner] building {IMAGE_TAG} …")
-    subprocess.run(
-        [
-            "docker",
-            "build",
-            "-t",
-            IMAGE_TAG,
-            "-f",
-            str(SANDBOX_DIR / "Dockerfile.base"),
+    # Local-disk cache directives are only honoured by the
+    # docker-container buildx driver; the default `docker` driver
+    # rejects --cache-to. CI sets these env vars + provisions the
+    # builder; local dev keeps the simpler `docker build` path.
+    cache_src = os.environ.get("SANDBOX_BUILDX_CACHE_FROM")
+    cache_dest = os.environ.get("SANDBOX_BUILDX_CACHE_TO")
+    if cache_src or cache_dest:
+        cmd = [
+            "docker", "buildx", "build",
+            "--load",
+            "-t", IMAGE_TAG,
+            "-f", str(SANDBOX_DIR / "Dockerfile.base"),
+        ]
+        if cache_src:
+            cmd.extend(["--cache-from", f"type=local,src={cache_src}"])
+        if cache_dest:
+            cmd.extend(["--cache-to", f"type=local,dest={cache_dest},mode=max"])
+        cmd.append(str(REPO_ROOT))
+    else:
+        cmd = [
+            "docker", "build",
+            "-t", IMAGE_TAG,
+            "-f", str(SANDBOX_DIR / "Dockerfile.base"),
             str(REPO_ROOT),
-        ],
-        check=True,
-    )
+        ]
+    env = {**os.environ, "DOCKER_BUILDKIT": "1"}
+    subprocess.run(cmd, check=True, env=env)
 
 
 def discover_scenarios() -> list[Path]:

@@ -1,0 +1,117 @@
+name: Sandbox
+
+# End-to-end scenarios in a docker container with real atty + atty-guard
+# binaries. Catches what unit tests can't: cross-UID gates, sudo-mediated
+# CLI, install-script integration, daemon lifecycle, V2-J auto-Block.
+#
+# Path-gated: skipped on PRs that don't touch the sandbox surface (LLM-
+# only PRs, docs-only PRs). Keeps the cost-per-PR low while still
+# protecting the security-critical code paths.
+
+on:
+  pull_request:
+    paths:
+      - 'atty-guard/**'
+      - 'src/modules/security_guard/**'
+      - 'tests/sandbox/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'Makefile'
+      - '.github/workflows/sandbox.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'atty-guard/**'
+      - 'src/modules/security_guard/**'
+      - 'tests/sandbox/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'Makefile'
+      - '.github/workflows/sandbox.yml'
+
+concurrency:
+  group: sandbox-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox:
+    name: sandbox e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # docker-container driver is required for local-disk cache
+      # export (the default driver rejects --cache-to). setup-buildx
+      # makes it the active builder.
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      # Sandbox base image takes ~3 min cold (Rust toolchain install +
+      # atty-guard release build with tier2-onnx + osv-live +
+      # atoms-fetch features). Layer cache covers all but the actual
+      # build step on warm runs.
+      - name: Restore docker layer cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: sandbox-buildx-${{ hashFiles('atty-guard/Cargo.lock', 'tests/sandbox/Dockerfile.base', 'atty-guard/contrib/install.sh', 'src/modules/security_guard/data/**') }}
+          restore-keys: |
+            sandbox-buildx-
+
+      - name: Run sandbox scenarios
+        id: sandbox
+        env:
+          SANDBOX_BUILDX_CACHE_FROM: /tmp/.buildx-cache
+          SANDBOX_BUILDX_CACHE_TO: /tmp/.buildx-cache-new
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/.buildx-cache /tmp/.buildx-cache-new
+          # Capture full output so the post-step can extract FAIL
+          # signatures without re-reading workflow logs.
+          make sandbox 2>&1 | tee /tmp/sandbox.log
+
+      # Surface the per-scenario FAIL lines as workflow annotations.
+      # The runner emits `FAIL: <reason>` on stderr (scenario.py's
+      # fail() helper) and `[runner] <name>: FAIL` on stdout — both
+      # captured in /tmp/sandbox.log via tee.
+      - name: Annotate failures
+        if: failure()
+        run: |
+          if [ ! -f /tmp/sandbox.log ]; then
+            echo "::error::sandbox produced no log"
+            exit 0
+          fi
+          # First annotate each FAIL line individually (multi-failure
+          # runs surface every failure, not just the first).
+          awk '/^FAIL: / {
+            sub(/^FAIL: /, "")
+            # Replace newlines in multi-line FAIL bodies with %0A
+            # so the annotation renders as one block.
+            gsub(/\n/, "%0A")
+            print "::error::sandbox: " $0
+          }' /tmp/sandbox.log
+          # Then dump the failed scenario names for at-a-glance triage.
+          grep -E '^\[runner\] [0-9].*: FAIL|TIMEOUT' /tmp/sandbox.log || true
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: sandbox-log
+          path: /tmp/sandbox.log
+          retention-days: 7
+
+      # Save the buildx cache for next run. Without this the cache
+      # key restores but never updates, so warm runs degrade to cold
+      # after the first Cargo.lock change.
+      - name: Move cache
+        if: always()
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache 2>/dev/null || true
