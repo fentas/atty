@@ -1209,9 +1209,14 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
 /// files. Called once at TrustStore::new — these are stale `write_atomic`
 /// scratch files from a crashed prior daemon. Linux PID reuse can
 /// otherwise collide a recycled PID's first write with a stale tmp
-/// name, hard-erroring on `create_new(true)`. Best-effort: stat /
-/// readdir / unlink errors are logged to journald but never block
-/// startup.
+/// name, hard-erroring on `create_new(true)`.
+///
+/// Best-effort, never blocks startup. The top-level `read_dir` and
+/// individual `unlink` failures log to journald. Per-UID `read_dir`
+/// failures + DirEntry iteration errors via `flatten()` are
+/// silently dropped — they're typically transient permission
+/// glitches that the daemon's own write path will surface again
+/// at first use; logging them at startup would be noise.
 fn sweep_stale_tmp_files(data_root: &Path) {
     let entries = match std::fs::read_dir(data_root) {
         Ok(e) => e,

@@ -697,31 +697,58 @@ fn sweep_stale_tmp_files_no_op_on_missing_root() {
 }
 
 #[test]
-fn write_locks_prune_drops_idle_entries_under_cap() {
+fn write_locks_prune_drops_idle_entries_above_soft_cap() {
     // #251 — acquire_write_lock prunes entries whose Arc isn't
-    // held by any caller when the map exceeds SOFT_CAP. Stuff the
-    // map past the cap with dropped Arcs, then one more acquire
-    // → the prune fires and the map shrinks.
+    // held by any caller when the map exceeds SOFT_CAP (1024).
+    // The prune fires DURING the loop each time the map grows past
+    // the cap (every ~1 acquire once we're saturated), so the map
+    // can't accumulate unbounded entries. The exact final count is
+    // implementation-detail of the trigger frequency; what matters
+    // is the upper bound — without pruning we'd see ~1100 entries,
+    // with pruning the count stays well below.
     let (store, _tmp) = fresh_store();
-    // Drive the map past 1024 by acquiring + immediately dropping
-    // for distinct UIDs. Each acquire drops the cloned Arc when
-    // `lock` goes out of scope. The map keeps the strong ref.
     for uid in 0u32..1100 {
         let _lock = store.acquire_write_lock(uid);
     }
     let final_acquire = store.acquire_write_lock(9999);
     drop(final_acquire);
     let map = store.write_locks.lock().unwrap();
-    // After the prune fires on the 1101st acquire (size > 1024),
-    // entries with strong_count == 1 are dropped. The just-acquired
-    // 9999 entry is also strong_count == 1 by the time we read here,
-    // so the map size after the prune should be small (just the
-    // freshly inserted entry, or empty if even that's been pruned
-    // — depending on whether the prune runs before or after the
-    // entry() insertion).
+    // Tight bound: the prune fires every time we cross the cap,
+    // so after a long sequence of acquires + drops the residue
+    // can't exceed the gap between the last prune trigger and
+    // now. SOFT_CAP=1024; the residue we observed empirically is
+    // 76. Assert STRICTLY less than the unpruned worst case
+    // (1101) — anything higher would mean the prune regressed.
     assert!(
-        map.len() <= 1100,
-        "prune should have reduced map size: got {}",
+        map.len() < 200,
+        "prune should bound the map well under 1101 entries; got {}",
         map.len()
     );
+    assert!(map.contains_key(&9999u32));
+}
+
+#[test]
+fn write_locks_prune_single_trigger_drops_all_idle() {
+    // Focused test for the prune RULE: when SOFT_CAP+1 entries
+    // are present and every Arc has been dropped (strong_count==1),
+    // the next acquire prunes ALL of them and inserts only the
+    // new entry. This pins the retain logic precisely; the
+    // multi-trigger test above just confirms the map stays bounded.
+    let (store, _tmp) = fresh_store();
+    // Seed the map past the cap with strong_count==1 entries.
+    // Bypass acquire_write_lock to control the trigger exactly —
+    // we want the prune to fire ONCE on our explicit acquire.
+    {
+        let mut map = store.write_locks.lock().unwrap();
+        for uid in 0u32..1025 {
+            map.insert(uid, std::sync::Arc::new(std::sync::Mutex::new(())));
+        }
+    }
+    let arc = store.acquire_write_lock(9999);
+    drop(arc);
+    let map = store.write_locks.lock().unwrap();
+    // 1025 prior entries (all strong_count==1) all pruned; 9999
+    // inserted afterward = exactly 1 entry survives.
+    assert_eq!(map.len(), 1);
+    assert!(map.contains_key(&9999u32));
 }
