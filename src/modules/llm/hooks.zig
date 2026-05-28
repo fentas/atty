@@ -19,6 +19,20 @@ const worker_mod_ns = @import("worker.zig");
 const chat_persist = @import("chat_persist.zig");
 const keymap = @import("../../keymap.zig");
 const nowMs = @import("../_lib.zig").nowMs;
+const parse = @import("parse.zig");
+
+/// Strip C0 + C1 control bytes from a user-visible status line.
+/// Delegates to `parse.stripControlBytes` so the C1 handling
+/// (raw 0x80–0x9F, UTF-8-encoded 0xC2 0x80–0x9F) matches the
+/// sibling sanitizers used on PTY- and terminal-bound LLM output.
+/// The status bar is a single physical row — an unsanitized ESC,
+/// CSI (0x9B), or SS3 could reposition the cursor, clear the
+/// screen, or splice arbitrary SGR styling, turning a benign env-
+/// var display into an injection vector.
+pub fn sanitizeForStatus(buf: []u8, raw: []const u8) []const u8 {
+    const n = parse.stripControlBytes(raw, buf);
+    return buf[0..n];
+}
 
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {
@@ -1234,6 +1248,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // after-scope hazard). One outer buffer, two
                     // bufPrint calls into disjoint subslices.
                     var buf: [256]u8 = undefined;
+                    // Endpoint string is env-derived ($LLM_API_BASE
+                    // or the per-provider api_base). A hostile env
+                    // var like `http://x\x1b[2J` would land control
+                    // bytes in the latched status line and let the
+                    // user clear the screen, reposition the cursor,
+                    // or splice arbitrary SGR styling into the bar.
+                    // Sanitize before it hits the formatter.
+                    var endpoint_buf: [256]u8 = undefined;
                     const mode = currentDispatchMode(rt);
                     const resolved = worker_mod_ns.resolveProviderForMode(
                         mode,
@@ -1262,7 +1284,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         std.fmt.bufPrint(buf[0..32], " ({d}/{d})", .{ resolved_idx + 1, cfg.providers.len }) catch ""
                     else
                         "";
-                    const endpoint: []const u8 = if (rt.inert)
+                    const endpoint_raw: []const u8 = if (rt.inert)
                         "(inert — no endpoint)"
                     else switch (resolved.provider) {
                         // For HTTP, surface the actual endpoint URL —
@@ -1273,6 +1295,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         .http => |h| if (h.api_base.len > 0) h.api_base else rt.api_base,
                         .subprocess => |sub| if (sub.argv.len > 0) sub.argv[0] else "(subprocess)",
                     };
+                    const endpoint = sanitizeForStatus(&endpoint_buf, endpoint_raw);
                     // Message goes into the remaining bytes. cycle_info
                     // is referenced before its underlying storage is
                     // overwritten — bufPrint copies the formatted

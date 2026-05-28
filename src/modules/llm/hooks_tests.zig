@@ -11,9 +11,48 @@ const mod = @import("../llm.zig");
 const configure = mod.configure;
 const m = @import("../../module.zig");
 const dialog = mod.dialog_ns;
+const hooks = @import("hooks.zig");
 const shutdownAndFree = @import("test_helpers.zig").shutdownAndFree;
 
 const test_io: std.Io = std.Io.failing;
+
+test "sanitizeForStatus: ESC bytes stripped from env-derived endpoint" {
+    var buf: [128]u8 = undefined;
+    const out = hooks.sanitizeForStatus(&buf, "http://x\x1b[2J\x1b[0m");
+    try testing.expectEqualStrings("http://x[2J[0m", out);
+}
+
+test "sanitizeForStatus: raw C1 (0x9B CSI) stripped" {
+    var buf: [128]u8 = undefined;
+    const out = hooks.sanitizeForStatus(&buf, "http://x\x9b" ++ "31m");
+    try testing.expectEqualStrings("http://x31m", out);
+}
+
+test "sanitizeForStatus: UTF-8-encoded C1 (0xC2 0x9B) stripped" {
+    var buf: [128]u8 = undefined;
+    const out = hooks.sanitizeForStatus(&buf, "http://x\xc2\x9b" ++ "31m");
+    try testing.expectEqualStrings("http://x31m", out);
+}
+
+test "sanitizeForStatus: legitimate UTF-8 multi-byte preserved" {
+    var buf: [128]u8 = undefined;
+    // U+00A3 POUND SIGN = 0xC2 0xA3 — outside the C1 range, passes
+    // through unchanged.
+    const out = hooks.sanitizeForStatus(&buf, "http://\xc2\xa3.example");
+    try testing.expectEqualStrings("http://\xc2\xa3.example", out);
+}
+
+test "sanitizeForStatus: C0 + DEL stripped" {
+    var buf: [128]u8 = undefined;
+    const out = hooks.sanitizeForStatus(&buf, "\x01http://x\x07\x7fy");
+    try testing.expectEqualStrings("http://xy", out);
+}
+
+test "sanitizeForStatus: empty input produces empty output" {
+    var buf: [128]u8 = undefined;
+    const out = hooks.sanitizeForStatus(&buf, "");
+    try testing.expectEqualStrings("", out);
+}
 
 test "chat overlay (Alt+Shift+C): opens empty when no conversation exists" {
     const L = configure(.{
