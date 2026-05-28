@@ -25,9 +25,9 @@ Failure modes this catches:
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, "/sandbox")
@@ -56,41 +56,58 @@ def write_bad_config() -> None:
     )
 
 
-def main() -> None:
-    write_bad_config()
+# Single anchored regex over the full error prefix. Loose
+# substring matching (the original three-fragment check) would
+# false-pass if `--config` parse rejection emitted the
+# unrelated `--config /path rejected …` line (which contains
+# "config" but not the structured tier2 prefix).
+_FAIL_CLOSED_RE = re.compile(
+    r"^atty-guard: tier2=onnx requested from (cli|config) "
+    r"but backend load failed:",
+    re.MULTILINE,
+)
 
-    # Test 1: explicit `backend = "onnx"` + missing model →
-    # daemon must REFUSE to start. We can't use the Daemon
-    # helper here (it asserts the socket comes up); spawn raw
-    # and check the exit code + stderr.
+
+def assert_fail_closed(argv: list[str], request_source: str) -> None:
+    """Run atty-guard with `argv`, assert it exits non-zero AND
+    emits the structured fail-closed error with the expected
+    source attribution.
+    """
     proc = subprocess.run(
         ["runuser", "-u", "atty", "--", "/usr/local/bin/atty-guard",
-         "--socket", SOCKET, "--config", str(BAD_CONFIG), "-v", "1"],
+         "--socket", SOCKET, "-v", "1", *argv],
         capture_output=True,
         timeout=10,
     )
     if proc.returncode == 0:
-        fail("daemon started with explicit onnx + missing model — "
-             "expected fail-closed exit.\n"
+        fail(f"daemon started with explicit onnx + missing model "
+             f"({request_source}); expected fail-closed exit.\n"
              f"stderr: {proc.stderr.decode()!r}")
     err = proc.stderr.decode()
-    # Both the backend name AND the source ("config") must be in
-    # the error message so operators can tell what they configured
-    # vs what failed.
-    if "tier2=onnx" not in err or "backend load failed" not in err:
-        fail("error message missing the structured "
-             f"'tier2=onnx ... backend load failed' shape:\n{err}")
-    if "config" not in err:
-        fail(f"error message doesn't name the source (config):\n{err}")
+    match = _FAIL_CLOSED_RE.search(err)
+    if not match or match.group(1) != request_source:
+        fail(f"missing fail-closed signature (from={request_source}). "
+             f"stderr:\n{err}")
 
-    # Test 2: default path (no --config) → daemon starts fine
-    # with stub backend. The fail-closed posture must NOT bleed
-    # into the no-operator-request case.
+
+def main() -> None:
+    write_bad_config()
+
+    # Test 1: config-arm fail-closed.
+    assert_fail_closed(["--config", str(BAD_CONFIG)], "config")
+
+    # Test 2: cli-arm fail-closed. `--tier2 onnx` with no
+    # `--config` uses the default OnnxConfig (empty model_path),
+    # which fails backend construction. Catches a regression
+    # where the CLI path silently degrades while the config path
+    # stays strict (or vice versa).
+    assert_fail_closed(["--tier2", "onnx"], "cli")
+
+    # Test 3: default path (no operator request) keeps the
+    # legacy degrade-to-stub fallback. wait_socket returning
+    # True already implies the stderr log is flushed — the
+    # eprintln + UDS bind are sequential in main.rs.
     with Daemon(verbosity=1) as d:
-        # Daemon emits `tier2=stub effective=stub (source=default)`
-        # before opening the UDS — by the time __enter__ returns
-        # the log line is on disk.
-        time.sleep(0.2)  # cushion for stderr flush
         log = d.read_log()
         if "source=default" not in log:
             fail(f"default path didn't log source=default:\n{log}")
