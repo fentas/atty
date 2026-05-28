@@ -43,3 +43,16 @@ test "formatHistoryLine round-trips through parseHistoryLine" {
     const without_nl = std.mem.trimEnd(u8, formatted, "\n");
     try testing.expectEqualStrings("echo hi", parseHistoryLine(without_nl));
 }
+
+test "parseHistoryLine drops bash HISTTIMEFORMAT timestamp markers" {
+    // `#<digits>` lines are bash's HISTTIMEFORMAT metadata, not
+    // typed commands — drop them so they don't surface as ghost
+    // suggestions. Empty return makes the caller's empty-filter
+    // skip the line.
+    try testing.expectEqualStrings("", parseHistoryLine("#1700000000"));
+    try testing.expectEqualStrings("", parseHistoryLine("#0"));
+    // `#` followed by a non-digit is a genuine typed comment; keep
+    // it (operator wanted to bookmark `# TODO` in their history).
+    try testing.expectEqualStrings("# TODO", parseHistoryLine("# TODO"));
+    try testing.expectEqualStrings("#!/bin/bash", parseHistoryLine("#!/bin/bash"));
+}

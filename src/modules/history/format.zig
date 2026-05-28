@@ -12,8 +12,18 @@ const history = @import("../history.zig");
 /// Strip the zsh extended-history prefix from a recorded line, if
 /// present. `: <timestamp>:<duration>;<command>` → `<command>`.
 /// Plain bash / plain-format lines pass through unchanged.
+///
+/// Bash with `HISTTIMEFORMAT` set writes `#<unix-ts>\n<command>`
+/// pairs — the `#<digits>` marker line is metadata, not a typed
+/// command. Returning `""` makes the caller drop it (empty-line
+/// filter) so it isn't offered as a ghost suggestion. We restrict
+/// to `#` + a digit so legitimately-typed comment commands (`# TODO`)
+/// still surface.
 pub fn parseHistoryLine(line: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, line, "\r");
+    if (trimmed.len >= 2 and trimmed[0] == '#' and trimmed[1] >= '0' and trimmed[1] <= '9') {
+        return "";
+    }
     if (trimmed.len < 4 or trimmed[0] != ':' or trimmed[1] != ' ') return trimmed;
     const semi = std.mem.indexOfScalar(u8, trimmed, ';') orelse return trimmed;
     return trimmed[semi + 1 ..];
