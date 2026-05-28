@@ -63,13 +63,17 @@ def kernel_supports_bpf_lsm() -> bool:
 
 
 def skip_if_no_bpf_lsm(scenario_name: str) -> None:
-    """Print a SKIP line and exit 0 when BPF LSM is unavailable.
+    """Print a SKIP/FAIL line and exit when BPF LSM is unavailable.
 
-    Failure cases handled differently:
-    - securityfs not mounted in the container → loud failure
-      (scenario's docker.json bug; user needs to know).
-    - securityfs mounted but kernel lacks BPF LSM → clean skip
-      (host kernel limitation, scenario can't run).
+    Three branches, each with a tailored message so the next-level
+    cause is visible without rereading the source:
+    - securityfs not mounted → loud FAIL (docker.json bug).
+    - lsm file unreadable (PermissionError / similar OSError) →
+      loud FAIL (the mount made it through but bind-mounted ro
+      with broken perms, or the container's caps don't allow the
+      read — both are container-side bugs).
+    - lsm file readable but no 'bpf' → clean SKIP (kernel
+      limitation, scenario can't run).
     """
     if not securityfs_available():
         print(f"FAIL: {scenario_name} — securityfs not mounted at "
@@ -77,7 +81,15 @@ def skip_if_no_bpf_lsm(scenario_name: str) -> None:
               '{"volumes": [{"src": "/sys/kernel/security", '
               '"dst": "/sys/kernel/security"}]}', file=sys.stderr)
         sys.exit(1)
-    if not kernel_supports_bpf_lsm():
+    try:
+        contents = _LSM_FILE.read_text()
+    except OSError as e:
+        print(f"FAIL: {scenario_name} — {_LSM_FILE} unreadable "
+              f"({e}). securityfs is mounted but the lsm file "
+              "isn't accessible — check the container's bind-mount "
+              "permissions / caps.", file=sys.stderr)
+        sys.exit(1)
+    if "bpf" not in contents:
         print(f"SKIP: {scenario_name} — host kernel lacks BPF LSM "
               f"({_LSM_FILE} does not contain 'bpf'). Build kernel "
               "with CONFIG_BPF_LSM=y AND set lsm=…,bpf in cmdline.")
