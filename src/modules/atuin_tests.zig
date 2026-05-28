@@ -201,7 +201,7 @@ test "configure exposes deleteHistoryMatch hook (regression: atuin-side delete m
     try testing.expect(@hasDecl(A, "deleteHistoryMatch"));
 }
 
-// ---- gpt-review #027/#028/#030 regressions ---------------------------------
+// ---- record FIFO + sync lifecycle regressions ---------------------------------
 
 test "config exposes record_queue_capacity + sync_on_detach_timeout_ms knobs" {
     // Pin that the two new comptime knobs are wired. A future
@@ -213,7 +213,7 @@ test "config exposes record_queue_capacity + sync_on_detach_timeout_ms knobs" {
     try testing.expectEqual(@as(u64, 500), A.config.sync_on_detach_timeout_ms);
 }
 
-test "pushRecord FIFO preserves order across multiple commits (gpt-review #027)" {
+test "pushRecord FIFO preserves order across multiple commits" {
     // Drive the REAL production push path (`pushRecord`, used by
     // `onLineCommit`) rather than inlining the FIFO math. Pre-fix
     // the single-slot mailbox overwrote "first" when "second"
@@ -233,7 +233,7 @@ test "pushRecord FIFO preserves order across multiple commits (gpt-review #027)"
     }
 }
 
-test "pushRecord overflow drops newest and bumps rec_dropped (gpt-review #027)" {
+test "pushRecord overflow drops newest and bumps rec_dropped" {
     // Hits the real overflow branch inside `pushRecord`. Pre-fix
     // the latest-wins shape would have OVERWRITTEN "a" with "c";
     // the FIFO drop-newest leaves "a" at head + bumps the counter
@@ -256,7 +256,7 @@ test "pushRecord overflow drops newest and bumps rec_dropped (gpt-review #027)" 
     try testing.expectEqual(@as(u32, 3), shared.rec_dropped);
 }
 
-test "pushRecord round-trips cwd + author + intent into the slot (gpt-review #027)" {
+test "pushRecord round-trips cwd + author + intent into the slot" {
     // Pin that the four non-cmd fields each make it through
     // unmodified so a future RecordSlot refactor doesn't silently
     // drop intent/author/cwd from records.
@@ -270,17 +270,15 @@ test "pushRecord round-trips cwd + author + intent into the slot (gpt-review #02
     try testing.expectEqualStrings("explore the dir", slot.intent_buf[0..slot.intent_len]);
 }
 
-test "config default record_queue_capacity is sane (gpt-review #027)" {
-    // The default needs to be > 1 (otherwise the FIFO is just a
-    // latest-wins slot again) and a power of 2 is nice for the
-    // modulo math but not required. Pin the default at 16 so a
-    // future tweak that drops it to 1 silently re-introduces the
-    // bug class.
+test "config default record_queue_capacity is 16" {
+    // Exact-pin the default so a future tweak that drops it
+    // (toward latest-wins) trips the build instead of silently
+    // shrinking the burst-tolerance the FIFO was added for.
     const A = configure(.{});
-    try testing.expect(A.config.record_queue_capacity >= 8);
+    try testing.expectEqual(@as(comptime_int, 16), A.config.record_queue_capacity);
 }
 
-test "default sync_on_detach_timeout_ms is bounded (gpt-review #030)" {
+test "default sync_on_detach_timeout_ms is bounded" {
     // Zero means "wait forever"; that's a tail risk on atuin's
     // offline backoff. The default must be a finite cap so a
     // session exiting offline doesn't hang indefinitely.

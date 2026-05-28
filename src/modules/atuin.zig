@@ -18,7 +18,7 @@
 //!                        rec_count ↑                 run record
 //!                                                    maybe run sync
 //!
-//! Records use a bounded FIFO (gpt-review #027) instead of a single
+//! Records use a bounded FIFO instead of a single
 //! latest-wins slot so a burst of Enter-presses preserves all
 //! commits. At cap the producer drops the NEWEST commit and bumps
 //! `rec_dropped`; the oldest is already in flight to atuin's local
@@ -28,7 +28,7 @@
 //! `sync_after_records` commits or `sync_interval_ms` of wall time,
 //! whichever is sooner. The CLI is the source of truth — we never
 //! touch atuin's sqlite directly. One final sync runs on detach
-//! (BLOCKING up to `sync_on_detach_timeout_ms`, gpt-review #030)
+//! (BLOCKING up to `sync_on_detach_timeout_ms`)
 //! so an interactive session always flushes before exit.
 
 const std = @import("std");
@@ -95,7 +95,7 @@ pub const Config = struct {
     /// Record committed commands via `atuin history start <cmd>`.
     /// Set false to disable recording (suggestions still work).
     record: bool = true,
-    /// Bounded record queue depth (gpt-review #027). The committed-
+    /// Bounded record queue depth. The committed-
     /// command path now uses FIFO semantics so two Enters arriving
     /// before the worker drains don't lose the first. At cap, the
     /// newest commit is dropped + `rec_dropped` surfaces in the
@@ -111,13 +111,13 @@ pub const Config = struct {
     /// 0 disables the time-based trigger.
     sync_interval_ms: u64 = 60_000,
     /// Run one final `atuin sync` on detach if we recorded anything.
-    /// gpt-review #030: the detach path waits for this sync to
+    /// the detach path waits for this sync to
     /// complete (blocking, up to `sync_on_detach_timeout_ms`) so the
     /// promised final flush isn't killed by process exit. Periodic
     /// syncs during normal operation stay detached.
     sync_on_detach: bool = true,
     /// Hard cap on how long the detach blocks waiting for the final
-    /// `atuin sync` (gpt-review #030). The sync runs on a joined
+    /// `atuin sync`. The sync runs on a joined
     /// thread; if it doesn't finish in this window, the proxy exits
     /// without waiting further. Atuin's offline backoff can hang
     /// indefinitely on a saturated NIC — the cap keeps shutdown
@@ -162,7 +162,7 @@ pub const Config = struct {
 };
 
 pub fn configure(comptime cfg: Config) type {
-    // gpt-review #027: a 0-capacity FIFO would underflow the
+    // a 0-capacity FIFO would underflow the
     // `(idx + 1) % 0` modulo. Catch the misconfiguration at
     // compile time. Capacity 1 collapses to drop-newest-on-second-
     // push but is a legal degenerate; require at least 2 for FIFO
@@ -199,7 +199,7 @@ pub fn configure(comptime cfg: Config) type {
             res_len: usize = 0,
             res_gen: u64 = 0,
 
-            // FIFO ring buffer of pending records (gpt-review #027).
+            // FIFO ring buffer of pending records.
             // Replaces the prior single-slot latest-wins mailbox so
             // bursts of commits (paste, automation, LLM-assisted
             // submits) preserve all entries in order. At cap, the
@@ -231,7 +231,7 @@ pub fn configure(comptime cfg: Config) type {
             /// to `Shared.res_buf`.
             list_copy: [cfg.max_result]u8 = undefined,
             /// Buffer for `statusText`'s formatted output when
-            /// `rec_dropped > 0` (gpt-review #027). Bounded — the
+            /// `rec_dropped > 0`. Bounded — the
             /// longest expected string is `atuin (4294967295 dropped)`
             /// = 26 chars.
             status_buf: [32]u8 = undefined,
@@ -323,7 +323,7 @@ pub fn configure(comptime cfg: Config) type {
                             total_records += 1;
                         }
                     }
-                    // gpt-review #030: BLOCKING final sync so the
+                    // BLOCKING final sync so the
                     // promised flush actually lands. main.zig calls
                     // std.process.exit immediately after proxy.run
                     // returns; the previous `runSync` detached the
@@ -342,7 +342,7 @@ pub fn configure(comptime cfg: Config) type {
                     @memcpy(query_local[0..query_len], shared.req_buf[0..query_len]);
                 }
 
-                // gpt-review #027: drain one record from the FIFO
+                // drain one record from the FIFO
                 // head. Keep the drain to one-per-loop iteration so
                 // bursts of records don't starve query handling
                 // (the cv signals once per producer event; we still
@@ -385,7 +385,7 @@ pub fn configure(comptime cfg: Config) type {
                     total_records += 1;
                     records_since_sync += 1;
                     const now = nowMs();
-                    // gpt-review #028: start the sync clock on the
+                    // start the sync clock on the
                     // first recorded command WITHOUT also firing a
                     // sync there. Prior shape included `last_sync_ms
                     // == 0` as an unconditional trigger, so every
@@ -578,7 +578,7 @@ pub fn configure(comptime cfg: Config) type {
             t.detach();
         }
 
-        /// gpt-review #030: blocking final-sync path used by worker
+        /// blocking final-sync path used by worker
         /// shutdown. Spawns the sync on a JOINED thread (not detached)
         /// so the proxy waits for completion before main.zig hits
         /// `std.process.exit`. Capped at `cfg.sync_on_detach_timeout_ms`
@@ -800,7 +800,7 @@ pub fn configure(comptime cfg: Config) type {
             pushRecord(rt.shared, ctx.io, line, resolved_cwd, author, intent);
         }
 
-        /// Test-visible push helper — gpt-review #027 FIFO ring
+        /// Test-visible push helper — FIFO ring
         /// push. Returns no value; overflow bumps `rec_dropped`
         /// silently (caller-side error handling would just discard
         /// the line anyway). Drop-newest on overflow because the
@@ -911,7 +911,7 @@ pub fn configure(comptime cfg: Config) type {
 
         /// Status-bar segment. Defaults to the bare `atuin` label;
         /// if any committed records were dropped because the FIFO
-        /// hit cap (gpt-review #027), append `(N dropped)` so the
+        /// hit cap, append `(N dropped)` so the
         /// operator notices their commits aren't being recorded.
         /// Cleared back to `atuin` only on detach — the count is
         /// session-cumulative because there's no obvious "ack" event
