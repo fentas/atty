@@ -538,10 +538,11 @@ Commits don't fire `dispatchLineCommit` while on.
 
 `delete_history_match` (default `Ctrl+Shift+D`) fires
 `dispatchDeleteHistoryMatch` on every module that implements the
-hook (today: just `history`), then sends `\x15` (Ctrl+U) to the
-shell so the prompt clears, and calls `StatusBar.setTransient(...)`
-to flash `🗑 deleted: <line>` for 3 s before the bar reverts to its
-normal text.
+hook (today: `history` and `atuin` — the latter via `atuin search
+--delete` with the configured `delete_scope`), then sends `\x15`
+(Ctrl+U) to the shell so the prompt clears, and calls
+`StatusBar.setTransient(...)` to flash `🗑 deleted: <line>` for 3 s
+before the bar reverts to its normal text.
 
 ### Bypass while a shell-alt-screen TUI is running
 
@@ -706,20 +707,32 @@ onInput      ─────▶  req_buf  ────────────�
                      res_gen ↑
 provideGhostText ◀── read res_buf
 
-onLineCommit ─────▶  rec_buf  ───────────────▶  read pending
-                     rec_pending ↑               atuin history start
+onLineCommit ─────▶  rec_queue[tail] ────────▶  drain head FIFO
+                     rec_count ↑                 atuin history start
                                                  (then maybe atuin sync
                                                   on a detached thread)
 ```
 
-Coalescing falls out naturally: each new keystroke overwrites the
-pending request, so the worker only ever sees the most recent state.
-No queue, no backpressure.
+The QUERY side coalesces naturally — each new keystroke overwrites
+the pending request, so the worker only ever sees the most recent
+state. No queue, no backpressure.
 
-`atuin sync` runs on a *detached* `std.Thread.spawn` so the worker
-never blocks on network round-trips — without that, every record
-would stall the next ~5–30 seconds of queries and the ghost would
-appear stuck.
+The RECORD side is a **bounded FIFO ring** (`record_queue_capacity`,
+default 16). Two Enter-presses arriving before the worker drains
+both land in order — earlier latest-wins behaviour silently lost
+the first commit. At cap, the producer drops the *newest* entry
+(the oldest is already in flight to atuin's local store) and
+increments `rec_dropped`; the status bar surfaces this as
+`atuin (N dropped)` until detach.
+
+Periodic `atuin sync` runs on a *detached* `std.Thread.spawn` so
+the worker never blocks on network round-trips — without that,
+every record would stall the next ~5–30 seconds of queries and
+the ghost would appear stuck. The **final sync on detach** is
+joined with a timeout (`sync_on_detach_timeout_ms`, default 3 s)
+so an interactive session's exit doesn't leave commits stranded
+in atuin's local store unsynced; on timeout the sync thread is
+detached so process exit stays bounded.
 
 ## Future work
 
