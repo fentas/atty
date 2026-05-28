@@ -20,15 +20,30 @@ _LSM_FILE = Path("/sys/kernel/security/lsm")
 
 
 def securityfs_available() -> bool:
-    """True iff `/sys/kernel/security` is mounted + readable.
+    """True iff securityfs is actually mounted at
+    `/sys/kernel/security` AND the per-LSM probe file is readable.
 
-    A privileged container that didn't bind-mount it would fail
-    here even on a fully BPF-LSM-capable host. Use this to
-    distinguish a container misconfig (loud failure) from a
-    genuine kernel limitation (clean skip).
+    The bare directory can exist without securityfs mounted (the
+    kernel pre-creates the mountpoint), so an `is_dir()` check
+    isn't enough to distinguish "mount missing" from "kernel
+    lacks BPF LSM". Authoritative test: parse /proc/self/mounts
+    and look for a securityfs entry at the path. Fall back to
+    reachability of the lsm file (covers the rare host where
+    /proc/self/mounts is restricted).
     """
+    mountpoint = str(_LSM_FILE.parent)
     try:
-        return _LSM_FILE.parent.is_dir()
+        with open("/proc/self/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == mountpoint and parts[2] == "securityfs":
+                    return True
+    except OSError:
+        pass
+    # Fallback: if /proc/self/mounts isn't reachable, accept the
+    # lsm file's reachability as proof the mount is up.
+    try:
+        return _LSM_FILE.is_file()
     except OSError:
         return False
 

@@ -123,6 +123,8 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
     if not meta.exists():
         return []
     cfg = json.loads(meta.read_text())
+    if not isinstance(cfg, dict):
+        die(f"{meta}: top-level must be a JSON object, got {type(cfg).__name__}")
     unknown = set(cfg) - _DOCKER_JSON_KEYS - {"_comment"}
     if unknown:
         die(f"{meta}: unknown keys {sorted(unknown)} — "
@@ -135,12 +137,16 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
     for opt in cfg.get("security_opt", []):
         flags.extend(["--security-opt", opt])
     for vol in cfg.get("volumes", []):
+        if not isinstance(vol, dict):
+            die(f"{meta}: volume entries must be JSON objects, got {vol!r}")
         bad_keys = set(vol) - _VOLUME_KEYS
         if bad_keys:
             die(f"{meta}: volume {vol!r} has unknown keys "
                 f"{sorted(bad_keys)} — allowed: {sorted(_VOLUME_KEYS)}")
-        if "src" not in vol or "dst" not in vol:
-            die(f"{meta}: volume {vol!r} missing src or dst")
+        if not isinstance(vol.get("src"), str) or not isinstance(vol.get("dst"), str):
+            die(f"{meta}: volume {vol!r} src + dst must both be strings")
+        if "rw" in vol and not isinstance(vol["rw"], bool):
+            die(f"{meta}: volume {vol!r} rw must be bool")
         suffix = "" if vol.get("rw") else ":ro"
         flags.extend(["-v", f"{vol['src']}:{vol['dst']}{suffix}"])
     return flags
