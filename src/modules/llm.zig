@@ -875,6 +875,12 @@ pub fn configure(comptime cfg: Config) type {
             // The full overlay (Alt+Shift+C) is still available and
             // mutually-exclusive — opening one closes the other.
             chat_inline_open: bool = false,
+            /// Trailing-byte carry for clear-sequence detection so a
+            /// CSI 2J / 3J / ESC c sequence that straddles two
+            /// adjacent `onOutput` chunks is still recognised. 4
+            /// bytes covers the longest watched shape (`\x1B[2J`).
+            clear_seq_carry_len: u8 = 0,
+            clear_seq_carry: [4]u8 = .{ 0, 0, 0, 0 },
             /// Snapshot of `ctx.cursor_row` taken when the panel
             /// opens. The shell prompt row is load-bearing for paint:
             /// the real terminal cursor must end every paint here so

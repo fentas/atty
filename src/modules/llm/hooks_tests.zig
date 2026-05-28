@@ -54,6 +54,45 @@ test "sanitizeForStatus: empty input produces empty output" {
     try testing.expectEqualStrings("", out);
 }
 
+test "containsClearSequence: CSI 2J detected" {
+    try testing.expect(hooks.containsClearSequence("\x1B[2J"));
+    try testing.expect(hooks.containsClearSequence("foo\x1B[H\x1B[2Jbar"));
+}
+
+test "containsClearSequence: CSI 3J (scrollback) detected" {
+    try testing.expect(hooks.containsClearSequence("\x1B[3J"));
+}
+
+test "containsClearSequence: RIS (ESC c) detected" {
+    try testing.expect(hooks.containsClearSequence("\x1Bcfoo"));
+}
+
+test "containsClearSequence: SGR / cursor-only sequences do NOT trigger" {
+    try testing.expect(!hooks.containsClearSequence("\x1B[31mred\x1B[0m"));
+    try testing.expect(!hooks.containsClearSequence("\x1B[5;10H"));
+    try testing.expect(!hooks.containsClearSequence("\x1B[K"));
+    try testing.expect(!hooks.containsClearSequence("plain text"));
+}
+
+test "containsClearSequence: bare ESC at end-of-buf is not a false positive" {
+    try testing.expect(!hooks.containsClearSequence("foo\x1B"));
+    try testing.expect(!hooks.containsClearSequence("\x1B"));
+    try testing.expect(!hooks.containsClearSequence(""));
+}
+
+test "containsClearSequence: detects sequence split across boundary via carry" {
+    // Simulates the carry-buffer probe in onOutput: the previous
+    // chunk ended with "\x1B[" and the next starts with "2J". The
+    // probe concatenates carry + head and runs containsClearSequence
+    // on the merged view, so the split sequence is still recognised.
+    var probe: [12]u8 = undefined;
+    const carry = "\x1B[";
+    const head = "2Jfoo";
+    @memcpy(probe[0..carry.len], carry);
+    @memcpy(probe[carry.len .. carry.len + head.len], head);
+    try testing.expect(hooks.containsClearSequence(probe[0 .. carry.len + head.len]));
+}
+
 test "chat overlay (Alt+Shift+C): opens empty when no conversation exists" {
     const L = configure(.{
         .provider = .{ .http = .{
