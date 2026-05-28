@@ -39,8 +39,16 @@ def securityfs_available() -> bool:
                     return True
     except OSError:
         pass
+    # Fallback when /proc/self/mounts isn't reachable. is_file()
+    # quietly swallows OSError → False; do an explicit stat to
+    # distinguish "mount present but unreadable" (return True so
+    # skip_if_no_bpf_lsm hits its more specific "lsm file
+    # unreadable" branch) from "really not there" (return False).
     try:
-        return _LSM_FILE.is_file()
+        _LSM_FILE.stat()
+        return True
+    except PermissionError:
+        return True
     except OSError:
         return False
 

@@ -159,7 +159,10 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
         if bad_keys:
             die(f"{meta}: volume {vol!r} has unknown keys "
                 f"{sorted(bad_keys)} — allowed: {sorted(_VOLUME_KEYS)}")
-        if not isinstance(vol.get("src"), str) or not isinstance(vol.get("dst"), str):
+        missing = [k for k in ("src", "dst") if k not in vol]
+        if missing:
+            die(f"{meta}: volume {vol!r} missing required key(s): {missing}")
+        if not isinstance(vol["src"], str) or not isinstance(vol["dst"], str):
             die(f"{meta}: volume {vol!r} src + dst must both be strings")
         if "rw" in vol and not isinstance(vol["rw"], bool):
             die(f"{meta}: volume {vol!r} rw must be bool")
