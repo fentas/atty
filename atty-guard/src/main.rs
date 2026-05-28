@@ -707,12 +707,12 @@ fn main() -> std::io::Result<()> {
         classifier::BackendKind::Heuristic => "heuristic",
         classifier::BackendKind::Onnx => "onnx",
     };
-    // gpt-review #026 — backend construction here so explicit
-    // operator requests (CLI / config) FAIL CLOSED on load failure
-    // instead of silently degrading to Stub under an `tier2=onnx`
-    // log line. The default path (no operator request) keeps the
-    // legacy best-effort fallback so a fresh install doesn't refuse
-    // to start because of a missing model file.
+    // Backend construction here so explicit operator requests
+    // (CLI / config) FAIL CLOSED on load failure instead of
+    // silently degrading to Stub under a `tier2=onnx` log line.
+    // The default path (no operator request) keeps the legacy
+    // best-effort fallback so a fresh install doesn't refuse to
+    // start because of a missing model file.
     let classifier = match backend_source {
         classifier::BackendSource::Default => {
             classifier::Classifier::new_with_backend(backend, &file_cfg.tier2.onnx)
