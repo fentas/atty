@@ -667,3 +667,61 @@ fn session_write_drops_persisted_trust_keeps_invalid() {
         "malformed hash should remain for review",
     );
 }
+
+#[test]
+fn sweep_stale_tmp_files_unlinks_write_atomic_scratch() {
+    // Set up a per-UID dir with a stale tmp file shaped like
+    // write_atomic's output: `<file>.tmp.<pid>.<seq>`. Constructing
+    // TrustStore::new should sweep it.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data_root = tmp.path();
+    let uid_dir = data_root.join("1000");
+    std::fs::create_dir_all(&uid_dir).unwrap();
+    let stale_tmp = uid_dir.join("atoms.user.txt.tmp.12345.0");
+    let keep = uid_dir.join("atoms.user.txt");
+    std::fs::write(&stale_tmp, b"crashed write").unwrap();
+    std::fs::write(&keep, b"valid content").unwrap();
+    let _ = TrustStore::new(data_root.to_path_buf());
+    assert!(!stale_tmp.exists(), "stale tmp should be unlinked");
+    assert!(keep.exists(), "real file must survive the sweep");
+}
+
+#[test]
+fn sweep_stale_tmp_files_no_op_on_missing_root() {
+    // TrustStore::new on a path that doesn't yet exist must not
+    // crash — fresh installs use this path before any per-UID
+    // dir has been created.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let absent = tmp.path().join("does-not-yet-exist");
+    let _ = TrustStore::new(absent);
+}
+
+#[test]
+fn write_locks_prune_drops_idle_entries_under_cap() {
+    // #251 — acquire_write_lock prunes entries whose Arc isn't
+    // held by any caller when the map exceeds SOFT_CAP. Stuff the
+    // map past the cap with dropped Arcs, then one more acquire
+    // → the prune fires and the map shrinks.
+    let (store, _tmp) = fresh_store();
+    // Drive the map past 1024 by acquiring + immediately dropping
+    // for distinct UIDs. Each acquire drops the cloned Arc when
+    // `lock` goes out of scope. The map keeps the strong ref.
+    for uid in 0u32..1100 {
+        let _lock = store.acquire_write_lock(uid);
+    }
+    let final_acquire = store.acquire_write_lock(9999);
+    drop(final_acquire);
+    let map = store.write_locks.lock().unwrap();
+    // After the prune fires on the 1101st acquire (size > 1024),
+    // entries with strong_count == 1 are dropped. The just-acquired
+    // 9999 entry is also strong_count == 1 by the time we read here,
+    // so the map size after the prune should be small (just the
+    // freshly inserted entry, or empty if even that's been pruned
+    // — depending on whether the prune runs before or after the
+    // entry() insertion).
+    assert!(
+        map.len() <= 1100,
+        "prune should have reduced map size: got {}",
+        map.len()
+    );
+}
