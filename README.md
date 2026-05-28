@@ -278,7 +278,7 @@ make docker-binary # build in docker, copy binary to ./dist/atty
 
 ### 🎯 Roadmap
 
-- [ ] OSC 133 prompt-marker awareness (drop guesswork from the line-state model)
+- [x] ~~OSC 133 prompt-marker awareness (drop guesswork from the line-state model)~~ — shipped in `src/osc133.zig`; auto-detects when shells emit `\x1b]133;A/B/C/D` markers and overrides the keystroke-tracker's view of the typed input.
 - [ ] Atuin daemon socket backend (replace the subprocess fallback once IPC stabilises)
 - [ ] Bracketed-paste detection (suppress ghost text during a paste burst)
 - [ ] Ring buffer for `onOutput` parsers that span read boundaries

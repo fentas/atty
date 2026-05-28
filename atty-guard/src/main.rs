@@ -112,10 +112,12 @@ struct Cli {
     osv_endpoint: String,
 
     /// V2-I one-shot atom refresh. Fetches the configured IOC
-    /// corpora (default: GTFOBins; future: Sigma, LOLBAS), parses
-    /// them into atoms, writes `$XDG_DATA_HOME/atty-guard/
-    /// flagged_atoms.txt` atomically, and exits without starting
-    /// the UDS server. Requires `--features atoms-fetch`.
+    /// corpora (GTFOBins + Sigma; LOLBAS was prototyped and dropped
+    /// — Windows-native, didn't surface Linux shell IOCs), parses
+    /// them into atoms, writes `/var/lib/atty-guard/atoms.system.txt`
+    /// (or `$STATE_DIRECTORY/atoms.system.txt` under systemd)
+    /// atomically, and exits without starting the UDS server.
+    /// Requires `--features atoms-fetch`.
     #[arg(long, default_value_t = false)]
     update_atoms_now: bool,
 
