@@ -667,3 +667,88 @@ fn session_write_drops_persisted_trust_keeps_invalid() {
         "malformed hash should remain for review",
     );
 }
+
+#[test]
+fn sweep_stale_tmp_files_unlinks_write_atomic_scratch() {
+    // Set up a per-UID dir with a stale tmp file shaped like
+    // write_atomic's output: `<file>.tmp.<pid>.<seq>`. Constructing
+    // TrustStore::new should sweep it.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data_root = tmp.path();
+    let uid_dir = data_root.join("1000");
+    std::fs::create_dir_all(&uid_dir).unwrap();
+    let stale_tmp = uid_dir.join("atoms.user.txt.tmp.12345.0");
+    let keep = uid_dir.join("atoms.user.txt");
+    std::fs::write(&stale_tmp, b"crashed write").unwrap();
+    std::fs::write(&keep, b"valid content").unwrap();
+    let _ = TrustStore::new(data_root.to_path_buf());
+    assert!(!stale_tmp.exists(), "stale tmp should be unlinked");
+    assert!(keep.exists(), "real file must survive the sweep");
+}
+
+#[test]
+fn sweep_stale_tmp_files_no_op_on_missing_root() {
+    // TrustStore::new on a path that doesn't yet exist must not
+    // crash — fresh installs use this path before any per-UID
+    // dir has been created.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let absent = tmp.path().join("does-not-yet-exist");
+    let _ = TrustStore::new(absent);
+}
+
+#[test]
+fn write_locks_prune_drops_idle_entries_above_soft_cap() {
+    // #251 — acquire_write_lock prunes entries whose Arc isn't
+    // held by any caller when the map exceeds SOFT_CAP (1024).
+    // The prune fires DURING the loop each time the map grows past
+    // the cap (every ~1 acquire once we're saturated), so the map
+    // can't accumulate unbounded entries. The exact final count is
+    // implementation-detail of the trigger frequency; what matters
+    // is the upper bound — without pruning we'd see ~1100 entries,
+    // with pruning the count stays well below.
+    let (store, _tmp) = fresh_store();
+    for uid in 0u32..1100 {
+        let _lock = store.acquire_write_lock(uid);
+    }
+    let final_acquire = store.acquire_write_lock(9999);
+    drop(final_acquire);
+    let map = store.write_locks.lock().unwrap();
+    // Tight bound: the prune fires every time we cross the cap,
+    // so after a long sequence of acquires + drops the residue
+    // can't exceed the gap between the last prune trigger and
+    // now. SOFT_CAP=1024; the residue we observed empirically is
+    // 76. Assert STRICTLY less than the unpruned worst case
+    // (1101) — anything higher would mean the prune regressed.
+    assert!(
+        map.len() < 200,
+        "prune should bound the map well under 1101 entries; got {}",
+        map.len()
+    );
+    assert!(map.contains_key(&9999u32));
+}
+
+#[test]
+fn write_locks_prune_single_trigger_drops_all_idle() {
+    // Focused test for the prune RULE: when SOFT_CAP+1 entries
+    // are present and every Arc has been dropped (strong_count==1),
+    // the next acquire prunes ALL of them and inserts only the
+    // new entry. This pins the retain logic precisely; the
+    // multi-trigger test above just confirms the map stays bounded.
+    let (store, _tmp) = fresh_store();
+    // Seed the map past the cap with strong_count==1 entries.
+    // Bypass acquire_write_lock to control the trigger exactly —
+    // we want the prune to fire ONCE on our explicit acquire.
+    {
+        let mut map = store.write_locks.lock().unwrap();
+        for uid in 0u32..1025 {
+            map.insert(uid, std::sync::Arc::new(std::sync::Mutex::new(())));
+        }
+    }
+    let arc = store.acquire_write_lock(9999);
+    drop(arc);
+    let map = store.write_locks.lock().unwrap();
+    // 1025 prior entries (all strong_count==1) all pruned; 9999
+    // inserted afterward = exactly 1 entry survives.
+    assert_eq!(map.len(), 1);
+    assert!(map.contains_key(&9999u32));
+}

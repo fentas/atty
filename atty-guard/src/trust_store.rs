@@ -150,6 +150,17 @@ impl TrustStore {
             .parent()
             .map(|p| p.join("atoms.system.txt"))
             .unwrap_or_else(|| data_root.join("atoms.system.txt"));
+
+        // #252 — sweep stale `.tmp.*` files left behind by a crash
+        // mid-rename. Linux PID reuse can make `create_new(true)`
+        // hard-error on a future write when the recycled PID
+        // collides with a stale tmp name; eagerly clean them at
+        // startup so the operator doesn't see the failure first.
+        // Best-effort: I/O errors here surface to journald via the
+        // wrapper but never block daemon startup — the worst case
+        // is the operational papercut we're trying to avoid.
+        sweep_stale_tmp_files(&data_root);
+
         Self {
             data_root,
             state: Mutex::new(HashMap::new()),
@@ -166,11 +177,24 @@ impl TrustStore {
     /// HashMap lookup; the returned `Arc<Mutex<()>>` is owned by
     /// the caller and can be locked without blocking other UIDs.
     /// See the `write_locks` field doc-comment for lock ordering.
+    ///
+    /// #251 — opportunistic prune of idle entries. The map grows
+    /// monotonically without this — one Arc per UID that ever
+    /// performed a persistent write. When the map exceeds the
+    /// soft cap, drop entries whose only strong reference is the
+    /// map itself (i.e. no write is currently in flight for that
+    /// UID). Safe under the outer guard: any thread that would
+    /// `clone()` an Arc out of the map is blocked behind this
+    /// lock, so `strong_count == 1` reliably means "no live writer."
     fn acquire_write_lock(&self, uid: u32) -> Arc<Mutex<()>> {
+        const SOFT_CAP: usize = 1024;
         let mut map = self
             .write_locks
             .lock()
             .expect("write_locks poisoned");
+        if map.len() > SOFT_CAP {
+            map.retain(|_, arc| Arc::strong_count(arc) > 1);
+        }
         map.entry(uid)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
@@ -1179,6 +1203,70 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
     }
     Ok(())
+}
+
+/// Scan per-UID dirs under `data_root` and unlink any `*.tmp.*`
+/// files. Called once at TrustStore::new — these are stale `write_atomic`
+/// scratch files from a crashed prior daemon. Linux PID reuse can
+/// otherwise collide a recycled PID's first write with a stale tmp
+/// name, hard-erroring on `create_new(true)`.
+///
+/// Best-effort, never blocks startup. The top-level `read_dir` and
+/// individual `unlink` failures log to journald. Per-UID `read_dir`
+/// failures + DirEntry iteration errors via `flatten()` are
+/// silently dropped — they're typically transient permission
+/// glitches that the daemon's own write path will surface again
+/// at first use; logging them at startup would be noise.
+fn sweep_stale_tmp_files(data_root: &Path) {
+    let entries = match std::fs::read_dir(data_root) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            eprintln!(
+                "atty-guard: tmp-sweep — read_dir({}) failed: {e}",
+                data_root.display()
+            );
+            return;
+        }
+    };
+    let mut swept: u32 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // Per-UID dir. Walk one level deeper and unlink any file
+        // whose name contains ".tmp." — the write_atomic suffix
+        // shape is `<file>.tmp.<pid>.<seq>`.
+        let sub = match std::fs::read_dir(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for f in sub.flatten() {
+            let fname = f.file_name();
+            let s = match fname.to_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            if !s.contains(".tmp.") {
+                continue;
+            }
+            let p = f.path();
+            match std::fs::remove_file(&p) {
+                Ok(_) => swept += 1,
+                Err(e) => eprintln!(
+                    "atty-guard: tmp-sweep — unlink({}) failed: {e}",
+                    p.display()
+                ),
+            }
+        }
+    }
+    if swept > 0 {
+        eprintln!(
+            "atty-guard: tmp-sweep — removed {swept} stale write_atomic tmp file(s) under {}",
+            data_root.display()
+        );
+    }
 }
 
 fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
