@@ -26,7 +26,13 @@ libbpf-rs = { version = "0.24.5", optional = true }
 # moving parts. tokenizers stays pure-Rust for HF-style tokeniser JSON.
 tract-onnx = { version = "0.21", optional = true, default-features = false }
 tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
-toml = { version = "0.8", optional = true }
+# Runtime config parser. Non-optional: `--config <path>` is part
+# of the daemon's policy surface (server caps, accumulator threshold,
+# non-ONNX tier2 backend), so dropping the parser to save ~150 KB on
+# binaries built without `tier2-onnx` silently discarded operator
+# policy. The cost is paid by every build now, but parsing is one-
+# shot at startup — no per-classify overhead.
+toml = { version = "0.8" }
 # V2-F live OSV.dev lookup. ureq is the smallest blocking HTTP
 # client in the ecosystem with rustls for TLS — no openssl
 # flakiness. Pulled in only when `osv-live` is enabled.
@@ -54,7 +60,7 @@ ebpf = ["dep:libbpf-rs"]
 # Build the V2-C ONNX Tier-2 backend (SecureBERT 2.0 / Qwen2.5-Coder
 # / any HF-tokeniser ONNX classifier). Uses pure-Rust tract — no
 # system onnxruntime needed. See `docs/security-guard-slm.md`.
-tier2-onnx = ["dep:tract-onnx", "dep:tokenizers", "dep:toml"]
+tier2-onnx = ["dep:tract-onnx", "dep:tokenizers"]
 # Build the V2-F live OSV.dev lookup. Hits the upstream API per
 # uncached `npm install <pkg>`; default off (network use is opt-in).
 osv-live = ["dep:ureq"]
@@ -62,7 +68,7 @@ osv-live = ["dep:ureq"]
 # `--atoms-update-interval` cron-style background refresh.
 # Reuses ureq for HTTPS; adds flate2 + tar + serde_yaml for
 # tarball + YAML parsing. See `docs/security-guard-updates.md`.
-atoms-fetch = ["dep:ureq", "dep:flate2", "dep:tar", "dep:serde_yaml", "dep:sha2", "dep:toml"]
+atoms-fetch = ["dep:ureq", "dep:flate2", "dep:tar", "dep:serde_yaml", "dep:sha2"]
 
 [dev-dependencies]
 # trust_store tests use tempdir-rooted file ops; no global env mutation.

@@ -124,6 +124,9 @@ pub struct Tier2Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+// Fields are only read by the ONNX backend; the struct itself is
+// parsed in every build so config validation is consistent across
+// feature flavors.
 #[cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
 pub struct OnnxConfig {
     /// Model selector — defaults to `securebert2` because it's
@@ -190,7 +193,6 @@ fn default_block_threshold() -> f32 {
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
 pub enum LoadError {
     Io(std::io::Error),
     Parse(String),
@@ -207,34 +209,51 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-#[cfg(feature = "tier2-onnx")]
+/// Hard cap on config file size. Real-world atty-guard configs
+/// are <4 KiB; the cap defends against `--config` pointing at
+/// /dev/urandom, a fifo, or a misplaced large file that would
+/// OOM the daemon under an unbounded `read_to_string`.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// Parse a TOML config file. Always fails closed so an explicit
+/// `--config` never silently degrades to defaults:
+///   - missing / unreadable path → `LoadError::Io`
+///   - non-regular file (fifo, directory, char/block device) →
+///     `LoadError::Io` with EINVAL — refuses to read from
+///     anything that could block or OOM us
+///   - file > `MAX_CONFIG_BYTES` → `LoadError::Io` with
+///     `FileTooLarge`
+///   - malformed TOML → `LoadError::Parse`
 pub fn load(path: &Path) -> Result<Config, LoadError> {
+    let meta = std::fs::metadata(path).map_err(LoadError::Io)?;
+    if !meta.is_file() {
+        return Err(LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} is not a regular file (refusing to read from fifo/dir/device)",
+                path.display()
+            ),
+        )));
+    }
+    if meta.len() > MAX_CONFIG_BYTES {
+        return Err(LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!(
+                "{} is {} bytes (cap is {})",
+                path.display(),
+                meta.len(),
+                MAX_CONFIG_BYTES,
+            ),
+        )));
+    }
     let text = std::fs::read_to_string(path).map_err(LoadError::Io)?;
     toml::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))
-}
-
-/// Stub for builds without the `tier2-onnx` feature.
-///
-/// TOML parsing is gated behind `tier2-onnx`; this stub deliberately
-/// does NOT parse the file even when the `toml` crate is in the dep
-/// tree via another feature (e.g. `atoms-fetch`) — keeping the
-/// parsing surface tied to a single feature flag.
-///
-/// The stub still performs the file read so the I/O failure posture
-/// is identical to the feature-on build: an unreadable `--config
-/// <path>` is a hard error in both flavors. A readable file always
-/// returns `Config::default()` regardless of contents.
-#[cfg(not(feature = "tier2-onnx"))]
-pub fn load(path: &Path) -> Result<Config, LoadError> {
-    std::fs::read_to_string(path).map_err(LoadError::Io)?;
-    Ok(Config::default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "tier2-onnx")]
     #[test]
     fn parses_complete_tier2_onnx_block() {
         let src = r#"
@@ -256,7 +275,6 @@ block_threshold = 0.9
         assert!((cfg.tier2.onnx.block_threshold - 0.9).abs() < 1e-6);
     }
 
-    #[cfg(feature = "tier2-onnx")]
     #[test]
     fn empty_config_yields_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
@@ -264,7 +282,6 @@ block_threshold = 0.9
         assert_eq!(cfg.tier2.onnx.max_tokens, 1024);
     }
 
-    #[cfg(feature = "tier2-onnx")]
     #[test]
     fn missing_onnx_subtable_keeps_defaults() {
         let cfg: Config = toml::from_str("[tier2]\nbackend = \"heuristic\"").unwrap();
@@ -272,33 +289,135 @@ block_threshold = 0.9
         assert_eq!(cfg.tier2.onnx.model, "securebert2");
     }
 
-    #[cfg(not(feature = "tier2-onnx"))]
     #[test]
-    fn no_feature_load_readable_file_returns_defaults() {
-        // Stub builds still perform the I/O so the failure posture
-        // matches the feature-on path; on a readable file the
-        // result is always `Config::default()` since the stub
-        // ignores TOML content (no parser wired through this path
-        // even when `toml` is present via another feature like
-        // `atoms-fetch`).
+    fn load_parses_server_and_accumulator_tables() {
+        // Invariant: `load` honors non-ONNX policy tables in every
+        // build flavor. Drives `load` (not bare `toml::from_str`)
+        // so a future cfg-gate on the parser regresses loudly.
+        let src = br#"
+[server]
+max_concurrent_connections = 8
+idle_read_timeout_secs = 5
+
+[accumulator]
+block_threshold = 0.97
+"#;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         use std::io::Write as _;
-        tmp.write_all(b"anything = \"ignored\"").unwrap();
-        let cfg = load(tmp.path()).expect("readable file should succeed");
-        assert_eq!(cfg.tier2.onnx.model, "securebert2");
+        tmp.write_all(src).unwrap();
+        let cfg = load(tmp.path()).expect("readable + valid TOML");
+        assert_eq!(cfg.server.max_concurrent_connections, 8);
+        assert_eq!(cfg.server.idle_read_timeout_secs, 5);
+        assert!((cfg.accumulator.block_threshold.unwrap() - 0.97).abs() < 1e-6);
     }
 
-    #[cfg(not(feature = "tier2-onnx"))]
     #[test]
-    fn no_feature_load_missing_file_errors() {
-        // Stub I/O failure parity: missing path → LoadError::Io,
-        // same as the feature-on build. Without this the explicit-
-        // --config fail-closed posture only applied to tier2-onnx
-        // builds, defeating it on default builds.
+    fn load_parses_non_onnx_tier2_backend() {
+        // Invariant: non-ONNX backend selection round-trips through
+        // `load` in every build flavor. Asserts the parsed Config
+        // field directly so the test fails on a parsing regression
+        // even if downstream `resolve_backend` is also broken.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"[tier2]\nbackend = \"heuristic\"").unwrap();
+        let cfg = load(tmp.path()).unwrap();
+        assert_eq!(cfg.tier2.backend.as_deref(), Some("heuristic"));
+    }
+
+    #[test]
+    fn load_rejects_malformed_toml() {
+        // Invariant: explicit --config must fail closed on parse
+        // errors so an operator's malformed policy can't silently
+        // fall through to compiled-in defaults.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"this = is = not = valid").unwrap();
+        let err = load(tmp.path()).unwrap_err();
+        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_missing_file_errors() {
+        // Explicit --config with a missing path is always a hard
+        // I/O error, in every build flavor.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.toml");
         assert!(!missing.exists());
-        let cfg = load(&missing);
-        assert!(cfg.is_err(), "missing path should not succeed");
+        match load(&missing) {
+            Err(LoadError::Io(_)) => {}
+            other => panic!("expected LoadError::Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_parses_onnx_subtable_in_every_build() {
+        // Even in non-`tier2-onnx` builds the `[tier2.onnx]`
+        // subtable must Deserialize cleanly — `OnnxConfig` is
+        // parsed in every build flavor, only READS of its fields
+        // are gated behind the feature. A future refactor that
+        // cfg-gates the struct definition would silently break
+        // operators who supply ONNX paths in a non-feature build
+        // and expect a recognisable parse error rather than a
+        // mysterious "unknown field" rejection.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(
+            br#"
+[tier2.onnx]
+model = "securebert2"
+model_path = "/var/lib/atty-guard/m.onnx"
+tokenizer_path = "/var/lib/atty-guard/t.json"
+max_tokens = 2048
+warn_threshold = 0.4
+block_threshold = 0.88
+"#,
+        )
+        .unwrap();
+        let cfg = load(tmp.path()).expect("OnnxConfig must parse in all builds");
+        assert_eq!(cfg.tier2.onnx.model, "securebert2");
+        assert_eq!(cfg.tier2.onnx.max_tokens, 2048);
+        assert!((cfg.tier2.onnx.block_threshold - 0.88).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_refuses_oversize_file() {
+        // Defense-in-depth: a misplaced `--config` pointing at a
+        // huge file (or /dev/urandom) would OOM the daemon. Cap
+        // exceeded = hard error.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        // Write just over the cap. Use a comment line so the
+        // content is still valid TOML if the cap were lifted.
+        let mut payload = String::from("# ");
+        payload.push_str(&"x".repeat(MAX_CONFIG_BYTES as usize));
+        tmp.write_all(payload.as_bytes()).unwrap();
+        let err = load(tmp.path()).expect_err("oversize file must fail");
+        match err {
+            LoadError::Io(e) => {
+                assert!(
+                    e.to_string().contains("cap is"),
+                    "expected cap message, got {e}"
+                );
+            }
+            other => panic!("expected LoadError::Io, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_non_regular_file() {
+        // Pointing --config at a directory (operator typo) or a
+        // fifo (mkfifo'd by mistake or maliciously) would block /
+        // misbehave under `read_to_string`. Reject before reading.
+        let dir = tempfile::tempdir().unwrap();
+        match load(dir.path()) {
+            Err(LoadError::Io(e)) => {
+                assert!(
+                    e.to_string().contains("not a regular file"),
+                    "expected filetype error, got {e}"
+                );
+            }
+            other => panic!("expected non-regular-file error, got {other:?}"),
+        }
     }
 }

@@ -84,10 +84,14 @@ struct Cli {
     #[arg(long, value_parser = ["stub", "heuristic", "onnx"])]
     tier2: Option<String>,
 
-    /// Optional TOML config — currently populates the Tier-2 ONNX
-    /// backend's model/tokenizer paths + thresholds. All fields
-    /// are optional; missing ones fall through to compiled-in
-    /// defaults. CLI flags override file values.
+    /// Optional TOML config. Populates `[server]` resource caps,
+    /// `[accumulator] block_threshold` for auto-Block escalation,
+    /// `[tier2] backend` selection, and the `[tier2.onnx]` model/
+    /// tokenizer/threshold sub-table. All fields are optional;
+    /// missing ones fall through to compiled-in defaults. CLI
+    /// flags override file values. An EXPLICIT `--config` that
+    /// fails to load or parse is a hard startup error (fail-
+    /// closed); omit `--config` if you want defaults.
     #[arg(long)]
     config: Option<PathBuf>,
 
