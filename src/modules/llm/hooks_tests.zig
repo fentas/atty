@@ -80,6 +80,19 @@ test "containsClearSequence: bare ESC at end-of-buf is not a false positive" {
     try testing.expect(!hooks.containsClearSequence(""));
 }
 
+test "containsClearSequence: detects sequence split across boundary via carry" {
+    // Simulates the carry-buffer probe in onOutput: the previous
+    // chunk ended with "\x1B[" and the next starts with "2J". The
+    // probe concatenates carry + head and runs containsClearSequence
+    // on the merged view, so the split sequence is still recognised.
+    var probe: [12]u8 = undefined;
+    const carry = "\x1B[";
+    const head = "2Jfoo";
+    @memcpy(probe[0..carry.len], carry);
+    @memcpy(probe[carry.len .. carry.len + head.len], head);
+    try testing.expect(hooks.containsClearSequence(probe[0 .. carry.len + head.len]));
+}
+
 test "chat overlay (Alt+Shift+C): opens empty when no conversation exists" {
     const L = configure(.{
         .provider = .{ .http = .{

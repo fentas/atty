@@ -1724,23 +1724,31 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.osc133_capture.feed(output);
             const edges = rt.osc133_capture.drainEdges();
 
-            // Sync inline panel state with what the user sees (#305).
-            // `clear` (or Ctrl+L) blasts the alt-screen / scrollback,
-            // visually wiping the inline chat area, but the panel's
-            // `chat_inline_open = true` state survives — the next
-            // Alt+C interprets as "toggle closed" and the panel only
-            // truly reopens on the SECOND press. Detecting the clear
-            // sequence here and forcing the state closed makes the
-            // next Alt+C the natural "reopen" gesture.
-            //
-            // Only the inline panel needs this — the full-size overlay
-            // owns the alt-screen and is unaffected by a primary-
-            // screen clear. We don't try to RE-RENDER the panel after
-            // the clear (the rerender path is non-trivial and would
-            // interfere with the user's `clear`); instead the panel
-            // simply matches what the user just observed.
-            if (rt.chat_inline_open and containsClearSequence(output)) {
-                rt.chat_inline_open = false;
+            // The inline panel's open flag is atty-side state; a
+            // shell-emitted screen-clear wipes the visible area
+            // without notifying us, so without this sync the next
+            // Alt+C would toggle against state that doesn't match
+            // what's on screen. The carry-buffer probe handles
+            // clear sequences that split across adjacent PTY read
+            // boundaries. The full overlay owns the alt-screen so
+            // a primary-screen clear can't touch it.
+            if (rt.chat_inline_open) {
+                const carry_prefix = rt.clear_seq_carry[0..rt.clear_seq_carry_len];
+                if (carry_prefix.len > 0) {
+                    var probe: [12]u8 = undefined;
+                    const head_len = @min(output.len, probe.len - carry_prefix.len);
+                    @memcpy(probe[0..carry_prefix.len], carry_prefix);
+                    @memcpy(probe[carry_prefix.len .. carry_prefix.len + head_len], output[0..head_len]);
+                    if (containsClearSequence(probe[0 .. carry_prefix.len + head_len])) {
+                        rt.chat_inline_open = false;
+                    }
+                }
+                if (rt.chat_inline_open and containsClearSequence(output)) {
+                    rt.chat_inline_open = false;
+                }
+                const tail_len: usize = @min(output.len, rt.clear_seq_carry.len);
+                @memcpy(rt.clear_seq_carry[0..tail_len], output[output.len - tail_len ..]);
+                rt.clear_seq_carry_len = @intCast(tail_len);
             }
 
             // Outside dialog execution, the only reason to feed was

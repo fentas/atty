@@ -1297,26 +1297,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // the original name for the recording-side gate.
                 const shell_saw_enter = recording_should_fire;
 
-                // TOCTOU defense for `slaveIsHiddenInput` (#283). The
-                // gate at the top of this block samples termios ONCE
-                // per stdin read. A paste of `sudo -S\n<password>\n`
-                // straddles the kernel's tcsetattr flip — the first
-                // byte sees visible mode, but by the time we reach
-                // the commit point sudo may already have dropped
-                // ECHO and the captured "line" is password material.
-                // Re-check now; if the slave is hidden, treat any
-                // pending commit as drop_recording AND scrub
-                // line_state so the next read starts clean rather
-                // than leaking the captured buffer into ghost text
-                // on the next paint or into atuin via dispatchLineCommit.
-                //
-                // Partial mitigation: bytes processed in earlier
-                // pipeline stages within this same chunk (applyInput,
-                // module onInput hooks) have already seen the data.
-                // A fully-tight fix would require segmented per-`\n`
-                // re-checks before EACH applyInput call; this
-                // defends the recording path which is the externally-
-                // visible leak (atuin history, ghost suggestions).
+                // A stdin chunk that straddles a child's ECHO flip
+                // (paste of `sudo -S` + password) can capture password
+                // material in line_state before the top-of-block
+                // termios check could observe the no-echo state.
+                // Re-checking now bounds the externally-visible leak
+                // (atuin / history recording) to the same chunk; bytes
+                // already seen by earlier pipeline stages within this
+                // chunk are not retroactively scrubbed.
                 const post_pipeline_hidden = slaveIsHiddenInput(pty.master);
 
                 if (line_state.lastCommitted()) |committed| {
