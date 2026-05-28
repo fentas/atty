@@ -117,10 +117,112 @@ fn handle_trust_list(socket: &Path, target_uid: Option<u32>) -> std::io::Result<
 /// root's. Without sudo (or running directly as root with no
 /// SUDO_UID), returns None — the daemon falls back to the connecting
 /// peer's own UID, which is the normal read-only / single-user case.
+///
+/// Defense against `sudo -E` and direct-root env-injection: the
+/// attacker model is a root-equivalent caller that sets SUDO_*
+/// env vars to point at a victim's UID. The bare `getenv("SUDO_UID")`
+/// trusted these blindly — `sudo -E atty-guard atoms add ...` (or
+/// any sudoers config preserving env, or a non-sudo root invocation
+/// from cron / systemd-run / sshd ForceCommand) could write to any
+/// UID's `/var/lib/atty-guard/users/<uid>/atoms.user.txt`.
+///
+/// Tightening, in order of cost:
+///   1. Require SUDO_UID, SUDO_USER, SUDO_GID all set together
+///      (real sudo always sets the triple).
+///   2. Require our effective UID to be 0 — direct root invocation
+///      passes, but a non-root caller's CLI should never forward a
+///      target_uid (the daemon's SO_PEERCRED gate would reject the
+///      mutating RPC anyway, so this just makes the refusal
+///      explicit at the CLI layer).
+///   3. Look up SUDO_USER via `getpwnam` and verify the passwd
+///      entry's UID matches SUDO_UID. Catches attacker-set
+///      `SUDO_UID=victim_uid SUDO_USER=different_name` env pairs
+///      where the name doesn't resolve to the claimed UID.
+///
+/// Step 3 doesn't defeat a determined attacker who supplies a
+/// consistent real-user pair (SUDO_USER=victimname matching
+/// SUDO_UID=victim's real uid), but that requires already knowing
+/// the victim by name AND only achieves what `chown` could do
+/// with root anyway. The check raises the bar against env-confusion
+/// mistakes and casual `sudo -E` patterns.
 fn sudo_target_uid() -> Option<u32> {
-    std::env::var("SUDO_UID")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
+    // Cheapest gate first: a non-root caller has no business
+    // forwarding a target_uid — the daemon's SO_PEERCRED check
+    // would reject the mutating RPC anyway, and short-circuiting
+    // here avoids the eprintln spam path when a non-root user
+    // happens to have stale SUDO_* env vars (e.g. custom prompts).
+    let euid = unsafe {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        geteuid()
+    };
+    if euid != 0 {
+        return None;
+    }
+
+    let sudo_uid: u32 = std::env::var("SUDO_UID").ok()?.parse().ok()?;
+    let sudo_user = std::env::var("SUDO_USER").ok()?;
+    // Presence check only — pre-1.8 sudo skipped SUDO_GID, but
+    // any sudo from the past 15 years sets all three. Parsing
+    // is redundant; checking ok() is the meaningful posture.
+    std::env::var("SUDO_GID").ok()?;
+
+    if !sudo_user_matches_uid(&sudo_user, sudo_uid) {
+        eprintln!(
+            "atty-guard: SUDO_USER={sudo_user:?} doesn't resolve to SUDO_UID={sudo_uid} \
+             — refusing to forward target_uid. Run via plain `sudo atty-guard ...` \
+             without env_keep or attacker-controlled SUDO_* vars."
+        );
+        return None;
+    }
+    Some(sudo_uid)
+}
+
+/// `getpwnam(name).pw_uid == uid` — a positive result means the
+/// passwd database has a user named `name` with the claimed `uid`.
+/// Returns false on any lookup failure (no such user, NSS error,
+/// `name` contains a NUL byte).
+///
+/// THREAD-SAFETY: `getpwnam(3)` returns a pointer to a static
+/// buffer that subsequent calls in the same process clobber.
+/// The CLI is single-threaded (one-shot `fn main()` invocation,
+/// no async runtime), so production use is fine. Unit tests
+/// running in parallel `cargo test` workers technically race on
+/// the static buffer, but the only field read here is `pw_uid`
+/// (a `u32` copied by value before this function returns), so
+/// the data race is benign on glibc/musl. Swap to `getpwnam_r`
+/// if this function ever moves into a multi-threaded caller.
+fn sudo_user_matches_uid(name: &str, uid: u32) -> bool {
+    use std::ffi::CString;
+    // libc::passwd layout. Only `pw_uid` is read so the trailing
+    // string pointers don't need careful typing — kept opaque.
+    #[repr(C)]
+    struct Passwd {
+        pw_name: *const std::os::raw::c_char,
+        pw_passwd: *const std::os::raw::c_char,
+        pw_uid: u32,
+        pw_gid: u32,
+        pw_gecos: *const std::os::raw::c_char,
+        pw_dir: *const std::os::raw::c_char,
+        pw_shell: *const std::os::raw::c_char,
+    }
+    extern "C" {
+        fn getpwnam(name: *const std::os::raw::c_char) -> *const Passwd;
+    }
+    let cname = match CString::new(name) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let pw = unsafe { getpwnam(cname.as_ptr()) };
+    if pw.is_null() {
+        return false;
+    }
+    // SAFETY: getpwnam returned non-null, so the static struct it
+    // points at is valid for this call (we don't retain after
+    // return — subsequent getpwnam* calls may overwrite it).
+    let pw_uid = unsafe { (*pw).pw_uid };
+    pw_uid == uid
 }
 
 fn send_and_check(socket: &Path, request: Request) -> std::io::Result<()> {
@@ -473,4 +575,63 @@ fn send_request(socket: &Path, request: Request) -> std::io::Result<ResponseBody
     let body: ResponseBody = serde_json::from_str(line.trim())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sudo_user_matches_uid_root() {
+        // `root` is universally present and always uid 0 on Linux.
+        assert!(sudo_user_matches_uid("root", 0));
+    }
+
+    #[test]
+    fn sudo_user_matches_uid_wrong_uid() {
+        // `root` is not uid 999.
+        assert!(!sudo_user_matches_uid("root", 999));
+    }
+
+    #[test]
+    fn sudo_user_matches_uid_unknown_user() {
+        // A name unlikely to exist on any test host.
+        assert!(!sudo_user_matches_uid(
+            "atty_guard_nonexistent_user_for_test",
+            12345
+        ));
+    }
+
+    #[test]
+    fn sudo_user_matches_uid_rejects_nul_byte() {
+        // CString::new bails on interior NUL — must not be passed
+        // through to getpwnam (which would either truncate or be
+        // confused).
+        assert!(!sudo_user_matches_uid("root\0evil", 0));
+    }
+
+    #[test]
+    fn sudo_target_uid_non_root_caller_returns_none() {
+        // `cargo test` runs under the test runner's UID (non-root).
+        // The euid==0 gate is the first check, so regardless of how
+        // SUDO_* env vars are set on the host (CI might inherit
+        // them, dev shells often don't), a non-root caller must
+        // always get None — daemon-side SO_PEERCRED would reject
+        // the mutating RPC anyway, and the CLI should refuse to
+        // forward a target_uid in that case.
+        //
+        // We can't fully exercise the SUCCESS path under `cargo
+        // test` — it'd require euid=0 AND atomic env-var
+        // manipulation, but `std::env::set_var` is unsafe-since-
+        // Rust-1.74 because parallel test workers race on the
+        // process-wide env. Integration coverage of the happy
+        // path lives in the manual test plan (run as root, set
+        // SUDO_*, verify daemon writes go to the right per-UID
+        // directory).
+        assert_eq!(
+            sudo_target_uid(),
+            None,
+            "non-root callers must always get None"
+        );
+    }
 }
