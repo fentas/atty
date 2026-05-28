@@ -61,7 +61,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/.buildx-cache
-          key: sandbox-buildx-${{ hashFiles('atty-guard/Cargo.lock', 'tests/sandbox/Dockerfile.base', 'atty-guard/contrib/install.sh', 'src/modules/security_guard/data/**') }}
+          # Cargo.toml in the key so a feature-flag flip (osv-live
+          # on/off) invalidates even when Cargo.lock didn't change.
+          key: sandbox-buildx-${{ hashFiles('atty-guard/Cargo.lock', 'atty-guard/Cargo.toml', 'tests/sandbox/Dockerfile.base', 'atty-guard/contrib/install.sh', 'src/modules/security_guard/data/**') }}
           restore-keys: |
             sandbox-buildx-
 
@@ -77,28 +79,28 @@ jobs:
           # signatures without re-reading workflow logs.
           make sandbox 2>&1 | tee /tmp/sandbox.log
 
-      # Surface the per-scenario FAIL lines as workflow annotations.
-      # The runner emits `FAIL: <reason>` on stderr (scenario.py's
-      # fail() helper) and `[runner] <name>: FAIL` on stdout — both
-      # captured in /tmp/sandbox.log via tee.
+      # Surface per-scenario failures as workflow annotations.
+      # Python over awk because FAIL: bodies span multiple lines
+      # (10-fresh-install dumps install.sh's stdout/stderr) and
+      # awk's record-per-line model can't keep them together.
       - name: Annotate failures
         if: failure()
         run: |
-          if [ ! -f /tmp/sandbox.log ]; then
-            echo "::error::sandbox produced no log"
-            exit 0
-          fi
-          # First annotate each FAIL line individually (multi-failure
-          # runs surface every failure, not just the first).
-          awk '/^FAIL: / {
-            sub(/^FAIL: /, "")
-            # Replace newlines in multi-line FAIL bodies with %0A
-            # so the annotation renders as one block.
-            gsub(/\n/, "%0A")
-            print "::error::sandbox: " $0
-          }' /tmp/sandbox.log
-          # Then dump the failed scenario names for at-a-glance triage.
-          grep -E '^\[runner\] [0-9].*: FAIL|TIMEOUT' /tmp/sandbox.log || true
+          test -f /tmp/sandbox.log || { echo "::error::sandbox produced no log"; exit 0; }
+          python3 - <<'PY'
+          import re, sys
+          log = open("/tmp/sandbox.log").read()
+          # FAIL: blocks run until the next FAIL: / [runner] /
+          # SystemExit / end-of-buffer. %0A is GitHub Actions'
+          # in-annotation newline.
+          blocks = re.split(r"^FAIL: ", log, flags=re.MULTILINE)[1:]
+          for blk in blocks:
+              body = re.split(r"\n(?=FAIL: |\[runner\] |Traceback)", blk, maxsplit=1)[0]
+              body = body.rstrip().replace("\n", "%0A")
+              print(f"::error::sandbox: {body}")
+          PY
+          # Failed scenario names for at-a-glance triage.
+          grep -E '^\[runner\] [0-9].*: (FAIL|TIMEOUT)' /tmp/sandbox.log || true
 
       - uses: actions/upload-artifact@v7
         if: failure()
@@ -109,9 +111,18 @@ jobs:
 
       # Save the buildx cache for next run. Without this the cache
       # key restores but never updates, so warm runs degrade to cold
-      # after the first Cargo.lock change.
+      # after the first Cargo.lock change. Skip when the new cache
+      # is empty (build failed before any layer wrote out) — without
+      # this guard a failed run would overwrite the previous run's
+      # good cache with nothing, poisoning future runs to cold-build
+      # forever.
       - name: Move cache
         if: always()
         run: |
+          if [ ! -d /tmp/.buildx-cache-new ] || \
+             [ -z "$(ls -A /tmp/.buildx-cache-new 2>/dev/null)" ]; then
+            echo "no new cache to save; keeping previous cache untouched"
+            exit 0
+          fi
           rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache 2>/dev/null || true
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
