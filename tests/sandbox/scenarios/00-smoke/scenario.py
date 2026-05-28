@@ -10,6 +10,7 @@ regresses — that's its only job. Real behaviour coverage lives in
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 
@@ -46,27 +47,17 @@ def read_until(proc: "ptyprocess.PtyProcess", marker: bytes, timeout: float,
 
 
 def drive_atty() -> str:
-    # printf wraps the echo with BEGIN/END markers so we can grep
-    # for the *executed* output, not the PTY's echo of the typed
-    # command (which would pass for the wrong reason).
+    # runuser resets the env of the target user, so PS1/TERM/HOME
+    # in subprocess env= would never reach atty. Stage them via
+    # `bash -c 'export …; exec atty …'` inside the user shell so
+    # they survive the user switch.
+    inner = (
+        "export PS1='\\$ ' TERM=xterm-256color HOME=/home/alice; "
+        "exec /usr/local/bin/atty bash --noprofile --norc"
+    )
     cmd = f"printf '%s %s\\n' {BEGIN} {END}"
     proc = ptyprocess.PtyProcess.spawn(
-        [
-            "runuser",
-            "-u",
-            "alice",
-            "--",
-            "/usr/local/bin/atty",
-            "bash",
-            "--noprofile",
-            "--norc",
-        ],
-        env={
-            **os.environ,
-            "PS1": r"\$ ",
-            "TERM": "xterm-256color",
-            "HOME": "/home/alice",
-        },
+        ["runuser", "-u", "alice", "--", "bash", "-c", inner],
         dimensions=(24, 80),
     )
 
@@ -74,14 +65,32 @@ def drive_atty() -> str:
     read_until(proc, b"$ ", timeout=4.0, sink=captured)
     proc.write(f"{cmd}\r".encode())
     if not read_until(proc, f"{BEGIN} {END}".encode(), timeout=4.0, sink=captured):
-        proc.write(b"exit\r")
+        try:
+            proc.kill(9)
+        except ptyprocess.PtyProcessError:
+            pass
         return bytes(captured).decode("utf-8", errors="replace")
     proc.write(b"exit\r")
 
-    try:
-        proc.wait()
-    except ptyprocess.PtyProcessError:
-        pass
+    # Bounded wait so a hung exit surfaces as a scenario failure
+    # rather than tripping the runner's 120s container timeout.
+    drain_deadline = time.time() + 3.0
+    while time.time() < drain_deadline:
+        if not proc.isalive():
+            break
+        try:
+            chunk = proc.read(4096)
+        except EOFError:
+            break
+        if chunk:
+            captured.extend(chunk)
+        else:
+            time.sleep(0.05)
+    if proc.isalive():
+        try:
+            proc.kill(9)
+        except ptyprocess.PtyProcessError:
+            pass
     try:
         while True:
             chunk = proc.read(4096)
@@ -94,6 +103,14 @@ def drive_atty() -> str:
     return bytes(captured).decode("utf-8", errors="replace")
 
 
+# Daemon log lines look like `<ts> <level> atty-guard: <message>`;
+# line-anchored regex avoids substring false positives like
+# "no error:" or "ERROR_NONE" in a future message.
+_DAEMON_FAIL_RE = re.compile(
+    r"^.*(?:error:|failed|rejected|ERROR\b)", re.MULTILINE | re.IGNORECASE
+)
+
+
 def main() -> None:
     with Daemon() as daemon:
         if not daemon.socket_ready():
@@ -103,13 +120,11 @@ def main() -> None:
         if f"{BEGIN} {END}" not in out:
             fail(f"atty did not propagate child output. captured={out!r}")
 
-        # Daemon emits `atty-guard: <level> — <reason>` style lines;
-        # `error:` / `failed` / `rejected` cover the real failure
-        # signatures in atty-guard/src/main.rs and server.rs.
-        for needle in ("error:", "failed", "rejected"):
-            if daemon.log_contains(needle):
-                daemon._dump_log()
-                fail(f"daemon logged {needle!r} during smoke run")
+        log_text = daemon.read_log()
+        match = _DAEMON_FAIL_RE.search(log_text)
+        if match:
+            daemon.dump_log()
+            fail(f"daemon logged failure signature: {match.group(0)!r}")
 
     print("PASS: 00-smoke")
 

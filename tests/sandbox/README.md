@@ -5,10 +5,13 @@ Real binaries, real users, real UDS — the bits unit tests can't reach.
 ## Running
 
 ```sh
-make build             # zig-out/bin/atty
-make build-guard       # atty-guard/target/release/atty-guard
+make build             # zig-out/bin/atty (musl-static, portable)
 make sandbox           # build base image + run all scenarios
 ```
+
+atty-guard is built **inside the container** (see `Dockerfile.base`'s
+`guard-builder` stage) so its glibc matches the runtime stage's
+glibc; no host-side `make build-guard` step is needed.
 
 `make sandbox` is idempotent: re-running uses cached docker layers
 (< 10s on warm cache). To rebuild from scratch, delete the image:
@@ -62,12 +65,14 @@ Planned (separate PRs):
 The base image (`atty-sandbox:base`) is built from
 `Dockerfile.base`. Inputs:
 
-- `tests/sandbox/.build/atty` — staged from `zig-out/bin/atty`.
-- `tests/sandbox/.build/atty-guard` — staged from
-  `atty-guard/target/release/atty-guard`.
+- `tests/sandbox/.build/atty` — staged from `zig-out/bin/atty`
+  (musl-static, portable across libc).
+- `atty-guard/` source — compiled by the `guard-builder` stage
+  against Ubuntu 24.04's glibc so it loads cleanly in the
+  runtime stage.
 
-The runner stages these before each `docker build`. The
-`.build/` directory is gitignored.
+The runner stages atty into `.build/` before each `docker build`.
+The `.build/` directory is gitignored.
 
 Image contents:
 - Ubuntu 24.04 base.

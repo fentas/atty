@@ -7,6 +7,7 @@ running as root would silently skip a real gate).
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -46,11 +47,12 @@ class Daemon:
             self.extra_args.extend(["--config", str(config_path)])
         self.env = env
         self.proc: subprocess.Popen | None = None
-        # Each Daemon instance gets its own log so restart-style
-        # scenarios can compare pre/post output without clobbering.
+        # Per-instance log so restart-style scenarios can compare
+        # pre/post output without clobbering.
         fd, log_path = tempfile.mkstemp(prefix="atty-guard.", suffix=".log")
         os.close(fd)
         self.stderr_log = Path(log_path)
+        self._log_fd = None
 
     def __enter__(self) -> "Daemon":
         cmd = [
@@ -66,16 +68,16 @@ class Daemon:
             *self.extra_args,
         ]
         run_env = {**os.environ, **(self.env or {})}
-        log_fd = open(self.stderr_log, "w")
+        self._log_fd = open(self.stderr_log, "w")
         self.proc = subprocess.Popen(
             cmd,
-            stdout=log_fd,
+            stdout=self._log_fd,
             stderr=subprocess.STDOUT,
             env=run_env,
             preexec_fn=os.setsid,
         )
         if not self.wait_socket(timeout=5.0):
-            self._dump_log()
+            self.dump_log()
             raise RuntimeError(f"daemon socket {self.socket} not ready within 5s")
         return self
 
@@ -89,6 +91,12 @@ class Daemon:
                     os.killpg(self.proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+        if self._log_fd is not None:
+            try:
+                self._log_fd.close()
+            except OSError:
+                pass
+            self._log_fd = None
 
     def wait_socket(self, timeout: float = 5.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -101,16 +109,23 @@ class Daemon:
     def socket_ready(self) -> bool:
         return os.path.exists(self.socket)
 
-    def log_contains(self, needle: str) -> bool:
+    def read_log(self) -> str:
         try:
-            return needle in self.stderr_log.read_text()
+            return self.stderr_log.read_text()
         except FileNotFoundError:
-            return False
+            return ""
 
-    def _dump_log(self) -> None:
-        try:
-            print("---- atty-guard log ----")
-            print(self.stderr_log.read_text())
-            print("---- end log ----")
-        except FileNotFoundError:
-            pass
+    def log_contains(self, needle: str) -> bool:
+        return needle in self.read_log()
+
+    def log_matches(self, pattern: str | re.Pattern[str]) -> bool:
+        """Line-anchored regex match — preferred over log_contains
+        for failure-signature checks (substring match has too many
+        false positives for words like 'error' / 'ERROR')."""
+        rx = pattern if isinstance(pattern, re.Pattern) else re.compile(pattern, re.MULTILINE)
+        return rx.search(self.read_log()) is not None
+
+    def dump_log(self) -> None:
+        print("---- atty-guard log ----")
+        print(self.read_log())
+        print("---- end log ----")

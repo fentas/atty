@@ -1,5 +1,8 @@
-# Sandbox docker build context is REPO_ROOT — keep it small.
-# Dockerfile.base only needs:
+# Per-Dockerfile ignore (BuildKit picks up <Dockerfile>.dockerignore
+# next to the Dockerfile). Scoped to the sandbox build so the
+# top-level Dockerfile keeps its full repo context.
+#
+# The sandbox image only needs:
 #   - atty-guard/ (Rust sidecar source)
 #   - src/modules/security_guard/data/ (shared atom corpus)
 #   - tests/sandbox/.build/atty (staged host build)
