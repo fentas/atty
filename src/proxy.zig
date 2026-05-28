@@ -47,6 +47,7 @@ const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
+const DecstbmWatcher = @import("decstbm_watcher.zig").DecstbmWatcher;
 const CursorTracker = @import("cursor_tracker.zig").CursorTracker;
 const cursor_dsr = @import("cursor_dsr.zig");
 const DsrParser = cursor_dsr.DsrParser;
@@ -286,6 +287,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // enters or exits, and the proxy uses that edge to flip the
     // slave PTY size + suspend / resume statusbar painting.
     var alt_screen = AltScreen.init();
+
+    // Issue #249 — inline TUIs (Claude Code, fzf in some modes,
+    // anything that paints over the primary screen without
+    // entering alt-screen) can emit their own DECSTBM and
+    // evaporate atty's reserved bottom region. The watcher flags
+    // any external CSI...r; the tick consumes the flag and
+    // re-asserts atty's scroll region via `sb.reassertDecstbm`.
+    // Cheap: ~6-byte emission per detected reset, save/restore
+    // wrapped to preserve the inner app's cursor.
+    var decstbm_watcher = DecstbmWatcher.init();
 
     // OSC 7 cwd reports — emitted by Ghostty's shell-integration,
     // VS Code's snippet, ble.sh, zsh4humans, kitty's integration,
@@ -1435,15 +1446,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const can_fast = !has_esc and
                     osc133_tracker.canFastPath() and
                     alt_screen.canFastPath() and
-                    osc7_tracker.canFastPath();
+                    osc7_tracker.canFastPath() and
+                    decstbm_watcher.canFastPath();
                 if (can_fast) {
                     osc133_tracker.onFastPath(output.len);
                     alt_screen.onFastPath(output.len);
                     osc7_tracker.onFastPath(output.len);
+                    decstbm_watcher.onFastPath(output.len);
                 } else {
                     osc133_tracker.feed(output);
                     alt_screen.feed(output);
                     osc7_tracker.feed(output);
+                    decstbm_watcher.feed(output);
                 }
                 cursor_tracker.feed(output);
                 // Only surface the row to modules on real TTY runs
@@ -1749,6 +1763,28 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
                 if (statusbar) |*sb| {
                     if (!alt_screen.active) {
+                        // Issue #249 — if an inline TUI just clobbered
+                        // DECSTBM (Claude Code etc.), re-assert atty's
+                        // scroll region BEFORE the next render so the
+                        // statusbar row stays pinned to the bottom and
+                        // future scrolls from the inner app don't push
+                        // it into the visible scrollback. ALWAYS drain
+                        // the latch (call takeClobbered unconditionally
+                        // for its side effect) so it doesn't fire stale
+                        // on overlay close — but only emit the DECSTBM
+                        // bytes when no module overlay owns stdout, to
+                        // avoid layering scroll-region resets onto an
+                        // overlay-painted alt-screen surface (terminals
+                        // that scope DECSTBM globally would see the
+                        // reset bleed across buffers).
+                        const clobbered = decstbm_watcher.takeClobbered();
+                        if (clobbered and !ctx.module_overlay_active) {
+                            var w_decstbm: std.Io.Writer = .fixed(&out_buf);
+                            sb.reassertDecstbm(&w_decstbm) catch {};
+                            if (w_decstbm.end > 0) {
+                                writeAll(posix.STDOUT_FILENO, out_buf[0..w_decstbm.end]) catch {};
+                            }
+                        }
                         // Shell output may have scrolled or overwritten our
                         // reserved row — force a repaint.
                         sb.last_valid = false;

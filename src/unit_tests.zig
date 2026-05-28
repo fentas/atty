@@ -15,6 +15,7 @@ test {
     _ = @import("ghost_list.zig");
     _ = @import("osc133.zig");
     _ = @import("altscreen.zig");
+    _ = @import("decstbm_watcher.zig");
     _ = @import("cursor_tracker.zig");
     _ = @import("cursor_dsr.zig");
     _ = @import("subprocess.zig");

@@ -370,3 +370,35 @@ test "expired transient is dropped on the next render" {
     try testing.expect(std.mem.indexOf(u8, out, "atty") != null);
     try testing.expectEqual(@as(usize, 0), b.transient_len); // cleared by render
 }
+
+test "reassertDecstbm emits save+DECSTBM+restore, invalidates render caches" {
+    // Issue #249: after an inline TUI clobbers DECSTBM the statusbar
+    // tick should re-emit atty's scroll region without erasing rows
+    // (the inner app may have legitimate content drawn across the
+    // screen). Verify the byte sequence + that both render-cache
+    // invalidation flags flip so the next render() actually re-paints.
+    var b = StatusBar.init(24, 80, 2, .{});
+    // Set text/hint first so we can confirm the cache invalidation
+    // actually happens (vs. just being zero-initialised).
+    b.setText("atty");
+    var paint_buf: [512]u8 = undefined;
+    var paint_w = std.Io.Writer.fixed(&paint_buf);
+    try b.render(&paint_w);
+    try testing.expect(b.last_valid);
+
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try b.reassertDecstbm(&w);
+    const out = buf[0..w.end];
+
+    // Save_cursor → DECSTBM(1, effectiveRows) → restore_cursor.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[s") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[u") != null);
+    // effectiveRows() = 24 - 2 = 22.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[1;22r") != null);
+    // No row-erase (matches the explicit non-`reactivate` contract).
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[K") == null);
+    // Both caches invalidated so the next render() actually emits.
+    try testing.expect(!b.last_valid);
+    try testing.expect(!b.last_hint_valid);
+}

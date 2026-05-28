@@ -388,6 +388,21 @@ pub const StatusBar = struct {
         self.last_valid = false;
     }
 
+    /// Re-pin DECSTBM without touching reserved-row content. Used
+    /// when an inline TUI's own DECSTBM has clobbered our region;
+    /// erasing rows here would blank legitimate inner-app content
+    /// on the primary screen. Cache invalidation forces the next
+    /// `render()` to re-paint — a prior status row that got
+    /// scrolled into scrollback is no longer at row=rows, and
+    /// `text_unchanged` would otherwise no-op.
+    pub fn reassertDecstbm(self: *StatusBar, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll("\x1B[s");
+        try w.print("\x1B[1;{d}r", .{self.effectiveRows()});
+        try w.writeAll("\x1B[u");
+        self.last_valid = false;
+        self.last_hint_valid = false;
+    }
+
     /// Paint the status text into the last reserved row. Idempotent —
     /// if the text matches the last paint we emit zero bytes. When a
     /// transient message is active and not expired, it overrides
