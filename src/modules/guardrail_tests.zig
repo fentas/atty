@@ -553,19 +553,14 @@ test "isEnterOnly accepts pure CR/LF, rejects everything else" {
     try testing.expect(!G.isEnterOnly("\x1b[200~hi\x1b[201~\r"));
 }
 
-test "armed-state paste with appended CR re-checks rules instead of forwarding (issue #269)" {
-    // The bypass: user types `sudo apt update`, presses Enter
-    // (matches sudo-prefix .confirm, armed). Then a paste of a
-    // fork-bomb + CR arrives — pre-fix the armed branch
-    // returned .forward because the chunk contained CR, and the
-    // shell would execute the combined dangerous string
-    // WITHOUT re-running findRule.
-    //
-    // Post-fix the armed branch only forwards on a PURE Enter
-    // chunk. A mixed chunk falls through to findRule on the
-    // current buffer; the fork-bomb substring matches a .block
-    // rule → Ctrl+U replaces the chunk, banner emitted, no
-    // execution.
+test "armed-state paste with appended CR re-checks rules instead of forwarding" {
+    // Invariant: the rule a confirm grants is only valid for the
+    // exact buffer it was armed against. A mixed chunk (paste
+    // bytes ending in CR) changes the buffer and must trigger a
+    // fresh findRule on the new line. Without this, a paste of
+    // `; <dangerous>` + CR after `sudo apt update` (confirmed)
+    // would execute the combined string with the original
+    // arming's grant.
     const G = configure(.{});
     var rt = try G.attach(testing.allocator, test_io);
     defer G.detach(&rt, test_io);
@@ -599,8 +594,8 @@ test "armed-state paste with appended CR re-checks rules instead of forwarding (
     _ = line.applyInput("; :(){ :|:& };:\r");
     const paste_action = try G.onInput(&rt, &ctx, "; :(){ :|:& };:\r");
 
-    // Post-fix: fork-bomb rule fires .block → replace with Ctrl+U.
-    // Pre-fix this returned .forward — THE BUG.
+    // Fork-bomb rule fires .block → Ctrl+U replaces the chunk so
+    // the shell never sees the dangerous bytes.
     switch (paste_action) {
         .replace => |bytes| try testing.expectEqualSlices(u8, "\x15", bytes),
         else => return error.TestFailedBypassActive,
@@ -612,11 +607,11 @@ test "armed-state paste with appended CR re-checks rules instead of forwarding (
     try testing.expect(std.mem.indexOf(u8, sink.buf.items, "blocked.") != null);
 }
 
-test "armed-state paste with new .confirm rule re-arms instead of forwarding (issue #269 companion)" {
-    // Companion regression: when the pasted-with-CR content
-    // matches a .confirm rule (not .block), the fix should
-    // disarm + RE-ARM on the new rule. Pre-fix: forwarded
-    // blindly without re-checking.
+test "armed-state paste with new .confirm rule re-arms instead of forwarding" {
+    // Companion invariant: when the pasted-with-CR content matches
+    // a .confirm rule (not .block), the armed branch must disarm
+    // and RE-ARM on the new rule rather than forwarding the
+    // already-granted (stale) confirmation.
     const G = configure(.{});
     var rt = try G.attach(testing.allocator, test_io);
     defer G.detach(&rt, test_io);
@@ -652,8 +647,8 @@ test "armed-state paste with new .confirm rule re-arms instead of forwarding (is
 }
 
 test "armed-state pure CR confirms (preserves existing happy path)" {
-    // Regression guard: ensure the H2 fix doesn't break the
-    // normal "press Enter again to confirm" flow.
+    // Regression guard: pure-Enter input on an armed rule still
+    // forwards as confirmation.
     const G = configure(.{});
     var rt = try G.attach(testing.allocator, test_io);
     defer G.detach(&rt, test_io);

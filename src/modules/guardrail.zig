@@ -143,11 +143,9 @@ pub fn configure(comptime cfg: Config) type {
             };
 
             if (!has_enter) {
-                // No Enter anywhere — plain typing. Any prior arm
-                // is invalidated by the buffer change, but the
-                // user hasn't tried to submit yet so we just
-                // disarm + forward. The next Enter will re-run
-                // findRule on the new buffer.
+                // Plain typing invalidates any prior arm: the buffer
+                // shape that was checked is no longer what the shell
+                // will see on the next Enter.
                 rt.armed = false;
                 return .forward;
             }
@@ -168,15 +166,11 @@ pub fn configure(comptime cfg: Config) type {
 
             if (rt.armed) {
                 rt.armed = false;
-                // Only a pure CR/LF chunk is a legitimate second-press
-                // confirmation. A mixed chunk (paste containing `\r`
-                // appended to non-Enter bytes) means the buffer has
-                // CHANGED since the rule was armed — the user's first
-                // Enter confirmed `sudo apt update`, but the paste
-                // could have appended `; rm -rf /` before the `\r`,
-                // and the shell would execute the combined string.
-                // Fall through to a fresh findRule on the new line
-                // so the appended-and-dangerous shape is caught.
+                // A confirm consumes the rule's grant only when the
+                // chunk is a pure Enter. Anything else means the
+                // buffer changed since arming, so the previously
+                // checked shape is no longer what the shell will
+                // run — re-classify on the live buffer instead.
                 if (isEnterOnly(input)) {
                     if (rt.armed_rule_idx < effective_rules.len) {
                         const armed_rule = effective_rules[rt.armed_rule_idx];
