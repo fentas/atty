@@ -210,16 +210,51 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-/// Parse a TOML config file. Always available (the parser dep
-/// became non-optional after gpt-review #032 — previously the
-/// non-`tier2-onnx` build read the file but discarded its
-/// contents, silently dropping operator `[server]`, `[accumulator]`,
-/// and non-ONNX `[tier2]` policy).
+/// Hard cap on config file size. Defense-in-depth: even though
+/// the path is operator-set (sudo-only in production), reading
+/// /dev/urandom, a fifo, or a misplaced large file via
+/// `read_to_string` would OOM the daemon at startup or hang
+/// indefinitely. 1 MiB is well past any realistic atty-guard
+/// config (real-world configs are < 4 KiB).
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// Parse a TOML config file. Always available — gpt-review #032
+/// made the parser dep non-optional; previously the non-
+/// `tier2-onnx` build read the file but discarded its contents,
+/// silently dropping operator `[server]`, `[accumulator]`, and
+/// non-ONNX `[tier2]` policy.
 ///
-/// I/O and parse failures are both hard errors so explicit
-/// `--config` consistently fails closed: missing/unreadable path
-/// → `LoadError::Io`, malformed TOML → `LoadError::Parse`.
+/// Failure modes are all hard errors so explicit `--config`
+/// consistently fails closed:
+///   - missing / unreadable path → `LoadError::Io`
+///   - non-regular file (fifo, directory, char/block device) →
+///     `LoadError::Io` with EINVAL — refuses to read from
+///     anything that could block or OOM us
+///   - file > `MAX_CONFIG_BYTES` → `LoadError::Io` with
+///     `FileTooLarge`
+///   - malformed TOML → `LoadError::Parse`
 pub fn load(path: &Path) -> Result<Config, LoadError> {
+    let meta = std::fs::metadata(path).map_err(LoadError::Io)?;
+    if !meta.is_file() {
+        return Err(LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} is not a regular file (refusing to read from fifo/dir/device)",
+                path.display()
+            ),
+        )));
+    }
+    if meta.len() > MAX_CONFIG_BYTES {
+        return Err(LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!(
+                "{} is {} bytes (cap is {})",
+                path.display(),
+                meta.len(),
+                MAX_CONFIG_BYTES,
+            ),
+        )));
+    }
     let text = std::fs::read_to_string(path).map_err(LoadError::Io)?;
     toml::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))
 }
@@ -320,6 +355,78 @@ block_threshold = 0.97
         match load(&missing) {
             Err(LoadError::Io(_)) => {}
             other => panic!("expected LoadError::Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_parses_onnx_subtable_in_every_build() {
+        // Even in non-`tier2-onnx` builds the `[tier2.onnx]`
+        // subtable must Deserialize cleanly — `OnnxConfig` is
+        // parsed in every build flavor, only READS of its fields
+        // are gated behind the feature. A future refactor that
+        // cfg-gates the struct definition would silently break
+        // operators who supply ONNX paths in a non-feature build
+        // and expect a recognisable parse error rather than a
+        // mysterious "unknown field" rejection.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(
+            br#"
+[tier2.onnx]
+model = "securebert2"
+model_path = "/var/lib/atty-guard/m.onnx"
+tokenizer_path = "/var/lib/atty-guard/t.json"
+max_tokens = 2048
+warn_threshold = 0.4
+block_threshold = 0.88
+"#,
+        )
+        .unwrap();
+        let cfg = load(tmp.path()).expect("OnnxConfig must parse in all builds");
+        assert_eq!(cfg.tier2.onnx.model, "securebert2");
+        assert_eq!(cfg.tier2.onnx.max_tokens, 2048);
+        assert!((cfg.tier2.onnx.block_threshold - 0.88).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_refuses_oversize_file() {
+        // Defense-in-depth: a misplaced `--config` pointing at a
+        // huge file (or /dev/urandom) would OOM the daemon. Cap
+        // exceeded = hard error.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        // Write just over the cap. Use a comment line so the
+        // content is still valid TOML if the cap were lifted.
+        let mut payload = String::from("# ");
+        payload.push_str(&"x".repeat(MAX_CONFIG_BYTES as usize));
+        tmp.write_all(payload.as_bytes()).unwrap();
+        let err = load(tmp.path()).expect_err("oversize file must fail");
+        match err {
+            LoadError::Io(e) => {
+                assert!(
+                    e.to_string().contains("cap is"),
+                    "expected cap message, got {e}"
+                );
+            }
+            other => panic!("expected LoadError::Io, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_non_regular_file() {
+        // Pointing --config at a directory (operator typo) or a
+        // fifo (mkfifo'd by mistake or maliciously) would block /
+        // misbehave under `read_to_string`. Reject before reading.
+        let dir = tempfile::tempdir().unwrap();
+        match load(dir.path()) {
+            Err(LoadError::Io(e)) => {
+                assert!(
+                    e.to_string().contains("not a regular file"),
+                    "expected filetype error, got {e}"
+                );
+            }
+            other => panic!("expected non-regular-file error, got {other:?}"),
         }
     }
 }
