@@ -101,6 +101,10 @@ def discover_scenarios() -> list[Path]:
     )
 
 
+_DOCKER_JSON_KEYS = {"privileged", "cap_add", "security_opt", "volumes"}
+_VOLUME_KEYS = {"src", "dst", "rw"}
+
+
 def load_scenario_docker_opts(script: Path) -> list[str]:
     """Load extra `docker run` flags for a scenario from an
     optional `docker.json` sibling. eBPF scenarios need
@@ -111,12 +115,18 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
        "volumes": [{"src": "/sys/fs/bpf", "dst": "/sys/fs/bpf",
                     "rw": true}],
        "security_opt": ["apparmor=unconfined"]}
-    Everything is optional.
+    Unknown keys reject loudly — a typo like `cap-add` would
+    otherwise silently drop the cap and produce a confusing
+    runtime "permission denied" inside the scenario.
     """
     meta = script.parent / "docker.json"
     if not meta.exists():
         return []
     cfg = json.loads(meta.read_text())
+    unknown = set(cfg) - _DOCKER_JSON_KEYS - {"_comment"}
+    if unknown:
+        die(f"{meta}: unknown keys {sorted(unknown)} — "
+            f"allowed: {sorted(_DOCKER_JSON_KEYS)} (plus '_comment')")
     flags: list[str] = []
     if cfg.get("privileged"):
         flags.append("--privileged")
@@ -125,6 +135,12 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
     for opt in cfg.get("security_opt", []):
         flags.extend(["--security-opt", opt])
     for vol in cfg.get("volumes", []):
+        bad_keys = set(vol) - _VOLUME_KEYS
+        if bad_keys:
+            die(f"{meta}: volume {vol!r} has unknown keys "
+                f"{sorted(bad_keys)} — allowed: {sorted(_VOLUME_KEYS)}")
+        if "src" not in vol or "dst" not in vol:
+            die(f"{meta}: volume {vol!r} missing src or dst")
         suffix = "" if vol.get("rw") else ":ro"
         flags.extend(["-v", f"{vol['src']}:{vol['dst']}{suffix}"])
     return flags
