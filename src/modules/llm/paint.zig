@@ -448,7 +448,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // intent — we cap by what the user SEES.
             if (!looks_like_envelope) {
                 const slice = pw.truncateToCols(c, 1024);
-                try writeSanitized(w, slice);
+                // #311 — observation turns (command output) keep
+                // their SGR colors + newlines so cargo/git/grep
+                // output renders styled in the chat history. All
+                // other turn kinds (user prose, raw fallbacks)
+                // stay strict-sanitized.
+                if (turn.kind == .observation) {
+                    try pw.writeSanitizedAllowSgr(w, slice);
+                } else {
+                    try writeSanitized(w, slice);
+                }
                 if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             }
