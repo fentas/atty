@@ -383,23 +383,47 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         continue;
                     }
                     const n = m_meta.name;
-                    w.print(
-                        "  {s}  {s}-{s}-{s} {s}:{s}:{s}  \x1B[2m{s}\x1B[0m{s}\r\n",
-                        .{
-                            sel_open,
-                            n[0..4],
-                            n[4..6],
-                            n[6..8],
-                            n[9..11],
-                            n[11..13],
-                            n[13..15],
-                            n[16..22],
-                            sel_close,
-                        },
-                    ) catch {
-                        aw.deinit();
-                        return false;
-                    };
+                    // Empty preview falls back to the timestamp-only
+                    // row so the picker stays scannable when the
+                    // first-user-turn probe couldn't extract content.
+                    if (m_meta.preview.len > 0) {
+                        w.print(
+                            "  {s}  {s}-{s}-{s} {s}:{s}:{s}  \x1B[2m{s} \u{00B7} {s}\x1B[0m{s}\r\n",
+                            .{
+                                sel_open,
+                                n[0..4],
+                                n[4..6],
+                                n[6..8],
+                                n[9..11],
+                                n[11..13],
+                                n[13..15],
+                                n[16..22],
+                                m_meta.preview,
+                                sel_close,
+                            },
+                        ) catch {
+                            aw.deinit();
+                            return false;
+                        };
+                    } else {
+                        w.print(
+                            "  {s}  {s}-{s}-{s} {s}:{s}:{s}  \x1B[2m{s}\x1B[0m{s}\r\n",
+                            .{
+                                sel_open,
+                                n[0..4],
+                                n[4..6],
+                                n[6..8],
+                                n[9..11],
+                                n[11..13],
+                                n[13..15],
+                                n[16..22],
+                                sel_close,
+                            },
+                        ) catch {
+                            aw.deinit();
+                            return false;
+                        };
+                    }
                 }
             }
 

@@ -501,16 +501,21 @@ pub fn parseRecord(allocator: std.mem.Allocator, line: []const u8) !LoadedRecord
 }
 
 /// Metadata for one persisted dialog file, surfaced to the recall
-/// picker. `path` and `name` are owned by the caller; `freeDialog
-/// Meta` releases them.
+/// picker. `path` / `name` / `preview` are owned by the caller;
+/// `freeDialogMeta` releases them. `preview` is the first user
+/// turn's content (truncated, control-byte-stripped) — empty when
+/// the file is unreadable, the first record isn't a user turn, or
+/// the content is empty.
 pub const DialogMeta = struct {
     path: []u8, // owned, absolute
     name: []u8, // owned, basename only (no .jsonl suffix)
+    preview: []u8, // owned; may be empty
 };
 
 pub fn freeDialogMeta(allocator: std.mem.Allocator, m: DialogMeta) void {
     allocator.free(m.path);
     allocator.free(m.name);
+    allocator.free(m.preview);
 }
 
 pub fn freeDialogMetaList(allocator: std.mem.Allocator, list: []DialogMeta) void {
@@ -569,7 +574,12 @@ pub fn listDialogs(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) ![
         const child_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, entry.name });
         const stem_len = entry.name.len - ".jsonl".len;
         const name_owned = try allocator.dupe(u8, entry.name[0..stem_len]);
-        try list.append(allocator, .{ .path = child_path, .name = name_owned });
+        // Read a bounded prefix via libc (the std.Io.File reader
+        // we hold open for stat doesn't expose a plain read here).
+        // Best-effort — any I/O / parse / shape failure yields an
+        // empty preview, matching the picker's render contract.
+        const preview = readFirstUserPreview(allocator, child_path) catch try allocator.alloc(u8, 0);
+        try list.append(allocator, .{ .path = child_path, .name = name_owned, .preview = preview });
     }
 
     const result = try list.toOwnedSlice(allocator);
@@ -580,6 +590,65 @@ pub fn listDialogs(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) ![
 
 fn sortDialogMetaNewestFirst(_: void, a: DialogMeta, b: DialogMeta) bool {
     return std.mem.lessThan(u8, b.name, a.name);
+}
+
+/// Read up to PREVIEW_PROBE_BYTES from the file at `path` and
+/// return the first user-turn content (truncated, control-byte-
+/// stripped, owned by `allocator`). Empty slice when no user turn
+/// is found in the prefix, the parse fails, or the file is
+/// unreadable. The caller takes ownership.
+fn readFirstUserPreview(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const PREVIEW_PROBE_BYTES: usize = 4096;
+    const PREVIEW_MAX_COLS: usize = 64;
+
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    const fd = open(path_z.ptr, O_RDONLY);
+    if (fd < 0) return allocator.alloc(u8, 0);
+    defer _ = close(fd);
+
+    var buf: [PREVIEW_PROBE_BYTES]u8 = undefined;
+    var n: usize = 0;
+    while (n < buf.len) {
+        const got = read(fd, buf[n..].ptr, buf.len - n);
+        if (got <= 0) break;
+        n += @intCast(got);
+    }
+    const data = buf[0..n];
+
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        const Wire = struct {
+            kind: []const u8,
+            content: []const u8,
+        };
+        const parsed = std.json.parseFromSlice(Wire, allocator, line, .{
+            .ignore_unknown_fields = true,
+        }) catch continue;
+        defer parsed.deinit();
+        if (!std.mem.eql(u8, parsed.value.kind, "user")) continue;
+        const raw = parsed.value.content;
+        if (raw.len == 0) return allocator.alloc(u8, 0);
+        // Strip ASCII control bytes (incl. \n, \r, \t) so the
+        // preview stays on one row, and truncate to PREVIEW_MAX_COLS
+        // bytes — close enough to columns for typical English input
+        // without dragging in the full UTF-8 width calculator.
+        const take = @min(raw.len, PREVIEW_MAX_COLS);
+        var out = try allocator.alloc(u8, take);
+        errdefer allocator.free(out);
+        var j: usize = 0;
+        for (raw[0..take]) |c| {
+            if (c < 0x20 or c == 0x7F) {
+                out[j] = ' ';
+            } else {
+                out[j] = c;
+            }
+            j += 1;
+        }
+        return out;
+    }
+    return allocator.alloc(u8, 0);
 }
 
 /// `YYYYMMDDTHHMMSS-XXXXXX.jsonl` — 15 + 1 + 6 + 6 = 28 bytes.
