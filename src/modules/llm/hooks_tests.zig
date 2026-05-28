@@ -2591,10 +2591,21 @@ test "chat_recall picker: CSI Up/Down moves the selection (#318)" {
     const dir: []const u8 = "/tmp/atty-recall-arrow-test";
     const dz = try testing.allocator.dupeZ(u8, dir);
     defer testing.allocator.free(dz);
+    // Pre-cleanup: unlink the staged JSONL files from a possible
+    // prior crashed run (rmdir below would otherwise hit ENOTEMPTY
+    // and the subsequent mkdir would return EEXIST). Mirrors the
+    // pattern in `chat_recall: loads a pre-existing dialog file`.
+    const fnames = [_][]const u8{ "20260101T000000-aaaaaa.jsonl", "20260102T000000-bbbbbb.jsonl" };
+    for (fnames) |fname| {
+        const p = std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, fname }) catch return error.OutOfMemory;
+        defer testing.allocator.free(p);
+        const pz = testing.allocator.dupeZ(u8, p) catch return error.OutOfMemory;
+        defer testing.allocator.free(pz);
+        _ = std.c.unlink(pz.ptr);
+    }
     _ = std.c.rmdir(dz.ptr);
     try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
     // Stage TWO dialogs so the picker has rows to navigate.
-    const fnames = [_][]const u8{ "20260101T000000-aaaaaa.jsonl", "20260102T000000-bbbbbb.jsonl" };
     var paths_z: [2][:0]u8 = undefined;
     for (fnames, 0..) |fname, idx| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, fname });
@@ -2673,8 +2684,6 @@ test "chat_recall: Alt+R auto-closes the inline panel instead of refusing (#318)
     const dir: []const u8 = "/tmp/atty-recall-handoff-test";
     const dz = try testing.allocator.dupeZ(u8, dir);
     defer testing.allocator.free(dz);
-    _ = std.c.rmdir(dz.ptr);
-    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
     const dialog_path = try std.fmt.allocPrint(
         testing.allocator,
         "{s}/20260101T000000-cccccc.jsonl",
@@ -2683,6 +2692,11 @@ test "chat_recall: Alt+R auto-closes the inline panel instead of refusing (#318)
     defer testing.allocator.free(dialog_path);
     const dpz = try testing.allocator.dupeZ(u8, dialog_path);
     defer testing.allocator.free(dpz);
+    // Pre-cleanup: unlink the staged JSONL from any prior crashed
+    // run so the rmdir doesn't hit ENOTEMPTY + mkdir EEXIST.
+    _ = std.c.unlink(dpz.ptr);
+    _ = std.c.rmdir(dz.ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
     const fd = std.c.open(dpz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
     try testing.expect(fd >= 0);
     _ = std.c.write(fd, "{\"kind\":\"user\",\"content\":\"x\"}\n", 30);
