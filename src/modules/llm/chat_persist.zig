@@ -276,8 +276,8 @@ pub fn readBytes(fd: c_int, buf: [*]u8, count: usize) isize {
 /// (allocated via `allocator`). Returns an empty list when the file
 /// is missing / unreadable / empty.
 ///
-/// Reserved for the recall picker landing in a follow-up PR — no
-/// production caller invokes this in the per-dialog-file design.
+/// Used by `loadDialogFromMeta` to hydrate a saved session at chat-
+/// open time; the recall picker is the other production caller.
 ///
 /// Implementation: when the file is larger than `max_bytes`, seek
 /// to `size - max_bytes` and discard the (necessarily-partial)

@@ -1109,6 +1109,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// burn a wasted API call AND advance `shared.fixture_idx`,
         /// desynchronising the fixture cursor across cancel-aware
         /// e2e scenarios).
+        ///
+        /// What this does NOT touch: `rt.osc133_capture` is runtime-
+        /// scoped (one capture window per shell, not per dialog) and
+        /// owned by hooks.zig's OSC 133 stream handler. Its lifecycle
+        /// is `attach` → `detach`. Resetting it here would lose the
+        /// active prompt-mark window mid-cancel.
         pub fn dialogReset(rt: *Runtime, io: std.Io) void {
             rt.shared.mutex.lockUncancelable(io);
             rt.shared.req_gen +%= 1;
