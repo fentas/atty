@@ -1,0 +1,128 @@
+name: Sandbox
+
+# End-to-end scenarios in a docker container with real atty + atty-guard
+# binaries. Catches what unit tests can't: cross-UID gates, sudo-mediated
+# CLI, install-script integration, daemon lifecycle, V2-J auto-Block.
+#
+# Path-gated: skipped on PRs that don't touch the sandbox surface (LLM-
+# only PRs, docs-only PRs). Keeps the cost-per-PR low while still
+# protecting the security-critical code paths.
+
+on:
+  pull_request:
+    paths:
+      - 'atty-guard/**'
+      - 'src/modules/security_guard/**'
+      - 'tests/sandbox/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'Makefile'
+      - '.github/workflows/sandbox.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'atty-guard/**'
+      - 'src/modules/security_guard/**'
+      - 'tests/sandbox/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'Makefile'
+      - '.github/workflows/sandbox.yml'
+
+concurrency:
+  group: sandbox-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox:
+    name: sandbox e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # docker-container driver is required for local-disk cache
+      # export (the default driver rejects --cache-to). setup-buildx
+      # makes it the active builder.
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      # Sandbox base image takes ~3 min cold (Rust toolchain install +
+      # atty-guard release build with tier2-onnx + osv-live +
+      # atoms-fetch features). Layer cache covers all but the actual
+      # build step on warm runs.
+      - name: Restore docker layer cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          # Cargo.toml in the key so a feature-flag flip (osv-live
+          # on/off) invalidates even when Cargo.lock didn't change.
+          key: sandbox-buildx-${{ hashFiles('atty-guard/Cargo.lock', 'atty-guard/Cargo.toml', 'tests/sandbox/Dockerfile.base', 'atty-guard/contrib/install.sh', 'src/modules/security_guard/data/**') }}
+          restore-keys: |
+            sandbox-buildx-
+
+      - name: Run sandbox scenarios
+        id: sandbox
+        env:
+          SANDBOX_BUILDX_CACHE_FROM: /tmp/.buildx-cache
+          SANDBOX_BUILDX_CACHE_TO: /tmp/.buildx-cache-new
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/.buildx-cache /tmp/.buildx-cache-new
+          # Capture full output so the post-step can extract FAIL
+          # signatures without re-reading workflow logs.
+          make sandbox 2>&1 | tee /tmp/sandbox.log
+
+      # Surface per-scenario failures as workflow annotations.
+      # Python over awk because FAIL: bodies span multiple lines
+      # (10-fresh-install dumps install.sh's stdout/stderr) and
+      # awk's record-per-line model can't keep them together.
+      - name: Annotate failures
+        if: failure()
+        run: |
+          test -f /tmp/sandbox.log || { echo "::error::sandbox produced no log"; exit 0; }
+          python3 - <<'PY'
+          import re, sys
+          log = open("/tmp/sandbox.log").read()
+          # FAIL: blocks run until the next FAIL: / [runner] /
+          # SystemExit / end-of-buffer. %0A is GitHub Actions'
+          # in-annotation newline.
+          blocks = re.split(r"^FAIL: ", log, flags=re.MULTILINE)[1:]
+          for blk in blocks:
+              body = re.split(r"\n(?=FAIL: |\[runner\] |Traceback)", blk, maxsplit=1)[0]
+              body = body.rstrip().replace("\n", "%0A")
+              print(f"::error::sandbox: {body}")
+          PY
+          # Failed scenario names for at-a-glance triage.
+          grep -E '^\[runner\] [0-9].*: (FAIL|TIMEOUT)' /tmp/sandbox.log || true
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: sandbox-log
+          path: /tmp/sandbox.log
+          retention-days: 7
+
+      # Save the buildx cache for next run. Without this the cache
+      # key restores but never updates, so warm runs degrade to cold
+      # after the first Cargo.lock change. Skip when the new cache
+      # is empty (build failed before any layer wrote out) — without
+      # this guard a failed run would overwrite the previous run's
+      # good cache with nothing, poisoning future runs to cold-build
+      # forever.
+      - name: Move cache
+        if: always()
+        run: |
+          if [ ! -d /tmp/.buildx-cache-new ] || \
+             [ -z "$(ls -A /tmp/.buildx-cache-new 2>/dev/null)" ]; then
+            echo "no new cache to save; keeping previous cache untouched"
+            exit 0
+          fi
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
