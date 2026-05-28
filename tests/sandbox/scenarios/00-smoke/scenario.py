@@ -16,6 +16,7 @@ import time
 
 sys.path.insert(0, "/sandbox")
 from lib.daemon import Daemon  # noqa: E402
+from lib.pty import read_until  # noqa: E402
 
 import ptyprocess  # noqa: E402
 
@@ -27,23 +28,6 @@ END = "END-sandbox-smoke-7f3c"
 def fail(msg: str) -> None:
     print(f"FAIL: {msg}", file=sys.stderr)
     sys.exit(1)
-
-
-def read_until(proc: "ptyprocess.PtyProcess", marker: bytes, timeout: float,
-               sink: bytearray) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            chunk = proc.read(4096)
-        except EOFError:
-            return marker in bytes(sink)
-        if chunk:
-            sink.extend(chunk)
-            if marker in bytes(sink):
-                return True
-        else:
-            time.sleep(0.05)
-    return marker in bytes(sink)
 
 
 def drive_atty() -> str:
@@ -64,7 +48,8 @@ def drive_atty() -> str:
     captured = bytearray()
     read_until(proc, b"$ ", timeout=4.0, sink=captured)
     proc.write(f"{cmd}\r".encode())
-    if not read_until(proc, f"{BEGIN} {END}".encode(), timeout=4.0, sink=captured):
+    if not read_until(proc, f"{BEGIN} {END}".encode(), timeout=4.0,
+                      sink=captured):
         try:
             proc.kill(9)
         except ptyprocess.PtyProcessError:
@@ -72,33 +57,15 @@ def drive_atty() -> str:
         return bytes(captured).decode("utf-8", errors="replace")
     proc.write(b"exit\r")
 
-    # Bounded wait so a hung exit surfaces as a scenario failure
+    # Bounded drain so a hung exit surfaces as a scenario failure
     # rather than tripping the runner's 120s container timeout.
-    drain_deadline = time.time() + 3.0
-    while time.time() < drain_deadline:
-        if not proc.isalive():
-            break
-        try:
-            chunk = proc.read(4096)
-        except EOFError:
-            break
-        if chunk:
-            captured.extend(chunk)
-        else:
-            time.sleep(0.05)
+    from lib.pty import drain
+    drain(proc, timeout=3.0, sink=captured)
     if proc.isalive():
         try:
             proc.kill(9)
         except ptyprocess.PtyProcessError:
             pass
-    try:
-        while True:
-            chunk = proc.read(4096)
-            if not chunk:
-                break
-            captured.extend(chunk)
-    except EOFError:
-        pass
 
     return bytes(captured).decode("utf-8", errors="replace")
 

@@ -95,4 +95,12 @@ COPY tests/sandbox/.build/atty /usr/local/bin/atty
 COPY --from=guard-builder /src/atty-guard/target/release/atty-guard /usr/local/bin/atty-guard
 RUN chmod 0755 /usr/local/bin/atty /usr/local/bin/atty-guard
 
+# 10-fresh-install needs the contrib/ tree to invoke install.sh
+# end-to-end, plus a binary backup that the scenario can restore
+# after it wipes /usr/local/bin/atty-guard. Keeping these baked in
+# means the runner doesn't need a special mount for install scenarios.
+COPY atty-guard/contrib /install-src/atty-guard/contrib
+RUN cp /usr/local/bin/atty-guard /opt/atty-guard.image-backup && \
+    chmod 0755 /opt/atty-guard.image-backup
+
 WORKDIR /home/alice
