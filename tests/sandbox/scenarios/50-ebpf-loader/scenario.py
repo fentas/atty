@@ -39,9 +39,10 @@ def fail(msg: str) -> None:
 
 def wait_for_log(daemon: Daemon, needle: str, timeout: float) -> bool:
     """Poll daemon.read_log() until `needle` appears or timeout.
-    Required because eBPF attach happens AFTER the UDS opens
-    (main.rs:836-857), so Daemon.__enter__ returning doesn't
-    imply the eBPF log line is already on disk.
+    Belt-and-braces: the eBPF eprintln runs before the UDS bind
+    (main.rs ebpf_state branch) so the log line should be on disk
+    by the time Daemon.__enter__ returns, but stderr buffering or
+    a slow runuser exec can leave a small window.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:

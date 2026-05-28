@@ -109,22 +109,24 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     enable_ebpf: bool,
 
-    /// V2-B eBPF mode. Fan-out across the integration matrix for
-    /// operator dry-runs and sandbox testing.
+    /// V2-B eBPF mode. Today only the disabled vs non-disabled
+    /// split is behaviorally distinct — `observe` / `warn` /
+    /// `block` all attach + write threat_map + EPERM Critical
+    /// PIDs at the LSM hook. The 4-value enum is plumbed so
+    /// scenarios + operator scripts can pin against the eventual
+    /// split without a CLI break:
     ///   `disabled` (default) — programs not loaded.
-    ///   `observe`            — programs loaded, threat_map left
-    ///                          empty by atty-guard (LSM hook
-    ///                          attached but never fires Critical
-    ///                          → "does my kernel even support
-    ///                          BPF LSM?" check).
-    ///   `warn`               — programs loaded, threat_map
-    ///                          written by atty-guard, LSM hook
-    ///                          fires (== `block` today; banner-
-    ///                          only semantics need an atty-side
-    ///                          change and ship separately).
-    ///   `block`              — programs loaded, threat_map
-    ///                          written, LSM hook EPERMs Critical
-    ///                          PIDs. Production posture.
+    ///   `observe`            — programs loaded today; TODO:
+    ///                          classifier should skip set_threat
+    ///                          so the LSM hook never fires (dry-
+    ///                          run "does my kernel support BPF
+    ///                          LSM" probe).
+    ///   `warn`               — programs loaded today; TODO:
+    ///                          atty-side banner instead of LSM
+    ///                          EPERM. Needs cross-cutting atty +
+    ///                          daemon change.
+    ///   `block`              — programs loaded, LSM hook EPERMs
+    ///                          Critical PIDs. Production posture.
     /// `--enable-ebpf` is a back-compat alias for
     /// `--ebpf-mode=block`. Specifying both is an error.
     #[arg(long, value_enum, default_value_t = EbpfMode::Disabled)]
