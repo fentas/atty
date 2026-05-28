@@ -385,6 +385,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // handled by the digit branch below.
                     i.* += 3;
                     return switch (c) {
+                        'A' => .move_up,
+                        'B' => .move_down,
                         'D' => .move_left,
                         'C' => .move_right,
                         'H' => .move_home,
@@ -1460,9 +1462,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     return true;
                 },
                 .chat_recall => {
-                    // Refuse if a chat surface is already open — Alt+R
-                    // is a fetch, not a discard.
-                    if (rt.chat_overlay_open or rt.chat_inline_open or rt.chat_recall_open) {
+                    // Refuse if the recall picker itself is already
+                    // open or the full-screen overlay is up — those
+                    // own the alt-screen. The inline panel doesn't
+                    // own the alt-screen, so we auto-close it BELOW
+                    // (after every failure path has succeeded) and
+                    // open the picker on top. Closing earlier would
+                    // leave the user with a closed inline panel AND
+                    // no picker when (e.g.) listDialogs fails or the
+                    // archive is empty.
+                    if (rt.chat_overlay_open or rt.chat_recall_open) {
                         latchHint(rt, "close the chat panel first, then Alt+R to recall a past dialog");
                         return true;
                     }
@@ -1489,6 +1498,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         chat_persist.freeDialogMetaList(rt.allocator, list);
                         latchHint(rt, "no past dialogs to recall — run an Alt+S dialog first");
                         return true;
+                    }
+
+                    // All prerequisites passed — auto-close the
+                    // inline panel now and open the picker. Closing
+                    // earlier would leave a stuck "closed panel + no
+                    // picker" state on any of the failure paths
+                    // above. Also clear the live row-override so a
+                    // future inline reopen starts from the configured
+                    // default (matches the other inline-close sites:
+                    // Ctrl+D, Alt+C, overlay handoff, recall load).
+                    if (rt.chat_inline_open) {
+                        rt.chat_inline_open = false;
+                        rt.chat_focus_in_panel = false;
+                        rt.chat_inline_rows_override = null;
+                        rt.chat_inline_paint_pending = true;
                     }
 
                     // Transfer ownership of the list to the Runtime;
