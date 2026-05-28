@@ -3,7 +3,7 @@
 //! requires ble.sh on bash). atty doing the recording itself means the
 //! shell stays vanilla.
 //!
-//! Architecture (latest-wins mailbox for query, single-pending slot
+//! Architecture (latest-wins mailbox for query, bounded FIFO ring
 //! for record):
 //!
 //!   main thread          shared (mutex)              worker thread
@@ -14,14 +14,22 @@
 //!                                                    res_buf  ◀────
 //!                        res_gen ↑
 //!   provideGhost ◀───    read res_buf
-//!   onLineCommit ───▶    rec_buf  ──────────────▶   run record
-//!                        rec_pending ↑              maybe run sync
+//!   onLineCommit ───▶    rec_queue[tail] ───────▶   drain head, FIFO
+//!                        rec_count ↑                 run record
+//!                                                    maybe run sync
+//!
+//! Records use a bounded FIFO instead of a single
+//! latest-wins slot so a burst of Enter-presses preserves all
+//! commits. At cap the producer drops the NEWEST commit and bumps
+//! `rec_dropped`; the oldest is already in flight to atuin's local
+//! store and shouldn't be sacrificed for a later one.
 //!
 //! "Sync" here means firing `atuin sync` from the worker after either
 //! `sync_after_records` commits or `sync_interval_ms` of wall time,
 //! whichever is sooner. The CLI is the source of truth — we never
-//! touch atuin's sqlite directly. One final sync runs on detach so an
-//! interactive session always flushes before exit.
+//! touch atuin's sqlite directly. One final sync runs on detach
+//! (BLOCKING up to `sync_on_detach_timeout_ms`)
+//! so an interactive session always flushes before exit.
 
 const std = @import("std");
 const m = @import("../module.zig");
@@ -87,6 +95,15 @@ pub const Config = struct {
     /// Record committed commands via `atuin history start <cmd>`.
     /// Set false to disable recording (suggestions still work).
     record: bool = true,
+    /// Bounded record queue depth. The committed-
+    /// command path now uses FIFO semantics so two Enters arriving
+    /// before the worker drains don't lose the first. At cap, the
+    /// newest commit is dropped + `rec_dropped` surfaces in the
+    /// status bar as `atuin (N dropped)`. Per-slot footprint at
+    /// defaults is max_query (256) + max_cwd (1024) + intent (256)
+    /// + author tag = ~1552 B; default 16 ≈ 25 KB. Compile-time
+    /// asserted ≥ 2 — capacity 1 would collapse to latest-wins.
+    record_queue_capacity: comptime_int = 16,
     /// Fire `atuin sync` after this many recorded commits (per session).
     /// 0 disables the count-based trigger.
     sync_after_records: u32 = 10,
@@ -94,7 +111,18 @@ pub const Config = struct {
     /// 0 disables the time-based trigger.
     sync_interval_ms: u64 = 60_000,
     /// Run one final `atuin sync` on detach if we recorded anything.
+    /// the detach path waits for this sync to
+    /// complete (blocking, up to `sync_on_detach_timeout_ms`) so the
+    /// promised final flush isn't killed by process exit. Periodic
+    /// syncs during normal operation stay detached.
     sync_on_detach: bool = true,
+    /// Hard cap on how long the detach blocks waiting for the final
+    /// `atuin sync`. The sync runs on a joined
+    /// thread; if it doesn't finish in this window, the proxy exits
+    /// without waiting further. Atuin's offline backoff can hang
+    /// indefinitely on a saturated NIC — the cap keeps shutdown
+    /// bounded. 0 disables the timeout (block until completion).
+    sync_on_detach_timeout_ms: u64 = 3_000,
 
     /// Scope of the `deleteHistoryMatch` (Ctrl+Shift+D) action against
     /// atuin's database. Default `.exact` uses atuin's fuzzy mode
@@ -134,11 +162,32 @@ pub const Config = struct {
 };
 
 pub fn configure(comptime cfg: Config) type {
+    // a 0-capacity FIFO would underflow the
+    // `(idx + 1) % 0` modulo. Catch the misconfiguration at
+    // compile time. Capacity 1 collapses to drop-newest-on-second-
+    // push but is a legal degenerate; require at least 2 for FIFO
+    // semantics to hold (otherwise consumers expecting "preserves
+    // burst of 2 commits" see the prior latest-wins shape).
+    comptime {
+        if (cfg.record_queue_capacity < 2) {
+            @compileError("atuin: record_queue_capacity must be >= 2 — use the default (16) or pick a higher value");
+        }
+    }
     return struct {
         pub const name = "atuin";
         pub const config = cfg;
 
-        const Shared = struct {
+        pub const RecordSlot = struct {
+            cmd_buf: [cfg.max_query]u8 = undefined,
+            cmd_len: usize = 0,
+            cwd_buf: [subprocess_mod.max_cwd_bytes]u8 = undefined,
+            cwd_len: usize = 0,
+            author: m.Author = .user,
+            intent_buf: [256]u8 = undefined,
+            intent_len: usize = 0,
+        };
+
+        pub const Shared = struct {
             mutex: std.Io.Mutex = .init,
             cv: std.Io.Condition = .init,
 
@@ -150,31 +199,22 @@ pub fn configure(comptime cfg: Config) type {
             res_len: usize = 0,
             res_gen: u64 = 0,
 
-            // Latest-wins record slot. Two Enter-presses arriving before
-            // the worker drains: only the newer is recorded. Acceptable
-            // — typing two commands within ~50 ms is rare and we'd
-            // rather drop than queue unbounded.
-            rec_buf: [cfg.max_query]u8 = undefined,
-            rec_len: usize = 0,
-            rec_pending: bool = false,
-            // Resolved subprocess `--cwd` for the pending record, or
-            // empty when none. Captured from `ctx.subprocessCwd(…)` at
-            // onLineCommit time so the worker has a stable snapshot
-            // even if the user enters a new ssh/sudo/etc. before the
-            // worker drains.
-            rec_cwd_buf: [subprocess_mod.max_cwd_bytes]u8 = undefined,
-            rec_cwd_len: usize = 0,
-            // Author of the pending record, snapshotted in onLineCommit
-            // so the worker has a stable read even if a follow-up
-            // commit overwrites the slot before this one fires.
-            rec_author: m.Author = .user,
-            // Intent text for the pending record (LLM's description
-            // of why the command was suggested). Empty for user-typed
-            // commands. Same snapshot-in-onLineCommit lifecycle as
-            // rec_author. Bounded by `LineState.pending_intent_buf`
-            // size on the producer side (256 bytes).
-            rec_intent_buf: [256]u8 = undefined,
-            rec_intent_len: usize = 0,
+            // FIFO ring buffer of pending records.
+            // Replaces the prior single-slot latest-wins mailbox so
+            // bursts of commits (paste, automation, LLM-assisted
+            // submits) preserve all entries in order. At cap, the
+            // producer drops the newest commit and bumps
+            // `rec_dropped` so the worker / status bar can surface
+            // the loss instead of silently swallowing it.
+            //
+            // Indices: head = next slot the worker drains; tail =
+            // next slot the producer fills. Full when count ==
+            // capacity; empty when count == 0.
+            rec_queue: [cfg.record_queue_capacity]RecordSlot = undefined,
+            rec_head: usize = 0,
+            rec_tail: usize = 0,
+            rec_count: usize = 0,
+            rec_dropped: u32 = 0,
 
             shutdown: bool = false,
         };
@@ -190,6 +230,11 @@ pub fn configure(comptime cfg: Config) type {
             /// returned slice-of-slices from the worker's next write
             /// to `Shared.res_buf`.
             list_copy: [cfg.max_result]u8 = undefined,
+            /// Buffer for `statusText`'s formatted output when
+            /// `rec_dropped > 0`. Bounded — the
+            /// longest expected string is `atuin (4294967295 dropped)`
+            /// = 26 chars.
+            status_buf: [32]u8 = undefined,
             /// Slice-of-slices into `list_copy`, populated by
             /// `provideGhostList` via `_lib.ListBuilder`.
             list_slices: [cfg.list_count_max][]const u8 = undefined,
@@ -228,13 +273,7 @@ pub fn configure(comptime cfg: Config) type {
             var query_len: usize = 0;
             var serving_gen: u64 = 0;
 
-            var record_local: [cfg.max_query]u8 = undefined;
-            var record_len: usize = 0;
-            var record_cwd_local: [subprocess_mod.max_cwd_bytes]u8 = undefined;
-            var record_cwd_len: usize = 0;
-            var record_author_local: m.Author = .user;
-            var record_intent_local: [256]u8 = undefined;
-            var record_intent_len: usize = 0;
+            var record_local: RecordSlot = .{};
             var records_since_sync: u32 = 0;
             var last_sync_ms: i64 = 0;
             var total_records: u32 = 0;
@@ -243,16 +282,56 @@ pub fn configure(comptime cfg: Config) type {
                 shared.mutex.lockUncancelable(io);
                 while (!shared.shutdown and
                     shared.req_gen == serving_gen and
-                    !shared.rec_pending)
+                    shared.rec_count == 0)
                 {
                     shared.cv.waitUncancelable(io, &shared.mutex);
                 }
                 if (shared.shutdown) {
+                    // Drain any queued records BEFORE the final
+                    // sync so a burst of commits in the last 50ms
+                    // doesn't vanish (subagent round-1 finding —
+                    // checking shutdown before the drain dropped
+                    // in-flight records, contradicting #027's
+                    // "preserves all commits" claim). Pop slots
+                    // under the lock into a local buffer, release,
+                    // then `runRecord` each without the lock held.
+                    var drain_local: [cfg.record_queue_capacity]RecordSlot = undefined;
+                    var drain_n: usize = 0;
+                    while (shared.rec_count > 0 and drain_n < drain_local.len) {
+                        drain_local[drain_n] = shared.rec_queue[shared.rec_head];
+                        shared.rec_head = (shared.rec_head + 1) % cfg.record_queue_capacity;
+                        shared.rec_count -= 1;
+                        drain_n += 1;
+                    }
                     shared.mutex.unlock(io);
-                    // Final sync on the way out so an interactive session
-                    // leaves no commits stranded locally.
+                    if (cfg.record) {
+                        var i: usize = 0;
+                        while (i < drain_n) : (i += 1) {
+                            const s = &drain_local[i];
+                            const intent_slice: ?[]const u8 = if (s.intent_len > 0)
+                                s.intent_buf[0..s.intent_len]
+                            else
+                                null;
+                            runRecord(
+                                gpa,
+                                io,
+                                s.cmd_buf[0..s.cmd_len],
+                                s.cwd_buf[0..s.cwd_len],
+                                s.author,
+                                intent_slice,
+                            );
+                            total_records += 1;
+                        }
+                    }
+                    // BLOCKING final sync so the
+                    // promised flush actually lands. main.zig calls
+                    // std.process.exit immediately after proxy.run
+                    // returns; the previous `runSync` detached the
+                    // sync thread and let the OS kill it mid-flight.
+                    // `runSyncBlocking` joins (with timeout) so we
+                    // either succeed or give up explicitly.
                     if (cfg.record and cfg.sync_on_detach and total_records > 0)
-                        runSync(gpa, io);
+                        runSyncBlocking(gpa, io);
                     return;
                 }
 
@@ -263,20 +342,16 @@ pub fn configure(comptime cfg: Config) type {
                     @memcpy(query_local[0..query_len], shared.req_buf[0..query_len]);
                 }
 
-                const has_record = shared.rec_pending;
+                // drain one record from the FIFO
+                // head. Keep the drain to one-per-loop iteration so
+                // bursts of records don't starve query handling
+                // (the cv signals once per producer event; we still
+                // process queries in the same wakeup).
+                const has_record = shared.rec_count > 0;
                 if (has_record) {
-                    record_len = shared.rec_len;
-                    @memcpy(record_local[0..record_len], shared.rec_buf[0..record_len]);
-                    record_cwd_len = shared.rec_cwd_len;
-                    if (record_cwd_len > 0) {
-                        @memcpy(record_cwd_local[0..record_cwd_len], shared.rec_cwd_buf[0..record_cwd_len]);
-                    }
-                    record_author_local = shared.rec_author;
-                    record_intent_len = shared.rec_intent_len;
-                    if (record_intent_len > 0) {
-                        @memcpy(record_intent_local[0..record_intent_len], shared.rec_intent_buf[0..record_intent_len]);
-                    }
-                    shared.rec_pending = false;
+                    record_local = shared.rec_queue[shared.rec_head];
+                    shared.rec_head = (shared.rec_head + 1) % cfg.record_queue_capacity;
+                    shared.rec_count -= 1;
                 }
                 shared.mutex.unlock(io);
 
@@ -295,19 +370,36 @@ pub fn configure(comptime cfg: Config) type {
                 }
 
                 if (has_record and cfg.record) {
-                    const intent_slice: ?[]const u8 = if (record_intent_len > 0)
-                        record_intent_local[0..record_intent_len]
+                    const intent_slice: ?[]const u8 = if (record_local.intent_len > 0)
+                        record_local.intent_buf[0..record_local.intent_len]
                     else
                         null;
-                    runRecord(gpa, io, record_local[0..record_len], record_cwd_local[0..record_cwd_len], record_author_local, intent_slice);
+                    runRecord(
+                        gpa,
+                        io,
+                        record_local.cmd_buf[0..record_local.cmd_len],
+                        record_local.cwd_buf[0..record_local.cwd_len],
+                        record_local.author,
+                        intent_slice,
+                    );
                     total_records += 1;
                     records_since_sync += 1;
                     const now = nowMs();
-                    const count_due = cfg.sync_after_records > 0 and records_since_sync >= cfg.sync_after_records;
+                    // start the sync clock on the
+                    // first recorded command WITHOUT also firing a
+                    // sync there. Prior shape included `last_sync_ms
+                    // == 0` as an unconditional trigger, so every
+                    // session synced after record #1 regardless of
+                    // the operator's `sync_after_records` /
+                    // `sync_interval_ms` thresholds.
+                    if (last_sync_ms == 0) {
+                        last_sync_ms = now;
+                    }
+                    const count_due = cfg.sync_after_records > 0 and
+                        records_since_sync >= cfg.sync_after_records;
                     const time_due = cfg.sync_interval_ms > 0 and
-                        last_sync_ms > 0 and
                         @as(u64, @intCast(now - last_sync_ms)) >= cfg.sync_interval_ms;
-                    if (count_due or time_due or last_sync_ms == 0) {
+                    if (count_due or time_due) {
                         runSync(gpa, io);
                         records_since_sync = 0;
                         last_sync_ms = now;
@@ -486,6 +578,82 @@ pub fn configure(comptime cfg: Config) type {
             t.detach();
         }
 
+        /// blocking final-sync path used by worker
+        /// shutdown. Spawns the sync on a JOINED thread (not detached)
+        /// so the proxy waits for completion before main.zig hits
+        /// `std.process.exit`. Capped at `cfg.sync_on_detach_timeout_ms`
+        /// to keep shutdown bounded — atuin's offline backoff can
+        /// hang on a saturated NIC.
+        ///
+        /// The timeout is implemented via a sentinel flag + poll
+        /// loop rather than `std.Thread.timedJoin` because zig 0.16
+        /// stdlib doesn't expose a portable join-with-timeout.
+        /// Polling overhead is bounded by `poll_step_ms` × iterations;
+        /// on success the thread joins cleanly, on timeout we LEAK
+        /// the thread (it will continue and eventually exit when
+        /// the process does or when atuin returns).
+        fn runSyncBlocking(gpa: std.mem.Allocator, io: std.Io) void {
+            const SyncDone = struct {
+                flag: std.atomic.Value(bool) = .init(false),
+                gpa: std.mem.Allocator,
+                io: std.Io,
+                fn run(self: *@This()) void {
+                    syncOnThread(self.gpa, self.io);
+                    self.flag.store(true, .release);
+                }
+            };
+            // Allocated on heap so a leaked thread (timeout path)
+            // keeps a valid pointer to its flag until it sets it.
+            const done = gpa.create(SyncDone) catch return;
+            done.* = .{ .gpa = gpa, .io = io };
+
+            const t = std.Thread.spawn(.{}, SyncDone.run, .{done}) catch {
+                gpa.destroy(done);
+                return;
+            };
+
+            if (cfg.sync_on_detach_timeout_ms == 0) {
+                // No timeout — wait forever (or until sync completes).
+                t.join();
+                gpa.destroy(done);
+                return;
+            }
+
+            const start = nowMs();
+            const deadline_ms: i64 = start + @as(i64, @intCast(cfg.sync_on_detach_timeout_ms));
+            // 10 ms poll step. nanosleep matches the pattern in
+            // src/modules/llm/worker.zig — zig 0.16 stdlib doesn't
+            // expose a portable timed-sleep so we go via libc.
+            const sleep_ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+            while (nowMs() < deadline_ms) {
+                if (done.flag.load(.acquire)) {
+                    t.join();
+                    gpa.destroy(done);
+                    return;
+                }
+                _ = std.c.nanosleep(&sleep_ts, null);
+            }
+            // Deadline expired. Re-check the flag once more before
+            // committing to the leak path — a sync that completed
+            // between the last load and the deadline check is
+            // perfectly joinable (subagent round-1 race finding).
+            if (done.flag.load(.acquire)) {
+                t.join();
+                gpa.destroy(done);
+                return;
+            }
+            // Timeout: leak the thread + heap done (it'll set the
+            // flag and exit on its own when sync completes; we just
+            // can't reclaim it without blocking past the deadline).
+            t.detach();
+            // `done` is intentionally NOT destroyed — the leaked
+            // thread still owns a pointer to it. The struct is
+            // ~40-64 bytes (AtomicValue(bool) + std.mem.Allocator
+            // + std.Io); we leak at most once per session.
+            // Acceptable for an interactive tool's shutdown path —
+            // the process exits shortly after either way.
+        }
+
         fn syncOnThread(gpa: std.mem.Allocator, io: std.Io) void {
             const argv = [_][]const u8{
                 cfg.atuin_binary,
@@ -626,30 +794,55 @@ pub fn configure(comptime cfg: Config) type {
             // naturally scopes per ssh/kubectl/etc. target.
             var cwd_scratch: [subprocess_mod.max_cwd_bytes]u8 = undefined;
             const resolved_cwd = ctx.subprocessCwd(&cwd_scratch, "");
+            const intent = ctx.line.committedIntent();
+            const author = ctx.line.committedAuthor();
 
-            rt.shared.mutex.lockUncancelable(ctx.io);
-            defer rt.shared.mutex.unlock(ctx.io);
-            @memcpy(rt.shared.rec_buf[0..line.len], line);
-            rt.shared.rec_len = line.len;
-            if (resolved_cwd.len > 0 and resolved_cwd.len <= rt.shared.rec_cwd_buf.len) {
-                @memcpy(rt.shared.rec_cwd_buf[0..resolved_cwd.len], resolved_cwd);
-                rt.shared.rec_cwd_len = resolved_cwd.len;
-            } else {
-                rt.shared.rec_cwd_len = 0;
+            pushRecord(rt.shared, ctx.io, line, resolved_cwd, author, intent);
+        }
+
+        /// Test-visible push helper — FIFO ring
+        /// push. Returns no value; overflow bumps `rec_dropped`
+        /// silently (caller-side error handling would just discard
+        /// the line anyway). Drop-newest on overflow because the
+        /// oldest record is presumably already enroute to atuin's
+        /// local store via the worker's drain; the new arrival is
+        /// the one in jeopardy. Holds `shared.mutex` for the full
+        /// push so a concurrent worker drain sees a consistent
+        /// head/tail/count triple.
+        pub fn pushRecord(
+            shared: *Shared,
+            io: std.Io,
+            line: []const u8,
+            cwd: []const u8,
+            author: m.Author,
+            intent: ?[]const u8,
+        ) void {
+            shared.mutex.lockUncancelable(io);
+            defer shared.mutex.unlock(io);
+            if (shared.rec_count >= cfg.record_queue_capacity) {
+                shared.rec_dropped +%= 1;
+                return;
             }
-            rt.shared.rec_author = ctx.line.committedAuthor();
-            // Snapshot the staged intent (LLM's description for
-            // `.llm`-authored commits; empty for user-typed lines).
-            // Worker reads from `rec_intent_buf` under the same lock.
-            if (ctx.line.committedIntent()) |intent_text| {
-                const n = @min(intent_text.len, rt.shared.rec_intent_buf.len);
-                @memcpy(rt.shared.rec_intent_buf[0..n], intent_text[0..n]);
-                rt.shared.rec_intent_len = n;
+            const slot = &shared.rec_queue[shared.rec_tail];
+            @memcpy(slot.cmd_buf[0..line.len], line);
+            slot.cmd_len = line.len;
+            if (cwd.len > 0 and cwd.len <= slot.cwd_buf.len) {
+                @memcpy(slot.cwd_buf[0..cwd.len], cwd);
+                slot.cwd_len = cwd.len;
             } else {
-                rt.shared.rec_intent_len = 0;
+                slot.cwd_len = 0;
             }
-            rt.shared.rec_pending = true;
-            rt.shared.cv.signal(ctx.io);
+            slot.author = author;
+            if (intent) |intent_text| {
+                const n = @min(intent_text.len, slot.intent_buf.len);
+                @memcpy(slot.intent_buf[0..n], intent_text[0..n]);
+                slot.intent_len = n;
+            } else {
+                slot.intent_len = 0;
+            }
+            shared.rec_tail = (shared.rec_tail + 1) % cfg.record_queue_capacity;
+            shared.rec_count += 1;
+            shared.cv.signal(io);
         }
 
         /// Fired by Ctrl+Shift+D (default binding for
@@ -716,14 +909,27 @@ pub fn configure(comptime cfg: Config) type {
             rt.allocator.free(result.stderr);
         }
 
-        /// Status-bar segment. The runtime caches the rendered string
-        /// so we don't reformat per render cycle.
+        /// Status-bar segment. Defaults to the bare `atuin` label;
+        /// if any committed records were dropped because the FIFO
+        /// hit cap, append `(N dropped)` so the
+        /// operator notices their commits aren't being recorded.
+        /// Cleared back to `atuin` only on detach — the count is
+        /// session-cumulative because there's no obvious "ack" event
+        /// from the operator side.
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
             _ = ctx;
-            _ = rt;
-            // Static label for now — future: surface queued records,
-            // last-sync age, sync-in-progress, etc.
-            return "atuin";
+            rt.shared.mutex.lockUncancelable(rt.io);
+            const dropped = rt.shared.rec_dropped;
+            rt.shared.mutex.unlock(rt.io);
+            if (dropped == 0) return "atuin";
+            // Format into the runtime's status_buf so the returned
+            // slice survives until the next statusText call.
+            const written = std.fmt.bufPrint(
+                &rt.status_buf,
+                "atuin ({d} dropped)",
+                .{dropped},
+            ) catch return "atuin";
+            return written;
         }
     };
 }

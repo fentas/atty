@@ -200,3 +200,89 @@ test "configure exposes deleteHistoryMatch hook (regression: atuin-side delete m
     const A = configure(.{});
     try testing.expect(@hasDecl(A, "deleteHistoryMatch"));
 }
+
+// ---- record FIFO + sync lifecycle regressions ---------------------------------
+
+test "config exposes record_queue_capacity + sync_on_detach_timeout_ms knobs" {
+    // Pin that the two new comptime knobs are wired. A future
+    // rename here breaks `zig build test` so user configs that
+    // override either of them surface a clear compile error
+    // instead of silently picking up a renamed default.
+    const A = configure(.{ .record_queue_capacity = 4, .sync_on_detach_timeout_ms = 500 });
+    try testing.expectEqual(@as(comptime_int, 4), A.config.record_queue_capacity);
+    try testing.expectEqual(@as(u64, 500), A.config.sync_on_detach_timeout_ms);
+}
+
+test "pushRecord FIFO preserves order across multiple commits" {
+    // Drive the REAL production push path (`pushRecord`, used by
+    // `onLineCommit`) rather than inlining the FIFO math. Pre-fix
+    // the single-slot mailbox overwrote "first" when "second"
+    // landed; this assertion would have failed.
+    const A = configure(.{ .record_queue_capacity = 4 });
+    var shared: A.Shared = .{};
+    A.pushRecord(&shared, test_io, "first", "", .user, null);
+    A.pushRecord(&shared, test_io, "second", "", .user, null);
+    A.pushRecord(&shared, test_io, "third", "", .user, null);
+    try testing.expectEqual(@as(usize, 3), shared.rec_count);
+    try testing.expectEqual(@as(u32, 0), shared.rec_dropped);
+    // Drain in FIFO order — head walks the ring.
+    inline for ([_][]const u8{ "first", "second", "third" }) |expected| {
+        const slot = shared.rec_queue[shared.rec_head];
+        try testing.expectEqualStrings(expected, slot.cmd_buf[0..slot.cmd_len]);
+        shared.rec_head = (shared.rec_head + 1) % A.config.record_queue_capacity;
+    }
+}
+
+test "pushRecord overflow drops newest and bumps rec_dropped" {
+    // Hits the real overflow branch inside `pushRecord`. Pre-fix
+    // the latest-wins shape would have OVERWRITTEN "a" with "c";
+    // the FIFO drop-newest leaves "a" at head + bumps the counter
+    // so the operator can spot the loss via statusText.
+    const A = configure(.{ .record_queue_capacity = 2 });
+    var shared: A.Shared = .{};
+    A.pushRecord(&shared, test_io, "a", "", .user, null);
+    A.pushRecord(&shared, test_io, "b", "", .user, null);
+    try testing.expectEqual(@as(usize, 2), shared.rec_count);
+    A.pushRecord(&shared, test_io, "c", "", .user, null); // overflow
+    try testing.expectEqual(@as(u32, 1), shared.rec_dropped);
+    try testing.expectEqual(@as(usize, 2), shared.rec_count);
+    // Head still points at the OLDEST ("a"). The "c" never landed.
+    try testing.expectEqualStrings(
+        "a",
+        shared.rec_queue[shared.rec_head].cmd_buf[0..shared.rec_queue[shared.rec_head].cmd_len],
+    );
+    A.pushRecord(&shared, test_io, "d", "", .user, null);
+    A.pushRecord(&shared, test_io, "e", "", .user, null);
+    try testing.expectEqual(@as(u32, 3), shared.rec_dropped);
+}
+
+test "pushRecord round-trips cwd + author + intent into the slot" {
+    // Pin that the four non-cmd fields each make it through
+    // unmodified so a future RecordSlot refactor doesn't silently
+    // drop intent/author/cwd from records.
+    const A = configure(.{ .record_queue_capacity = 4 });
+    var shared: A.Shared = .{};
+    A.pushRecord(&shared, test_io, "ls -la", "/tmp/x", .llm, "explore the dir");
+    const slot = shared.rec_queue[shared.rec_head];
+    try testing.expectEqualStrings("ls -la", slot.cmd_buf[0..slot.cmd_len]);
+    try testing.expectEqualStrings("/tmp/x", slot.cwd_buf[0..slot.cwd_len]);
+    try testing.expectEqual(m.Author.llm, slot.author);
+    try testing.expectEqualStrings("explore the dir", slot.intent_buf[0..slot.intent_len]);
+}
+
+test "config default record_queue_capacity is 16" {
+    // Exact-pin the default so a future tweak that drops it
+    // (toward latest-wins) trips the build instead of silently
+    // shrinking the burst-tolerance the FIFO was added for.
+    const A = configure(.{});
+    try testing.expectEqual(@as(comptime_int, 16), A.config.record_queue_capacity);
+}
+
+test "default sync_on_detach_timeout_ms is bounded" {
+    // Zero means "wait forever"; that's a tail risk on atuin's
+    // offline backoff. The default must be a finite cap so a
+    // session exiting offline doesn't hang indefinitely.
+    const A = configure(.{});
+    try testing.expect(A.config.sync_on_detach_timeout_ms > 0);
+    try testing.expect(A.config.sync_on_detach_timeout_ms <= 60_000);
+}
