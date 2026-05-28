@@ -33,6 +33,7 @@ mod classifier;
 mod cli_client;
 mod config;
 mod ebpf;
+mod npm_parser;
 mod onnx_backend;
 mod osv;
 mod protocol;
