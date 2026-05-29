@@ -93,14 +93,6 @@ Current scenarios:
   `ONNX_MODEL_URL` / `ONNX_MODEL_SHA256` /
   `ONNX_TOKENIZER_URL` / `ONNX_TOKENIZER_SHA256`. Without the
   image they SKIP cleanly so `make sandbox` stays green.
-- **`70-shai-hulud-npm`** + **`71-sigma-reverse-shell`** +
-  **`72-flagged-url-curl-pipe`** — real-incident replay (#345).
-  Drive the classify RPC with canonical IOC shapes (a flagged
-  npm package, a Sigma reverse-shell command, the Shai-Hulud
-  delivery URL with `curl … | sh`) and pin the rendered reason
-  text so an atom-corpus prune or a reason-renderer regression
-  fails loudly. Run against `atty-sandbox:base` — no extension
-  image needed.
 
 ## Per-scenario docker flags
 

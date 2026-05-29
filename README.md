@@ -26,7 +26,7 @@ Features:
 - **Comptime module dispatch** — `inline for` over your config tuple; disabled modules contribute *zero bytes* to the binary
 - **Atuin autosuggestions** — fish-style dim/italic ghost text from your shell history, via an async worker thread
 - **Dangerous-command guardrail** — swallows Enter on `rm -rf /`, `dd if=…`, `… | sh`, fork bombs, and friends, then waits for a confirm
-- **Optional comptime hooks**: `attach` / `detach` / `onInput` / `onOutput` / `onTick` / `onLineCommit` / `provideGhostText` / `provideGhostList` / `statusText` / `isOverlayActive` — implement what you need, the rest is statically dropped
+- **Optional comptime hooks**: `attach` / `detach` / `onInput` / `onOutput` / `onTick` / `onLineCommit` / `onResize` / `provideGhostText` / `provideGhostList` / `provideErrorText` / `provideTermBytes` / `statusText` / `isOverlayActive` / `deleteHistoryMatch` — implement what you need, the rest is statically dropped
 - **Single static binary** — musl-linked, no libutil, no runtime deps; `ghcr.io/fentas/atty:latest` is ~14 MB
 - **Zero-allocation hot path** — per-keystroke dispatch does no heap traffic; Atuin lookups happen on a worker thread
 
@@ -246,10 +246,10 @@ The image is multi-arch (`linux/amd64`, `linux/arm64`) and the binary is musl-st
 | Module                                                       | Hook surface                                                         | Purpose                                                                |
 |--------------------------------------------------------------|----------------------------------------------------------------------|------------------------------------------------------------------------|
 | [`guardrail`](src/modules/guardrail.zig)                     | `onInput`                                                            | Confirm-on-Enter for `rm -rf /`, `dd`, `mkfs`, fork bombs, curl-pipe-sh |
-| [`history`](src/modules/history.zig) *(default)*             | `onInput`, `onLineCommit`, `provideGhostText`, `onTick`              | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history`     |
-| [`atuin`](src/modules/atuin.zig) *(opt-in)*                  | `onInput`, `onLineCommit`, `provideGhostText`, `onTick`              | Fish-style autosuggestions from your Atuin history + record on Enter   |
-| [`security_guard`](src/modules/security_guard/)              | `onInput`, `onTick`                                                  | Pre-Enter Tier-1 classifier + UDS client to the `atty-guard` sidecar   |
-| [`llm`](src/modules/llm/)                                    | `onInput`, `onLineCommit`, `provideGhostText`, `statusText`, `isOverlayActive` | `#: intent` → shell-command rewrite; Alt+A single, Alt+S dialog, Alt+R recall |
+| [`history`](src/modules/history.zig) *(default)*             | `onInput`, `onLineCommit`, `onTick`, `provideGhostText`, `provideGhostList`, `deleteHistoryMatch` | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history`     |
+| [`atuin`](src/modules/atuin.zig) *(opt-in)*                  | `onInput`, `onLineCommit`, `onTick`, `provideGhostText`, `provideGhostList`, `statusText`, `deleteHistoryMatch` | Fish-style autosuggestions from your Atuin history + record on Enter   |
+| [`security_guard`](src/modules/security_guard/)              | `onInput`, `onTick`, `statusText`                                    | Pre-Enter Tier-1 classifier + UDS client to the `atty-guard` sidecar   |
+| [`llm`](src/modules/llm/)                                    | `onInput`, `onLineCommit`, `onResize`, `provideGhostText`, `provideGhostList`, `provideErrorText`, `statusText`, `isOverlayActive` | `#: intent` → shell-command rewrite; Alt+A single, Alt+S dialog, Alt+R recall |
 
 Add your own under `src/modules/` and wire it into `config.modules`. Reference docs: [atty.sh/providers](https://atty.sh/providers/).
 
