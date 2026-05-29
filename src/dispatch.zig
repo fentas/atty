@@ -22,10 +22,17 @@
 const std = @import("std");
 const module = @import("module.zig");
 const keymap = @import("keymap.zig");
+const mouse_mod = @import("mouse.zig");
 
 pub const Action = module.Action;
 pub const Context = module.Context;
 pub const Error = module.Error;
+
+/// Module-side reply to `onMouseClick`. `consume` stops the
+/// dispatch chain + tells the proxy NOT to forward the
+/// underlying CSI sequence; `passthrough` lets later modules
+/// + the shell see the click.
+pub const MouseAction = enum { passthrough, consume };
 
 /// Build a dispatcher specialised on a comptime tuple of module types.
 ///
@@ -286,6 +293,35 @@ pub fn Dispatcher(comptime modules: anytype) type {
                     M.onResize(rts[i]);
                 }
             }
+        }
+
+        /// Fan out a mouse click event to modules that implement
+        /// `onMouseClick`. First module to return `.consume` wins —
+        /// the proxy then drops the underlying CSI sequence
+        /// (doesn't forward to the shell). Modules returning
+        /// `.passthrough` let later modules + the shell see it.
+        ///
+        /// Iteration is module-declaration order — same precedence
+        /// rule as `dispatchInput`. A module that opens a clickable
+        /// overlay should consume to stop the shell from also
+        /// reacting to the click.
+        ///
+        /// **Signature contract**: modules declare
+        /// `pub fn onMouseClick(rt: *Runtime, ctx: *Context, evt: mouse.Event) Error!MouseAction`.
+        pub fn dispatchMouseClick(
+            rts: *Runtimes,
+            ctx: *Context,
+            evt: mouse_mod.Event,
+        ) Error!MouseAction {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "onMouseClick")) {
+                    switch (try M.onMouseClick(rts[i], ctx, evt)) {
+                        .passthrough => {},
+                        .consume => return .consume,
+                    }
+                }
+            }
+            return .passthrough;
         }
 
         /// Sibling of `gatherHintText` for error notifications.
