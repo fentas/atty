@@ -32,26 +32,20 @@
         <a class="cta" href="https://github.com/fentas/atty" rel="noopener">GitHub&nbsp;↗</a>
       </p>
 
-      <div class="demo" id="demo">
-        <div class="demo-bar">
-          <span class="bar-dot dot-r"></span>
-          <span class="bar-dot dot-y"></span>
-          <span class="bar-dot dot-g"></span>
-          <span class="bar-title">~/code/atty — atty bash</span>
-        </div>
-        <div class="demo-body" id="demo-screen" aria-hidden="true" style="min-height: 17em;">
+      {% capture hero_static %}
           <!-- Static fallback for no-JS / crawlers. JS replaces on load. -->
           <div class="line"><span class="prompt">$ </span><span class="typed">git checkout featu</span><span class="ghost">re/auth-refactor</span></div>
           <div class="line dim">  → atuin: dim ghost suggests your last matching command — Right Arrow / End accepts</div>
           <div class="line">&nbsp;</div>
-          <div class="line"><span class="prompt">$ </span><span class="typed">rm -rf /home/work/</span></div>
-          <div class="line danger"><span class="warn-glyph">!</span>atty guardrail: rm -rf on a root-ish path</div>
+          <div class="line"><span class="prompt">$ </span><span class="typed">echo pipe-execution-test | sh</span></div>
+          <div class="line danger"><span class="warn-glyph">!</span>atty guardrail: pipe to `sh` detected</div>
           <div class="line dim">        press Enter again to confirm, any other key to cancel.</div>
-        </div>
-        <div class="demo-controls">
-          <button type="button" class="demo-btn" id="demo-replay" title="restart the demo">▶ replay</button>
-        </div>
-      </div>
+      {% endcapture %}
+      {% include terminal_example.html
+          cast="hero"
+          title="~/code/atty — atty bash"
+          rows_em=17
+          static=hero_static %}
     </div>
   </section>
 
@@ -133,144 +127,5 @@ eval "$(atty init bash)"</code></pre>
       MIT
     </p>
   </footer>
-
-  <script>
-    // Interactive demo playback — three scenes (atuin accept, guardrail
-    // confirm, LLM rewrite). Honors prefers-reduced-motion (bails to the
-    // static fallback). Replay button restarts.
-    (function () {
-      var screen = document.getElementById('demo-screen');
-      var replayBtn = document.getElementById('demo-replay');
-      if (!screen) return;
-      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        if (replayBtn) {
-          replayBtn.disabled = true;
-          replayBtn.textContent = '○ static (reduced motion)';
-        }
-        return;
-      }
-
-      var currentRun = 0;
-      var timers = new Map();
-
-      function sleep(ms) {
-        return new Promise(function (resolve) {
-          var id = setTimeout(function () {
-            timers.delete(id);
-            resolve();
-          }, ms);
-          timers.set(id, resolve);
-        });
-      }
-      function flushTimers() {
-        timers.forEach(function (resolve, id) {
-          clearTimeout(id);
-          resolve();
-        });
-        timers.clear();
-      }
-      function el(cls, text) {
-        var d = document.createElement('div');
-        if (cls) d.className = cls;
-        if (text != null) d.textContent = text;
-        return d;
-      }
-      function span(cls, text) {
-        var s = document.createElement('span');
-        if (cls) s.className = cls;
-        if (text != null) s.textContent = text;
-        return s;
-      }
-      function caret() { return span('caret', ''); }
-      function alive(myRun) { return myRun === currentRun; }
-
-      async function typeInto(myRun, node, text, cps) {
-        cps = cps || 22;
-        var baseDelay = 1000 / cps;
-        for (var i = 0; i < text.length; i++) {
-          if (!alive(myRun)) return;
-          var ch = text.charAt(i);
-          node.textContent += ch;
-          var jitter = (Math.random() - 0.5) * baseDelay * 0.55;
-          var pause = (ch === ' ') ? baseDelay * 1.35 : baseDelay;
-          await sleep(Math.max(22, pause + jitter));
-        }
-      }
-
-      async function play(myRun) {
-        while (alive(myRun)) {
-          screen.innerHTML = '';
-
-          var line1 = el('line');
-          line1.append(span('prompt', '$ '));
-          var typed1 = span('typed', '');
-          line1.append(typed1);
-          var c1 = caret();
-          line1.append(c1);
-          screen.append(line1);
-          await typeInto(myRun, typed1, 'git checkout featu');
-          if (!alive(myRun)) return;
-          await sleep(240);
-          if (!alive(myRun)) return;
-          c1.remove();
-          var ghost = span('ghost', 're/auth-refactor');
-          line1.append(ghost);
-          line1.append(caret());
-          screen.append(el('line dim', '  → atuin: dim ghost suggests your last matching cmd — Right Arrow/End accepts'));
-          await sleep(1800);
-          if (!alive(myRun)) return;
-          typed1.textContent = 'git checkout feature/auth-refactor';
-          ghost.remove();
-          await sleep(1000);
-          if (!alive(myRun)) return;
-
-          var line2 = el('line');
-          line2.append(span('prompt', '$ '));
-          var typed2 = span('typed', '');
-          line2.append(typed2);
-          line2.append(caret());
-          screen.append(line2);
-          await typeInto(myRun, typed2, 'rm -rf /home/work/', 26);
-          if (!alive(myRun)) return;
-          await sleep(420);
-          var warn = el('line danger');
-          warn.append(span('warn-glyph', '!'));
-          warn.append(document.createTextNode('atty guardrail: rm -rf on a root-ish path'));
-          screen.append(warn);
-          screen.append(el('line dim', '        line: rm -rf /home/work/'));
-          screen.append(el('line dim', '        press Enter again to confirm, any other key to cancel.'));
-          await sleep(2400);
-          if (!alive(myRun)) return;
-
-          var line3 = el('line');
-          line3.append(span('prompt', '$ '));
-          var typed3 = span('typed', '');
-          line3.append(typed3);
-          line3.append(caret());
-          screen.append(line3);
-          await typeInto(myRun, typed3, '#: list large files');
-          if (!alive(myRun)) return;
-          await sleep(520);
-          screen.append(el('line dim', '  ↪ llm module · Alt+A → fills the line · Enter to run'));
-          await sleep(900);
-          if (!alive(myRun)) return;
-          typed3.textContent = 'du -sh * | sort -h';
-          await sleep(2000);
-          if (!alive(myRun)) return;
-
-          await sleep(1200);
-        }
-      }
-
-      function restart() {
-        currentRun += 1;
-        flushTimers();
-        play(currentRun);
-      }
-
-      if (replayBtn) replayBtn.addEventListener('click', restart);
-      restart();
-    })();
-  </script>
 </body>
 </html>

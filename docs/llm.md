@@ -28,6 +28,23 @@ Three action keys, each with its own follow-up flow:
 > `Config.enter_action = .single` (or `.dialog` / `.auto`) to
 > bring back the pre-Alt-key trigger flow if you preferred it.
 
+{% capture llm_static %}
+    <div class="line"><span class="prompt">$ </span><span class="typed">#: list zig files modified this week</span></div>
+    <div class="line dim">  ↪ Alt+A → single rewrite · Alt+S → dialog · Alt+C → inline chat</div>
+    <div class="line">&nbsp;</div>
+    <div class="line dim">─── inline chat panel (Alt+C) ───</div>
+    <div class="line"><span class="prompt">You:</span> fix the failing test in atoms.rs</div>
+    <div class="line"><span class="prompt">atty:</span> run the test to see the failure</div>
+    <div class="line dim">      $ cargo test atoms::parser</div>
+    <div class="line dim">Output: [42 lines · Alt+Shift+C to inspect]</div>
+{% endcapture %}
+{% include terminal_example.html
+    cast="llm"
+    title="~/code/atty — atty bash"
+    rows_em=18
+    static=llm_static
+    caption="Alt+A single rewrite · inline chat panel collapsing exec output · Alt+R recall picker showing the first user line of each persisted dialog." %}
+
 ## Quickstart
 
 Add the module to your `src/config.zig` tuple and rebuild:

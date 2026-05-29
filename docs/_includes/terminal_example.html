@@ -1,0 +1,49 @@
+{%- comment -%}
+  Shared terminal-example demo. Renders the macOS-window chrome,
+  a static fallback for no-JS / crawlers / prefers-reduced-motion,
+  and loads the cast-specific playback script.
+
+  Usage:
+    {% include terminal_example.html cast="hero" title="~/code/atty — atty bash" %}
+
+  Parameters:
+    cast      — required. The cast id; must match a script under
+                /assets/casts/<id>.js that registers itself on
+                window.attyTerminalCasts['<id>'].
+    title     — optional. Title-bar text. Default "atty bash".
+    static    — optional capture block. Caller's static fallback
+                markup (rendered when JS / motion is unavailable).
+                If omitted, the body starts empty.
+    rows_em   — optional. FIXED body height in em units (default
+                17). The body uses `height` + `overflow-y: auto`,
+                not `min-height`, so playback can't grow the panel
+                mid-page — page content below stays stable. Tune
+                per-cast so all lines comfortably fit; longer
+                scripts scroll inside the panel.
+    caption   — optional. Short prose under the panel.
+
+  Engine + casts auto-attach via [data-cast] selector so multiple
+  panels on one page each play their own cast independently.
+{%- endcomment -%}
+{%- assign cast_id   = include.cast | default: "hero" -%}
+{%- assign cast_title = include.title | default: "atty bash" -%}
+{%- assign cast_rows = include.rows_em | default: 17 -%}
+<div class="demo" data-cast="{{ cast_id }}">
+  <div class="demo-bar">
+    <span class="bar-dot dot-r"></span>
+    <span class="bar-dot dot-y"></span>
+    <span class="bar-dot dot-g"></span>
+    <span class="bar-title">{{ cast_title }}</span>
+  </div>
+  <div class="demo-body" aria-hidden="true" style="height: {{ cast_rows }}em; overflow-y: auto;">
+    {{ include.static }}
+  </div>
+  <div class="demo-controls">
+    <button type="button" class="demo-btn" data-replay title="restart the demo">▶ replay</button>
+  </div>
+</div>
+{%- if include.caption -%}
+<p class="demo-caption">{{ include.caption }}</p>
+{%- endif -%}
+<script src="{{ '/assets/casts/' | append: cast_id | append: '.js' | relative_url }}" defer></script>
+<script src="{{ '/assets/terminal_example.js' | relative_url }}" defer></script>
