@@ -333,22 +333,15 @@ sandbox-base-image:
 # cache directives — same shape as runner.py's base-image build,
 # so the expensive atty-guard --features ebpf rebuild + .bpf.o
 # compile layers round-trip through /tmp/.buildx-cache.
+# Same constraint as sandbox-onnx-image: plain docker driver so
+# this can read atty-sandbox:base from the local daemon. Buildx
+# cache for this extension layer is TODO (local registry sidecar
+# is the proper fix).
 sandbox-ebpf-image: sandbox-base-image
-	@if [ -n "$$SANDBOX_BUILDX_CACHE_FROM" ] || [ -n "$$SANDBOX_BUILDX_CACHE_TO" ]; then \
-	    DOCKER_BUILDKIT=1 docker buildx build --load \
-	        -t atty-sandbox:ebpf \
-	        -f tests/sandbox/Dockerfile.ebpf \
-	        --build-context base-image=docker-image://atty-sandbox:base \
-	        $${SANDBOX_BUILDX_CACHE_FROM:+--cache-from type=local,src=$$SANDBOX_BUILDX_CACHE_FROM} \
-	        $${SANDBOX_BUILDX_CACHE_TO:+--cache-to type=local,dest=$$SANDBOX_BUILDX_CACHE_TO,mode=max} \
-	        $(CURDIR); \
-	else \
-	    docker build \
-	        -t atty-sandbox:ebpf \
-	        -f tests/sandbox/Dockerfile.ebpf \
-	        --build-context base-image=docker-image://atty-sandbox:base \
-	        $(CURDIR); \
-	fi
+	DOCKER_BUILDKIT=1 docker build \
+	    -t atty-sandbox:ebpf \
+	    -f tests/sandbox/Dockerfile.ebpf \
+	    $(CURDIR)
 
 # Run the eBPF scenarios (51, 52). Skips when the image was built
 # without .bpf.o OR when the runner kernel lacks BPF LSM.
