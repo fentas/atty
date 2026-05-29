@@ -23,6 +23,7 @@ const defaults = @import("defaults.zig");
 pub const Proxy = defaults.Proxy;
 pub const Ghost = defaults.Ghost;
 pub const Terminal = defaults.Terminal;
+pub const Mouse = defaults.Mouse;
 pub const Keymap = defaults.Keymap;
 pub const StatusBar = defaults.StatusBar;
 pub const Subprocess = defaults.Subprocess;

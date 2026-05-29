@@ -33,6 +33,7 @@ const config = @import("config");
 pub const Proxy = config.Proxy;
 pub const Ghost = config.Ghost;
 pub const Terminal = config.Terminal;
+pub const Mouse = config.Mouse;
 pub const Keymap = config.Keymap;
 pub const StatusBar = config.StatusBar;
 pub const Subprocess = config.Subprocess;
@@ -44,6 +45,7 @@ pub const modules = struct {
     pub const guardrail = @import("modules/guardrail.zig");
     pub const history = @import("modules/history.zig");
     pub const llm = @import("modules/llm.zig");
+    pub const mouse_links = @import("modules/mouse_links.zig");
     pub const security_guard = @import("modules/security_guard.zig");
 };
 

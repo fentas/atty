@@ -210,6 +210,38 @@ const atty = @import("atty");
 // //     .daemon_timeout_ms = 50,        // per-classify keystroke budget
 // // }),
 
+// ───── Mouse-click → editor (mouse_links) ───────────────────────────────
+//
+// Click any path token in compiler/grep/ls/git output to inject
+// `<editor> +LINE 'path'\n` into the shell — runs through your normal
+// readline + history. Detects `:LINE` and `:LINE:COL` suffixes (col is
+// dropped — see `mouse_links/inject.zig` for why). Output rows are
+// captured into a per-process ring; SGR + OSC sequences are stripped
+// before path detection. Streaming-line model only — TUIs in the
+// alt-screen (vim, htop) bypass the intercept and keep their own mouse.
+//
+// Two prerequisites:
+//   1. `mouse.enabled = true` so atty emits the SGR-1006 DECSET trio
+//      and routes click events to modules.
+//   2. The module added to your `modules` tuple. Default editor comes
+//      from `$EDITOR` / `$VISUAL`; override via `.editor`.
+//
+// pub const mouse: atty.Mouse = .{ .enabled = true };
+//
+// pub const modules = .{
+//     atty.modules.mouse_links.configure(.{}),
+//     atty.modules.guardrail.configure(.{}),
+//     atty.modules.history.configure(.{}),
+// };
+//
+// // Override $EDITOR, shrink the capture ring, or restrict to absolute
+// // paths only:
+// // atty.modules.mouse_links.configure(.{
+// //     .editor = "nvim",
+// //     .ring_rows = 64,
+// //     .accept_relative = false,
+// // }),
+
 // ───── Proxy ────────────────────────────────────────────────────────────
 //
 // pub const proxy: atty.Proxy = .{
