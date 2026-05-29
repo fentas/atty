@@ -1,0 +1,43 @@
+# ONNX-scenario base image (#341). Extends atty-sandbox:base with
+# the SecureBERT model + tokenizer baked at the production path
+# (/var/lib/atty-guard/models/) for scenarios 60-onnx-second-stage
+# and 61-onnx-fbas-sized-buffer.
+#
+# The project deliberately doesn't ship a bundled model (it's
+# ~150 MB and the licensing of a community fine-tune isn't ours
+# to publish — see docs/security-guard-slm.md). Operators wanting
+# CI-grade ONNX coverage point this image's MODEL_URL / TOKENIZER_URL
+# build args at their hosted bundle and pin via SHA-256.
+#
+# When MODEL_URL is empty (default), the model is NOT baked and
+# scenarios 60/61 SKIP cleanly with a clear message — same posture
+# as the eBPF scenarios when BPF LSM is missing.
+
+ARG BASE_TAG=atty-sandbox:base
+FROM ${BASE_TAG}
+
+ARG MODEL_URL=""
+ARG MODEL_SHA256=""
+ARG TOKENIZER_URL=""
+ARG TOKENIZER_SHA256=""
+
+# Pinning the model + tokenizer in their own RUN layer means an
+# unrelated Dockerfile edit (e.g. adding a CLI tool higher up)
+# doesn't invalidate the model layer cache.
+RUN if [ -n "${MODEL_URL}" ]; then \
+        if [ -z "${MODEL_SHA256}" ] || [ -z "${TOKENIZER_URL}" ] || [ -z "${TOKENIZER_SHA256}" ]; then \
+            echo "error: MODEL_URL set but MODEL_SHA256 / TOKENIZER_URL / TOKENIZER_SHA256 missing" >&2; \
+            exit 2; \
+        fi; \
+        apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+        install -d -o atty -g atty -m 0750 /var/lib/atty-guard/models && \
+        curl -fsSL "${MODEL_URL}" -o /var/lib/atty-guard/models/securebert2-int8.onnx && \
+        curl -fsSL "${TOKENIZER_URL}" -o /var/lib/atty-guard/models/securebert2-tokenizer.json && \
+        echo "${MODEL_SHA256}  /var/lib/atty-guard/models/securebert2-int8.onnx" | sha256sum -c - && \
+        echo "${TOKENIZER_SHA256}  /var/lib/atty-guard/models/securebert2-tokenizer.json" | sha256sum -c - && \
+        chown atty:atty /var/lib/atty-guard/models/securebert2-int8.onnx /var/lib/atty-guard/models/securebert2-tokenizer.json && \
+        chmod 0640 /var/lib/atty-guard/models/securebert2-int8.onnx /var/lib/atty-guard/models/securebert2-tokenizer.json && \
+        apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "MODEL_URL empty — ONNX scenarios will SKIP at runtime"; \
+    fi

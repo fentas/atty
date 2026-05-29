@@ -101,8 +101,30 @@ def discover_scenarios() -> list[Path]:
     )
 
 
-_DOCKER_JSON_KEYS = {"privileged", "cap_add", "security_opt", "volumes"}
+_DOCKER_JSON_KEYS = {"privileged", "cap_add", "security_opt", "volumes", "image"}
 _VOLUME_KEYS = {"src", "dst", "rw"}
+
+
+def load_scenario_image(script: Path) -> str:
+    """Resolve which docker image a scenario should run in.
+
+    Default is `atty-sandbox:base`; scenarios with model/feature
+    dependencies (ONNX, eBPF kernel-side) can override via
+    docker.json's `"image"` key. The runner doesn't build the
+    override — operators (or the make target / CI workflow) are
+    responsible for `docker pull` / `docker build` of it.
+    """
+    meta = script.parent / "docker.json"
+    if not meta.exists():
+        return IMAGE_TAG
+    try:
+        cfg = json.loads(meta.read_text())
+    except json.JSONDecodeError:
+        return IMAGE_TAG
+    image = cfg.get("image")
+    if isinstance(image, str) and image:
+        return image
+    return IMAGE_TAG
 
 
 def load_scenario_docker_opts(script: Path) -> list[str]:
@@ -171,10 +193,27 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
     return flags
 
 
+def docker_image_exists(image: str) -> bool:
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def run_scenario(script: Path) -> bool:
     name = script.parent.name
     print(f"\n[runner] === {name} ===")
     extra = load_scenario_docker_opts(script)
+    image = load_scenario_image(script)
+    # Scenarios that override the image (ONNX, future eBPF-kernel)
+    # SKIP cleanly when their image isn't on disk — the operator
+    # hasn't built it yet. Returning True keeps the suite green;
+    # the SKIP banner stays visible in logs.
+    if image != IMAGE_TAG and not docker_image_exists(image):
+        print(f"[runner] {name}: SKIP (image {image!r} not built — "
+              f"see make target for this scenario class)")
+        return True
     try:
         result = subprocess.run(
             [
@@ -189,7 +228,7 @@ def run_scenario(script: Path) -> bool:
                 "-w",
                 "/sandbox",
                 *extra,
-                IMAGE_TAG,
+                image,
                 "python3",
                 f"/sandbox/scenarios/{name}/scenario.py",
             ],

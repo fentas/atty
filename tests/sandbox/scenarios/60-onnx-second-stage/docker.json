@@ -1,0 +1,4 @@
+{
+  "_comment": "ONNX scenarios use the model-baked image. Build via `make sandbox-onnx` or push your own atty-sandbox:onnx with the model + tokenizer at /var/lib/atty-guard/models/.",
+  "image": "atty-sandbox:onnx"
+}

@@ -41,7 +41,7 @@ endif
 .PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
         clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard \
-        sandbox sandbox-rebuild
+        sandbox sandbox-rebuild sandbox-onnx sandbox-onnx-image
 
 help:
 	@printf "atty — build targets\n\n"
@@ -315,3 +315,24 @@ sandbox:
 sandbox-rebuild:
 	-docker image rm atty-sandbox:base 2>/dev/null || true
 	$(MAKE) sandbox
+
+# Build the ONNX-baked sandbox image. Requires the operator to
+# point at a hosted SecureBERT bundle via the *_URL / *_SHA256
+# env vars; without them the build still succeeds but the model
+# is NOT baked and scenarios 60/61 SKIP at runtime. See
+# tests/sandbox/onnx-models.toml for the pin file format.
+sandbox-onnx-image: sandbox
+	docker build \
+	    -t atty-sandbox:onnx \
+	    -f tests/sandbox/Dockerfile.onnx \
+	    --build-arg MODEL_URL="$$ONNX_MODEL_URL" \
+	    --build-arg MODEL_SHA256="$$ONNX_MODEL_SHA256" \
+	    --build-arg TOKENIZER_URL="$$ONNX_TOKENIZER_URL" \
+	    --build-arg TOKENIZER_SHA256="$$ONNX_TOKENIZER_SHA256" \
+	    tests/sandbox
+
+# Run the ONNX scenarios (60, 61) — depends on sandbox-onnx-image
+# being built first. Scenarios SKIP if the image was built
+# without a model bundle.
+sandbox-onnx: sandbox-onnx-image
+	python3 tests/sandbox/runner.py --no-build 60-onnx-second-stage 61-onnx-fbas-sized-buffer
