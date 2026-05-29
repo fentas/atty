@@ -13,6 +13,15 @@
 //! Capture model mirrors mouse_links — a per-module ring of recent
 //! output rows with SGR / OSC strip. Sharing the ring across both
 //! modules is a future refactor (the per-byte work is light).
+//!
+//! Module ordering: when `.ask_each` mode is on, the armed banner's
+//! key consumption (returning `.swallow` from `onInput`) must beat
+//! other input-consuming modules in dispatch order. Place
+//! `mouse_urls` BEFORE `guardrail` (which also swallows on its own
+//! armed banner) in the user's `modules` tuple — otherwise an open
+//! guardrail prompt could eat the `y/a/t` keystroke meant for the
+//! URL banner. The same rule applies to any future input-consuming
+//! module.
 
 const std = @import("std");
 const m = @import("../module.zig");
@@ -318,9 +327,10 @@ pub fn configure(comptime cfg: Config) type {
             // so the user gets the immediate effect without leaving
             // the prompt.
             sessionTrustAdd(rt, host);
+            const host_clean = stripPort(host);
             var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "session-trusted; persist: sudo atty-guard urls allow {s}", .{stripPort(host)}) catch
-                return setHint(rt, "session-trusted: ", host);
+            const msg = std.fmt.bufPrint(&buf, "session-trusted; persist: sudo atty-guard urls allow {s}", .{host_clean}) catch
+                return setHint(rt, "session-trusted: ", host_clean);
             setHint(rt, "", msg);
         }
 

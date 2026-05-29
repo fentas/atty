@@ -274,7 +274,9 @@ const atty = @import("atty");
 // // session-trust (subsequent clicks fast-path); `[t]` surfaces the
 // // `sudo atty-guard urls allow <host>` guidance for permanent
 // // persistence (atty can't write the daemon's trust file itself
-// // — `urls allow` is an EUID-0 RPC).
+// // — `urls allow` is an EUID-0 RPC). Place `mouse_urls` BEFORE
+// // `guardrail` in `modules` so the banner's `y`/`a`/`t` keystrokes
+// // beat guardrail's armed-prompt consumption.
 // // atty.modules.mouse_urls.configure(.{ .mode = .ask_each }),
 //
 // // Paranoid posture — click is always a no-op + hint:

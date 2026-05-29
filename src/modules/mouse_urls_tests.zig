@@ -412,7 +412,7 @@ test "ask_each — pre-existing whitelist entry fast-paths past the banner" {
     try testing.expectEqualStrings("opening: https://trusted.example/x", hint);
 }
 
-test "session_trust FIFO eviction at capacity" {
+test "session_trust FIFO eviction at capacity — strict ordering" {
     const Mod = configure(.{
         .mode = .ask_each,
         .opener = "true",
@@ -428,23 +428,68 @@ test "session_trust FIFO eviction at capacity" {
     defer scratch.deinit(testing.allocator);
     var c = ctx(&line, &scratch);
 
-    inline for ([_][]const u8{ "a", "b", "c", "d" }, 0..) |suffix, i| {
+    const hosts = [_][]const u8{ "ha.example", "hb.example", "hc.example", "hd.example", "he.example" };
+    inline for ([_][]const u8{ "a", "b", "c", "d", "e" }, 1..) |suffix, row| {
         const out = "https://h" ++ suffix ++ ".example\n";
         try Mod.onOutput(&rt, &c, out);
-        const click: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = @intCast(i + 1), .mods = .{} };
+        const click: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = @intCast(row), .mods = .{} };
         _ = try Mod.onMouseClick(&rt, &c, click);
         _ = try Mod.onInput(&rt, &c, "a");
     }
+
     try testing.expectEqual(@as(usize, 3), rt.session_filled);
-    // ha was evicted; hb hc hd remain (after wrap, ring contains
-    // hd hb hc in head-wrap order — set membership is what matters).
-    const has_a = blk: {
-        for (rt.session_hosts) |*slot| {
-            if (std.mem.eql(u8, slot.slice(), "ha.example")) break :blk true;
-        }
-        break :blk false;
-    };
-    try testing.expect(!has_a);
+
+    // After 5 adds with capacity 3, ha + hb were evicted; hc, hd, he survive.
+    try testing.expect(!ringHas(&rt, hosts[0])); // ha evicted
+    try testing.expect(!ringHas(&rt, hosts[1])); // hb evicted
+    try testing.expect(ringHas(&rt, hosts[2])); // hc
+    try testing.expect(ringHas(&rt, hosts[3])); // hd
+    try testing.expect(ringHas(&rt, hosts[4])); // he
+
+    // hc must still hostTrust — proves the surviving entries work.
+    try Mod.onOutput(&rt, &c, "https://hc.example/p\n");
+    const click_hc: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = 6, .mods = .{} };
+    _ = try Mod.onMouseClick(&rt, &c, click_hc);
+    try testing.expect(!rt.armed); // fast-path through session-trust
+}
+
+fn ringHas(rt: anytype, host: []const u8) bool {
+    for (rt.session_hosts) |*slot| {
+        if (std.mem.eql(u8, slot.slice(), host)) return true;
+    }
+    return false;
+}
+
+test "ask_each — 'y' on first host, 'a' on second: only the 'a' host is trusted" {
+    // Inverse-coverage for the 'y' test: prove 'y' does NOT fall through
+    // to the 'a' arm by interleaving them in the same Runtime.
+    const Mod = configure(.{
+        .mode = .ask_each,
+        .opener = "true",
+        .hint_ttl_ms = 60_000,
+    });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+
+    try Mod.onOutput(&rt, &c, "https://once.example/p\n");
+    _ = try Mod.onMouseClick(&rt, &c, .{ .button = .left, .kind = .press, .col = 5, .row = 1, .mods = .{} });
+    _ = try Mod.onInput(&rt, &c, "y");
+    try testing.expectEqual(@as(usize, 0), rt.session_filled);
+
+    try Mod.onOutput(&rt, &c, "https://twice.example/p\n");
+    _ = try Mod.onMouseClick(&rt, &c, .{ .button = .left, .kind = .press, .col = 5, .row = 2, .mods = .{} });
+    _ = try Mod.onInput(&rt, &c, "a");
+
+    try testing.expectEqual(@as(usize, 1), rt.session_filled);
+    try testing.expectEqualStrings("twice.example", rt.session_hosts[0].slice());
+    // The 'y' host must NOT have been trusted.
+    try testing.expect(!ringHas(&rt, "once.example"));
 }
 
 test "hint TTL expiry suppresses stale hint" {
