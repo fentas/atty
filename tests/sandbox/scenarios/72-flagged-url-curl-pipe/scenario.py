@@ -52,18 +52,22 @@ def main() -> None:
         verdict = resp.get("verdict")
         # curl_pipe_sh alone is 1.0 confidence Warn; combined
         # with the URL substring (0.9) the accumulator saturates
-        # close to 1.0. Either verdict is acceptable; the
-        # invariant being pinned is "definitely not Safe".
-        if verdict not in ("warn", "block"):
+        # Default verdict is warn — the regex hits at 1.0
+        # confidence but `[accumulator] block_threshold` isn't
+        # set in this scenario. Allowing block here would mask a
+        # regression where the opt-in gate fails open.
+        # 40-auto-block covers the threshold-enabled block path.
+        if verdict != "warn":
             d.dump_log()
-            fail(f"expected warn/block on curl-pipe-sh + flagged "
-                 f"URL combo, got verdict={verdict!r}; full "
-                 f"response: {resp}")
+            fail(f"expected warn (no [accumulator] block_threshold "
+                 f"opt-in) on curl-pipe-sh + flagged URL combo, "
+                 f"got verdict={verdict!r}; full response: {resp}")
         reason = resp.get("reason", "")
-        # Both the URL substring AND a curl-pipe-sh attribution
-        # should appear in the rendered reason — proves neither
-        # layer's contribution got dropped when the other fired
-        # at higher confidence.
+        # All three layers' attributions should appear — URL
+        # substring, curl_pipe_sh regex, and bundled atom hit.
+        # Asserting each independently catches a render regression
+        # where one layer's contribution gets shadowed by the
+        # higher-confidence regex when hits are concatenated.
         if FLAGGED_URL_SUB not in reason:
             d.dump_log()
             fail(f"reason text missing flagged URL substring "
@@ -80,6 +84,16 @@ def main() -> None:
             fail(f"reason text missing curl_pipe_sh regex layer "
                  f"attribution ('remote-fetch-and-execute'); "
                  f"reason={reason!r}; full response: {resp}")
+        # AtomMatcher layer hit on `curl -fsSL` (from
+        # flagged_atoms.txt). Distinct from the regex layer — a
+        # render regression that dropped atom attribution when
+        # the regex layer also fired would slip past the regex
+        # assertion alone.
+        if "curl -fsSL" not in reason:
+            d.dump_log()
+            fail(f"reason text missing AtomMatcher attribution "
+                 f"for 'curl -fsSL'; reason={reason!r}; full "
+                 f"response: {resp}")
 
     print("PASS: 72-flagged-url-curl-pipe")
 

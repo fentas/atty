@@ -44,11 +44,16 @@ def main() -> None:
             d.dump_log()
             fail(f"classify failed: {resp}")
         verdict = resp.get("verdict")
-        if verdict not in ("warn", "block"):
+        # Default verdict is warn — two atoms combine to ~0.84
+        # confidence, AND `[accumulator] block_threshold` isn't
+        # set in this scenario. Allowing block would mask a
+        # regression where the opt-in gate fails open.
+        # 40-auto-block covers the threshold-enabled block path.
+        if verdict != "warn":
             d.dump_log()
-            fail(f"expected warn/block on Sigma-shape multi-atom "
-                 f"hit, got verdict={verdict!r}; full response: "
-                 f"{resp}")
+            fail(f"expected warn (no [accumulator] block_threshold "
+                 f"opt-in) on Sigma-shape multi-atom hit, got "
+                 f"verdict={verdict!r}; full response: {resp}")
         reason = resp.get("reason", "")
         # Both atom fragments must appear in the rendered reason.
         # A regression that collapsed multi-atom reasons to "N

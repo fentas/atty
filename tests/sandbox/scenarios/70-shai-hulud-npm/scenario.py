@@ -4,8 +4,10 @@
 Pins that `npm install @ctrl/tinycolor` (one of the original
 Shai-Hulud-compromised packages, listed in
 src/modules/security_guard/data/flagged_npm.txt under the
-"Shai-Hulud npm worm" heading) lands as a Warn/Block verdict
-with the package name surfaced in the reason text.
+"Shai-Hulud npm worm" heading) lands as a Warn verdict —
+single-signal can't escalate per the `hits.len() >= 2` guard
+in classifier.rs:372 — with the package name surfaced in the
+reason text.
 
 This is a structural assertion on the npm-flagged-pkg classifier
 path — a regression where the corpus loader silently dropped
