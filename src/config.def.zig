@@ -269,6 +269,14 @@ const atty = @import("atty");
 //     atty.modules.history.configure(.{}),
 // };
 //
+// // Interactive — `[y]es / [a]llow / [t]rust / cancel` banner on
+// // click of an untrusted host. `[a]` adds to in-memory
+// // session-trust (subsequent clicks fast-path); `[t]` surfaces the
+// // `sudo atty-guard urls allow <host>` guidance for permanent
+// // persistence (atty can't write the daemon's trust file itself
+// // — `urls allow` is an EUID-0 RPC).
+// // atty.modules.mouse_urls.configure(.{ .mode = .ask_each }),
+//
 // // Paranoid posture — click is always a no-op + hint:
 // // atty.modules.mouse_urls.configure(.{ .mode = .never }),
 
