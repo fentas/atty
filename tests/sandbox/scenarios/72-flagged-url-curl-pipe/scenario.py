@@ -8,13 +8,14 @@ trips MULTIPLE classifier layers in the same response:
   `copyfail.security` (Shai-Hulud delivery host).
 - `curl_pipe_sh` precise regex at 1.0 confidence
   (classifier.rs:481 `find()` on `curl … | sh`).
-- Bundled atom hits `curl -fsSL` and `| sh`.
+- Bundled atom hit on `curl -fsSL` from flagged_atoms.txt.
 
-The combined verdict should be block (the regex's 1.0 confidence
-saturates the accumulator) with the URL surfaced in the reason
-text. A regression where the URL match got masked by the
-higher-confidence regex (or vice-versa) in reason rendering
-would surface here.
+Verdict is warn by default — the multi-layer hit doesn't
+escalate to block unless `[accumulator] block_threshold` is set
+(40-auto-block covers that path). What this scenario pins is
+that ALL THREE layers' contributions reach the reason text —
+neither the URL nor the atom gets shadowed by the higher-
+confidence regex when the renderer concatenates hits.
 
 Failure modes this catches:
 - flagged_urls.txt seed entry `copyfail.security` removed in a
