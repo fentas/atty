@@ -19,8 +19,8 @@ Skips cleanly when:
 """
 from __future__ import annotations
 
+import re
 import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -95,11 +95,23 @@ def main() -> None:
         # carries no new errors after the syscall.
         time.sleep(0.5)
         log_after = d.read_log()
-        # Filter to lines added AFTER opening the socket.
-        new_lines = log_after[len(log_before):].lower()
-        if "panic" in new_lines or "failed" in new_lines or "error" in new_lines:
+        # Filter to lines added AFTER opening the socket. Use a
+        # line-anchored failure-signature regex (same shape as
+        # 00-smoke's _DAEMON_FAIL_RE) — substring "error" matches
+        # benign text like "no error:" or "ERROR_NONE", so anchor
+        # on either the structured `atty-guard:` daemon prefix +
+        # failure word OR a catastrophic panic line.
+        new_lines = log_after[len(log_before):]
+        fail_re = re.compile(
+            r"^(?:atty-guard:.*(?:error:|failed|rejected)|"
+            r"thread .*panicked|panic:|fatal:)",
+            re.MULTILINE,
+        )
+        match = fail_re.search(new_lines)
+        if match:
             d.dump_log()
-            fail(f"daemon logged failure after AF_ALG syscall:\n{new_lines}")
+            fail(f"daemon logged failure after AF_ALG syscall: "
+                 f"{match.group(0)!r}\nfull new lines: {new_lines!r}")
 
     print("PASS: 52-ebpf-af-alg-tracepoint")
 
