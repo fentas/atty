@@ -351,7 +351,7 @@ fn parseStringField(
                 't' => '\t',
                 'r' => '\r',
                 else => next, // preserve unknown escape as the
-                              // literal char (best-effort).
+                // literal char (best-effort).
             };
             try out.append(allocator, decoded);
             i += 1;
