@@ -8,6 +8,7 @@ test {
     _ = @import("security_guard/patterns.zig");
     _ = @import("security_guard/trust_cache.zig");
     _ = @import("security_guard/uds_client.zig");
+    _ = @import("security_guard/warn_subscriber.zig");
 }
 
 const Sink = struct {
