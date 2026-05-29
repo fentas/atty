@@ -854,7 +854,6 @@ test "allDefaultBindings: picks up bindings from configure()-style factory modul
 // events. First module to return `.consume` wins; later modules
 // don't run and the proxy drops the underlying CSI sequence.
 
-
 const MouseObserver = struct {
     pub const name = "mouse-observer";
     pub const Runtime = struct {
