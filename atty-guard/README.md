@@ -143,11 +143,12 @@ JSON-line over the UDS — one request per `\n`-terminated line, one response pe
 
 ## Tier-2 backend
 
-Tier-2 is pluggable behind the `Tier2Backend` trait. Two impls ship today; an `OnnxBackend` lands with V2-C. Pick with `--tier2 <name>`:
+Tier-2 is pluggable behind the `Tier2Backend` trait. Three impls ship today (`stub`, `heuristic`, `onnx`); the ONNX backend is opt-in via the `tier2-onnx` Cargo feature. Pick with `--tier2 <name>`:
 
 ```sh
 atty-guard --tier2 stub        # default — always Safe, no extra rules
 atty-guard --tier2 heuristic   # additional regex rules beyond Tier-1
+atty-guard --tier2 onnx        # SecureBERT 2.0 / Qwen2.5-Coder — needs --features tier2-onnx
 ```
 
 ### `stub`
@@ -242,6 +243,6 @@ in-memory session trust mirrored to disk.
 |-------|---------------------------------------------------------|----------------|
 | V2-A  | This crate — UDS + Tier-1 + in-mem threat map.          | ✅ shipped (#105) |
 | V2-D  | atty-side UDS client — atty queries this daemon.        | ✅ shipped (#106) |
-| V2-B  | `aya-rs` LSM hook + ringbuf consumer + BPF threat map.  | ⏳ next        |
-| V2-C  | ONNX SLM in `classifier::tier2` (SecureBERT-class).     | ⏳ after V2-B  |
+| V2-B  | libbpf LSM hook + execve/AF_ALG tracepoints + BPF threat map. | ✅ shipped (opt-in via `--features ebpf`) |
+| V2-C  | ONNX SLM in `classifier::tier2` (SecureBERT-class).     | ✅ shipped (opt-in via `--features tier2-onnx`) |
 | V2-E  | Auto-launch from atty + system unit packaging.          | ✅ shipped (#140) |

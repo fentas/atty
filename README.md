@@ -26,7 +26,7 @@ Features:
 - **Comptime module dispatch** — `inline for` over your config tuple; disabled modules contribute *zero bytes* to the binary
 - **Atuin autosuggestions** — fish-style dim/italic ghost text from your shell history, via an async worker thread
 - **Dangerous-command guardrail** — swallows Enter on `rm -rf /`, `dd if=…`, `… | sh`, fork bombs, and friends, then waits for a confirm
-- **Five hooks per module**: `attach` / `detach` / `onInput` / `onOutput` / `provideGhostText` / `onTick` — implement what you need, the rest is statically dropped
+- **Optional comptime hooks**: `attach` / `detach` / `onInput` / `onOutput` / `onTick` / `onLineCommit` / `provideGhostText` / `provideGhostList` / `statusText` / `isOverlayActive` — implement what you need, the rest is statically dropped
 - **Single static binary** — musl-linked, no libutil, no runtime deps; `ghcr.io/fentas/atty:latest` is ~14 MB
 - **Zero-allocation hot path** — per-keystroke dispatch does no heap traffic; Atuin lookups happen on a worker thread
 
@@ -243,11 +243,13 @@ The image is multi-arch (`linux/amd64`, `linux/arm64`) and the binary is musl-st
 
 ### 📦 Built-in modules
 
-| Module                                                | Hook surface                                              | Purpose                                                                |
-|-------------------------------------------------------|-----------------------------------------------------------|------------------------------------------------------------------------|
-| [`guardrail`](src/modules/guardrail.zig)              | `onInput`                                                 | Confirm-on-Enter for `rm -rf /`, `dd`, `mkfs`, fork bombs, curl-pipe-sh |
-| [`history`](src/modules/history.zig) *(default)*      | `onInput`, `onLineCommit`, `provideGhostText`, `onTick`   | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history`     |
-| [`atuin`](src/modules/atuin.zig) *(opt-in)*           | `onInput`, `onLineCommit`, `provideGhostText`, `onTick`   | Fish-style autosuggestions from your Atuin history + record on Enter   |
+| Module                                                       | Hook surface                                                         | Purpose                                                                |
+|--------------------------------------------------------------|----------------------------------------------------------------------|------------------------------------------------------------------------|
+| [`guardrail`](src/modules/guardrail.zig)                     | `onInput`                                                            | Confirm-on-Enter for `rm -rf /`, `dd`, `mkfs`, fork bombs, curl-pipe-sh |
+| [`history`](src/modules/history.zig) *(default)*             | `onInput`, `onLineCommit`, `provideGhostText`, `onTick`              | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history`     |
+| [`atuin`](src/modules/atuin.zig) *(opt-in)*                  | `onInput`, `onLineCommit`, `provideGhostText`, `onTick`              | Fish-style autosuggestions from your Atuin history + record on Enter   |
+| [`security_guard`](src/modules/security_guard/)              | `onInput`, `onTick`                                                  | Pre-Enter Tier-1 classifier + UDS client to the `atty-guard` sidecar   |
+| [`llm`](src/modules/llm/)                                    | `onInput`, `onLineCommit`, `provideGhostText`, `statusText`, `isOverlayActive` | `#: intent` → shell-command rewrite; Alt+A single, Alt+S dialog, Alt+R recall |
 
 Add your own under `src/modules/` and wire it into `config.modules`. Reference docs: [atty.sh/providers](https://atty.sh/providers/).
 
@@ -258,7 +260,7 @@ Add your own under `src/modules/` and wire it into `config.modules`. Reference d
 ```bash
 mise use zig@0.16.0           # any other Zig 0.16.0 install also works
 zig build                     # → ./zig-out/bin/atty
-zig build test --summary all  # 33 unit tests
+zig build test --summary all  # 949 unit tests
 zig build itest --summary all # PTY round-trip integration test
 ```
 

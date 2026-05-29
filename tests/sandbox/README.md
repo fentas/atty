@@ -67,12 +67,19 @@ Current scenarios:
   `[accumulator] block_threshold = 0.8`, a multi-Tier-1 command
   triggers daemon Block + atty paints REFUSED.
 - **`50-ebpf-loader`** — `--ebpf-mode` flag plumbing + graceful
-  fallback. Sandbox image is built without `--features ebpf`
-  on purpose so the FeatureNotBuilt path is the test target.
-  Full kernel-side eBPF testing (51 / 52 in #332's original
-  scope) needs a separate sandbox image build with libbpf-dev +
-  clang + the .bpf.o pre-compiled — deferred to a follow-up
-  issue.
+  fallback. Runs against `atty-sandbox:base` (built without
+  `--features ebpf`) so the FeatureNotBuilt path is the test
+  target.
+- **`51-ebpf-threat-map-roundtrip`** + **`52-ebpf-af-alg-tracepoint`**
+  — real kernel-side coverage. Both require `atty-sandbox:ebpf`
+  with libbpf-dev + clang + a pre-compiled `.bpf.o`. Build via
+  `make sandbox-ebpf-image` (needs host BTF at
+  `/sys/kernel/btf/vmlinux`). Without the image they SKIP
+  cleanly so `make sandbox` stays green. 51 marks alice's PID
+  Critical via the UDS, then asserts the LSM hook denies a
+  subsequent execve; 52 opens an AF_ALG socket and asserts the
+  daemon survives the `sys_enter_socket` tracepoint without
+  faulting.
 - **`62-onnx-fallback`** — pins the PR #316 / #026 fail-closed
   posture: explicit `[tier2] backend = "onnx"` + missing model
   must refuse to start; default path (no operator request)
@@ -86,6 +93,14 @@ Current scenarios:
   `ONNX_MODEL_URL` / `ONNX_MODEL_SHA256` /
   `ONNX_TOKENIZER_URL` / `ONNX_TOKENIZER_SHA256`. Without the
   image they SKIP cleanly so `make sandbox` stays green.
+- **`70-shai-hulud-npm`** + **`71-sigma-reverse-shell`** +
+  **`72-flagged-url-curl-pipe`** — real-incident replay (#345).
+  Drive the classify RPC with canonical IOC shapes (a flagged
+  npm package, a Sigma reverse-shell command, the Shai-Hulud
+  delivery URL with `curl … | sh`) and pin the rendered reason
+  text so an atom-corpus prune or a reason-renderer regression
+  fails loudly. Run against `atty-sandbox:base` — no extension
+  image needed.
 
 ## Per-scenario docker flags
 
