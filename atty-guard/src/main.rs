@@ -42,6 +42,13 @@ mod server;
 mod shutdown;
 mod threat_map;
 mod trust_store;
+// warn_consumer's surface (ringbuf-event types + broadcast +
+// PID-tree walk) is fully wired only when the `ebpf` feature is
+// built. Without it, the daemon still exposes SubscribeWarnEvents
+// (subscribers just see no events) so the types compile but a
+// chunk go unused — silence those warnings on the no-feature
+// path instead of sprinkling per-item allow(dead_code).
+#[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
 mod warn_consumer;
 
 use clap::Parser;

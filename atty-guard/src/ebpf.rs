@@ -209,8 +209,19 @@ mod with_libbpf {
     /// the per-connection RPC threads (lookup/update/delete) is
     /// safe under that contract.
     pub struct ObjectHandle(&'static libbpf_rs::Object);
+    // SAFETY-redundant — EbpfState's outer impl also asserts these,
+    // but local impl makes the intent self-contained should the
+    // wrapper ever leave EbpfState.
     unsafe impl Sync for ObjectHandle {}
     unsafe impl Send for ObjectHandle {}
+
+    /// Daemon-start instant for monotonic `timestamp_ms` on warn
+    /// events. `SystemTime::now()` would jump on NTP step / DST /
+    /// manual clock set — a backwards-stepping timestamp on a warn
+    /// banner looks like a duplicate. Captured once at first read;
+    /// `Instant::elapsed` is monotonic per std lib contract.
+    static DAEMON_START: std::sync::LazyLock<std::time::Instant> =
+        std::sync::LazyLock::new(std::time::Instant::now);
 
     // SAFETY: `libbpf_rs::Link` wraps `NonNull<bpf_link>` and isn't
     // auto-Send/Sync. We only touch Links at `EbpfState::Drop`,
@@ -460,10 +471,7 @@ mod with_libbpf {
         if !evt.is_warn() {
             return;
         }
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = DAEMON_START.elapsed().as_millis() as u64;
         broadcast.broadcast(
             evt.pid,
             evt.to_warn_event(now_ms),

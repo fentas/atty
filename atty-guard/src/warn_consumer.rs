@@ -192,14 +192,6 @@ pub struct ExecveEvent {
 
 const _: () = assert!(std::mem::size_of::<ExecveEvent>() == 156);
 
-// PR 2a ships the wire-format mirror, broadcast list, and
-// subscribe-RPC plumbing in server.rs but doesn't yet drive the
-// kernel→broadcast pipe (the ringbuf consumer thread lands in
-// PR 2b — libbpf-rs lifetime gymnastics warrant their own focused
-// change). Marking ExecveEvent methods + cstr_trim as
-// allow(dead_code) until then so the build stays warning-free.
-
-#[allow(dead_code)]
 impl ExecveEvent {
     /// Decode a raw event from the ringbuf. Returns `None` for
     /// truncated buffers — kernel can hand us a runt if the
@@ -249,7 +241,6 @@ impl ExecveEvent {
     }
 }
 
-#[allow(dead_code)]
 fn cstr_trim(buf: &[u8]) -> String {
     let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..len]).into_owned()

@@ -8,9 +8,11 @@ subscriber through the daemon's `subscribe_warn_events` RPC.
 Wire-up:
 1. Spawn an interactive bash under alice (PID captured).
 2. Open a UDS subscriber connection, send
-   `subscribe_warn_events { parent_pid_tree: 0 }` (unfiltered —
-   the per-PID-tree walk needs /proc visibility into alice's
-   tree which is fiddly to thread through the runuser shim).
+   `subscribe_warn_events { parent_pid_tree: alice_pid }` —
+   exercises the per-PID-tree filter integration (pid_in_tree
+   _root walks /proc/<child>/status looking for alice_pid as
+   an ancestor). A filter regression surfaces as "no event
+   received in 5s".
 3. Read the `Subscribed` ack.
 4. Mark alice's bash PID Critical under `--ebpf-mode=warn`.
 5. Trigger an execve under alice (`/bin/true`).
@@ -111,10 +113,17 @@ def spawn_alice_bash() -> tuple["ptyprocess.PtyProcess", int]:
     fail(f"couldn't capture alice's bash PID; output={bytes(sink)!r}")
 
 
-def open_subscriber() -> tuple[socket.socket, socket.SocketIO]:
+def open_subscriber(pid_tree_root: int) -> tuple[socket.socket, socket.SocketIO]:
     """Connect to the daemon UDS, send the SubscribeWarnEvents
     request, wait for the `Subscribed` ack. Returns (socket, file
     handle for newline-buffered reads).
+
+    `pid_tree_root` exercises the PID-tree filter integration —
+    passing alice's bash PID means the test only receives events
+    from alice's tree, which is also the only tree producing
+    warn events here. A filter regression (pid_in_tree_root
+    returns false when it should return true) would surface as
+    "no warn_event received within timeout".
     """
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(5.0)
@@ -122,7 +131,7 @@ def open_subscriber() -> tuple[socket.socket, socket.SocketIO]:
     req = json.dumps({
         "id": 1,
         "method": "subscribe_warn_events",
-        "parent_pid_tree": 0,
+        "parent_pid_tree": pid_tree_root,
     })
     s.sendall((req + "\n").encode())
     # makefile-buffered read for line framing.
@@ -213,7 +222,7 @@ def main() -> None:
                 d.dump_log()
                 fail(f"daemon didn't attach eBPF; log:\n{log}")
 
-            sub_sock, rf = open_subscriber()
+            sub_sock, rf = open_subscriber(pid_tree_root=alice_pid)
             mark_critical_via_alice(alice_pid)
             # Give the BPF map write a beat.
             time.sleep(0.3)
