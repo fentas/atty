@@ -25,9 +25,29 @@ use crate::protocol::ResponseBody;
 /// `pid_tree_root = 0` means "no filter" — operator-debug
 /// subscribers (e.g. `atty-guard subscribe-warns` CLI) want the
 /// full stream.
+///
+/// `tx` is a SyncSender (bounded) so a slow subscriber drops
+/// the oldest event (via `try_send` returning Full) instead of
+/// growing the daemon's memory unbounded. `dropped_since_notice`
+/// counts the drops between `WarnDropped` notice emissions so
+/// the subscriber knows they fell behind.
 pub struct Subscriber {
     pub pid_tree_root: u32,
-    pub tx: std::sync::mpsc::Sender<ResponseBody>,
+    pub tx: std::sync::mpsc::SyncSender<ResponseBody>,
+    pub dropped_since_notice: std::cell::Cell<u32>,
+}
+
+impl Subscriber {
+    pub fn new(
+        pid_tree_root: u32,
+        tx: std::sync::mpsc::SyncSender<ResponseBody>,
+    ) -> Self {
+        Self {
+            pid_tree_root,
+            tx,
+            dropped_since_notice: std::cell::Cell::new(0),
+        }
+    }
 }
 
 /// Thread-safe broadcast list. `register` appends a subscriber;
@@ -48,8 +68,10 @@ impl Broadcast {
         self.subs.lock().expect("broadcast poisoned").push(sub);
     }
 
-    /// Fan a single ResponseBody out to all matching subscribers,
-    /// removing any whose receiver has gone away. `pid_tree_match`
+    /// Fan a single ResponseBody out to all matching subscribers.
+    /// Drops disconnected subscribers; slow subscribers (inbox
+    /// full) get the event dropped + a `WarnDropped` notice
+    /// queued on their next-event opportunity. `pid_tree_match`
     /// decides if an event matches a given subscriber's root —
     /// caller-supplied so the (potentially I/O-bound) /proc walk
     /// can be stubbed in tests.
@@ -64,15 +86,41 @@ impl Broadcast {
                 // don't forward.
                 return true;
             }
-            // Send a clone (cheap for ResponseBody — String fields
-            // are short). Drop the subscriber if the receiver is
-            // gone.
-            s.tx.send(body.clone()).is_ok()
+            // Flush the WarnDropped notice first if there's a
+            // pending count — the subscriber needs to learn
+            // they missed events BEFORE seeing the next live
+            // one. Best-effort: if their inbox is still full
+            // we'll try again next time.
+            let pending = s.dropped_since_notice.get();
+            if pending > 0 {
+                if s.tx
+                    .try_send(ResponseBody::WarnDropped { count: pending })
+                    .is_ok()
+                {
+                    s.dropped_since_notice.set(0);
+                }
+                // If the notice itself couldn't fit either, fall
+                // through to attempt the live event; either both
+                // queue or both increment the drop counter.
+            }
+            match s.tx.try_send(body.clone()) {
+                Ok(()) => true,
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    s.dropped_since_notice
+                        .set(s.dropped_since_notice.get().saturating_add(1));
+                    true
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
+            }
         });
     }
 
     pub fn len(&self) -> usize {
         self.subs.lock().expect("broadcast poisoned").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -133,7 +181,9 @@ const VERDICT_BLOCK: u8 = 2;
 pub struct ExecveEvent {
     pub kind: u8,
     pub verdict: u8,
-    pub _pad: [u8; 2],
+    // Layout-only filler — keep private so callers don't reach
+    // for it. Total struct stays 156 bytes (size_of assert below).
+    _pad: [u8; 2],
     pub pid: u32,
     pub ppid: u32,
     pub comm: [u8; 16],
@@ -266,8 +316,8 @@ mod tests {
     #[test]
     fn broadcast_drops_disconnected_subscriber() {
         let bcast = Broadcast::new();
-        let (tx, rx) = mpsc::channel();
-        bcast.register(Subscriber { pid_tree_root: 0, tx });
+        let (tx, rx) = mpsc::sync_channel(16);
+        bcast.register(Subscriber::new(0, tx));
         assert_eq!(bcast.len(), 1);
         drop(rx); // simulate subscriber disconnect
         bcast.broadcast(
@@ -287,13 +337,13 @@ mod tests {
     #[test]
     fn broadcast_filters_by_pid_tree() {
         let bcast = Broadcast::new();
-        let (tx_alice, rx_alice) = mpsc::channel();
-        let (tx_bob, rx_bob) = mpsc::channel();
+        let (tx_alice, rx_alice) = mpsc::sync_channel(16);
+        let (tx_bob, rx_bob) = mpsc::sync_channel(16);
         // alice's atty proxy: subscribed to its own PID tree
         // (parent_pid_tree = 999, alice's atty pid).
-        bcast.register(Subscriber { pid_tree_root: 999, tx: tx_alice });
+        bcast.register(Subscriber::new(999, tx_alice));
         // bob's atty proxy: subscribed to a different tree.
-        bcast.register(Subscriber { pid_tree_root: 888, tx: tx_bob });
+        bcast.register(Subscriber::new(888, tx_bob));
         // event from bob's tree (pid 1234 has bob's atty 888 as
         // ancestor); the filter closure returns true only for bob.
         bcast.broadcast(
@@ -314,8 +364,8 @@ mod tests {
     #[test]
     fn broadcast_root_zero_means_no_filter() {
         let bcast = Broadcast::new();
-        let (tx, rx) = mpsc::channel();
-        bcast.register(Subscriber { pid_tree_root: 0, tx });
+        let (tx, rx) = mpsc::sync_channel(16);
+        bcast.register(Subscriber::new(0, tx));
         bcast.broadcast(
             1234,
             ResponseBody::WarnEvent {
@@ -338,5 +388,47 @@ mod tests {
     #[test]
     fn pid_in_tree_root_zero_is_unfiltered() {
         assert!(pid_in_tree_root(1234, 0));
+    }
+
+    #[test]
+    fn broadcast_drops_oldest_when_inbox_full_then_emits_warn_dropped() {
+        let bcast = Broadcast::new();
+        // Inbox of 2: third push drops, fourth drops, fifth drops.
+        // First subsequent push after rx drains should carry the
+        // WarnDropped notice before the live event.
+        let (tx, rx) = mpsc::sync_channel(2);
+        bcast.register(Subscriber::new(0, tx));
+        let event = || ResponseBody::WarnEvent {
+            pid: 1,
+            ppid: 1,
+            comm: "x".into(),
+            argv0: "x".into(),
+            timestamp_ms: 0,
+        };
+        // Fill the inbox plus a few drops on top.
+        for _ in 0..5 {
+            bcast.broadcast(1, event(), |_p, _r| true);
+        }
+        // Drain the two queued events.
+        for _ in 0..2 {
+            match rx.recv().unwrap() {
+                ResponseBody::WarnEvent { .. } => {}
+                other => panic!("expected WarnEvent, got {other:?}"),
+            }
+        }
+        // Next broadcast should: try to send pending WarnDropped
+        // notice (succeeds since inbox is empty), then send the
+        // event. Verify both.
+        bcast.broadcast(1, event(), |_p, _r| true);
+        match rx.recv().unwrap() {
+            ResponseBody::WarnDropped { count } => {
+                assert_eq!(count, 3, "should have counted the 3 dropped events");
+            }
+            other => panic!("expected WarnDropped first, got {other:?}"),
+        }
+        match rx.recv().unwrap() {
+            ResponseBody::WarnEvent { .. } => {}
+            other => panic!("expected WarnEvent after notice, got {other:?}"),
+        }
     }
 }

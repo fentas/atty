@@ -422,13 +422,10 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
         Request::TrustList { target_uid } => handle_trust_list(state, peer, target_uid),
         Request::SessionWrite { target_uid } => handle_session_write(state, peer, target_uid),
         Request::SubscribeWarnEvents { .. } => {
-            // Handled by the connection loop before dispatch (it
-            // owns the stream for as long as the subscriber is
-            // connected). Reaching here means a logic error in
-            // the loop's bypass check.
-            ResponseBody::Error {
-                message: "SubscribeWarnEvents must be handled out-of-band".into(),
-            }
+            // Bypass-checked in the request loop above. Dispatch
+            // is for request/response RPCs; reaching here is a
+            // bypass-check regression.
+            unreachable!("SubscribeWarnEvents must be intercepted before dispatch")
         }
     }
 }
@@ -440,17 +437,37 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
 /// the connection. Returns when either the stream errors (peer
 /// disconnect) or the channel closes (broadcast was dropped —
 /// daemon shutting down).
+/// Per-subscriber inbox depth. Slow subscribers get the oldest
+/// events dropped + a coalesced `WarnDropped` notice — bounded
+/// memory matters more than perfect delivery for a banner-grade
+/// signal stream. 256 chosen to absorb a burst (CI machine
+/// recompiles → execve flurry) without dropping during the
+/// reader's normal scheduling latency. Aging-out at the broadcast
+/// level (vs per-message timeout) keeps the hot path lock-free.
+///
+/// Caveat (#347 PR 2a follow-up): each subscriber holds a
+/// connection-thread + a `ConnGuard` slot for its lifetime. With
+/// `max_concurrent_connections` defaulting to 64 (server.rs),
+/// 64 long-lived subscribers brick every other RPC. Future PR
+/// should exempt `SubscribeWarnEvents` from the cap or use a
+/// separate counter — out of scope here.
+const SUBSCRIBER_INBOX: usize = 256;
+
 fn stream_warn_events(
     state: Arc<State>,
     writer: &mut UnixStream,
     id: u64,
     pid_tree_root: u32,
 ) -> std::io::Result<()> {
-    write_response(writer, id, ResponseBody::Subscribed)?;
-    let (tx, rx) = std::sync::mpsc::channel::<ResponseBody>();
+    // Register FIRST, ack SECOND. This way the ack provably
+    // implies the subscriber is in the broadcast list — a
+    // publisher that fires the moment the ack hits the wire
+    // can't lose its first event to a register-not-yet-run race.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<ResponseBody>(SUBSCRIBER_INBOX);
     state
         .warn_broadcast
-        .register(crate::warn_consumer::Subscriber { pid_tree_root, tx });
+        .register(crate::warn_consumer::Subscriber::new(pid_tree_root, tx));
+    write_response(writer, id, ResponseBody::Subscribed)?;
     if state.verbosity >= 1 {
         eprintln!(
             "atty-guard: subscriber attached (pid_tree_root={pid_tree_root})"
