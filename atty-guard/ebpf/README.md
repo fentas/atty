@@ -1,6 +1,6 @@
 # eBPF programs (V2-B)
 
-Status: **design + skeleton (no auto-loading yet).** The userspace loader that drives this `.o` lands in a follow-up under the `ebpf` Cargo feature; for now this directory documents the planned shape and ships the kernel-side source so it's reviewable.
+Status: **shipped, opt-in.** Build the daemon with `--features ebpf` (or `make install-guard GUARD_FEATURES=…,ebpf`) and launch with `--enable-ebpf` to load these programs. The kernel-side source lives here; the userspace loader is in [`atty-guard/src/ebpf.rs`](../src/ebpf.rs).
 
 ## What this does
 
@@ -70,7 +70,7 @@ make
 
 The output `.o` ships alongside the daemon binary. Userspace finds it via `dirname(argv[0])/atty_guard.bpf.o` first, then `/usr/lib/atty-guard/atty_guard.bpf.o` as a fallback.
 
-## Run (when V2-B userspace lands)
+## Run
 
 ```sh
 atty-guard --enable-ebpf

@@ -9,8 +9,8 @@ atty (Zig PTY proxy)
 atty-guard (Rust sidecar)
    │
    ├── Tier-1 regex / atom classifier
-   ├── Tier-2 backend: stub | heuristic | onnx (BERT) | ollama (SLM)
-   ├── atom-fetcher (GTFOBins / Sigma / LOLBAS sources)
+   ├── Tier-2 backend: stub | heuristic | onnx (BERT)
+   ├── atom-fetcher (GTFOBins / Sigma sources)
    └── eBPF LSM hooks (V2-B, behind `--features ebpf`)
 ```
 
@@ -44,7 +44,7 @@ Runs everything `quick` runs PLUS:
 - **Ollama SLM** for the LLM module's dialog flow — needs `ollama serve`
   reachable at `$OLLAMA_HOST` (default `http://localhost:11434`) and a
   pulled model named `$ATTY_OLLAMA_MODEL` (default `qwen2.5-coder:1.5b`).
-- **atom-fetcher network downloads** — pulls GTFOBins / SigmaHQ / LOLBAS
+- **atom-fetcher network downloads** — pulls GTFOBins + SigmaHQ
   tarballs from upstream. Requires outbound HTTPS.
 
 Each section auto-detects its dependency and SKIPs cleanly when missing.
@@ -80,7 +80,6 @@ Each scenario is a self-contained bash script under `scenarios/`.
 | atty side honors `Warn` | `atty_warn_arms_banner` | atty + atty-guard run together |
 | atom-fetcher GTFOBins source | `atom_fetcher_gtfobins` | outbound HTTPS |
 | atom-fetcher Sigma source | `atom_fetcher_sigma` | outbound HTTPS |
-| atom-fetcher LOLBAS source | `atom_fetcher_lolbas` | outbound HTTPS |
 | trust-cache survives Block | `atty_trust_cache_shortcircuit` | atty + atty-guard |
 
 Each scenario exits non-zero on failure with a clear `FAIL:` line; pass
