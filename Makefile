@@ -316,17 +316,18 @@ sandbox-rebuild:
 	-docker image rm atty-sandbox:base 2>/dev/null || true
 	$(MAKE) sandbox
 
+# Build ONLY the base image (atty-sandbox:base) without running
+# any scenarios. Used by extending-image targets as a prereq so
+# `sandbox-onnx-image` / `sandbox-ebpf-image` don't drag in the
+# full base-suite run as a side effect.
+sandbox-base-image:
+	python3 tests/sandbox/runner.py --build-only
+
 # Build the ONNX-baked sandbox image. Requires the operator to
 # point at a hosted SecureBERT bundle via the *_URL / *_SHA256
 # env vars; without them the build still succeeds but the model
 # is NOT baked and scenarios 60/61 SKIP at runtime. See
 # tests/sandbox/onnx-models.toml for the pin file format.
-# Build ONLY the base image (atty-sandbox:base) without running
-# any scenarios. Used by `sandbox-onnx-image` as a prereq so
-# extending images don't drag in the full base-suite run.
-sandbox-base-image:
-	python3 tests/sandbox/runner.py --build-only
-
 sandbox-onnx-image: sandbox-base-image
 	docker build \
 	    -t atty-sandbox:onnx \
