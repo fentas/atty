@@ -499,6 +499,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         _ = std.c.write(posix.STDOUT_FILENO, keymap.kitty_kbd_pop.ptr, keymap.kitty_kbd_pop.len);
     };
 
+    // #304 PR 4d — DECSET mouse-reporting (SGR 1006). Without this
+    // the terminal never emits CSI < sequences and the parser landed
+    // in PR 4a / dispatcher in PR 4b / stdin intercept in PR 4c have
+    // nothing to do. Pop on exit so the next shell the user runs
+    // (after detaching atty) isn't left in mouse-reporting mode.
+    if (args.is_tty and config.mouse.enabled) {
+        _ = std.c.write(posix.STDOUT_FILENO, mouse_mod.enable_sequence.ptr, mouse_mod.enable_sequence.len);
+    }
+    defer if (args.is_tty and config.mouse.enabled) {
+        _ = std.c.write(posix.STDOUT_FILENO, mouse_mod.disable_sequence.ptr, mouse_mod.disable_sequence.len);
+    };
+
     // --- Incognito state -------------------------------------------------
     var incognito_on: bool = false;
 
