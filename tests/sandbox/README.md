@@ -77,9 +77,15 @@ Current scenarios:
   posture: explicit `[tier2] backend = "onnx"` + missing model
   must refuse to start; default path (no operator request)
   keeps the legacy degrade-to-stub fallback. Doesn't need a
-  real model file; the actual-classify scenarios (60 / 61
-  from #333's original scope) need model download + cache
-  infrastructure and are deferred to a follow-up issue.
+  real model file.
+- **`60-onnx-second-stage`** + **`61-onnx-fbas-sized-buffer`** —
+  real-classify roundtrip + 16 KiB envelope buffer-shape
+  regression pin. Both require `atty-sandbox:onnx` with a real
+  SecureBERT model + tokenizer baked in. Build via
+  `make sandbox-onnx-image` after exporting
+  `ONNX_MODEL_URL` / `ONNX_MODEL_SHA256` /
+  `ONNX_TOKENIZER_URL` / `ONNX_TOKENIZER_SHA256`. Without the
+  image they SKIP cleanly so `make sandbox` stays green.
 
 ## Per-scenario docker flags
 

@@ -1,0 +1,25 @@
+# SHA-256 pins for ONNX-scenario model + tokenizer fixtures.
+#
+# The project deliberately doesn't ship a SecureBERT bundle (it's
+# 150 MB and the licensing of a community fine-tune isn't ours to
+# tell — see docs/security-guard-slm.md). Scenarios skip cleanly
+# when no model is configured here.
+#
+# To enable the 60-onnx-second-stage + 61-onnx-fbas-sized-buffer
+# scenarios, drop your model + tokenizer into
+# ~/.cache/atty-guard/models/ and set both `url` AND `sha256` so
+# the fetch is verified. Empty `url` = skip with a clear message.
+#
+# The Dockerfile.onnx build downloads from `url` and verifies
+# against `sha256` in a dedicated RUN layer (so unrelated
+# Dockerfile edits don't invalidate the model cache).
+
+[model]
+# e.g. "https://huggingface.co/cisco-ai/SecureBERT-2.0/resolve/main/model.onnx"
+url = ""
+sha256 = ""
+
+[tokenizer]
+# HuggingFace tokenizer.json. Required when [model] is set.
+url = ""
+sha256 = ""
