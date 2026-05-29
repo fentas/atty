@@ -327,11 +327,26 @@ sandbox-base-image:
 # compiled atty_guard.bpf.o. Requires the host kernel's BTF dump
 # accessible at /sys/kernel/btf/vmlinux during build — otherwise
 # .bpf.o isn't compiled and scenarios 51/52 SKIP at runtime.
+#
+# When SANDBOX_BUILDX_CACHE_FROM / _TO are set (CI workflow does),
+# routes through `docker buildx build --load` with type=local
+# cache directives — same shape as runner.py's base-image build,
+# so the expensive atty-guard --features ebpf rebuild + .bpf.o
+# compile layers round-trip through /tmp/.buildx-cache.
 sandbox-ebpf-image: sandbox-base-image
-	docker build \
-	    -t atty-sandbox:ebpf \
-	    -f tests/sandbox/Dockerfile.ebpf \
-	    $(CURDIR)
+	@if [ -n "$$SANDBOX_BUILDX_CACHE_FROM" ] || [ -n "$$SANDBOX_BUILDX_CACHE_TO" ]; then \
+	    DOCKER_BUILDKIT=1 docker buildx build --load \
+	        -t atty-sandbox:ebpf \
+	        -f tests/sandbox/Dockerfile.ebpf \
+	        $${SANDBOX_BUILDX_CACHE_FROM:+--cache-from type=local,src=$$SANDBOX_BUILDX_CACHE_FROM} \
+	        $${SANDBOX_BUILDX_CACHE_TO:+--cache-to type=local,dest=$$SANDBOX_BUILDX_CACHE_TO,mode=max} \
+	        $(CURDIR); \
+	else \
+	    docker build \
+	        -t atty-sandbox:ebpf \
+	        -f tests/sandbox/Dockerfile.ebpf \
+	        $(CURDIR); \
+	fi
 
 # Run the eBPF scenarios (51, 52). Skips when the image was built
 # without .bpf.o OR when the runner kernel lacks BPF LSM.
