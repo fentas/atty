@@ -3,9 +3,10 @@
 #     atty_guard.bpf.o object.
 #   - atty-guard rebuilt with `--features ebpf` — userspace loader
 #     enabled.
-#   - vmlinux.h generated from a downloaded kernel BTF dump so the
-#     .bpf.o has CO-RE relocations the runtime loader can fix up
-#     against whatever kernel the host actually runs.
+#   - vmlinux.h generated from the build host's BTF dump at
+#     /sys/kernel/btf/vmlinux so the .bpf.o has CO-RE
+#     relocations the runtime loader can fix up against whatever
+#     kernel the runtime host actually runs.
 #
 # The .bpf.o is BAKED into /usr/lib/atty-guard/atty_guard.bpf.o
 # (the third location atty-guard's loader probes — see
@@ -55,10 +56,11 @@ RUN cd /src/atty-guard && \
 # the no-host-BTF case becomes common in CI.
 RUN cd /src/atty-guard/ebpf && \
     if [ -r /sys/kernel/btf/vmlinux ] && bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h 2>/dev/null; then \
-        clang -O2 -g -Wall -target bpf -D__TARGET_ARCH_x86 \
+        ARCH=$(uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/'); \
+        clang -O2 -g -Wall -target bpf -D__TARGET_ARCH_$ARCH \
             -I/usr/include/bpf \
             -c atty_guard.bpf.c -o atty_guard.bpf.o && \
-        echo "built atty_guard.bpf.o (host BTF)"; \
+        echo "built atty_guard.bpf.o (host BTF, arch=$ARCH)"; \
     else \
         echo "warn: no host BTF reachable — skipping .bpf.o build; scenarios will SKIP at runtime"; \
     fi && \
