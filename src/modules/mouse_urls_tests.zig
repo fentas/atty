@@ -229,6 +229,269 @@ test "wildcard whitelist entry covers subdomain on click" {
     try testing.expect(std.mem.indexOf(u8, hint, "api.github.com") != null);
 }
 
+test "ask_each — untrusted click arms banner with statusText prompt" {
+    const Mod = configure(.{
+        .mode = .ask_each,
+        .url_whitelist = &.{},
+        .hint_ttl_ms = 60_000,
+    });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+
+    try Mod.onOutput(&rt, &c, "see https://blog.example.com/post\n");
+    const click: mouse.Event = .{ .button = .left, .kind = .press, .col = 7, .row = 1, .mods = .{} };
+    try testing.expectEqual(dispatch.MouseAction.consume, try Mod.onMouseClick(&rt, &c, click));
+
+    try testing.expect(rt.armed);
+    const banner = (try Mod.statusText(&rt, &c)).?;
+    try testing.expectEqualStrings(
+        "open blog.example.com? [y]es / [a]llow / [t]rust / cancel",
+        banner,
+    );
+}
+
+test "ask_each — 'y' opens once, doesn't add to session-trust" {
+    const Mod = configure(.{
+        .mode = .ask_each,
+        .opener = "true",
+        .hint_ttl_ms = 60_000,
+    });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+
+    try Mod.onOutput(&rt, &c, "https://once.example/path\n");
+    const click: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = 1, .mods = .{} };
+    _ = try Mod.onMouseClick(&rt, &c, click);
+    try testing.expect(rt.armed);
+
+    const action = try Mod.onInput(&rt, &c, "y");
+    try testing.expectEqual(m.Action.swallow, action);
+    try testing.expect(!rt.armed);
+    try testing.expectEqual(@as(usize, 0), rt.session_filled);
+    const hint = (try Mod.provideHintText(&rt, &c)).?;
+    try testing.expectEqualStrings("opening: https://once.example/path", hint);
+}
+
+test "ask_each — 'a' adds host to session-trust + opens" {
+    const Mod = configure(.{
+        .mode = .ask_each,
+        .opener = "true",
+        .hint_ttl_ms = 60_000,
+    });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+
+    try Mod.onOutput(&rt, &c, "https://allow.example/x\n");
+    const click: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = 1, .mods = .{} };
+    _ = try Mod.onMouseClick(&rt, &c, click);
+
+    _ = try Mod.onInput(&rt, &c, "a");
+    try testing.expect(!rt.armed);
+    try testing.expectEqual(@as(usize, 1), rt.session_filled);
+    try testing.expectEqualStrings("allow.example", rt.session_hosts[0].slice());
+
+    // Subsequent click on the same host fast-paths through the
+    // banner — directly opens.
+    try Mod.onOutput(&rt, &c, "https://allow.example/y\n");
+    const click2: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = 2, .mods = .{} };
+    _ = try Mod.onMouseClick(&rt, &c, click2);
+    try testing.expect(!rt.armed);
+}
+
+test "ask_each — 't' surfaces sudo guidance + session-trusts" {
+    const Mod = configure(.{
+        .mode = .ask_each,
+        .opener = "true",
+        .hint_ttl_ms = 60_000,
+    });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+
+    try Mod.onOutput(&rt, &c, "https://trust.example/x\n");
+    const click: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = 1, .mods = .{} };
+    _ = try Mod.onMouseClick(&rt, &c, click);
+
+    _ = try Mod.onInput(&rt, &c, "t");
+    try testing.expect(!rt.armed);
+    try testing.expectEqual(@as(usize, 1), rt.session_filled);
+    const hint = (try Mod.provideHintText(&rt, &c)).?;
+    try testing.expect(std.mem.indexOf(u8, hint, "sudo atty-guard urls allow trust.example") != null);
+}
+
+test "ask_each — Esc / Ctrl-C / 'c' cancel the banner without opening" {
+    for ([_]u8{ 0x1b, 0x03, 'c', 'C' }) |key| {
+        const Mod = configure(.{
+            .mode = .ask_each,
+            .opener = "true",
+            .hint_ttl_ms = 60_000,
+        });
+        var rt = try Mod.attach(testing.allocator, test_io);
+        defer Mod.detach(&rt, test_io);
+        rt.test_clock_ms = 1000;
+
+        var line = LineState{};
+        var scratch: std.ArrayList(u8) = .empty;
+        defer scratch.deinit(testing.allocator);
+        var c = ctx(&line, &scratch);
+
+        try Mod.onOutput(&rt, &c, "https://cancel.example/x\n");
+        const click: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = 1, .mods = .{} };
+        _ = try Mod.onMouseClick(&rt, &c, click);
+        try testing.expect(rt.armed);
+
+        const buf = [_]u8{key};
+        const action = try Mod.onInput(&rt, &c, &buf);
+        try testing.expectEqual(m.Action.swallow, action);
+        try testing.expect(!rt.armed);
+        try testing.expectEqual(@as(usize, 0), rt.session_filled);
+    }
+}
+
+test "ask_each — unrelated keystroke while armed is swallowed (not forwarded)" {
+    const Mod = configure(.{ .mode = .ask_each, .opener = "true", .hint_ttl_ms = 60_000 });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+    try Mod.onOutput(&rt, &c, "https://example.com\n");
+    _ = try Mod.onMouseClick(&rt, &c, .{ .button = .left, .kind = .press, .col = 5, .row = 1, .mods = .{} });
+
+    const action = try Mod.onInput(&rt, &c, "x");
+    try testing.expectEqual(m.Action.swallow, action);
+    try testing.expect(rt.armed); // still armed after unrelated key
+}
+
+test "ask_each — pre-existing whitelist entry fast-paths past the banner" {
+    const Mod = configure(.{
+        .mode = .ask_each,
+        .url_whitelist = &.{"trusted.example"},
+        .opener = "true",
+        .hint_ttl_ms = 60_000,
+    });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+
+    try Mod.onOutput(&rt, &c, "https://trusted.example/x\n");
+    _ = try Mod.onMouseClick(&rt, &c, .{ .button = .left, .kind = .press, .col = 5, .row = 1, .mods = .{} });
+    try testing.expect(!rt.armed);
+    const hint = (try Mod.provideHintText(&rt, &c)).?;
+    try testing.expectEqualStrings("opening: https://trusted.example/x", hint);
+}
+
+test "session_trust FIFO eviction at capacity — strict ordering" {
+    const Mod = configure(.{
+        .mode = .ask_each,
+        .opener = "true",
+        .session_trust_capacity = 3,
+        .hint_ttl_ms = 60_000,
+    });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+
+    const hosts = [_][]const u8{ "ha.example", "hb.example", "hc.example", "hd.example", "he.example" };
+    inline for ([_][]const u8{ "a", "b", "c", "d", "e" }, 1..) |suffix, row| {
+        const out = "https://h" ++ suffix ++ ".example\n";
+        try Mod.onOutput(&rt, &c, out);
+        const click: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = @intCast(row), .mods = .{} };
+        _ = try Mod.onMouseClick(&rt, &c, click);
+        _ = try Mod.onInput(&rt, &c, "a");
+    }
+
+    try testing.expectEqual(@as(usize, 3), rt.session_filled);
+
+    // After 5 adds with capacity 3, ha + hb were evicted; hc, hd, he survive.
+    try testing.expect(!ringHas(&rt, hosts[0])); // ha evicted
+    try testing.expect(!ringHas(&rt, hosts[1])); // hb evicted
+    try testing.expect(ringHas(&rt, hosts[2])); // hc
+    try testing.expect(ringHas(&rt, hosts[3])); // hd
+    try testing.expect(ringHas(&rt, hosts[4])); // he
+
+    // hc must still hostTrust — proves the surviving entries work.
+    try Mod.onOutput(&rt, &c, "https://hc.example/p\n");
+    const click_hc: mouse.Event = .{ .button = .left, .kind = .press, .col = 5, .row = 6, .mods = .{} };
+    _ = try Mod.onMouseClick(&rt, &c, click_hc);
+    try testing.expect(!rt.armed); // fast-path through session-trust
+}
+
+fn ringHas(rt: anytype, host: []const u8) bool {
+    for (rt.session_hosts) |*slot| {
+        if (std.mem.eql(u8, slot.slice(), host)) return true;
+    }
+    return false;
+}
+
+test "ask_each — 'y' on first host, 'a' on second: only the 'a' host is trusted" {
+    // Inverse-coverage for the 'y' test: prove 'y' does NOT fall through
+    // to the 'a' arm by interleaving them in the same Runtime.
+    const Mod = configure(.{
+        .mode = .ask_each,
+        .opener = "true",
+        .hint_ttl_ms = 60_000,
+    });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+    rt.test_clock_ms = 1000;
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var c = ctx(&line, &scratch);
+
+    try Mod.onOutput(&rt, &c, "https://once.example/p\n");
+    _ = try Mod.onMouseClick(&rt, &c, .{ .button = .left, .kind = .press, .col = 5, .row = 1, .mods = .{} });
+    _ = try Mod.onInput(&rt, &c, "y");
+    try testing.expectEqual(@as(usize, 0), rt.session_filled);
+
+    try Mod.onOutput(&rt, &c, "https://twice.example/p\n");
+    _ = try Mod.onMouseClick(&rt, &c, .{ .button = .left, .kind = .press, .col = 5, .row = 2, .mods = .{} });
+    _ = try Mod.onInput(&rt, &c, "a");
+
+    try testing.expectEqual(@as(usize, 1), rt.session_filled);
+    try testing.expectEqualStrings("twice.example", rt.session_hosts[0].slice());
+    // The 'y' host must NOT have been trusted.
+    try testing.expect(!ringHas(&rt, "once.example"));
+}
+
 test "hint TTL expiry suppresses stale hint" {
     const Mod = configure(.{
         .mode = .never,

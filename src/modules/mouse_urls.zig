@@ -13,6 +13,15 @@
 //! Capture model mirrors mouse_links — a per-module ring of recent
 //! output rows with SGR / OSC strip. Sharing the ring across both
 //! modules is a future refactor (the per-byte work is light).
+//!
+//! Module ordering: when `.ask_each` mode is on, the armed banner's
+//! key consumption (returning `.swallow` from `onInput`) must beat
+//! other input-consuming modules in dispatch order. Place
+//! `mouse_urls` BEFORE `guardrail` (which also swallows on its own
+//! armed banner) in the user's `modules` tuple — otherwise an open
+//! guardrail prompt could eat the `y/a/t` keystroke meant for the
+//! URL banner. The same rule applies to any future input-consuming
+//! module.
 
 const std = @import("std");
 const m = @import("../module.zig");
@@ -28,11 +37,17 @@ pub const Mode = enum {
     /// Click is a no-op; the URL is not opened. Paranoid default
     /// suitable for shared / multi-tenant hosts.
     never,
-    /// Open URLs whose host matches an entry in `url_whitelist`;
-    /// silent no-op for everything else (status hint surfaces the
-    /// reason). Default — least-surprise behaviour while preserving
-    /// user agency over what gets launched.
+    /// Open URLs whose host matches an entry in `url_whitelist` OR
+    /// the in-memory session-trust set. Silent no-op + status hint
+    /// for anything else. The least-surprise mode for users who want
+    /// agency over what gets launched.
     whitelist_only,
+    /// On click of an untrusted URL, arm a banner with `[y]/[a]/[t]/
+    /// cancel`: open once / session-trust / print the sudo guidance
+    /// for permanent trust / cancel. Trusted hosts (`url_whitelist`
+    /// or in-memory session-trust) still fast-path through without a
+    /// banner.
+    ask_each,
 };
 
 pub const Config = struct {
@@ -56,8 +71,24 @@ pub const Config = struct {
     row_bytes: usize = 1024,
 
     /// Status-hint TTL after a click-on-non-whitelisted-URL. Lets
-    /// the user notice the policy decision without polling.
+    /// the user notice the policy decision without polling. While
+    /// the `ask_each` banner is armed the TTL is suspended (the
+    /// banner persists until a keystroke).
     hint_ttl_ms: u64 = 4000,
+
+    /// Maximum hosts kept in the in-memory session-trust set. Old
+    /// entries are evicted oldest-first. 64 is plenty for a typical
+    /// session; raise if you click "a" on many distinct hosts.
+    session_trust_capacity: usize = 64,
+};
+
+pub const HostSlot = struct {
+    bytes: [256]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn slice(self: *const HostSlot) []const u8 {
+        return self.bytes[0..self.len];
+    }
 };
 
 pub fn configure(comptime cfg: Config) type {
@@ -65,6 +96,7 @@ pub fn configure(comptime cfg: Config) type {
         if (cfg.ring_rows == 0) @compileError("mouse_urls: ring_rows must be > 0");
         if (cfg.row_bytes == 0) @compileError("mouse_urls: row_bytes must be > 0");
         if (cfg.opener.len == 0) @compileError("mouse_urls: opener must not be empty");
+        if (cfg.session_trust_capacity == 0) @compileError("mouse_urls: session_trust_capacity must be > 0");
     }
     return struct {
         pub const name = "mouse_urls";
@@ -85,6 +117,23 @@ pub fn configure(comptime cfg: Config) type {
             hint_len: usize = 0,
             hint_set_at_ms: u64 = 0,
 
+            // ask_each banner state. While `armed` is true, the
+            // statusText shows `Open <url>? [y]/[a]/[t]/cancel` and
+            // hint_ttl is suspended. Cleared on any keystroke
+            // response (y/a/t/Esc/Ctrl-C/c).
+            armed: bool = false,
+            armed_url_buf: [2048]u8 = undefined,
+            armed_url_len: usize = 0,
+            armed_host_buf: [256]u8 = undefined,
+            armed_host_len: usize = 0,
+
+            // Session-trust ring of hosts (no port). [a]llow appends
+            // here; subsequent clicks on the same host fast-path
+            // through the whitelist check. FIFO eviction at capacity.
+            session_hosts: []HostSlot = &.{},
+            session_head: usize = 0, // next-write index
+            session_filled: usize = 0, // entries seen (≤ capacity)
+
             // Optional clock for tests to inject monotonic time. nil
             // = real CLOCK_MONOTONIC.
             test_clock_ms: ?u64 = null,
@@ -97,13 +146,17 @@ pub fn configure(comptime cfg: Config) type {
             const line_starts = try allocator.alloc(usize, cfg.ring_rows);
             errdefer allocator.free(line_starts);
             const line_lens = try allocator.alloc(u16, cfg.ring_rows);
+            errdefer allocator.free(line_lens);
+            const session_hosts = try allocator.alloc(HostSlot, cfg.session_trust_capacity);
             for (line_starts, 0..) |*s, i| s.* = i * cfg.row_bytes;
             for (line_lens) |*l| l.* = 0;
+            for (session_hosts) |*h| h.* = .{};
             return .{
                 .allocator = allocator,
                 .ring = ring,
                 .line_starts = line_starts,
                 .line_lens = line_lens,
+                .session_hosts = session_hosts,
             };
         }
 
@@ -112,6 +165,7 @@ pub fn configure(comptime cfg: Config) type {
             rt.allocator.free(rt.ring);
             rt.allocator.free(rt.line_starts);
             rt.allocator.free(rt.line_lens);
+            rt.allocator.free(rt.session_hosts);
         }
 
         pub fn onOutput(rt: *Runtime, ctx: *m.Context, output: []const u8) !void {
@@ -125,6 +179,7 @@ pub fn configure(comptime cfg: Config) type {
             evt: mouse.Event,
         ) m.Error!dispatch.MouseAction {
             if (evt.button != .left or evt.kind != .press) return .passthrough;
+            if (rt.armed) return .consume; // ignore further clicks while a banner is open
 
             const line = clickedLine(cfg, rt, ctx, evt.row) orelse return .passthrough;
             const hit = detect.find(line, evt.col, .{}) orelse return .passthrough;
@@ -135,18 +190,148 @@ pub fn configure(comptime cfg: Config) type {
                     return .consume;
                 },
                 .whitelist_only => {
-                    if (hostMatches(hit.host, cfg.url_whitelist)) {
-                        spawnOpener(cfg.opener, hit.url) catch |err| {
-                            setHintErr(rt, hit.url, err);
-                            return .consume;
-                        };
-                        setHint(rt, "opening: ", hit.url);
-                    } else {
-                        setHint(rt, "host not in whitelist: ", hit.host);
+                    if (hostTrusted(rt, hit.host)) {
+                        return launch(rt, hit.url);
                     }
+                    setHint(rt, "host not in whitelist: ", hit.host);
+                    return .consume;
+                },
+                .ask_each => {
+                    if (hostTrusted(rt, hit.host)) {
+                        return launch(rt, hit.url);
+                    }
+                    arm(rt, hit.url, hit.host);
                     return .consume;
                 },
             }
+        }
+
+        pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
+            _ = ctx;
+            if (!rt.armed) return .forward;
+            if (input.len == 0) return .forward;
+
+            const c = input[0];
+            // Esc / Ctrl-C / Ctrl-U / 'c' cancel.
+            if (c == 0x1b or c == 0x03 or c == 0x15 or c == 'c' or c == 'C') {
+                disarm(rt);
+                setHint(rt, "url-open cancelled: ", rt.armed_url_buf[0..0]);
+                return .swallow;
+            }
+
+            switch (c) {
+                'y', 'Y' => {
+                    const url = rt.armed_url_buf[0..rt.armed_url_len];
+                    const act = launch(rt, url) catch dispatch.MouseAction.passthrough;
+                    _ = act;
+                    disarm(rt);
+                    return .swallow;
+                },
+                'a', 'A' => {
+                    sessionTrustAdd(rt, rt.armed_host_buf[0..rt.armed_host_len]);
+                    const url = rt.armed_url_buf[0..rt.armed_url_len];
+                    _ = launch(rt, url) catch dispatch.MouseAction.passthrough;
+                    disarm(rt);
+                    return .swallow;
+                },
+                't', 'T' => {
+                    // [t] adds to session-trust + surfaces the
+                    // permanent-trust guidance, but does NOT open
+                    // — opening would clobber the guidance hint
+                    // before the user has a chance to read it.
+                    // Clicking the same URL again then takes the
+                    // session-trust fast-path and opens immediately.
+                    const host = rt.armed_host_buf[0..rt.armed_host_len];
+                    setPersistHint(rt, host);
+                    disarm(rt);
+                    return .swallow;
+                },
+                else => return .swallow, // any other key while armed: ignore (don't pass to shell)
+            }
+        }
+
+        pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            _ = ctx;
+            if (!rt.armed) return null;
+            // Use hint_buf as scratch — when armed there's no
+            // competing TTL hint to clobber (armed disables it).
+            var w: usize = 0;
+            const cap = rt.hint_buf.len;
+            const prefix: []const u8 = "open ";
+            w += copyClamped(rt.hint_buf[w..cap], prefix);
+            w += copyClamped(rt.hint_buf[w..cap], rt.armed_host_buf[0..rt.armed_host_len]);
+            const suffix: []const u8 = "? [y]es / [a]llow / [t]rust / cancel";
+            w += copyClamped(rt.hint_buf[w..cap], suffix);
+            return rt.hint_buf[0..w];
+        }
+
+        fn arm(rt: *Runtime, url: []const u8, host: []const u8) void {
+            rt.armed = true;
+            const ucopy = @min(url.len, rt.armed_url_buf.len);
+            @memcpy(rt.armed_url_buf[0..ucopy], url[0..ucopy]);
+            rt.armed_url_len = ucopy;
+            const hcopy = @min(host.len, rt.armed_host_buf.len);
+            @memcpy(rt.armed_host_buf[0..hcopy], host[0..hcopy]);
+            rt.armed_host_len = hcopy;
+            // Clear any pending TTL hint — banner is the active UI.
+            rt.hint_len = 0;
+        }
+
+        fn disarm(rt: *Runtime) void {
+            rt.armed = false;
+            rt.armed_url_len = 0;
+            rt.armed_host_len = 0;
+        }
+
+        fn launch(rt: *Runtime, url: []const u8) m.Error!dispatch.MouseAction {
+            spawnOpener(cfg.opener, url) catch |err| {
+                setHintErr(rt, url, err);
+                return .consume;
+            };
+            setHint(rt, "opening: ", url);
+            return .consume;
+        }
+
+        fn hostTrusted(rt: *Runtime, host: []const u8) bool {
+            if (hostMatches(host, cfg.url_whitelist)) return true;
+            const host_no_port = stripPort(host);
+            const n = @min(rt.session_filled, rt.session_hosts.len);
+            for (rt.session_hosts[0..n]) |*slot| {
+                if (std.ascii.eqlIgnoreCase(slot.slice(), host_no_port)) return true;
+            }
+            return false;
+        }
+
+        fn sessionTrustAdd(rt: *Runtime, host: []const u8) void {
+            const host_no_port = stripPort(host);
+            if (host_no_port.len == 0) return;
+            // Dedupe.
+            const n = @min(rt.session_filled, rt.session_hosts.len);
+            for (rt.session_hosts[0..n]) |*slot| {
+                if (std.ascii.eqlIgnoreCase(slot.slice(), host_no_port)) return;
+            }
+            const idx = rt.session_head;
+            const slot = &rt.session_hosts[idx];
+            const copy = @min(host_no_port.len, slot.bytes.len);
+            @memcpy(slot.bytes[0..copy], host_no_port[0..copy]);
+            slot.len = @intCast(copy);
+            rt.session_head = (rt.session_head + 1) % rt.session_hosts.len;
+            if (rt.session_filled < rt.session_hosts.len) rt.session_filled += 1;
+        }
+
+        fn setPersistHint(rt: *Runtime, host: []const u8) void {
+            // Daemon-side `urls allow` requires EUID 0 (see
+            // atty-guard/src/server.rs::handle_urls_allow), so atty
+            // can't write it directly. Surface the sudo command;
+            // session-trust adds the host in-memory for THIS session
+            // so the user gets the immediate effect without leaving
+            // the prompt.
+            sessionTrustAdd(rt, host);
+            const host_clean = stripPort(host);
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "session-trusted; persist: sudo atty-guard urls allow {s}", .{host_clean}) catch
+                return setHint(rt, "session-trusted: ", host_clean);
+            setHint(rt, "", msg);
         }
 
         pub fn provideHintText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
@@ -301,6 +486,12 @@ fn stripPort(host: []const u8) []const u8 {
     // bare-`:` case is host:port. (Userinfo was already stripped by
     // `extractHost`.)
     return host[0..idx];
+}
+
+fn copyClamped(dst: []u8, src: []const u8) usize {
+    const n = @min(dst.len, src.len);
+    @memcpy(dst[0..n], src[0..n]);
+    return n;
 }
 
 fn setHint(rt: anytype, prefix: []const u8, body: []const u8) void {
