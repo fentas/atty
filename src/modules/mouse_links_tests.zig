@@ -238,6 +238,36 @@ test "no terminal_rows in ctx is passthrough" {
     );
 }
 
+test "CR followed by shorter content truncates the stale tail" {
+    // Locks the line_lens=new_col (overwrite) semantics — high-water-mark
+    // would leak `wrongABC` → `xyzgABC` after `\r`.
+    const Mod = configure(.{ .editor = "nvim" });
+    var rt = try Mod.attach(testing.allocator, test_io);
+    defer Mod.detach(&rt, test_io);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch, 24, 80);
+
+    // `wrongabcdef` then CR back to start, then write `src/y.zig` (9
+    // bytes, shorter than the 11 written before CR). The captured row
+    // must be exactly `src/y.zig`, not `src/y.zigef`.
+    try Mod.onOutput(&rt, &ctx, "wrongabcdef\rsrc/y.zig\n");
+
+    const click: mouse.Event = .{
+        .button = .left,
+        .kind = .press,
+        .col = 3,
+        .row = 1,
+        .mods = .{},
+    };
+    const act = try Mod.onMouseClick(&rt, &ctx, click);
+    try testing.expectEqual(dispatch.MouseAction.consume, act);
+    const payload = (try Mod.pollShellInput(&rt, &ctx)).?;
+    try testing.expectEqualStrings("\x15nvim 'src/y.zig'\n", payload);
+}
+
 test "CR resets col within a row, BS rewinds one cell" {
     const Mod = configure(.{ .editor = "nvim" });
     var rt = try Mod.attach(testing.allocator, test_io);

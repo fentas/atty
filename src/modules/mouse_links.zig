@@ -1,27 +1,14 @@
-//! mouse_links — convert clicks on path tokens in terminal output
-//! to `$EDITOR` launches.
+//! mouse_links — clicks on path tokens in terminal output become
+//! `$EDITOR` launches injected into the shell's input stream.
 //!
-//! Click flow (issue #304, PR 4f):
+//! Streaming-line capture model (not cursor-addressed). TUIs like
+//! vim/htop run in the alt-screen path where atty's mouse intercept
+//! is gated off (the shell owns input), so we never see their
+//! cursor-positioned paints — and don't need to model them.
 //!
-//!     onOutput          — SGR-strip + append to row ring
-//!     onMouseClick      — left-press → coords → captured row →
-//!                         path token (path_detect.find) → queue
-//!                         `\x15<editor> +LINE 'path'\n`
-//!     pollShellInput    — surface the queued bytes to pty.master,
-//!                         shell runs them like the user typed.
-//!
-//! Output capture model: monotonic row counter; every `\n` starts a
-//! new row at `lines[row % N]`. CR/BS reset col within the row.
-//! Cursor addressing (CSI H/A/B/C/D) is NOT tracked — this is a
-//! streaming-line model fit for compiler / grep / ls / git output.
-//! TUIs like vim/htop run in the alt-screen path where atty's mouse
-//! intercept is bypassed (the shell owns input), so this model
-//! never sees their cursor-addressed paints.
-//!
-//! Quoting is POSIX shell single-quote with `'\''` escape — see
-//! `mouse_links/inject.zig`. Path strings can legitimately contain
-//! `*`, `?`, `;`, `$`, backtick, etc.; the formatter quotes them
-//! literally so the shell parser doesn't expand them.
+//! `$EDITOR` is trusted: the shell tokenises the injected line so a
+//! user-set `$EDITOR="code --wait"` works while a hostile
+//! `$EDITOR="vim ; rm -rf"` is the user's footgun, not ours.
 
 const std = @import("std");
 const m = @import("../module.zig");
@@ -52,6 +39,10 @@ pub const Config = struct {
 };
 
 pub fn configure(comptime cfg: Config) type {
+    comptime {
+        if (cfg.ring_rows == 0) @compileError("mouse_links: ring_rows must be > 0");
+        if (cfg.row_bytes == 0) @compileError("mouse_links: row_bytes must be > 0");
+    }
     return struct {
         pub const name = "mouse_links";
         pub const config = cfg;
@@ -127,6 +118,10 @@ pub fn configure(comptime cfg: Config) type {
             _ = ctx;
             if (rt.inject_len == 0) return null;
             const out = rt.inject_buf[0..rt.inject_len];
+            // Safe to zero before the proxy's writeAll: the poll loop
+            // is single-threaded and the very next thing the proxy
+            // does is read `out` and write to pty.master. A re-arming
+            // click can only fire from a future poll iteration.
             rt.inject_len = 0;
             return out;
         }
@@ -191,7 +186,11 @@ fn ingest(comptime cfg: Config, rt: anytype, output: []const u8) void {
                 if (rt.current_col < cfg.row_bytes) {
                     rt.ring[rt.line_starts[idx] + rt.current_col] = c;
                     const new_col = rt.current_col + 1;
-                    if (new_col > rt.line_lens[idx]) rt.line_lens[idx] = new_col;
+                    // Overwrite semantics: truncate stale tail after a
+                    // shorter rewrite (CR + new content, or \r\x1b[K
+                    // clear-and-redraw progress bars). High-water-mark
+                    // would leak `wrongABC` after `\rxyz` as `xyzgABC`.
+                    rt.line_lens[idx] = new_col;
                     rt.current_col = new_col;
                 }
             },
