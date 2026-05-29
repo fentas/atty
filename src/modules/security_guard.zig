@@ -35,12 +35,14 @@ const style_mod = @import("../style.zig");
 const patterns_mod = @import("security_guard/patterns.zig");
 const trust_mod = @import("security_guard/trust_cache.zig");
 const uds_client_mod = @import("security_guard/uds_client.zig");
+const warn_subscriber_mod = @import("security_guard/warn_subscriber.zig");
 
 pub const Pattern = patterns_mod.Pattern;
 pub const Category = patterns_mod.Category;
 pub const default_patterns = patterns_mod.default_patterns;
 pub const TrustCache = trust_mod.TrustCache;
 pub const UdsClient = uds_client_mod.Client;
+pub const WarnSubscriber = warn_subscriber_mod.Subscriber;
 
 pub const Config = struct {
     /// Master switch. Off by default — opt-in only. When disabled
@@ -178,6 +180,19 @@ pub fn configure(comptime cfg: Config) type {
             /// instead of stderr.
             sink_ctx: ?*anyopaque = null,
             sink_fn: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void = null,
+            /// #347 PR 3 — kernel-side warn-event subscriber.
+            /// Background thread connects to the daemon's
+            /// `subscribe_warn_events` stream + buffers events
+            /// for the status segment + (future) overlay UI.
+            /// Heap-allocated so the address survives Runtime
+            /// moves (the thread captures a pointer at spawn).
+            warn_sub: ?*WarnSubscriber = null,
+            /// Persistent storage for the statusText return slice.
+            /// dispatch.gatherStatus borrows the slice (doesn't
+            /// free), so a stack buffer would dangle by the time
+            /// the writer reads it. 128 bytes covers the longest
+            /// shape: emoji + count + "warns | critical".
+            status_buf: [128]u8 = undefined,
         };
 
         /// Convert an in-proc pattern's category to a threat level
@@ -207,17 +222,49 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
-            _ = io;
+            var rt: Runtime = .{ .allocator = allocator };
             // Trust state seeded lazily from the daemon's
             // commands.trusted.txt — see `queryDaemon` for the
             // `daemon_trust_seeded` flag. No local file is read or
             // written; the daemon is the single source of truth for
             // persisted trust hashes (post-#147 + post-#150).
-            return .{ .allocator = allocator };
+            // #347 PR 3: spawn the warn-event subscriber thread
+            // when the daemon socket is configured. The subscriber
+            // is best-effort — if the daemon isn't reachable on
+            // first connect, the thread keeps trying in the
+            // background; statusText shows nothing until events
+            // arrive. No banner / no log noise on the no-daemon
+            // path (subscriber's own back-off + log discipline).
+            if (cfg.daemon_socket_path.len > 0) {
+                const ptr = allocator.create(WarnSubscriber) catch return rt;
+                ptr.* = WarnSubscriber.init(
+                    allocator,
+                    cfg.daemon_socket_path,
+                    @intCast(std.c.getpid()),
+                );
+                ptr.start(io) catch |err| {
+                    // Spawn failure (resource exhaustion) — log
+                    // and continue without subscriber rather than
+                    // failing module attach entirely.
+                    std.log.warn(
+                        "atty security_guard: warn subscriber spawn failed: {s}",
+                        .{@errorName(err)},
+                    );
+                    allocator.destroy(ptr);
+                    return rt;
+                };
+                rt.warn_sub = ptr;
+            }
+            return rt;
         }
 
         pub fn detach(rt: *Runtime, io: std.Io) void {
             _ = io;
+            if (rt.warn_sub) |sub| {
+                sub.stop();
+                if (rt.allocator) |a| a.destroy(sub);
+                rt.warn_sub = null;
+            }
             if (rt.allocator) |a| {
                 rt.trust.deinit(a);
                 rt.session_trust.deinit(a);
@@ -762,18 +809,49 @@ pub fn configure(comptime cfg: Config) type {
         /// null at idle so the segment disappears (rather than
         /// staying as dead chrome).
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            // Two independent signals:
+            // 1. `active_threat` — sticky in-flight warning from a
+            //    recently-typed flagged command.
+            // 2. `warn_sub.count()` — kernel-side warn events the
+            //    daemon's ringbuf consumer pushed our way (post
+            //    #347 PR 2b). Surface both; the warn count comes
+            //    first because it's the more time-sensitive
+            //    signal (recent kernel observation).
             _ = ctx;
-            const lvl = rt.active_threat orelse return null;
-            // Allocate in the per-Runtime tiny buffer. Statusbar
-            // joins segments with " │ " so the icon needs no
-            // surrounding chrome.
-            const text: []const u8 = switch (lvl) {
+            const warn_count: usize = if (rt.warn_sub) |sub| sub.count() else 0;
+            const lvl = rt.active_threat;
+            if (warn_count == 0 and lvl == null) return null;
+
+            const lvl_label: []const u8 = if (lvl) |l| switch (l) {
                 .low => "",
-                .high => "\u{1F6E1} high",
-                .critical => "\u{1F6E1} critical",
-            };
-            if (text.len == 0) return null;
-            return text;
+                .high => "high",
+                .critical => "critical",
+            } else "";
+
+            // Both signals empty (only possible when active_threat
+            // is `.low` — no producer currently emits it but the
+            // variant exists, so guard defensively rather than
+            // painting "⚠ " with a trailing space).
+            if (warn_count == 0 and lvl_label.len == 0) return null;
+
+            // Write into the per-Runtime buffer so the slice stays
+            // valid for the gatherStatus call's writer (which
+            // borrows, not copies).
+            const out = if (warn_count > 0 and lvl_label.len > 0)
+                std.fmt.bufPrint(
+                    &rt.status_buf,
+                    "\u{1F6E1} {d} warn{s} | {s}",
+                    .{ warn_count, if (warn_count == 1) "" else "s", lvl_label },
+                ) catch return null
+            else if (warn_count > 0)
+                std.fmt.bufPrint(
+                    &rt.status_buf,
+                    "\u{1F6E1} {d} warn{s}",
+                    .{ warn_count, if (warn_count == 1) "" else "s" },
+                ) catch return null
+            else
+                std.fmt.bufPrint(&rt.status_buf, "\u{1F6E1} {s}", .{lvl_label}) catch return null;
+            return out;
         }
 
         /// Daemon-`Block` refusal notice. Single red line + clears
