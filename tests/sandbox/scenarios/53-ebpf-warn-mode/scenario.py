@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
-"""51-ebpf-threat-map-roundtrip — daemon→BPF map→LSM hook chain.
+"""53-ebpf-warn-mode — `--ebpf-mode=warn` allows execve + warn_pids write.
 
-Pins the kernel-side enforcement: alice's bash gets marked
-Critical via the daemon's set_threat_level RPC; the daemon
-writes through to the threat_map BPF map; the LSM hook's
-`bprm_check_security` reads the map and EPERMs subsequent
-execve()s under that PID.
+Mirror of 51-ebpf-threat-map-roundtrip but for the warn-mode path
+landed in #347's PR 1: when an operator picks warn over block, a
+Critical-verdict `set_threat_level` writes the PID to the
+`warn_pids` BPF map (NOT `threat_map`), and the LSM hook ALLOWS
+the subsequent execve rather than EPERMing it.
 
-Two-stage assertion:
-1. `bpftool map dump name threat_map` confirms the daemon
-   landed the kernel-side write (independent of LSM hook
-   behaviour).
-2. A PTY-driven bash under alice runs `/bin/true` after the
-   mark — the LSM hook intercepts and the shell reports
-   "Permission denied" with non-zero rc.
+Three-stage assertion:
+1. `warn_pids` contains the PID after the daemon write — verifies
+   the mode dispatch landed.
+2. `threat_map` does NOT contain the PID — confirms warn-mode
+   dispatch didn't fall through to the block path.
+3. A PTY-driven `/bin/true` under the marked PID returns rc=0 —
+   confirms the LSM hook respects the warn/allow path.
 
-If (1) passes but (2) fails: the regression is on the kernel-
-side LSM hook (vs the daemon-side write). Two-stage check =
-better diagnostics than a single end-to-end one.
+If (1) fails but (3) succeeds: dispatch is broken (still writing
+to threat_map maybe? but block dispatch would have EPERMed → 3
+would fail too). If (1) passes but (3) fails: the LSM hook is
+EPERMing on warn_pids entries that should only emit + allow.
 
-The warn-mode equivalent (set_threat_level writes to warn_pids,
-LSM hook allows the execve) is in `53-ebpf-warn-mode`.
+Pairs with 51 to cover the full mode matrix kernel-side.
+Subscribe-RPC + atty banner rendering land in subsequent PRs;
+that path's sandbox coverage will be `54-ebpf-warn-atty-render`.
 
 Skips cleanly when:
 - BPF LSM not in `/sys/kernel/security/lsm` (lib/bpf.py).
@@ -53,14 +55,13 @@ def fail(msg: str) -> None:
 
 def skip_if_no_bpf_object() -> None:
     if not BPF_OBJ.is_file():
-        print(f"SKIP: 51-ebpf-threat-map-roundtrip — "
+        print(f"SKIP: 53-ebpf-warn-mode — "
               f"{BPF_OBJ} not baked. Build Dockerfile.ebpf on a host "
               "with /sys/kernel/btf/vmlinux present.")
         sys.exit(0)
 
 
 def read_all_available(proc, timeout: float, sink: bytearray) -> None:
-    """Drain pending PTY output without blocking past `timeout`."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         r, _, _ = select.select([proc.fd], [], [], 0.1)
@@ -77,7 +78,6 @@ def read_all_available(proc, timeout: float, sink: bytearray) -> None:
 
 
 def spawn_alice_bash() -> tuple["ptyprocess.PtyProcess", int]:
-    """Spawn an interactive bash under alice. Returns (proc, pid)."""
     proc = ptyprocess.PtyProcess.spawn(
         ["runuser", "-u", "alice", "--", "bash",
          "--noprofile", "--norc"],
@@ -118,8 +118,6 @@ def mark_critical_via_alice(pid: int) -> None:
 
 
 def try_execve_in_bash(proc) -> tuple[int, str]:
-    """Run `/bin/true; echo rc=$?` in the PTY-attached bash.
-    Returns (rc, raw output). rc = -1 if no rc= line surfaced."""
     sink = bytearray()
     proc.write(b"/bin/true; echo rc=$?\r")
     deadline = time.time() + 4.0
@@ -135,55 +133,46 @@ def try_execve_in_bash(proc) -> tuple[int, str]:
     return -1, bytes(sink).decode("utf-8", errors="replace")
 
 
-def run_block_sub() -> None:
+def main() -> None:
+    skip_if_no_bpf_lsm("53-ebpf-warn-mode")
+    skip_if_no_bpf_object()
+
     proc, alice_pid = spawn_alice_bash()
     try:
-        with Daemon(extra_args=["--ebpf-mode", "block"], verbosity=1) as d:
+        with Daemon(extra_args=["--ebpf-mode", "warn"], verbosity=1) as d:
             time.sleep(1.0)
             log = d.read_log()
             if "eBPF attached" not in log:
                 d.dump_log()
-                fail(f"block sub: daemon didn't attach eBPF; log:\n{log}")
+                fail(f"daemon didn't attach eBPF; log:\n{log}")
             mark_critical_via_alice(alice_pid)
-            # Give the BPF map write a beat to land before the
-            # next execve fires.
             time.sleep(0.3)
-            # block sub: independently verify the daemon→kernel
-            # map-write chain via bpftool BEFORE checking LSM.
-            # If this assertion holds but the LSM check below
-            # doesn't, the kernel-side hook is the regression
-            # site (vs. the daemon-side write). Two-stage check
-            # = better diagnostics than a single end-to-end one.
-            if not bpf_map_has_pid("threat_map", alice_pid):
+
+            if not bpf_map_has_pid("warn_pids", alice_pid):
                 d.dump_log()
-                fail(f"block sub: threat_map missing PID {alice_pid} after "
-                     "SetThreatLevel(Critical) — daemon→BPF map write "
-                     "failed.")
+                fail(f"warn_pids missing PID {alice_pid} after "
+                     "SetThreatLevel(Critical) under --ebpf-mode=warn "
+                     "— mode dispatch didn't route to the warn map.")
+            if bpf_map_has_pid("threat_map", alice_pid):
+                d.dump_log()
+                fail(f"threat_map unexpectedly has PID {alice_pid} "
+                     "under --ebpf-mode=warn — mode dispatch fell "
+                     "through to the block path. Critical verdicts in "
+                     "warn-mode should write warn_pids ONLY.")
+
             rc, out = try_execve_in_bash(proc)
-            if rc == 0:
-                fail(f"block sub: execve under alice's bash was ALLOWED "
-                     f"despite threat_map entry — LSM EPERM didn't fire. "
-                     "Map write landed but the kernel-side hook isn't "
-                     f"reading it.\noutput: {out!r}")
-            if "permission denied" not in out.lower():
-                fail(f"block sub: execve failed (rc={rc}) but the bash "
-                     f"didn't show 'Permission denied' — verify the "
-                     f"EPERM came from the LSM hook, not some other "
-                     f"failure.\noutput: {out!r}")
+            if rc != 0:
+                fail(f"execve under alice's bash returned rc={rc} "
+                     "(expected 0). LSM hook is EPERMing warn_pids "
+                     "entries — warn-mode should allow the execve "
+                     f"and only emit a ringbuf event.\noutput: {out!r}")
     finally:
         try:
             proc.kill(9)
         except ptyprocess.PtyProcessError:
             pass
 
-
-def main() -> None:
-    skip_if_no_bpf_lsm("51-ebpf-threat-map-roundtrip")
-    skip_if_no_bpf_object()
-
-    run_block_sub()
-
-    print("PASS: 51-ebpf-threat-map-roundtrip")
+    print("PASS: 53-ebpf-warn-mode")
 
 
 if __name__ == "__main__":
