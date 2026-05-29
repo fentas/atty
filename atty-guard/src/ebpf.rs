@@ -115,10 +115,6 @@ impl EbpfState {
     pub fn set_threat(&self, _pid: u32, _level: ThreatLevel) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
-    #[allow(dead_code)]
-    pub fn mode(&self) -> LoadedMode {
-        LoadedMode::Block
-    }
 }
 
 // ===========================================================================
@@ -303,9 +299,7 @@ mod with_libbpf {
         pub fn set_threat(&self, pid: u32, level: ThreatLevel) -> Result<(), LoadError> {
             let key = pid.to_ne_bytes();
             if matches!(level, ThreatLevel::Low) {
-                let _ = self.delete("threat_map", &key);
-                let _ = self.delete("warn_pids", &key);
-                return Ok(());
+                return self.clear_both(&key);
             }
             if matches!(self.mode, LoadedMode::Observe) {
                 return Ok(());
@@ -320,6 +314,22 @@ mod with_libbpf {
                 (_, ThreatLevel::High) => self.update("threat_map", &key, &[1u8]),
                 _ => Ok(()),
             }
+        }
+
+        /// Clear the PID from BOTH maps under ONE lock. The naive
+        /// "delete from threat_map, then delete from warn_pids"
+        /// shape used to take the mutex twice — a concurrent
+        /// `get_threat` could observe a half-cleared state (gone
+        /// from threat_map, still in warn_pids). Single-lock keeps
+        /// the clear atomic from every reader's perspective.
+        fn clear_both(&self, key: &[u8]) -> Result<(), LoadError> {
+            let guard = self.obj.lock().expect("ebpf obj poisoned");
+            for map_name in ["threat_map", "warn_pids"] {
+                if let Some(map) = guard.maps().find(|m| m.name() == map_name) {
+                    let _ = map.delete(key);
+                }
+            }
+            Ok(())
         }
 
         fn update(&self, map_name: &str, key: &[u8], value: &[u8]) -> Result<(), LoadError> {
@@ -410,10 +420,19 @@ mod tests {
     }
 
     #[test]
-    fn loaded_mode_variants_exist() {
-        // Sentinel — adding a new mode variant without updating
-        // main.rs's effective_mode → LoadedMode conversion would
-        // surface here once the test is extended to exhaust them.
-        let _modes = [LoadedMode::Observe, LoadedMode::Warn, LoadedMode::Block];
+    fn loaded_mode_variants_exhausted() {
+        // Sentinel — adding a new LoadedMode variant must also be
+        // matched here. Wildcard `_` arm intentionally omitted so
+        // the compiler surfaces the gap; the conversion in
+        // main.rs's effective_mode → LoadedMode + the set_threat
+        // dispatch in this file both need updating in lockstep.
+        fn _exhaust(m: LoadedMode) {
+            match m {
+                LoadedMode::Observe => {}
+                LoadedMode::Warn => {}
+                LoadedMode::Block => {}
+            }
+        }
+        _exhaust(LoadedMode::Block);
     }
 }
