@@ -38,6 +38,11 @@ pub fn serve(
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
     osv: Option<Arc<crate::osv::OsvClient>>,
     trust_store: Arc<crate::trust_store::TrustStore>,
+    // Shared warn-event broadcast — main.rs constructs and passes
+    // the same Arc to (a) this serve() call (so SubscribeWarnEvents
+    // can register subscribers) and (b) the ringbuf consumer
+    // thread (#347 PR 2b — drives broadcast() per kernel event).
+    warn_broadcast: Arc<crate::warn_consumer::Broadcast>,
     server_cfg: crate::config::ServerConfig,
 ) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
@@ -72,6 +77,7 @@ pub fn serve(
         verbosity,
         trust_store,
         osv,
+        warn_broadcast,
     });
 
     // Bounded-resources gate: shared atomic counter ticks up on
@@ -182,6 +188,12 @@ struct State {
     /// dispatch arms gate on connecting client's EUID via
     /// SO_PEERCRED (`PeerCred` below).
     trust_store: Arc<crate::trust_store::TrustStore>,
+    /// #347 PR 2 — broadcast list for warn-mode subscribers.
+    /// Always present (zero subscribers when no eBPF / no one
+    /// subscribed). The ringbuf consumer thread (#347 PR 2b)
+    /// will drive `broadcast()` calls; SubscribeWarnEvents
+    /// handler registers new subscribers.
+    warn_broadcast: Arc<crate::warn_consumer::Broadcast>,
 }
 
 /// Peer credentials read from the UDS via SO_PEERCRED at accept
@@ -357,6 +369,15 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
             }
         };
 
+        // SubscribeWarnEvents is the only persistent-stream RPC —
+        // bypass dispatch (which returns one ResponseBody) and
+        // drive the connection ourselves. After this returns the
+        // connection is closed; bail out of the request loop.
+        if let Request::SubscribeWarnEvents { parent_pid_tree } = &request {
+            let root = *parent_pid_tree;
+            return stream_warn_events(state.clone(), &mut writer, id, root);
+        }
+
         let response = dispatch(&state, request, peer);
         if state.verbosity >= 2 {
             eprintln!("atty-guard: -> id={id} {response:?}");
@@ -400,7 +421,73 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
         Request::TrustAdd { hash, target_uid } => handle_trust_add(state, peer, hash, target_uid),
         Request::TrustList { target_uid } => handle_trust_list(state, peer, target_uid),
         Request::SessionWrite { target_uid } => handle_session_write(state, peer, target_uid),
+        Request::SubscribeWarnEvents { .. } => {
+            // Bypass-checked in the request loop above. Dispatch
+            // is for request/response RPCs; reaching here is a
+            // bypass-check regression.
+            unreachable!("SubscribeWarnEvents must be intercepted before dispatch")
+        }
     }
+}
+
+/// Run a SubscribeWarnEvents stream until the subscriber
+/// disconnects. Sends an initial `Subscribed` ack, registers a
+/// channel sender with the broadcast, then forwards every
+/// `ResponseBody` the broadcast pushes through the channel onto
+/// the connection. Returns when either the stream errors (peer
+/// disconnect) or the channel closes (broadcast was dropped —
+/// daemon shutting down).
+/// Per-subscriber inbox depth. Slow subscribers get the oldest
+/// events dropped + a coalesced `WarnDropped` notice — bounded
+/// memory matters more than perfect delivery for a banner-grade
+/// signal stream. 256 chosen to absorb a burst (CI machine
+/// recompiles → execve flurry) without dropping during the
+/// reader's normal scheduling latency. Aging-out at the broadcast
+/// level (vs per-message timeout) keeps the hot path lock-free.
+///
+/// Caveat (#347 PR 2a follow-up): each subscriber holds a
+/// connection-thread + a `ConnGuard` slot for its lifetime. With
+/// `max_concurrent_connections` defaulting to 64 (server.rs),
+/// 64 long-lived subscribers brick every other RPC. Future PR
+/// should exempt `SubscribeWarnEvents` from the cap or use a
+/// separate counter — out of scope here.
+const SUBSCRIBER_INBOX: usize = 256;
+
+fn stream_warn_events(
+    state: Arc<State>,
+    writer: &mut UnixStream,
+    id: u64,
+    pid_tree_root: u32,
+) -> std::io::Result<()> {
+    // Register FIRST, ack SECOND. This way the ack provably
+    // implies the subscriber is in the broadcast list — a
+    // publisher that fires the moment the ack hits the wire
+    // can't lose its first event to a register-not-yet-run race.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<ResponseBody>(SUBSCRIBER_INBOX);
+    state
+        .warn_broadcast
+        .register(crate::warn_consumer::Subscriber::new(pid_tree_root, tx));
+    write_response(writer, id, ResponseBody::Subscribed)?;
+    if state.verbosity >= 1 {
+        eprintln!(
+            "atty-guard: subscriber attached (pid_tree_root={pid_tree_root})"
+        );
+    }
+    // Block on the channel until either an event arrives or the
+    // sender side disappears (daemon shutdown). Each event is
+    // written with `id=0` — the protocol envelope's id field
+    // pairs requests with replies; server-pushed events aren't
+    // replies and don't have one to echo. Subscribers parse on
+    // `type` discriminator.
+    while let Ok(body) = rx.recv() {
+        if let Err(e) = write_response(writer, 0, body) {
+            if state.verbosity >= 1 {
+                eprintln!("atty-guard: subscriber write failed: {e} — closing");
+            }
+            break;
+        }
+    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -1216,12 +1303,29 @@ mod tests {
     fn spawn_server_with_cfg(
         cfg: crate::config::ServerConfig,
     ) -> (std::path::PathBuf, thread::JoinHandle<()>) {
+        let (socket, handle, _bcast) = spawn_server_with_cfg_and_broadcast(cfg);
+        (socket, handle)
+    }
+
+    /// Same as `spawn_server_with_cfg` but also returns the
+    /// shared warn-event broadcast so tests can publish events
+    /// to subscribers without a live BPF ringbuf consumer (which
+    /// lands in #347 PR 2b).
+    fn spawn_server_with_cfg_and_broadcast(
+        cfg: crate::config::ServerConfig,
+    ) -> (
+        std::path::PathBuf,
+        thread::JoinHandle<()>,
+        Arc<crate::warn_consumer::Broadcast>,
+    ) {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
         let trust_tmp = tempfile::tempdir().expect("tempdir");
         let trust_root = trust_tmp.path().to_path_buf();
         let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
         let classifier = Classifier::new();
+        let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
+        let bcast_for_thread = bcast.clone();
         let handle = thread::spawn(move || {
             let _trust_tmp_owned = trust_tmp;
             let _ = serve(
@@ -1231,6 +1335,7 @@ mod tests {
                 None,
                 None,
                 trust_store,
+                bcast_for_thread,
                 cfg,
             );
         });
@@ -1251,7 +1356,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        (socket, handle)
+        (socket, handle, bcast)
     }
 
     /// Spin a daemon backed by a caller-provided TrustStore. Lets
@@ -1265,6 +1370,7 @@ mod tests {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
         let classifier = Classifier::new();
+        let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
         let handle = thread::spawn(move || {
             let _ = serve(
                 &socket_for_thread,
@@ -1273,6 +1379,7 @@ mod tests {
                 None,
                 None,
                 trust_store,
+                bcast,
                 crate::config::ServerConfig::default(),
             );
         });
@@ -1297,6 +1404,7 @@ mod tests {
         let trust_root = trust_tmp.path().to_path_buf();
         let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
         let classifier = Classifier::new();
+        let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
         let handle = thread::spawn(move || {
             let _trust_tmp_owned = trust_tmp; // moved-in, Drop on exit
             let _ = serve(
@@ -1306,6 +1414,7 @@ mod tests {
                 None, // ebpf
                 None, // osv
                 trust_store,
+                bcast,
                 crate::config::ServerConfig::default(),
             );
         });
@@ -1336,6 +1445,73 @@ mod tests {
         assert_eq!(v["id"], 1);
         assert_eq!(v["type"], "health");
         assert!(v["version"].as_str().unwrap().len() > 0);
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn subscribe_warn_events_acks_then_streams() {
+        let (socket, _h, bcast) =
+            spawn_server_with_cfg_and_broadcast(crate::config::ServerConfig::default());
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        // Send subscribe with pid_tree_root=0 (unfiltered) so the
+        // test doesn't need to inject a fake /proc walk closure.
+        stream
+            .write_all(br#"{"id":7,"method":"subscribe_warn_events","parent_pid_tree":0}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let ack: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(ack["id"], 7, "ack echoes subscriber's id");
+        assert_eq!(ack["type"], "subscribed");
+
+        // Wait for the subscriber to register with the broadcast
+        // — the handler thread might not have run register() yet
+        // when the ack hit our reader. Bounded poll.
+        for _ in 0..50 {
+            if bcast.len() >= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(bcast.len(), 1, "subscriber should be registered after ack");
+
+        // Publish a fake warn event via the broadcast — simulates
+        // what the (PR 2b) ringbuf consumer thread will do.
+        bcast.broadcast(
+            4242,
+            ResponseBody::WarnEvent {
+                pid: 4242,
+                ppid: 1,
+                comm: "rm".into(),
+                argv0: "/bin/rm".into(),
+                timestamp_ms: 1234567,
+            },
+            |_p, _r| true,
+        );
+
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let evt: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(evt["id"], 0, "server-pushed events carry id=0");
+        assert_eq!(evt["type"], "warn_event");
+        assert_eq!(evt["pid"], 4242);
+        assert_eq!(evt["ppid"], 1);
+        assert_eq!(evt["comm"], "rm");
+        assert_eq!(evt["argv0"], "/bin/rm");
+        assert_eq!(evt["timestamp_ms"], 1234567);
+
+        // Drop our reader → handler sees write error / channel
+        // sender goes away → subscriber gets reaped on next
+        // broadcast attempt. (Don't assert the reap here; the
+        // separate broadcast_drops_disconnected_subscriber unit
+        // test in warn_consumer covers that path explicitly.)
+        drop(reader);
+        drop(stream);
         let _ = std::fs::remove_file(socket);
     }
 

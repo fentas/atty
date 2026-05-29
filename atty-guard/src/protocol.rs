@@ -206,6 +206,25 @@ pub enum Request {
         #[serde(default)]
         target_uid: Option<u32>,
     },
+
+    /// Subscribe to a stream of `VERDICT_WARN` execve events. Unlike
+    /// every other request, this NEVER replies once and closes —
+    /// the daemon sends a single `Subscribed` ack, then pushes
+    /// zero-or-more `WarnEvent` responses (newline-framed JSON,
+    /// same connection) as the kernel-side LSM hook emits them.
+    /// The connection holds until the subscriber disconnects.
+    ///
+    /// `parent_pid_tree` scopes the stream: only events whose
+    /// emitting pid is `parent_pid_tree` itself OR a descendant
+    /// (via /proc/<pid>/status PPid chain) are forwarded. atty
+    /// passes its own ATTY_PID so each proxy gets only its own
+    /// shell-tree's warns, not noise from other users' sessions.
+    /// `parent_pid_tree = 0` reserved for unfiltered (operator
+    /// debug / `atty-guard subscribe-warns` future CLI).
+    SubscribeWarnEvents {
+        #[serde(default)]
+        parent_pid_tree: u32,
+    },
 }
 
 /// Scope selector for `AtomsList`. The matcher serves the union of
@@ -344,6 +363,36 @@ pub enum ResponseBody {
         updated_at: Option<String>,
         sources: Vec<DriftEntry>,
     },
+    /// One-shot ack of a `SubscribeWarnEvents`. Followed by zero-or-
+    /// more `WarnEvent` responses on the SAME connection until the
+    /// subscriber disconnects (one of the only persistent-stream
+    /// RPCs — every other response closes the conversation).
+    Subscribed,
+    /// Server-pushed warn event. Drained by the daemon's ringbuf
+    /// consumer thread from the kernel-side `events` ringbuf when
+    /// the LSM hook tagged an execve as `VERDICT_WARN` (warn-mode
+    /// dispatch — see #347 PR 1 / commit 69e46c7). The subscriber
+    /// renders these as a banner (atty) or logs them
+    /// (CLI debug subscriber). `comm` and `argv0` are best-effort
+    /// strings — the kernel-side hook reads them but the binary
+    /// load that follows could clobber comm before the consumer
+    /// runs; userspace cross-references `/proc/<pid>/cmdline` for
+    /// the authoritative cmd when present.
+    WarnEvent {
+        pid: u32,
+        ppid: u32,
+        comm: String,
+        argv0: String,
+        /// Monotonic-clock millis when the daemon's ringbuf
+        /// consumer drained the event. Not the exact kernel
+        /// emission time (the BPF program doesn't stamp), but
+        /// close enough for ordering + banner display.
+        timestamp_ms: u64,
+    },
+    /// Best-effort notice that the ringbuf consumer's broadcast
+    /// dropped events for this subscriber (slow consumer / buffer
+    /// full). Carries the count since the last drop notice.
+    WarnDropped { count: u32 },
 }
 
 /// Per-source drift entry. Mirrors `atom_drift::DriftSource` but

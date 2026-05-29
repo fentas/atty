@@ -42,6 +42,7 @@ mod server;
 mod shutdown;
 mod threat_map;
 mod trust_store;
+mod warn_consumer;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -1060,6 +1061,12 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // #347 PR 2 — single broadcast list shared between (a) the
+    // server's SubscribeWarnEvents handler (adds subscribers) and
+    // (b) the eventual ringbuf consumer thread (PR 2b will spawn
+    // one when eBPF is loaded and push events through this Arc).
+    let warn_broadcast = std::sync::Arc::new(warn_consumer::Broadcast::new());
+
     server::serve(
         &socket,
         cli.verbosity,
@@ -1067,6 +1074,7 @@ fn main() -> std::io::Result<()> {
         ebpf_state,
         osv_client,
         trust_store,
+        warn_broadcast,
         file_cfg.server.clone(),
     )
 }
