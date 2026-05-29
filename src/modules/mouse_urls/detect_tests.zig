@@ -246,3 +246,39 @@ test "quoted URL strips the quote" {
         "https",
     );
 }
+
+test "percent-encoded path preserved" {
+    try expectHit(
+        "https://example.com/path%20with%20spaces",
+        10,
+        "https://example.com/path%20with%20spaces",
+        "example.com",
+        "https",
+    );
+}
+
+test "IPv6 literal — host slice includes brackets" {
+    // RFC 3986 §3.2.2: IPv6 lives inside `[]` so the `:` between
+    // segments isn't confused with the port `:`. Detector captures
+    // the brackets verbatim; trust-store comparison is up to the
+    // module wrapper (mouse_urls.stripPort handles `[::1]:8080`).
+    try expectHit(
+        "see http://[::1]:8080/api",
+        15,
+        "http://[::1]:8080/api",
+        "[::1]:8080",
+        "http",
+    );
+}
+
+test "OAuth-style URL with commas in query string" {
+    // Commas inside `?` should be preserved; only trailing-prose
+    // commas get stripped.
+    try expectHit(
+        "see https://example.com/cb?state=a,b,c then",
+        10,
+        "https://example.com/cb?state=a,b,c",
+        "example.com",
+        "https",
+    );
+}

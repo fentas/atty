@@ -88,10 +88,6 @@ pub fn configure(comptime cfg: Config) type {
             // Optional clock for tests to inject monotonic time. nil
             // = real CLOCK_MONOTONIC.
             test_clock_ms: ?u64 = null,
-
-            // Last URL the user attempted to open, surfaced via
-            // statusText so they can see what was blocked / launched.
-            // Borrowed from hint_buf; valid while hint_len > 0.
         };
 
         pub fn attach(allocator: std.mem.Allocator, io: std.Io) !Runtime {
@@ -175,6 +171,10 @@ pub fn configure(comptime cfg: Config) type {
     };
 }
 
+// TODO(termview): `AnsiState` / `ingest` / `clickedLine` are
+// byte-identical to `mouse_links.zig`. When a third consumer
+// appears, extract into `src/modules/_termview.zig` (or core
+// `src/termview.zig` if other layers want it).
 const AnsiState = struct {
     in_csi: bool = false,
     in_osc: bool = false,
@@ -269,13 +269,7 @@ pub fn hostMatches(host: []const u8, whitelist: []const []const u8) bool {
 fn matchOne(host: []const u8, pattern: []const u8) bool {
     if (pattern.len == 0) return false;
 
-    // Strip optional `:port` from the host for matching — entries
-    // are written by humans without a port, and the trust decision
-    // shouldn't depend on the port number.
-    const host_no_port = if (std.mem.lastIndexOfScalar(u8, host, ':')) |idx|
-        host[0..idx]
-    else
-        host;
+    const host_no_port = stripPort(host);
 
     if (std.mem.startsWith(u8, pattern, "*.")) {
         const suffix = pattern[2..];
@@ -290,6 +284,23 @@ fn matchOne(host: []const u8, pattern: []const u8) bool {
     }
 
     return std.ascii.eqlIgnoreCase(host_no_port, pattern);
+}
+
+/// Strip `:port` from a host while preserving IPv6 bracketed
+/// literals. `[::1]:8080` → `[::1]`; `example.com:443` →
+/// `example.com`; `[::1]` (no port) → `[::1]`.
+fn stripPort(host: []const u8) []const u8 {
+    if (host.len == 0) return host;
+    if (host[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, host, ']') orelse return host;
+        if (close + 1 < host.len and host[close + 1] == ':') return host[0 .. close + 1];
+        return host;
+    }
+    const idx = std.mem.lastIndexOfScalar(u8, host, ':') orelse return host;
+    // Plain hostnames never legitimately contain `:`; the only
+    // bare-`:` case is host:port. (Userinfo was already stripped by
+    // `extractHost`.)
+    return host[0..idx];
 }
 
 fn setHint(rt: anytype, prefix: []const u8, body: []const u8) void {
@@ -323,12 +334,17 @@ fn nowMs() u64 {
 pub const SpawnError = error{
     /// fork(2) failed — likely RLIMIT_NPROC or system overload.
     ForkFailed,
-    /// The URL is too long for our internal argv buffer (32 KiB).
+    /// The URL exceeds the 32 KiB argv slot. Real URLs cap around
+    /// 8 KiB; this is a defensive guard, not an expected outcome.
     UrlTooLong,
+    /// The opener binary name exceeds the 255-byte slot. The comptime
+    /// assert in `configure` catches empty; this branch covers
+    /// pathological non-empty cases (config injected by a generator).
+    OpenerTooLong,
 };
 
 fn spawnOpener(opener: []const u8, url: []const u8) SpawnError!void {
-    if (opener.len == 0 or opener.len >= 256) return error.UrlTooLong;
+    if (opener.len == 0 or opener.len >= 256) return error.OpenerTooLong;
     if (url.len == 0 or url.len >= 32 * 1024) return error.UrlTooLong;
 
     // Double-fork: child A becomes init's child after exit; child B

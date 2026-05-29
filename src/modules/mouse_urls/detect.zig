@@ -32,7 +32,7 @@ pub const Options = struct {
     /// Which schemes are clickable. Order doesn't matter; matching is
     /// case-insensitive against the lowercased scheme.
     accept_schemes: []const []const u8 = &.{
-        "https", "http", "ftp", "ftps", "ssh", "file", "git", "mailto",
+        "https", "http", "ftp", "ftps", "ssh", "file", "git",
     },
 };
 

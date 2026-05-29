@@ -55,21 +55,27 @@ test "hostMatches — port stripped before comparison" {
     try testing.expect(hostMatches("example.com:443", &.{"example.com"}));
 }
 
+test "hostMatches — IPv6 literal with and without port" {
+    try testing.expect(hostMatches("[::1]", &.{"[::1]"}));
+    try testing.expect(hostMatches("[::1]:8080", &.{"[::1]"}));
+    try testing.expect(hostMatches("[2001:db8::1]:443", &.{"[2001:db8::1]"}));
+    try testing.expect(!hostMatches("[::1]", &.{"[::2]"}));
+}
+
 test "hostMatches — empty whitelist always misses" {
     try testing.expect(!hostMatches("example.com", &.{}));
 }
 
-test "whitelist_only mode — whitelisted host attempts launch (mocked via hint)" {
-    // We can't actually fork+exec in unit tests, so this test only
-    // verifies the policy path: a whitelisted host reaches the
-    // launch branch (which yields an "opening: " hint either before
-    // or after the spawn — when spawn succeeds the hint is set; when
-    // it fails it's `opener failed (...)`). Both hint shapes are
-    // acceptable here; the test guards the consume + policy path.
+test "whitelist_only mode — whitelisted host enters launch branch" {
+    // /bin/true exists on every POSIX system (glibc + musl + alpine)
+    // and exits 0 immediately, so the double-fork+exec succeeds and
+    // the hint is "opening: ...". If a future CI uses an exotic image
+    // where `true` is missing, this test will fail on the strict
+    // assertion below — that's the expected signal, not a flake.
     const Mod = configure(.{
         .mode = .whitelist_only,
         .url_whitelist = &.{"example.com"},
-        .opener = "true", // /bin/true always succeeds, no side effects
+        .opener = "true",
         .hint_ttl_ms = 60_000,
     });
     var rt = try Mod.attach(testing.allocator, test_io);
@@ -92,9 +98,8 @@ test "whitelist_only mode — whitelisted host attempts launch (mocked via hint)
     };
     try testing.expectEqual(dispatch.MouseAction.consume, try Mod.onMouseClick(&rt, &c, click));
     const hint = (try Mod.provideHintText(&rt, &c)).?;
-    try testing.expect(std.mem.startsWith(u8, hint, "opening: ") or
-        std.mem.startsWith(u8, hint, "opener failed"));
-    try testing.expect(std.mem.indexOf(u8, hint, "https://example.com/foo") != null);
+    try testing.expect(std.mem.startsWith(u8, hint, "opening: "));
+    try testing.expectEqualStrings("opening: https://example.com/foo", hint);
 }
 
 test "whitelist_only mode — non-whitelisted host blocks with hint" {
