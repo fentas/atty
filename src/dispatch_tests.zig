@@ -15,6 +15,8 @@ const Action = mod.Action;
 const Context = mod.Context;
 const Dispatcher = mod.Dispatcher;
 const Error = mod.Error;
+const MouseAction = mod.MouseAction;
+const mouse = @import("mouse.zig");
 
 // ===========================================================================
 // Tests — stub modules defined inline so we can verify the dispatch
@@ -844,4 +846,146 @@ test "allDefaultBindings: picks up bindings from configure()-style factory modul
     try testing.expectEqual(@as(usize, 2), all.len);
     try testing.expectEqualSlices(u8, "A", all[0].bytes);
     try testing.expectEqualSlices(u8, "B", all[1].bytes);
+}
+
+// --- onMouseClick dispatch -----------------------------------
+//
+// Modules implement `onMouseClick` to recognise + react to mouse
+// events. First module to return `.consume` wins; later modules
+// don't run and the proxy drops the underlying CSI sequence.
+
+const MouseObserver = struct {
+    pub const name = "mouse-observer";
+    pub const Runtime = struct {
+        seen_count: usize = 0,
+        last_col: u16 = 0,
+    };
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn onMouseClick(
+        rt: *Runtime,
+        _: *Context,
+        evt: mouse.Event,
+    ) Error!MouseAction {
+        rt.seen_count += 1;
+        rt.last_col = evt.col;
+        return .passthrough;
+    }
+};
+
+const MouseConsumer = struct {
+    pub const name = "mouse-consumer";
+    pub const Runtime = struct { consumed: usize = 0 };
+    pub fn attach(_: std.mem.Allocator, _: std.Io) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime, _: std.Io) void {}
+    pub fn onMouseClick(
+        rt: *Runtime,
+        _: *Context,
+        _: mouse.Event,
+    ) Error!MouseAction {
+        rt.consumed += 1;
+        return .consume;
+    }
+};
+
+test "dispatchMouseClick fans out to every module's onMouseClick" {
+    const D = Dispatcher(.{ MouseObserver, MouseObserver });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    const evt: mouse.Event = .{
+        .button = .left,
+        .kind = .press,
+        .col = 42,
+        .row = 7,
+        .mods = .{},
+    };
+    const act = try D.dispatchMouseClick(&rts, &ctx, evt);
+    try testing.expectEqual(MouseAction.passthrough, act);
+    try testing.expectEqual(@as(usize, 1), rts[0].seen_count);
+    try testing.expectEqual(@as(usize, 1), rts[1].seen_count);
+    try testing.expectEqual(@as(u16, 42), rts[0].last_col);
+}
+
+test "dispatchMouseClick short-circuits at first .consume" {
+    const D = Dispatcher(.{ MouseConsumer, MouseObserver });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    const evt: mouse.Event = .{
+        .button = .left,
+        .kind = .press,
+        .col = 1,
+        .row = 1,
+        .mods = .{},
+    };
+    const act = try D.dispatchMouseClick(&rts, &ctx, evt);
+    try testing.expectEqual(MouseAction.consume, act);
+    try testing.expectEqual(@as(usize, 1), rts[0].consumed);
+    // Later module's onMouseClick must NOT have run.
+    try testing.expectEqual(@as(usize, 0), rts[1].seen_count);
+}
+
+test "dispatchMouseClick runs earlier .passthrough then stops at later .consume" {
+    // {Observer, Consumer, Observer} — verify the walker
+    // actually visits the passthrough module BEFORE the
+    // consumer + terminates after consumer (third observer
+    // must NOT run). Catches an off-by-one in the inline-for
+    // walker that {Consumer, Observer} alone wouldn't.
+    const D = Dispatcher(.{ MouseObserver, MouseConsumer, MouseObserver });
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    const evt: mouse.Event = .{
+        .button = .right,
+        .kind = .press,
+        .col = 5,
+        .row = 5,
+        .mods = .{},
+    };
+    const act = try D.dispatchMouseClick(&rts, &ctx, evt);
+    try testing.expectEqual(MouseAction.consume, act);
+    try testing.expectEqual(@as(usize, 1), rts[0].seen_count);
+    try testing.expectEqual(@as(usize, 1), rts[1].consumed);
+    try testing.expectEqual(@as(usize, 0), rts[2].seen_count);
+}
+
+test "dispatchMouseClick returns passthrough when no module implements the hook" {
+    const D = Dispatcher(.{Observer}); // Observer has no onMouseClick
+    var rts = try D.attachAll(testing.allocator, test_io);
+    defer D.detachAll(testing.allocator, test_io, &rts);
+
+    var line = LineState{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeContext(&line, &scratch);
+
+    const evt: mouse.Event = .{
+        .button = .right,
+        .kind = .press,
+        .col = 10,
+        .row = 10,
+        .mods = .{},
+    };
+    const act = try D.dispatchMouseClick(&rts, &ctx, evt);
+    try testing.expectEqual(MouseAction.passthrough, act);
 }
