@@ -182,6 +182,18 @@ eval "$(atty init bash)"</code></pre>
         return s;
       }
       function caret() { return span('caret', ''); }
+      // Move the blinking caret onto `node`, removing any caret
+      // that's still attached elsewhere in the screen. Real
+      // terminals only render one cursor at a time — without this
+      // helper, every line that previously hosted typing keeps
+      // its caret on screen forever (#350).
+      function setActiveCaret(node) {
+        var stale = screen.querySelectorAll('.caret');
+        for (var i = 0; i < stale.length; i++) stale[i].remove();
+        var c = caret();
+        node.append(c);
+        return c;
+      }
       function alive(myRun) { return myRun === currentRun; }
 
       async function typeInto(myRun, node, text, cps) {
@@ -205,17 +217,15 @@ eval "$(atty init bash)"</code></pre>
           line1.append(span('prompt', '$ '));
           var typed1 = span('typed', '');
           line1.append(typed1);
-          var c1 = caret();
-          line1.append(c1);
+          setActiveCaret(line1);
           screen.append(line1);
           await typeInto(myRun, typed1, 'git checkout featu');
           if (!alive(myRun)) return;
           await sleep(240);
           if (!alive(myRun)) return;
-          c1.remove();
           var ghost = span('ghost', 're/auth-refactor');
           line1.append(ghost);
-          line1.append(caret());
+          setActiveCaret(line1);
           screen.append(el('line dim', '  → atuin: dim ghost suggests your last matching cmd — Right Arrow/End accepts'));
           await sleep(1800);
           if (!alive(myRun)) return;
@@ -228,7 +238,7 @@ eval "$(atty init bash)"</code></pre>
           line2.append(span('prompt', '$ '));
           var typed2 = span('typed', '');
           line2.append(typed2);
-          line2.append(caret());
+          setActiveCaret(line2);
           screen.append(line2);
           await typeInto(myRun, typed2, 'rm -rf /home/work/', 26);
           if (!alive(myRun)) return;
@@ -246,7 +256,7 @@ eval "$(atty init bash)"</code></pre>
           line3.append(span('prompt', '$ '));
           var typed3 = span('typed', '');
           line3.append(typed3);
-          line3.append(caret());
+          setActiveCaret(line3);
           screen.append(line3);
           await typeInto(myRun, typed3, '#: list large files');
           if (!alive(myRun)) return;
