@@ -47,10 +47,13 @@ RUN cd /src/atty-guard && \
     cargo build --release --no-default-features \
         --features "tier2-onnx,osv-live,atoms-fetch,ebpf"
 
-# Compile the BPF object. vmlinux.h: prefer the runtime kernel's
-# BTF (when /sys/kernel/btf/vmlinux is bind-mounted in privileged
-# build), else fall back to a bundled reference dump. If neither
-# is available we skip — runtime scenarios then SKIP cleanly.
+# Compile the BPF object. vmlinux.h is generated from the host
+# kernel's BTF when reachable (build needs /sys/kernel/btf
+# bind-mounted, which requires a privileged build context). When
+# unreachable we skip the .bpf.o compilation — runtime scenarios
+# then SKIP cleanly via lib/bpf.py's probe. No bundled vmlinux.h
+# fallback today; a future PR can pin a known-good BTF dump if
+# the no-host-BTF case becomes common in CI.
 RUN cd /src/atty-guard/ebpf && \
     if [ -r /sys/kernel/btf/vmlinux ] && bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h 2>/dev/null; then \
         clang -O2 -g -Wall -target bpf -D__TARGET_ARCH_x86 \
@@ -58,7 +61,7 @@ RUN cd /src/atty-guard/ebpf && \
             -c atty_guard.bpf.c -o atty_guard.bpf.o && \
         echo "built atty_guard.bpf.o (host BTF)"; \
     else \
-        echo "warn: no host BTF + no bundled vmlinux.h — skipping .bpf.o build; scenarios will SKIP at runtime"; \
+        echo "warn: no host BTF reachable — skipping .bpf.o build; scenarios will SKIP at runtime"; \
     fi
 
 # ── runtime stage ────────────────────────────────────────────────

@@ -1,31 +1,36 @@
 #!/usr/bin/env python3
 """51-ebpf-threat-map-roundtrip — daemon→BPF map→LSM hook chain.
 
-Pins the kernel-side enforcement path: alice marks her own PID
-Critical via the daemon, the daemon writes through to the
-threat_map BPF map, the LSM hook's `bprm_check_security`
-read-back EPERMs alice's next execve.
+Pins the kernel-side enforcement: alice's bash gets marked
+Critical via the daemon's set_threat_level RPC; the daemon
+writes through to the threat_map BPF map; the LSM hook's
+`bprm_check_security` reads the map and EPERMs subsequent
+execve()s under that PID.
 
-Two sub-runs:
-- observe → alice's child runs (LSM hook attached but threat_map
-  stayed empty because the classifier didn't promote in observe
-  mode — the userspace-side observe semantics).
-- block → alice's child execve fails with EPERM (the production
-  enforcement path).
+Two sub-runs over distinct alice bash sessions:
+- observe → marking does NOT make the LSM hook EPERM (the
+  userspace classifier doesn't promote in observe mode so the
+  threat_map stays empty even though the LSM is attached).
+- block → marking → next execve under alice's bash returns
+  Permission denied.
 
-The "warn" sub-mode from #340's original scope is deferred —
-warn semantics need an atty-side banner change (cross-cutting
-atty + daemon) tracked separately.
+Verified via a PTY-driven bash: the scenario spawns bash under
+alice, captures its PID, marks Critical, then writes
+`/bin/true\\n` into the PTY and observes the resulting shell exit
+code (0 in observe, non-zero + "Permission denied" in block).
+
+The "warn" sub-mode is deferred — banner semantics need a cross-
+cutting atty + daemon design (filed as #347).
 
 Skips cleanly when:
 - BPF LSM not in `/sys/kernel/security/lsm` (lib/bpf.py).
-- atty_guard.bpf.o not baked into the image (Dockerfile.ebpf
-  build skipped it because no BTF was available).
+- atty_guard.bpf.o not baked into the image.
 """
 from __future__ import annotations
 
+import json
 import os
-import signal
+import select
 import subprocess
 import sys
 import time
@@ -34,7 +39,8 @@ from pathlib import Path
 sys.path.insert(0, "/sandbox")
 from lib.bpf import skip_if_no_bpf_lsm  # noqa: E402
 from lib.daemon import Daemon  # noqa: E402
-from lib.uds import call  # noqa: E402
+
+import ptyprocess  # noqa: E402
 
 
 BPF_OBJ = Path("/usr/lib/atty-guard/atty_guard.bpf.o")
@@ -48,65 +54,111 @@ def fail(msg: str) -> None:
 def skip_if_no_bpf_object() -> None:
     if not BPF_OBJ.is_file():
         print(f"SKIP: 51-ebpf-threat-map-roundtrip — "
-              f"{BPF_OBJ} not baked. Dockerfile.ebpf build "
-              "skipped .bpf.o compilation (no BTF available "
-              "at image-build time). Build the image on a host "
+              f"{BPF_OBJ} not baked. Build Dockerfile.ebpf on a host "
               "with /sys/kernel/btf/vmlinux present.")
         sys.exit(0)
 
 
-def spawn_alice_loop() -> tuple[subprocess.Popen, int]:
-    """Spawn a long-running bash as alice that prints its PID
-    then waits. The exec'd `sleep` lives long enough for the
-    daemon's /proc/<pid>/status lookup AND survives a
-    SetThreatLevel RPC. Returns the proc handle + alice's PID."""
-    proc = subprocess.Popen(
-        ["runuser", "-u", "alice", "--", "bash", "-c",
-         "echo $$; exec sleep 30"],
-        stdout=subprocess.PIPE,
+def read_all_available(proc, timeout: float, sink: bytearray) -> None:
+    """Drain pending PTY output without blocking past `timeout`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r, _, _ = select.select([proc.fd], [], [], 0.1)
+        if not r:
+            continue
+        try:
+            chunk = os.read(proc.fd, 4096)
+            if chunk:
+                sink.extend(chunk)
+            else:
+                return
+        except OSError:
+            return
+
+
+def spawn_alice_bash() -> tuple["ptyprocess.PtyProcess", int]:
+    """Spawn an interactive bash under alice. Returns (proc, pid)."""
+    proc = ptyprocess.PtyProcess.spawn(
+        ["runuser", "-u", "alice", "--", "bash",
+         "--noprofile", "--norc"],
+        env={**os.environ, "PS1": r"\$ ", "HOME": "/home/alice"},
+        dimensions=(24, 80),
     )
-    pid = int(proc.stdout.readline().strip())
-    time.sleep(0.1)
-    return proc, pid
+    sink = bytearray()
+    read_all_available(proc, 2.0, sink)
+    proc.write(b"echo PID=$$\r")
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        read_all_available(proc, 0.1, sink)
+        for line in bytes(sink).decode("utf-8", errors="replace").splitlines():
+            if line.startswith("PID="):
+                try:
+                    return proc, int(line[4:].strip())
+                except ValueError:
+                    pass
+        time.sleep(0.05)
+    proc.kill(9)
+    fail(f"couldn't capture alice's bash PID; output={bytes(sink)!r}")
 
 
-def try_execve_as_alice(pid_to_check: int) -> int:
-    """fork+execve as alice; returns the child's exit code.
-    The execve gets gated by the LSM hook iff that hook fired
-    for this child's parent process tree."""
+def mark_critical_via_alice(pid: int) -> None:
     res = subprocess.run(
-        ["runuser", "-u", "alice", "--",
-         "bash", "-c", "/bin/true; echo exit=$?"],
-        capture_output=True,
-        timeout=5,
+        ["runuser", "-u", "alice", "--", "python3", "-c",
+         "import sys; sys.path.insert(0, '/sandbox'); "
+         "import json; from lib.uds import call; "
+         f"print(json.dumps(call('set_threat_level', "
+         f"pid={pid}, level='critical')))"],
+        capture_output=True, timeout=10,
     )
-    return res.returncode
+    if res.returncode != 0:
+        fail(f"set_threat_level RPC failed: stderr={res.stderr!r}")
+    resp = json.loads(res.stdout)
+    if resp.get("type") == "error":
+        fail(f"set_threat_level rejected: {resp}")
+
+
+def try_execve_in_bash(proc) -> tuple[int, str]:
+    """Run `/bin/true; echo rc=$?` in the PTY-attached bash.
+    Returns (rc, raw output). rc = -1 if no rc= line surfaced."""
+    sink = bytearray()
+    proc.write(b"/bin/true; echo rc=$?\r")
+    deadline = time.time() + 4.0
+    while time.time() < deadline:
+        read_all_available(proc, 0.1, sink)
+        for line in bytes(sink).decode("utf-8", errors="replace").splitlines():
+            if line.startswith("rc="):
+                try:
+                    return int(line[3:].strip()), bytes(sink).decode("utf-8", errors="replace")
+                except ValueError:
+                    pass
+        time.sleep(0.05)
+    return -1, bytes(sink).decode("utf-8", errors="replace")
 
 
 def run_observe_sub() -> None:
-    """observe mode — LSM attached, but the userspace classifier
-    doesn't promote PIDs to Critical, so the threat_map stays
-    empty and the LSM hook returns 0 for every PID. Alice's
-    child should run normally."""
-    with Daemon(extra_args=["--ebpf-mode", "observe"], verbosity=1) as d:
-        time.sleep(1.0)
-        log = d.read_log()
-        if "eBPF attached" not in log:
-            d.dump_log()
-            fail(f"observe sub: daemon didn't attach eBPF; log:\n{log}")
-        rc = try_execve_as_alice(os.getpid())
-        if rc != 0:
-            fail(f"observe sub: alice's execve was BLOCKED unexpectedly (rc={rc})")
+    proc, alice_pid = spawn_alice_bash()
+    try:
+        with Daemon(extra_args=["--ebpf-mode", "observe"], verbosity=1) as d:
+            time.sleep(1.0)
+            log = d.read_log()
+            if "eBPF attached" not in log:
+                d.dump_log()
+                fail(f"observe sub: daemon didn't attach eBPF; log:\n{log}")
+            mark_critical_via_alice(alice_pid)
+            rc, out = try_execve_in_bash(proc)
+            if rc != 0:
+                fail(f"observe sub: execve under alice's bash was BLOCKED "
+                     f"(rc={rc}) — the userspace classifier shouldn't "
+                     f"promote in observe mode.\noutput: {out!r}")
+    finally:
+        try:
+            proc.kill(9)
+        except ptyprocess.PtyProcessError:
+            pass
 
 
 def run_block_sub() -> None:
-    """block mode — daemon writes threat_map; LSM hook EPERMs
-    PIDs marked Critical. We mark alice's victim PID Critical
-    via the daemon RPC, then verify a SUBSEQUENT execve under
-    the same alice UID gets EPERM'd (the LSM check fires on
-    bprm_check_security, which sees the parent's CHILD's PID
-    if we set Critical against the process group)."""
-    victim, alice_pid = spawn_alice_loop()
+    proc, alice_pid = spawn_alice_bash()
     try:
         with Daemon(extra_args=["--ebpf-mode", "block"], verbosity=1) as d:
             time.sleep(1.0)
@@ -114,40 +166,24 @@ def run_block_sub() -> None:
             if "eBPF attached" not in log:
                 d.dump_log()
                 fail(f"block sub: daemon didn't attach eBPF; log:\n{log}")
-            # Mark alice's PID Critical. SetThreatLevel from
-            # alice's perspective is allowed when she owns the
-            # PID (which she does here).
-            resp = subprocess.run(
-                ["runuser", "-u", "alice", "--", "python3", "-c",
-                 "import sys; sys.path.insert(0, '/sandbox'); "
-                 "import json; from lib.uds import call; "
-                 f"print(json.dumps(call('set_threat_level', "
-                 f"pid={alice_pid}, level='critical')))"],
-                capture_output=True, timeout=10,
-            )
-            if resp.returncode != 0:
-                fail(f"block sub: set_threat_level RPC failed: {resp.stderr!r}")
-            # Now try execve under that PID's process group. The
-            # LSM hook's bprm_check_security reads the threat_map
-            # for the calling process's PID. Without an actual
-            # process-tree linkage we can only assert the LSM
-            # hook FIRED — pin via journald log line.
-            time.sleep(0.5)
-            log = d.read_log()
-            if "threat_map" not in log and "set_threat" not in log:
-                # Daemon doesn't log every threat_map write at
-                # default verbosity — that's OK. The LSM hook
-                # would need a separate scenario to assert the
-                # EPERM directly (would need to spawn a child
-                # under the marked PID's process tree).
-                print("note: daemon didn't log threat_map write at "
-                      "verbosity=1; LSM hook firing was set up but "
-                      "not directly observed in this scenario.")
+            mark_critical_via_alice(alice_pid)
+            # Give the BPF map write a beat to land before the
+            # next execve fires.
+            time.sleep(0.3)
+            rc, out = try_execve_in_bash(proc)
+            if rc == 0:
+                fail(f"block sub: execve under alice's bash was ALLOWED "
+                     f"despite SetThreatLevel(Critical) — LSM EPERM "
+                     f"didn't fire.\noutput: {out!r}")
+            if "permission denied" not in out.lower():
+                fail(f"block sub: execve failed (rc={rc}) but the bash "
+                     f"didn't show 'Permission denied' — verify the "
+                     f"EPERM came from the LSM hook, not some other "
+                     f"failure.\noutput: {out!r}")
     finally:
         try:
-            victim.send_signal(signal.SIGTERM)
-            victim.wait(timeout=3)
-        except (subprocess.TimeoutExpired, ProcessLookupError):
+            proc.kill(9)
+        except ptyprocess.PtyProcessError:
             pass
 
 

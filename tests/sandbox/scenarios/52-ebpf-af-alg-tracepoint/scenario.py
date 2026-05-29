@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""52-ebpf-af-alg-tracepoint — AF_ALG syscall trace + classifier upgrade.
+"""52-ebpf-af-alg-tracepoint — AF_ALG syscall sanity smoke.
 
-Pins the V2-B sys_enter_execve / AF_ALG tracepoint chain: when
-a process opens an AF_ALG socket (the canonical
-crypto-LPE-precursor shape per the atty-guard/ebpf/README.md
-threat model), the daemon's tracepoint fires + the classifier
-upgrades any subsequent classify for that PID's tree.
+Smoke-tests the V2-B sys_enter_execve / AF_ALG tracepoint
+attachment: opens an AF_ALG socket (the canonical
+crypto-LPE-precursor shape per atty-guard/ebpf/README.md) and
+verifies the daemon survives the syscall without panicking or
+logging an error.
+
+NOT a full classifier-upgrade assertion — the tracepoint's
+effect on the classifier is internal (threat_map hint) and not
+visible at default verbosity. A richer assertion that pins the
+upgrade-on-AF_ALG behaviour belongs in a separate scenario
+once the daemon exposes per-PID hint introspection.
 
 Skips cleanly when:
 - BPF LSM not in `/sys/kernel/security/lsm` (lib/bpf.py).
@@ -90,8 +96,8 @@ def main() -> None:
         time.sleep(0.5)
         log_after = d.read_log()
         # Filter to lines added AFTER opening the socket.
-        new_lines = log_after[len(log_before):]
-        if "panic" in new_lines or "failed" in new_lines.lower():
+        new_lines = log_after[len(log_before):].lower()
+        if "panic" in new_lines or "failed" in new_lines or "error" in new_lines:
             d.dump_log()
             fail(f"daemon logged failure after AF_ALG syscall:\n{new_lines}")
 
