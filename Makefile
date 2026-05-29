@@ -41,7 +41,7 @@ endif
 .PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
         clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard \
-        sandbox sandbox-rebuild sandbox-onnx sandbox-onnx-image
+        sandbox sandbox-rebuild sandbox-base-image sandbox-onnx sandbox-onnx-image
 
 help:
 	@printf "atty — build targets\n\n"
@@ -321,7 +321,13 @@ sandbox-rebuild:
 # env vars; without them the build still succeeds but the model
 # is NOT baked and scenarios 60/61 SKIP at runtime. See
 # tests/sandbox/onnx-models.toml for the pin file format.
-sandbox-onnx-image: sandbox
+# Build ONLY the base image (atty-sandbox:base) without running
+# any scenarios. Used by `sandbox-onnx-image` as a prereq so
+# extending images don't drag in the full base-suite run.
+sandbox-base-image:
+	python3 tests/sandbox/runner.py --build-only
+
+sandbox-onnx-image: sandbox-base-image
 	docker build \
 	    -t atty-sandbox:onnx \
 	    -f tests/sandbox/Dockerfile.onnx \

@@ -30,14 +30,14 @@ RUN if [ -n "${MODEL_URL}" ]; then \
             exit 2; \
         fi; \
         apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+        rm -rf /var/lib/apt/lists/* && \
         install -d -o atty -g atty -m 0750 /var/lib/atty-guard/models && \
         curl -fsSL "${MODEL_URL}" -o /var/lib/atty-guard/models/securebert2-int8.onnx && \
         curl -fsSL "${TOKENIZER_URL}" -o /var/lib/atty-guard/models/securebert2-tokenizer.json && \
         echo "${MODEL_SHA256}  /var/lib/atty-guard/models/securebert2-int8.onnx" | sha256sum -c - && \
         echo "${TOKENIZER_SHA256}  /var/lib/atty-guard/models/securebert2-tokenizer.json" | sha256sum -c - && \
         chown atty:atty /var/lib/atty-guard/models/securebert2-int8.onnx /var/lib/atty-guard/models/securebert2-tokenizer.json && \
-        chmod 0640 /var/lib/atty-guard/models/securebert2-int8.onnx /var/lib/atty-guard/models/securebert2-tokenizer.json && \
-        apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*; \
+        chmod 0640 /var/lib/atty-guard/models/securebert2-int8.onnx /var/lib/atty-guard/models/securebert2-tokenizer.json; \
     else \
         echo "MODEL_URL empty — ONNX scenarios will SKIP at runtime"; \
     fi

@@ -257,11 +257,16 @@ def main() -> int:
         help="Scenario names to run (default: all). e.g. 00-smoke",
     )
     ap.add_argument("--no-build", action="store_true", help="Skip image rebuild")
+    ap.add_argument("--build-only", action="store_true",
+                    help="Build the base image then exit (no scenarios)")
     args = ap.parse_args()
 
     if not args.no_build:
         stage_binaries()
         build_image()
+
+    if args.build_only:
+        return 0
 
     scenarios = discover_scenarios()
     if not scenarios:
