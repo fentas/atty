@@ -47,6 +47,8 @@ test {
     _ = @import("modules/mouse_links.zig");
     _ = @import("modules/mouse_links/inject.zig");
     _ = @import("modules/mouse_links/path_detect.zig");
+    _ = @import("modules/mouse_urls.zig");
+    _ = @import("modules/mouse_urls/detect.zig");
     _ = @import("modules/security_guard.zig");
     _ = @import("test/e2e/vt.zig");
     _ = @import("test/e2e/dsl.zig");

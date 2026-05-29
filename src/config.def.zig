@@ -242,6 +242,36 @@ const atty = @import("atty");
 // //     .accept_relative = false,
 // // }),
 
+// ───── Mouse-click → browser (mouse_urls) ───────────────────────────────
+//
+// Click any URL in terminal output to open in `xdg-open` (or your
+// configured opener) — but only if the host is in `url_whitelist`.
+// Default mode is `.whitelist_only`: the paranoid posture so a
+// curl'd page or hostile log line can't trigger a phishing tab on
+// click. Switch to `.never` on shared / multi-tenant hosts where
+// even whitelisted opens are too much surface.
+//
+// Same `mouse.enabled = true` prereq as mouse_links — the modules
+// share the proxy's click dispatch.
+//
+// pub const modules = .{
+//     atty.modules.mouse_urls.configure(.{
+//         .mode = .whitelist_only,
+//         .url_whitelist = &.{
+//             "github.com",
+//             "*.github.com",
+//             "docs.zig.dev",
+//         },
+//         // .opener = "firefox",                   // override $BROWSER
+//     }),
+//     atty.modules.mouse_links.configure(.{}),
+//     atty.modules.guardrail.configure(.{}),
+//     atty.modules.history.configure(.{}),
+// };
+//
+// // Paranoid posture — click is always a no-op + hint:
+// // atty.modules.mouse_urls.configure(.{ .mode = .never }),
+
 // ───── Proxy ────────────────────────────────────────────────────────────
 //
 // pub const proxy: atty.Proxy = .{
