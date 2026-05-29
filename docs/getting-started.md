@@ -34,6 +34,25 @@ Same destination, different journey: clones atty into
 prompts you to look at `src/config.zig`, then compiles and installs.
 Use this one if you want to customize.
 
+### Git + make (clone + build)
+
+```sh
+git clone https://github.com/fentas/atty.git
+cd atty
+make build-atty     # → zig-out/bin/atty (musl-static)
+make link-atty      # → ~/.local/bin/atty symlinked to the clone
+```
+
+Use this when you want to read the source before running it, when
+your platform doesn't have a release binary yet, or when you plan
+to edit `src/config.zig` and rebuild in place.
+
+> The bare `make build` / `make link` targets also build and link
+> the `atty-guard` Rust sidecar (Cargo required). The
+> `-atty`-suffixed targets above are the minimal path — Zig only,
+> no cargo dependency. See [Security guard](/security-guard/) for
+> the daemon flow once you want it.
+
 ### Docker
 
 ```sh
@@ -43,12 +62,26 @@ git clone https://github.com/fentas/atty && cd atty
 
 ## Wire it into your shell
 
-Two ways. Pick whichever matches how you already start shells.
+### Option A — shell-rc snippet (recommended)
 
-### Option A — terminal emulator launches atty
+Drop this in your `.bashrc` or `.zshrc`:
 
-Most direct. Edit your terminal's config to spawn `atty` instead of
-your shell. For Ghostty (`~/.config/ghostty/config`):
+```sh
+eval "$(atty init bash)"   # or `atty init zsh`
+```
+
+This is the canonical setup. It re-execs the current interactive
+shell under atty AND wires up OSC 133 prompt markers — without
+those markers, ghost text falls back to keystroke tracking
+(best-effort), history capture loses exit-code attribution, and
+the LLM module can't tell where one command ends and the next
+begins. Set it once in your dotfiles; every new shell picks it up.
+
+### Option B — terminal emulator launches atty
+
+If touching `.bashrc` / `.zshrc` isn't an option (locked-down host,
+managed dotfiles, ephemeral container), point your terminal config
+at atty directly. For Ghostty (`~/.config/ghostty/config`):
 
 ```
 command = atty bash
@@ -64,20 +97,8 @@ Prefer the explicit `atty bash` / `atty zsh` form — when the
 terminal emulator spawns atty directly, the environment is minimal
 and `$SHELL` may not yet be set.
 
-### Option B — shell-rc snippet
-
-If touching the terminal config isn't an option (you have multiple
-terminal emulators, you SSH into other machines, you sync dotfiles),
-drop this in your `.bashrc` or `.zshrc`:
-
-```sh
-eval "$(atty init bash)"   # or `atty init zsh`
-```
-
-The snippet re-execs the current interactive shell under atty once.
-It also wires up OSC 133 prompt markers so atty can read where your
-command line starts and ends — without those, ghost text falls back
-to keystroke tracking, which is less accurate.
+You'll need to source the OSC 133 snippet yourself for full
+accuracy — Option A is still cleaner where it's available.
 
 ## First contact
 
@@ -89,8 +110,12 @@ Start a new terminal. You're now inside atty. Try:
 # accepts the full suggestion.
 git ch                          # → git checkout featu...
 
-# Try a guardrail-tripping command. It WILL prompt before running.
-rm -rf /home/work/
+# Trip the guardrail without risking any data. `echo … | sh` runs
+# a harmless string through a pipe-to-sh — atty intercepts the
+# pattern before the shell sees it; the prompt asks for confirm.
+# (We deliberately don't suggest typing `rm -rf` to test things —
+# if the guardrail isn't engaged for any reason, you lose data.)
+echo pipe-execution-test | sh
 
 # Type a prompt-style line with `#:` and an instruction, then
 # press Alt+A — atty replaces the line with a shell command,
