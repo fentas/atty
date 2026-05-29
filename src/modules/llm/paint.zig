@@ -581,6 +581,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return renderTurnContentWithSkip(w, turn, max_visible, 0, max_rows);
         }
 
+        /// One-row compact observation stub for the inline panel
+        /// (#311). Shows the captured line count so the user knows
+        /// what's been collapsed without losing the conversation
+        /// scrolling rhythm. Caller has already emitted the
+        /// `Output:` prefix; this writes the bracketed metadata
+        /// after it.
+        fn paintCompactObservation(w: *std.Io.Writer, content: []const u8) !usize {
+            // Count lines: every '\n' is a separator. A non-empty
+            // tail without trailing newline is its own line; an
+            // empty content reads as zero lines.
+            var lines: usize = 0;
+            var i: usize = 0;
+            var saw_text = false;
+            while (i < content.len) : (i += 1) {
+                if (content[i] == '\n') {
+                    lines += 1;
+                    saw_text = false;
+                } else if (!saw_text) {
+                    saw_text = true;
+                }
+            }
+            if (saw_text) lines += 1;
+            try w.print("\x1B[2m[{d} line{s} \u{00B7} Alt+Shift+C to inspect]\x1B[0m", .{
+                lines,
+                if (lines == 1) "" else "s",
+            });
+            return 1;
+        }
+
         /// Render a turn skipping the first `skip_rows` of its
         /// produced content, emitting up to `max_rows` after.
         /// Used by the per-row scrollback path to slice through a
@@ -1349,7 +1378,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             var turn_row_buf: [cfg.history_turns_max]usize = undefined;
             var content_total_rows: usize = 0;
             for (rt.turns[0..rt.turns_len], 0..) |t, idx| {
-                turn_row_buf[idx] = countTurnRows(t, max_inline_visible, big);
+                // Inline-panel observations collapse to a one-row
+                // stub (#311). Full content still in turn.content
+                // — Alt+Shift+C / scroll-back to the full overlay
+                // sees verbatim. Count + render paths must stay
+                // synced; the render branch below mirrors this.
+                turn_row_buf[idx] =
+                    if (cfg.inline_observation_compact and t.kind == .observation)
+                        1
+                    else
+                        countTurnRows(t, max_inline_visible, big);
                 content_total_rows += turn_row_buf[idx];
             }
 
@@ -1414,7 +1452,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     };
                     w.writeAll(prefix) catch return false;
                 }
-                const rows_used = renderTurnContentWithSkip(&w, turn, max_inline_visible, skip, budget) catch 1;
+                // #311 — observation turns compress to a line-count
+                // stub in the inline panel. Full content stays
+                // available in the alt-screen overlay.
+                const rows_used = if (cfg.inline_observation_compact and turn.kind == .observation)
+                    paintCompactObservation(&w, turn.content) catch 1
+                else
+                    renderTurnContentWithSkip(&w, turn, max_inline_visible, skip, budget) catch 1;
                 // 0 means countTurnRows over-counted vs md_render's
                 // actual emission (the wrap-iter heuristic
                 // over-estimates for some done envelopes). Rewind

@@ -2088,3 +2088,104 @@ test "inline scroll: per-row offset scrolls THROUGH a single tall turn" {
     try testing.expect(std.mem.indexOf(u8, mid.?, "P3-MID-B") == null);
     try testing.expect(std.mem.indexOf(u8, mid.?, "P4-BOTTOM") == null);
 }
+
+test "inline chat: observation collapses to line-count stub when compact (#311)" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .inline_observation_compact = true,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    const obs_content =
+        "RUSTC_OUTPUT_LINE_1_should_not_appear\n" ++
+        "RUSTC_OUTPUT_LINE_2_should_not_appear\n" ++
+        "RUSTC_OUTPUT_LINE_3_should_not_appear";
+    try helpers.pushTurn(&rt, .observation, try testing.allocator.dupe(u8, obs_content));
+
+    rt.chat_inline_paint_pending = true;
+    const out = (try L.provideTermBytes(&rt, &ctx)).?;
+
+    // Compact stub shows the line count and inspect hint.
+    try testing.expect(std.mem.indexOf(u8, out, "3 lines") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Alt+Shift+C") != null);
+    // Verbatim content must NOT appear in the inline panel.
+    try testing.expect(std.mem.indexOf(u8, out, "RUSTC_OUTPUT_LINE_1") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "RUSTC_OUTPUT_LINE_2") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "RUSTC_OUTPUT_LINE_3") == null);
+}
+
+test "inline chat: compact OFF renders observation verbatim (#311)" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .inline_observation_compact = false,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    try helpers.pushTurn(&rt, .observation, try testing.allocator.dupe(u8, "VERBATIM_SENTINEL"));
+
+    rt.chat_inline_paint_pending = true;
+    const out = (try L.provideTermBytes(&rt, &ctx)).?;
+
+    try testing.expect(std.mem.indexOf(u8, out, "VERBATIM_SENTINEL") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Alt+Shift+C") == null);
+}
