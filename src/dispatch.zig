@@ -32,6 +32,13 @@ pub const Error = module.Error;
 /// dispatch chain + tells the proxy NOT to forward the
 /// underlying CSI sequence; `passthrough` lets later modules
 /// + the shell see the click.
+///
+/// Scope note: today the dispatch only fans out clicks
+/// (`mouse.Kind.press`); drag + release events are NOT
+/// currently dispatched (the proxy-side intercept lands in
+/// PR 4c with its first consumer, which only needs click).
+/// Drag-aware modules would need a separate hook or a
+/// `Click(Range)` variant — defer until a use case shows up.
 pub const MouseAction = enum { passthrough, consume };
 
 /// Build a dispatcher specialised on a comptime tuple of module types.
