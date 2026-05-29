@@ -1,0 +1,100 @@
+name: Sandbox (eBPF)
+
+# Kernel-side eBPF scenarios for the V2-B threat-map + tracepoints
+# (#340). Non-required because the image build needs BPF support
+# in the runner's kernel + privileged container support; both are
+# host-specific. Scenarios SKIP cleanly when prereqs are missing
+# (lib/bpf.py probe + .bpf.o presence check).
+
+on:
+  pull_request:
+    paths:
+      - 'atty-guard/src/ebpf.rs'
+      - 'atty-guard/ebpf/**'
+      - 'atty-guard/Cargo.toml'
+      - 'tests/sandbox/Dockerfile.ebpf'
+      - 'tests/sandbox/scenarios/51-ebpf-threat-map-roundtrip/**'
+      - 'tests/sandbox/scenarios/52-ebpf-af-alg-tracepoint/**'
+      - 'tests/sandbox/lib/bpf.py'
+      - '.github/workflows/sandbox-ebpf.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: sandbox-ebpf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox-ebpf:
+    name: sandbox ebpf
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Allow merging when this fails — the base sandbox.yml is the
+    # gate. This job is best-effort: catches loader / classifier
+    # regressions on hosts that support BPF LSM + privileged
+    # containers; SKIPs cleanly elsewhere.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      - name: Restore docker layer cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: sandbox-ebpf-buildx-${{ hashFiles('atty-guard/Cargo.lock', 'atty-guard/Cargo.toml', 'tests/sandbox/Dockerfile.base', 'tests/sandbox/Dockerfile.ebpf', 'atty-guard/ebpf/atty_guard.bpf.c') }}
+          restore-keys: |
+            sandbox-ebpf-buildx-
+
+      - name: Build base + eBPF images
+        env:
+          SANDBOX_BUILDX_CACHE_FROM: /tmp/.buildx-cache
+          SANDBOX_BUILDX_CACHE_TO: /tmp/.buildx-cache-new
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/.buildx-cache /tmp/.buildx-cache-new
+          make sandbox-ebpf-image 2>&1 | tee /tmp/sandbox-ebpf.log || \
+              echo "::warning::ebpf image build failed — scenarios will SKIP"
+
+      - name: Run eBPF scenarios
+        run: |
+          set -o pipefail
+          python3 tests/sandbox/runner.py --no-build \
+              51-ebpf-threat-map-roundtrip 52-ebpf-af-alg-tracepoint 2>&1 | tee -a /tmp/sandbox-ebpf.log
+
+      - name: Annotate failures
+        if: failure()
+        run: |
+          test -f /tmp/sandbox-ebpf.log || { echo "::warning::sandbox-ebpf log missing"; exit 0; }
+          python3 - <<'PY'
+          import re
+          log = open("/tmp/sandbox-ebpf.log").read()
+          for blk in re.split(r"^FAIL: ", log, flags=re.MULTILINE)[1:]:
+              body = re.split(r"\n(?=FAIL: |\[runner\] |Traceback)", blk, maxsplit=1)[0]
+              print(f"::error::sandbox-ebpf: {body.rstrip().replace(chr(10), '%0A')}")
+          PY
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: sandbox-ebpf-log
+          path: /tmp/sandbox-ebpf.log
+          retention-days: 7
+
+      - name: Move cache
+        if: always()
+        run: |
+          if [ ! -d /tmp/.buildx-cache-new ] || \
+             [ -z "$(ls -A /tmp/.buildx-cache-new 2>/dev/null)" ]; then
+            echo "no new cache to save"
+            exit 0
+          fi
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache

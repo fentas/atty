@@ -41,7 +41,7 @@ endif
 .PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
         clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard \
-        sandbox sandbox-rebuild
+        sandbox sandbox-rebuild sandbox-ebpf sandbox-ebpf-image
 
 help:
 	@printf "atty — build targets\n\n"
@@ -315,3 +315,22 @@ sandbox:
 sandbox-rebuild:
 	-docker image rm atty-sandbox:base 2>/dev/null || true
 	$(MAKE) sandbox
+
+# Build the eBPF-baked sandbox image (atty-sandbox:ebpf). Extends
+# atty-sandbox:base with atty-guard rebuilt --features ebpf + the
+# compiled atty_guard.bpf.o. Requires the host kernel's BTF dump
+# accessible at /sys/kernel/btf/vmlinux during build — otherwise
+# .bpf.o isn't compiled and scenarios 51/52 SKIP at runtime.
+sandbox-ebpf-image: sandbox
+	docker buildx build \
+	    --load \
+	    -t atty-sandbox:ebpf \
+	    -f tests/sandbox/Dockerfile.ebpf \
+	    --allow security.insecure \
+	    --build-context btf=/sys/kernel/btf \
+	    $(CURDIR)
+
+# Run the eBPF scenarios (51, 52). Skips when the image was built
+# without .bpf.o OR when the runner kernel lacks BPF LSM.
+sandbox-ebpf: sandbox-ebpf-image
+	python3 tests/sandbox/runner.py --no-build 51-ebpf-threat-map-roundtrip 52-ebpf-af-alg-tracepoint
