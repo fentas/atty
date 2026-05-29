@@ -43,6 +43,7 @@
         await api.typeInto(myRun, typed2, 'echo pipe-execution-test | sh', 26);
         if (!api.alive(myRun)) return;
         await api.sleep(420);
+        if (!api.alive(myRun)) return;
         var warn = api.el('line danger');
         warn.append(api.span('warn-glyph', '!'));
         warn.append(document.createTextNode('atty guardrail: pipe to `sh` detected'));
@@ -61,6 +62,7 @@
         await api.typeInto(myRun, typed3, '#: list large files');
         if (!api.alive(myRun)) return;
         await api.sleep(520);
+        if (!api.alive(myRun)) return;
         api.screen.append(api.el('line dim', '  ↪ llm module · Alt+A → fills the line · Enter to run'));
         await api.sleep(900);
         if (!api.alive(myRun)) return;

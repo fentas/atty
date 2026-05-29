@@ -18,9 +18,9 @@ engine is in `../terminal_example.js`; the include lives at
            api.screen.innerHTML = '';
            // … build lines via api.el / api.span / api.typeInto …
            // ALWAYS guard awaits with: if (!api.alive(myRun)) return;
-           // Use api.setActiveCaret(line) to move the cursor —
-           // never api.caret() + manual remove (that's the bug
-           // closed in #350).
+           // Use api.setActiveCaret(line) to move the cursor;
+           // bare api.caret() + manual remove leaks stale carets
+           // on every line that ever hosted typing.
            await api.sleep(1200);
          }
        };
@@ -54,7 +54,7 @@ engine is in `../terminal_example.js`; the include lives at
 ## Style guide
 
 - Each scene clears `screen.innerHTML` at the top of the loop iteration.
-- Use `setActiveCaret`, not bare `caret()` + manual remove — single caret invariant per #350.
+- Use `setActiveCaret`, not bare `caret()` + manual remove — single caret invariant.
 - Honour `api.alive(myRun)` between EVERY `await`. Without that guard, restart races leak typing into the new screen.
 - Pick `rows_em` so the script comfortably fits the body — playback that overflows will scroll inside the panel (overflow-y: auto) instead of growing the page.
 
