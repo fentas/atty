@@ -16,6 +16,12 @@
 //! Stateless and allocation-free — returns slices into the input.
 //! Hot-path safe; the module wrapper owns the captured buffer's
 //! lifetime.
+//!
+//! **Caller responsibility:** the returned `path` is NOT sanitised
+//! for shell metacharacters. Pass it to `$EDITOR` via an execve-
+//! style argv (no shell), never via `system()` / `popen()` /
+//! `sh -c`. Path strings can legitimately contain `*`, `?`, `[`,
+//! `$`, etc. and we deliberately don't quote them here.
 
 const std = @import("std");
 
@@ -232,8 +238,12 @@ fn isPathShape(s: []const u8, opts: Options) bool {
     if (looksLikeEmail(s)) return false;
     if (isAllDigits(s)) return false;
 
-    const absolute = s.len > 0 and s[0] == '/';
-    const tilde = s.len > 0 and s[0] == '~';
+    // A bare `/` or `~` is not a useful click target — require at
+    // least one more byte so `$EDITOR` always gets a name to open.
+    if (s.len < 2) return false;
+
+    const absolute = s[0] == '/';
+    const tilde = s[0] == '~';
     const dot_rel = std.mem.startsWith(u8, s, "./") or std.mem.startsWith(u8, s, "../");
     const has_slash = std.mem.indexOfScalar(u8, s, '/') != null;
     const has_known_ext = hasKnownExtension(s);
@@ -261,6 +271,9 @@ fn isAllDigits(s: []const u8) bool {
     return true;
 }
 
+// Editable-text formats only; binaries/media (.png/.pdf/.bin) are
+// intentionally absent — `$EDITOR` opening a PDF is a worse UX
+// than the click being a no-op.
 const known_exts = [_][]const u8{
     ".zig",   ".rs",   ".c",     ".h",   ".cpp",   ".hpp",    ".cc",  ".cxx",
     ".go",    ".py",   ".pyi",   ".js",  ".jsx",   ".ts",     ".tsx", ".mjs",
@@ -293,7 +306,7 @@ fn isKnownBareFilename(s: []const u8) bool {
 }
 
 fn isBoundary(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0;
+    return c <= 0x20 or c == 0x7f;
 }
 
 test {

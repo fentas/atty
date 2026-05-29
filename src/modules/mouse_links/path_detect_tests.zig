@@ -170,14 +170,40 @@ test "deep relative with line" {
     try expectHit("a/b/c/d/e.toml:99", 6, "a/b/c/d/e.toml", 99, null);
 }
 
-test "ignore wrapper without matching close" {
-    // Unmatched leading `"` is left as part of the run; isPathShape
-    // still passes via has_slash, but the quote stays in the path.
-    // Acceptable behaviour — caller should sanitise quotes if they
-    // matter for $EDITOR argv.
+test "unmatched leading quote stays in path — documented limitation" {
+    // No matching close, so stripWrappers can't peel the quote; the
+    // shape test still passes via `has_slash`. Documented as a
+    // limitation rather than a bug — callers should pass via execve
+    // argv anyway (per the file header), where a leading `"` is a
+    // legal-but-weird filename.
     try expectHit("\"src/foo.zig", 5, "\"src/foo.zig", null, null);
 }
 
 test "tab as separator" {
     try expectHit("src/a.zig\tsrc/b.zig", 12, "src/b.zig", null, null);
+}
+
+test "10-digit line number that overflows u32 folds into path" {
+    // 9_999_999_999 (10 digits) exceeds u32 max; splitTrailingNumber
+    // length-accepts the run but parseInt errors → suffix stays as
+    // part of the path candidate, which `isPathShape` still accepts
+    // (the path part still ends in `.zig`).
+    const hit = find("src/foo.zig:9999999999", 5, default_opts) orelse return error.TestExpectedHit;
+    try testing.expectEqualStrings("src/foo.zig:9999999999", hit.path);
+    try testing.expectEqual(@as(?u32, null), hit.line);
+}
+
+test "bare slash rejected" {
+    try expectMiss("/", 1);
+}
+
+test "bare tilde rejected" {
+    try expectMiss("~", 1);
+}
+
+test "stray ANSI ESC byte is a boundary" {
+    // Module wrapper SGR-strips before calling us; this is defense
+    // in depth so a leaky strip-implementation doesn't push raw
+    // CSI bytes into $EDITOR argv.
+    try expectHit("src/foo.zig\x1b[0m", 5, "src/foo.zig", null, null);
 }
