@@ -8,6 +8,7 @@
 test {
     _ = @import("module.zig");
     _ = @import("dispatch.zig");
+    _ = @import("mouse.zig");
     _ = @import("line_state.zig");
     _ = @import("ansi.zig");
     _ = @import("trace.zig");
