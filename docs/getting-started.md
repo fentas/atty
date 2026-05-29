@@ -39,13 +39,19 @@ Use this one if you want to customize.
 ```sh
 git clone https://github.com/fentas/atty.git
 cd atty
-make build          # → zig-out/bin/atty (musl-static)
-make link           # → ~/.local/bin/atty symlinked to the clone
+make build-atty     # → zig-out/bin/atty (musl-static)
+make link-atty      # → ~/.local/bin/atty symlinked to the clone
 ```
 
 Use this when you want to read the source before running it, when
 your platform doesn't have a release binary yet, or when you plan
 to edit `src/config.zig` and rebuild in place.
+
+> The bare `make build` / `make link` targets also build and link
+> the `atty-guard` Rust sidecar (Cargo required). The
+> `-atty`-suffixed targets above are the minimal path — Zig only,
+> no cargo dependency. See [Security guard](/security-guard/) for
+> the daemon flow once you want it.
 
 ### Docker
 
