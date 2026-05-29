@@ -68,9 +68,16 @@ def main() -> None:
             fail(f"reason text missing flagged URL substring "
                  f"{FLAGGED_URL_SUB!r}; reason={reason!r}; full "
                  f"response: {resp}")
-        if "curl" not in reason.lower() or "sh" not in reason.lower():
+        # The curl_pipe_sh regex layer's reason has a fixed phrase
+        # (classifier.rs:487 "remote-fetch-and-execute (`curl … |
+        # sh`)") — pin that distinctive token rather than the bare
+        # word "sh", which the URL itself satisfies (install.sh /
+        # copyfail.security) and would let a regex-layer regression
+        # slip past.
+        if "remote-fetch-and-execute" not in reason:
             d.dump_log()
-            fail(f"reason text missing curl/sh attribution; "
+            fail(f"reason text missing curl_pipe_sh regex layer "
+                 f"attribution ('remote-fetch-and-execute'); "
                  f"reason={reason!r}; full response: {resp}")
 
     print("PASS: 72-flagged-url-curl-pipe")

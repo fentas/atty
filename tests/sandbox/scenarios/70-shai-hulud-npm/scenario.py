@@ -46,10 +46,16 @@ def main() -> None:
             d.dump_log()
             fail(f"classify failed: {resp}")
         verdict = resp.get("verdict")
-        if verdict not in ("warn", "block"):
+        # Single flagged-npm hit → exactly one signal → can't
+        # auto-Block per classifier.rs:372's `hits.len() >= 2`
+        # guard. Tightening to warn-only catches a regression
+        # where that guard goes away — 40-auto-block tests the
+        # same guard via the URL path; this is the npm sibling.
+        if verdict != "warn":
             d.dump_log()
-            fail(f"expected warn/block on flagged-npm hit, got "
-                 f"verdict={verdict!r}; full response: {resp}")
+            fail(f"expected warn (single-signal can't auto-Block) "
+                 f"on flagged-npm hit, got verdict={verdict!r}; "
+                 f"full response: {resp}")
         reason = resp.get("reason", "")
         if FLAGGED_PKG not in reason:
             d.dump_log()
