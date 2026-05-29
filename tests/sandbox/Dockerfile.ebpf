@@ -61,7 +61,16 @@ RUN cd /src/atty-guard/ebpf && \
         echo "built atty_guard.bpf.o (host BTF)"; \
     else \
         echo "warn: no host BTF reachable — skipping .bpf.o build; scenarios will SKIP at runtime"; \
+    fi && \
+    install -d /opt/ebpf-artifact && \
+    if [ -f atty_guard.bpf.o ]; then \
+        install -m 0644 atty_guard.bpf.o /opt/ebpf-artifact/atty_guard.bpf.o; \
     fi
+    # /opt/ebpf-artifact/ contains only the .bpf.o (or is empty),
+    # never vmlinux.h / sources. The runtime stage COPYs from
+    # this small dir instead of /src/atty-guard/ebpf/ — keeps the
+    # final image lean by not pulling the multi-MB BTF dump or
+    # the source tree through the COPY layer.
 
 # ── runtime stage ────────────────────────────────────────────────
 FROM atty-sandbox:base
@@ -70,15 +79,14 @@ FROM atty-sandbox:base
 COPY --from=ebpf-builder /src/atty-guard/target/release/atty-guard /usr/local/bin/atty-guard
 RUN chmod 0755 /usr/local/bin/atty-guard
 
-# The .bpf.o may or may not have been built (see ebpf-builder
-# stage). Stage whatever's there into the daemon's standard
-# probe path (atty-guard/src/ebpf.rs:locate_bpf_object). Missing
-# file is fine — scenarios skip on absence.
+# Stage the .bpf.o into the daemon's standard probe path
+# (atty-guard/src/ebpf.rs:locate_bpf_object). The builder
+# packaged it into /opt/ebpf-artifact/ which is either {.bpf.o}
+# or empty — direct COPY keeps the runtime image lean (no
+# vmlinux.h, no source tree carried through). Missing file is
+# fine: scenarios check BPF_OBJ.is_file() and skip cleanly.
 RUN install -d /usr/lib/atty-guard
-COPY --from=ebpf-builder /src/atty-guard/ebpf/ /tmp/ebpf-out/
-RUN if [ -f /tmp/ebpf-out/atty_guard.bpf.o ]; then \
-        install -m 0644 /tmp/ebpf-out/atty_guard.bpf.o /usr/lib/atty-guard/atty_guard.bpf.o; \
-    fi && rm -rf /tmp/ebpf-out
+COPY --from=ebpf-builder /opt/ebpf-artifact/ /usr/lib/atty-guard/
 
 # Runtime deps: libbpf for the daemon's loader (libbpf-rs),
 # bpftool so scenarios can dump BPF maps directly and pin the

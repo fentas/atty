@@ -203,8 +203,17 @@ def run_scenario(script: Path) -> bool:
     extra = load_scenario_docker_opts(script)
     image = load_scenario_image(script)
     if image != IMAGE_TAG and not docker_image_exists(image):
-        print(f"[runner] {name}: SKIP (image {image!r} not built — "
-              f"see make target for this scenario class)")
+        # Derive the make target from the image tag. Convention:
+        # atty-sandbox:<class> ↔ make sandbox-<class>-image.
+        # Unknown image shapes fall back to a generic hint so a
+        # third-party image override doesn't lie about a target
+        # that may not exist.
+        if image.startswith("atty-sandbox:"):
+            cls = image.split(":", 1)[1]
+            hint = f"run `make sandbox-{cls}-image`"
+        else:
+            hint = "see the make target for this scenario class"
+        print(f"[runner] {name}: SKIP (image {image!r} not built — {hint})")
         return True
     try:
         result = subprocess.run(
