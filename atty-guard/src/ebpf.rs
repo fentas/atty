@@ -96,7 +96,10 @@ pub struct EbpfState;
 
 #[cfg(not(feature = "ebpf"))]
 impl EbpfState {
-    pub fn attach(_mode: LoadedMode) -> Result<Self, LoadError> {
+    pub fn attach(
+        _mode: LoadedMode,
+        _broadcast: std::sync::Arc<crate::warn_consumer::Broadcast>,
+    ) -> Result<Self, LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
     /// Stub for builds without the `ebpf` feature. `get_threat` on
@@ -125,7 +128,6 @@ mod with_libbpf {
     use super::{LoadError, LoadedMode, ThreatLevel};
     use libbpf_rs::{MapCore, MapFlags};
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     /// Resolve `atty_guard.bpf.o` from one of the conventional
     /// locations. Tries (1) sibling-of-binary, (2) source-tree
@@ -169,18 +171,20 @@ mod with_libbpf {
         ))
     }
 
-    /// Loaded + attached BPF state. Holds `Object` (programs + maps)
-    /// + the `Link` handles that keep the programs attached —
-    /// dropping the Links detaches.
+    /// Holds the loaded BPF `Object` via a `Box::leak`'d static
+    /// reference (so the RingBuffer in the consumer thread can
+    /// borrow from it for 'static) + the `Link` handles that keep
+    /// the programs attached — dropping the Links detaches.
     ///
-    /// `Mutex<Object>` is the simpler half of the design options
-    /// the original skeleton noted: `libbpf_rs::Object` is `!Sync`,
-    /// so a daemon-shared `Arc<EbpfState>` model requires this
-    /// serialise point. Lock cost is negligible — the only callers
-    /// are atty (writing one PID per Enter) and infrequent
-    /// `GetThreatLevel` lookups.
+    /// The leak is intentional: the daemon's BPF state lives for
+    /// the entire process lifetime (there's no graceful kernel-
+    /// side unload path while atty proxies are still subscribed
+    /// to the ringbuf), and clean lifetime management of the
+    /// Object across the set_threat caller threads + the
+    /// long-lived consumer thread is otherwise gnarly. ~10 KB of
+    /// permanent heap is a trivial cost for a sidecar.
     pub struct EbpfState {
-        obj: Mutex<libbpf_rs::Object>,
+        obj: ObjectHandle,
         _lsm_link: libbpf_rs::Link,
         _tp_execve_link: libbpf_rs::Link,
         /// AF_ALG socket() tracepoint — copy.fail-class kernel-LPE
@@ -189,28 +193,44 @@ mod with_libbpf {
         /// the execve enforcement path.
         _tp_socket_link: libbpf_rs::Link,
         mode: LoadedMode,
+        /// Detached ringbuf consumer thread (`atty-guard-ringbuf`).
+        /// Held only to make the handle visible in `ps`; we never
+        /// join — the thread runs until process exit.
+        _consumer: std::thread::JoinHandle<()>,
     }
 
-    // SAFETY: `libbpf_rs::Object` and `libbpf_rs::Link` wrap raw
-    // `NonNull<bpf_object>` / `NonNull<bpf_link>` and aren't
-    // auto-Send/Sync. We serialize all access to the inner
-    // pointers through `Mutex<Object>`, and libbpf's own map
-    // operations (BPF_MAP_LOOKUP_ELEM / BPF_MAP_UPDATE_ELEM) are
-    // thread-safe by the kernel's own contract. Link is only
-    // touched at `EbpfState::Drop`, which runs once when the
-    // last Arc handle drops. Sharing the EbpfState across the
-    // daemon's per-connection threads via Arc is therefore safe.
+    /// Sync wrapper around the leaked `&'static Object`. libbpf-rs
+    /// marks `Object` as `!Sync` defensively, but its `&self`
+    /// methods we actually call (`maps().find()`, then `Map`'s
+    /// `lookup`/`update`/`delete`) all delegate to kernel syscalls
+    /// (`bpf(BPF_MAP_*_ELEM)`) which are atomic per-key on the
+    /// kernel side. Concurrent access from the consumer thread
+    /// (read-only — only iterates maps to find the ringbuf) and
+    /// the per-connection RPC threads (lookup/update/delete) is
+    /// safe under that contract.
+    pub struct ObjectHandle(&'static libbpf_rs::Object);
+    unsafe impl Sync for ObjectHandle {}
+    unsafe impl Send for ObjectHandle {}
+
+    // SAFETY: `libbpf_rs::Link` wraps `NonNull<bpf_link>` and isn't
+    // auto-Send/Sync. We only touch Links at `EbpfState::Drop`,
+    // which runs once when the last Arc handle drops. Sharing the
+    // EbpfState across the daemon's per-connection threads via
+    // Arc is therefore safe.
     unsafe impl Send for EbpfState {}
     unsafe impl Sync for EbpfState {}
 
     impl EbpfState {
-        pub fn attach(mode: LoadedMode) -> Result<Self, LoadError> {
+        pub fn attach(
+            mode: LoadedMode,
+            broadcast: std::sync::Arc<crate::warn_consumer::Broadcast>,
+        ) -> Result<Self, LoadError> {
             let path = locate_bpf_object()?;
             let mut obj_builder = libbpf_rs::ObjectBuilder::default();
             let open_obj = obj_builder
                 .open_file(&path)
                 .map_err(|e| LoadError::LoadFailed(format!("open {}: {e}", path.display())))?;
-            let obj = open_obj
+            let mut obj = open_obj
                 .load()
                 .map_err(|e| LoadError::LoadFailed(format!("load: {e}")))?;
 
@@ -244,12 +264,60 @@ mod with_libbpf {
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach socket tracepoint: {e}")))?;
 
+            // Leak the Object so its borrows can live 'static. The
+            // consumer thread holds a RingBuffer<'static> built from
+            // a Map borrow off this Object; the per-connection RPC
+            // threads also borrow Map handles for set_threat. Both
+            // need the same Object alive forever — daemon lifetime
+            // is process lifetime so the leak is the natural fit.
+            let obj_static: &'static libbpf_rs::Object =
+                Box::leak(Box::new(obj));
+            let obj_handle = ObjectHandle(obj_static);
+
+            // Build the ringbuf consumer + spawn its thread before
+            // returning so the LSM hook's first event has somewhere
+            // to land. RingBuffer<'static> moves into the thread;
+            // the broadcast Arc clone outlives the callback.
+            let events_map = obj_static
+                .maps()
+                .find(|m| m.name() == "events")
+                .ok_or_else(|| {
+                    LoadError::LoadFailed("events ringbuf missing".into())
+                })?;
+            let bcast_for_cb = broadcast.clone();
+            let mut rb_builder = libbpf_rs::RingBufferBuilder::new();
+            rb_builder
+                .add(&events_map, move |data| {
+                    ringbuf_callback(data, &bcast_for_cb);
+                    0
+                })
+                .map_err(|e| {
+                    LoadError::LoadFailed(format!("ringbuf add: {e}"))
+                })?;
+            let rb = rb_builder
+                .build()
+                .map_err(|e| {
+                    LoadError::LoadFailed(format!("ringbuf build: {e}"))
+                })?;
+            // Drop the explicit map binding so the implicit borrow
+            // ends; the RingBuffer holds its own reference via
+            // libbpf-rs internals.
+            drop(events_map);
+
+            let consumer = std::thread::Builder::new()
+                .name("atty-guard-ringbuf".into())
+                .spawn(move || consumer_loop(rb))
+                .map_err(|e| {
+                    LoadError::LoadFailed(format!("spawn ringbuf consumer: {e}"))
+                })?;
+
             Ok(Self {
-                obj: Mutex::new(obj),
+                obj: obj_handle,
                 _lsm_link: lsm_link,
                 _tp_execve_link: tp_execve_link,
                 _tp_socket_link: tp_socket_link,
                 mode,
+                _consumer: consumer,
             })
         }
 
@@ -261,8 +329,7 @@ mod with_libbpf {
         /// keys (matches the kernel-side `if (level && ...)`
         /// check which treats absence-of-mark as Low).
         pub fn get_threat(&self, pid: u32) -> ThreatLevel {
-            let guard = self.obj.lock().expect("ebpf obj poisoned");
-            let map = match guard.maps().find(|m| m.name() == "threat_map") {
+            let map = match self.obj.0.maps().find(|m| m.name() == "threat_map") {
                 Some(m) => m,
                 None => return ThreatLevel::Low,
             };
@@ -316,16 +383,15 @@ mod with_libbpf {
             }
         }
 
-        /// Clear the PID from BOTH maps under ONE lock. The naive
-        /// "delete from threat_map, then delete from warn_pids"
-        /// shape used to take the mutex twice — a concurrent
-        /// `get_threat` could observe a half-cleared state (gone
-        /// from threat_map, still in warn_pids). Single-lock keeps
-        /// the clear atomic from every reader's perspective.
+        /// Clear the PID from BOTH maps in a single sweep. Map
+        /// operations are kernel-side atomic per-key; reading
+        /// either map between the two deletes can observe a
+        /// half-cleared state, but the LSM hook itself does its
+        /// own kernel-side reads against the live maps and never
+        /// observes the userspace race (libbpf delete is sync).
         fn clear_both(&self, key: &[u8]) -> Result<(), LoadError> {
-            let guard = self.obj.lock().expect("ebpf obj poisoned");
             for map_name in ["threat_map", "warn_pids"] {
-                if let Some(map) = guard.maps().find(|m| m.name() == map_name) {
+                if let Some(map) = self.obj.0.maps().find(|m| m.name() == map_name) {
                     let _ = map.delete(key);
                 }
             }
@@ -333,8 +399,9 @@ mod with_libbpf {
         }
 
         fn update(&self, map_name: &str, key: &[u8], value: &[u8]) -> Result<(), LoadError> {
-            let guard = self.obj.lock().expect("ebpf obj poisoned");
-            let map = guard
+            let map = self
+                .obj
+                .0
                 .maps()
                 .find(|m| m.name() == map_name)
                 .ok_or_else(|| {
@@ -344,9 +411,11 @@ mod with_libbpf {
                 .map_err(|e| LoadError::LoadFailed(format!("{map_name} update: {e}")))
         }
 
+        #[allow(dead_code)]
         fn delete(&self, map_name: &str, key: &[u8]) -> Result<(), LoadError> {
-            let guard = self.obj.lock().expect("ebpf obj poisoned");
-            let map = guard
+            let map = self
+                .obj
+                .0
                 .maps()
                 .find(|m| m.name() == map_name)
                 .ok_or_else(|| {
@@ -355,6 +424,51 @@ mod with_libbpf {
             map.delete(key)
                 .map_err(|e| LoadError::LoadFailed(format!("{map_name} delete: {e}")))
         }
+    }
+
+    /// Ringbuf consumer entry point — runs in the
+    /// `atty-guard-ringbuf` thread until the process exits.
+    ///
+    /// `poll(500ms)` is the canonical libbpf idiom: blocks via
+    /// epoll until kernel pushes data OR the timeout expires.
+    /// Errors here are catastrophic libbpf failures (negative fd,
+    /// etc) — log + back off briefly so the thread doesn't spin
+    /// if libbpf is in a bad state.
+    fn consumer_loop(rb: libbpf_rs::RingBuffer<'static>) {
+        loop {
+            match rb.poll(std::time::Duration::from_millis(500)) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("atty-guard: ringbuf poll error: {e} — backing off");
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+    }
+
+    /// Per-event callback inside the libbpf poll. Parses the raw
+    /// bytes as ExecveEvent, filters to VERDICT_WARN, broadcasts.
+    /// Trace + block events are ignored (they belong to other
+    /// paths — daemon logs / atty banner respectively).
+    fn ringbuf_callback(
+        data: &[u8],
+        broadcast: &std::sync::Arc<crate::warn_consumer::Broadcast>,
+    ) {
+        let Some(evt) = crate::warn_consumer::ExecveEvent::from_bytes(data) else {
+            return;
+        };
+        if !evt.is_warn() {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        broadcast.broadcast(
+            evt.pid,
+            evt.to_warn_event(now_ms),
+            crate::warn_consumer::pid_in_tree_root,
+        );
     }
 }
 
@@ -395,7 +509,10 @@ mod tests {
     #[cfg(not(feature = "ebpf"))]
     #[test]
     fn attach_without_feature_returns_feature_not_built() {
-        match EbpfState::attach(LoadedMode::Block) {
+        match EbpfState::attach(
+            LoadedMode::Block,
+            std::sync::Arc::new(crate::warn_consumer::Broadcast::new()),
+        ) {
             Err(LoadError::FeatureNotBuilt) => {}
             Err(other) => panic!("expected FeatureNotBuilt, got {other:?}"),
             Ok(_) => panic!("expected Err on feature-disabled build"),

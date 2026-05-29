@@ -895,6 +895,13 @@ fn main() -> std::io::Result<()> {
     // OR the feature IS built but the kernel/caps aren't there
     // (also clean — log + continue). V2-A behaviour stays as a
     // graceful fallback for all failure modes.
+    // #347 PR 2 — single broadcast list shared between (a) the
+    // server's SubscribeWarnEvents handler (adds subscribers) and
+    // (b) the eBPF ringbuf consumer thread (PR 2b — spawned
+    // inside EbpfState::attach if eBPF is loaded, drives
+    // broadcast() per VERDICT_WARN event).
+    let warn_broadcast = std::sync::Arc::new(warn_consumer::Broadcast::new());
+
     let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode != EbpfMode::Disabled {
         let loaded_mode = match effective_mode {
             EbpfMode::Observe => ebpf::LoadedMode::Observe,
@@ -902,7 +909,7 @@ fn main() -> std::io::Result<()> {
             EbpfMode::Block => ebpf::LoadedMode::Block,
             EbpfMode::Disabled => unreachable!("guarded by the if above"),
         };
-        match ebpf::EbpfState::attach(loaded_mode) {
+        match ebpf::EbpfState::attach(loaded_mode, warn_broadcast.clone()) {
             Ok(state) => {
                 if cli.verbosity >= 1 {
                     eprintln!(
@@ -1060,12 +1067,6 @@ fn main() -> std::io::Result<()> {
             eprintln!("atty-guard: atoms.system.txt not loaded — {e}");
         }
     }
-
-    // #347 PR 2 — single broadcast list shared between (a) the
-    // server's SubscribeWarnEvents handler (adds subscribers) and
-    // (b) the eventual ringbuf consumer thread (PR 2b will spawn
-    // one when eBPF is loaded and push events through this Arc).
-    let warn_broadcast = std::sync::Arc::new(warn_consumer::Broadcast::new());
 
     server::serve(
         &socket,
