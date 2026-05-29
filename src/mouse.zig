@@ -25,6 +25,12 @@ pub const Button = enum {
     /// `Ctrl+Wheel` come through the Modifiers fields).
     wheel_up,
     wheel_down,
+    /// Horizontal wheel — xterm 341+, kitty, foot, Ghostty,
+    /// and WezTerm all emit these for two-finger trackpad
+    /// pans. Cb bits 0-1 = 2 means left, 3 means right when
+    /// the wheel bit (64) is set.
+    wheel_left,
+    wheel_right,
     /// xterm "extended" buttons (button4/5 on some mice).
     /// Rare; carry through verbatim so callers can ignore.
     extended_8,
@@ -111,7 +117,12 @@ pub fn parse(bytes: []const u8) ParseError!struct { event: Event, consumed: usiz
     const low2 = @as(u2, @intCast(cb & 0b11));
 
     const button: Button = if (is_wheel) blk: {
-        break :blk if (low2 == 0) .wheel_up else .wheel_down;
+        break :blk switch (low2) {
+            0 => .wheel_up,
+            1 => .wheel_down,
+            2 => .wheel_left,
+            3 => .wheel_right,
+        };
     } else if (is_ext) blk: {
         break :blk switch (low2) {
             0 => .extended_8,
