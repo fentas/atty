@@ -895,7 +895,13 @@ fn main() -> std::io::Result<()> {
     // (also clean — log + continue). V2-A behaviour stays as a
     // graceful fallback for all failure modes.
     let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode != EbpfMode::Disabled {
-        match ebpf::EbpfState::attach() {
+        let loaded_mode = match effective_mode {
+            EbpfMode::Observe => ebpf::LoadedMode::Observe,
+            EbpfMode::Warn => ebpf::LoadedMode::Warn,
+            EbpfMode::Block => ebpf::LoadedMode::Block,
+            EbpfMode::Disabled => unreachable!("guarded by the if above"),
+        };
+        match ebpf::EbpfState::attach(loaded_mode) {
             Ok(state) => {
                 if cli.verbosity >= 1 {
                     eprintln!(

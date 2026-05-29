@@ -19,6 +19,25 @@
 
 use crate::protocol::ThreatLevel;
 
+/// Which BPF map a `set_threat(Critical)` call writes to. Set
+/// once at `EbpfState::attach()` and immutable for the daemon's
+/// lifetime — flipping at runtime would race ongoing LSM hook
+/// reads. `Disabled` isn't a variant: when the operator picks
+/// disabled, `EbpfState` is never constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadedMode {
+    /// LSM programs loaded, but no daemon-driven map writes —
+    /// kernel still emits tracepoint events for observability,
+    /// nothing gets blocked or warn-flagged.
+    Observe,
+    /// `set_threat(Critical)` writes to `warn_pids`. LSM hook
+    /// allows the execve, emits a `VERDICT_WARN` event.
+    Warn,
+    /// `set_threat(Critical)` writes to `threat_map`. LSM hook
+    /// returns -EPERM (existing V2-B behaviour).
+    Block,
+}
+
 /// Errors the loader can return. Kept narrow so the daemon's
 /// startup path can degrade gracefully — any of these makes
 /// atty-guard fall back to V2-A behaviour (in-memory threat map,
@@ -77,7 +96,7 @@ pub struct EbpfState;
 
 #[cfg(not(feature = "ebpf"))]
 impl EbpfState {
-    pub fn attach() -> Result<Self, LoadError> {
+    pub fn attach(_mode: LoadedMode) -> Result<Self, LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
     /// Stub for builds without the `ebpf` feature. `get_threat` on
@@ -96,6 +115,10 @@ impl EbpfState {
     pub fn set_threat(&self, _pid: u32, _level: ThreatLevel) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
+    #[allow(dead_code)]
+    pub fn mode(&self) -> LoadedMode {
+        LoadedMode::Block
+    }
 }
 
 // ===========================================================================
@@ -103,7 +126,7 @@ impl EbpfState {
 
 #[cfg(feature = "ebpf")]
 mod with_libbpf {
-    use super::{LoadError, ThreatLevel};
+    use super::{LoadError, LoadedMode, ThreatLevel};
     use libbpf_rs::{MapCore, MapFlags};
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -169,6 +192,7 @@ mod with_libbpf {
         /// for one BPF object load even if they only care about
         /// the execve enforcement path.
         _tp_socket_link: libbpf_rs::Link,
+        mode: LoadedMode,
     }
 
     // SAFETY: `libbpf_rs::Object` and `libbpf_rs::Link` wrap raw
@@ -184,7 +208,7 @@ mod with_libbpf {
     unsafe impl Sync for EbpfState {}
 
     impl EbpfState {
-        pub fn attach() -> Result<Self, LoadError> {
+        pub fn attach(mode: LoadedMode) -> Result<Self, LoadError> {
             let path = locate_bpf_object()?;
             let mut obj_builder = libbpf_rs::ObjectBuilder::default();
             let open_obj = obj_builder
@@ -229,7 +253,12 @@ mod with_libbpf {
                 _lsm_link: lsm_link,
                 _tp_execve_link: tp_execve_link,
                 _tp_socket_link: tp_socket_link,
+                mode,
             })
+        }
+
+        pub fn mode(&self) -> LoadedMode {
+            self.mode
         }
 
         /// Look up a PID's threat level. Returns Low for unmapped
@@ -253,34 +282,68 @@ mod with_libbpf {
             }
         }
 
-        /// Write or clear a PID's threat level. Kernel-side LSM hook
-        /// picks up the new value on the next execve. `Low` removes
-        /// the entry (matches the C-side check).
+        /// Write or clear a PID's threat level. Routes to the
+        /// kernel map appropriate for the current mode:
+        ///
+        /// - `Block` mode: `Critical` writes `threat_map[pid]=2`
+        ///   so the LSM hook EPERMs (existing V2-B path). `High`
+        ///   also writes `threat_map[pid]=1` so tracepoint events
+        ///   can be annotated; the LSM hook ignores High.
+        /// - `Warn` mode: `Critical` writes `warn_pids[pid]` so
+        ///   the LSM hook emits a `VERDICT_WARN` event and
+        ///   allows the execve. `High` still writes `threat_map`
+        ///   (annotation-only, same as block mode).
+        /// - `Observe` mode: every level is a no-op — operator
+        ///   asked for tracepoint-only visibility, no daemon-
+        ///   driven map state.
+        ///
+        /// `Low` clears the PID from BOTH maps. Kernel-side LSM
+        /// hook checks threat_map then warn_pids; leaving either
+        /// stale would leak the prior verdict to the next execve.
         pub fn set_threat(&self, pid: u32, level: ThreatLevel) -> Result<(), LoadError> {
+            let key = pid.to_ne_bytes();
+            if matches!(level, ThreatLevel::Low) {
+                let _ = self.delete("threat_map", &key);
+                let _ = self.delete("warn_pids", &key);
+                return Ok(());
+            }
+            if matches!(self.mode, LoadedMode::Observe) {
+                return Ok(());
+            }
+            match (self.mode, level) {
+                (LoadedMode::Warn, ThreatLevel::Critical) => {
+                    self.update("warn_pids", &key, &[1u8])
+                }
+                (LoadedMode::Block, ThreatLevel::Critical) => {
+                    self.update("threat_map", &key, &[2u8])
+                }
+                (_, ThreatLevel::High) => self.update("threat_map", &key, &[1u8]),
+                _ => Ok(()),
+            }
+        }
+
+        fn update(&self, map_name: &str, key: &[u8], value: &[u8]) -> Result<(), LoadError> {
             let guard = self.obj.lock().expect("ebpf obj poisoned");
             let map = guard
                 .maps()
-                .find(|m| m.name() == "threat_map")
+                .find(|m| m.name() == map_name)
                 .ok_or_else(|| {
-                    LoadError::LoadFailed("threat_map missing from loaded object".into())
+                    LoadError::LoadFailed(format!("{map_name} missing from loaded object"))
                 })?;
-            let key = pid.to_ne_bytes();
-            match level {
-                ThreatLevel::Low => {
-                    let _ = map.delete(&key);
-                    Ok(())
-                }
-                ThreatLevel::High => {
-                    let v: [u8; 1] = [1];
-                    map.update(&key, &v, MapFlags::ANY)
-                        .map_err(|e| LoadError::LoadFailed(format!("update: {e}")))
-                }
-                ThreatLevel::Critical => {
-                    let v: [u8; 1] = [2];
-                    map.update(&key, &v, MapFlags::ANY)
-                        .map_err(|e| LoadError::LoadFailed(format!("update: {e}")))
-                }
-            }
+            map.update(key, value, MapFlags::ANY)
+                .map_err(|e| LoadError::LoadFailed(format!("{map_name} update: {e}")))
+        }
+
+        fn delete(&self, map_name: &str, key: &[u8]) -> Result<(), LoadError> {
+            let guard = self.obj.lock().expect("ebpf obj poisoned");
+            let map = guard
+                .maps()
+                .find(|m| m.name() == map_name)
+                .ok_or_else(|| {
+                    LoadError::LoadFailed(format!("{map_name} missing from loaded object"))
+                })?;
+            map.delete(key)
+                .map_err(|e| LoadError::LoadFailed(format!("{map_name} delete: {e}")))
         }
     }
 }
@@ -322,7 +385,7 @@ mod tests {
     #[cfg(not(feature = "ebpf"))]
     #[test]
     fn attach_without_feature_returns_feature_not_built() {
-        match EbpfState::attach() {
+        match EbpfState::attach(LoadedMode::Block) {
             Err(LoadError::FeatureNotBuilt) => {}
             Err(other) => panic!("expected FeatureNotBuilt, got {other:?}"),
             Ok(_) => panic!("expected Err on feature-disabled build"),
@@ -344,5 +407,13 @@ mod tests {
     fn get_threat_without_feature_returns_low() {
         let s = EbpfState;
         assert!(matches!(s.get_threat(123), ThreatLevel::Low));
+    }
+
+    #[test]
+    fn loaded_mode_variants_exist() {
+        // Sentinel — adding a new mode variant without updating
+        // main.rs's effective_mode → LoadedMode conversion would
+        // surface here once the test is extended to exhaust them.
+        let _modes = [LoadedMode::Observe, LoadedMode::Warn, LoadedMode::Block];
     }
 }

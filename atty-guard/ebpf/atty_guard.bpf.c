@@ -44,14 +44,32 @@
 #define THREAT_CRITICAL 2
 
 // PID → threat level. Owned by userspace atty-guard; updated via
-// `set_threat_level` RPCs from atty. The LSM hook below reads it
-// on every execve.
+// `set_threat_level` RPCs from atty in `--ebpf-mode=block`. The
+// LSM hook below reads it on every execve and EPERMs Critical.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 16384);
     __type(key, __u32);
     __type(value, __u8);
 } threat_map SEC(".maps");
+
+// PID → marked (value byte unused, presence is the signal). Owned
+// by userspace in `--ebpf-mode=warn` — populated when a Block
+// verdict comes in but the operator opted into warn-not-block. The
+// LSM hook below emits a verdict=WARN event when a child execve's
+// parent is in this map and ALLOWS the execve (no EPERM). Lets the
+// operator pilot block-mode behaviour without killing real work.
+//
+// Separate from threat_map (Option A from #347) instead of a tagged
+// value: BPF map values aren't CO-RE-relocated, so a struct
+// value's layout depends on the .bpf.o build's compiler padding —
+// two single-primitive maps avoid that whole class of drift.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, __u32);
+    __type(value, __u8);
+} warn_pids SEC(".maps");
 
 // Ringbuf for async execve events. Sized at 1 MiB — plenty for the
 // commit-rate of an interactive shell. Userspace drains in a loop.
@@ -61,15 +79,29 @@ struct {
 } events SEC(".maps");
 
 // Tagged event union. `kind` discriminates which other fields are
-// meaningful — userspace switches on it. Kept POD + fixed-size so
-// the ringbuf carries one entry shape regardless of source.
+// meaningful; `verdict` says what the LSM decided (only meaningful
+// for kind=EXECVE — tracepoint hits and AF_ALG always carry
+// VERDICT_TRACE). Kept POD + fixed-size so the ringbuf carries one
+// entry shape regardless of source.
+//
+// Layout is hand-padded (no compiler-chosen padding bytes) so the
+// userspace Rust mirror can `#[repr(C)]` it without surprises —
+// total 156 bytes, same as before adding `verdict` (reclaimed one
+// of the original three pad bytes).
 #define EVENT_EXECVE       1
 #define EVENT_AF_ALG       2 // AF_ALG socket() — used by copy.fail
                              // class kernel LPEs (algif_aead).
 
+#define VERDICT_TRACE      0 // Async log path (tracepoint hits).
+#define VERDICT_WARN       1 // LSM hook saw warn_pids match;
+                             // allowed the execve.
+#define VERDICT_BLOCK      2 // LSM hook saw threat_map=Critical;
+                             // returned -EPERM.
+
 struct execve_event {
     __u8  kind;           // EVENT_EXECVE / EVENT_AF_ALG
-    __u8  _pad[3];
+    __u8  verdict;        // VERDICT_TRACE / VERDICT_WARN / VERDICT_BLOCK
+    __u8  _pad[2];
     __u32 pid;
     __u32 ppid;
     char  comm[16];
@@ -110,6 +142,7 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
         struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
             e->kind = EVENT_EXECVE;
+            e->verdict = VERDICT_BLOCK;
             e->pid = child_pid;
             e->ppid = parent_pid;
             bpf_get_current_comm(e->comm, sizeof(e->comm));
@@ -117,6 +150,26 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
             bpf_ringbuf_submit(e, 0);
         }
         return -EPERM;
+    }
+
+    // warn_pids takes effect only when threat_map didn't match —
+    // block always wins so an operator transitioning from warn to
+    // block on the same PID doesn't see a window where both states
+    // race.
+    __u8 *warn = bpf_map_lookup_elem(&warn_pids, &parent_pid);
+    if (warn) {
+        struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (e) {
+            e->kind = EVENT_EXECVE;
+            e->verdict = VERDICT_WARN;
+            e->pid = child_pid;
+            e->ppid = parent_pid;
+            bpf_get_current_comm(e->comm, sizeof(e->comm));
+            e->argv0[0] = '\0';
+            bpf_ringbuf_submit(e, 0);
+        }
+        // No EPERM — warn mode logs the would-have-blocked event
+        // for operator visibility but lets the execve proceed.
     }
 
     return 0;
@@ -139,6 +192,7 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     //   args[2] = const char __user *const __user *envp
     // The previous comment was misleading; argv is args[1].
     e->kind = EVENT_EXECVE;
+    e->verdict = VERDICT_TRACE;
     e->pid = bpf_get_current_pid_tgid() >> 32;
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -194,6 +248,7 @@ int trace_socket(struct trace_event_raw_sys_enter *ctx)
         return 0;
 
     e->kind = EVENT_AF_ALG;
+    e->verdict = VERDICT_TRACE;
     e->pid = bpf_get_current_pid_tgid() >> 32;
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();

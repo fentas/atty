@@ -1,4 +1,4 @@
-"""BPF LSM availability probe for sandbox scenarios.
+"""BPF LSM availability probe + map-dump helpers for sandbox scenarios.
 
 eBPF scenarios are inherently kernel-conditional — the LSM hook
 that atty-guard installs (`lsm/bprm_check_security`) needs the
@@ -12,6 +12,8 @@ support this" (true skip) from "container forgot the bind mount"
 """
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -102,3 +104,42 @@ def skip_if_no_bpf_lsm(scenario_name: str) -> None:
               f"({_LSM_FILE} does not contain 'bpf'). Build kernel "
               "with CONFIG_BPF_LSM=y AND set lsm=…,bpf in cmdline.")
         sys.exit(0)
+
+
+def bpf_map_has_pid(map_name: str, pid: int) -> bool:
+    """Dump a named BPF hash map via bpftool and check if `pid` is
+    one of its keys. Used by ebpf scenarios to verify the daemon's
+    map writes independently of the LSM hook firing — separates
+    "daemon failed to write" from "kernel hook didn't read" so a
+    regression's source is obvious.
+
+    Returns False on any failure (map missing, JSON parse error,
+    bpftool not found) — the caller decides whether absence is
+    "fail loudly" (scenario expects the map populated) or
+    "expected" (scenario is testing the dispatch wrote elsewhere).
+
+    bpftool resolves maps by name from the kernel namespace; the
+    daemon's loader keeps the object in-process so no bpffs pinning
+    required.
+
+    Hash-map JSON shape: `[{"key": [b0,b1,b2,b3], "value": [...]}]`
+    with the key being 4 little-endian bytes of u32 pid.
+    """
+    res = subprocess.run(
+        ["bpftool", "map", "dump", "name", map_name, "--json"],
+        capture_output=True, timeout=5,
+    )
+    if res.returncode != 0:
+        return False
+    try:
+        entries = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return False
+    for entry in entries:
+        key_bytes = entry.get("key", [])
+        if len(key_bytes) != 4:
+            continue
+        entry_pid = int.from_bytes(bytes(key_bytes), "little")
+        if entry_pid == pid:
+            return True
+    return False
