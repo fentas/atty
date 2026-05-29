@@ -13,14 +13,7 @@
 # scenarios 60/61 SKIP cleanly with a clear message — same posture
 # as the eBPF scenarios when BPF LSM is missing.
 
-# Resolved via `--build-context base-image=docker-image://atty-sandbox:base`
-# from the Makefile. The named-context indirection is required for
-# the buildx docker-container driver — it doesn't share an image
-# store with the local docker daemon, so a literal
-# `FROM atty-sandbox:base` would try to pull from registry and
-# fail. Plain `docker build` (local-dev path) still works because
-# the named context resolves to the local daemon's image.
-FROM base-image
+FROM atty-sandbox:base
 
 ARG MODEL_URL=""
 ARG MODEL_SHA256=""

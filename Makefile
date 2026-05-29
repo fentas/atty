@@ -335,30 +335,24 @@ sandbox-base-image:
 # the cache the expensive model-bake layer (~150 MB) would
 # rebuild on every CI run — the whole point of the cache strategy
 # spelled out in #341.
+# Extension-image builds use the plain docker driver so they can
+# read atty-sandbox:base from the LOCAL daemon (runner.py builds
+# the base image with --load → ends up in local daemon). The
+# buildx docker-container driver enables cache-to but can't see
+# local images even with `docker-image://` named contexts — it
+# always tries to pull from registry. Workaround would be a local
+# registry sidecar (TODO if the extension-image build cost
+# becomes a bottleneck). For now the base image still benefits
+# from the buildx cache via runner.py.
 sandbox-onnx-image: sandbox-base-image
-	@if [ -n "$$SANDBOX_BUILDX_CACHE_FROM" ] || [ -n "$$SANDBOX_BUILDX_CACHE_TO" ]; then \
-	    DOCKER_BUILDKIT=1 docker buildx build --load \
-	        -t atty-sandbox:onnx \
-	        -f tests/sandbox/Dockerfile.onnx \
-	        --build-context base-image=docker-image://atty-sandbox:base \
-	        $${SANDBOX_BUILDX_CACHE_FROM:+--cache-from type=local,src=$$SANDBOX_BUILDX_CACHE_FROM} \
-	        $${SANDBOX_BUILDX_CACHE_TO:+--cache-to type=local,dest=$$SANDBOX_BUILDX_CACHE_TO,mode=max} \
-	        --build-arg MODEL_URL="$$ONNX_MODEL_URL" \
-	        --build-arg MODEL_SHA256="$$ONNX_MODEL_SHA256" \
-	        --build-arg TOKENIZER_URL="$$ONNX_TOKENIZER_URL" \
-	        --build-arg TOKENIZER_SHA256="$$ONNX_TOKENIZER_SHA256" \
-	        tests/sandbox; \
-	else \
-	    docker build \
-	        -t atty-sandbox:onnx \
-	        -f tests/sandbox/Dockerfile.onnx \
-	        --build-context base-image=docker-image://atty-sandbox:base \
-	        --build-arg MODEL_URL="$$ONNX_MODEL_URL" \
-	        --build-arg MODEL_SHA256="$$ONNX_MODEL_SHA256" \
-	        --build-arg TOKENIZER_URL="$$ONNX_TOKENIZER_URL" \
-	        --build-arg TOKENIZER_SHA256="$$ONNX_TOKENIZER_SHA256" \
-	        tests/sandbox; \
-	fi
+	DOCKER_BUILDKIT=1 docker build \
+	    -t atty-sandbox:onnx \
+	    -f tests/sandbox/Dockerfile.onnx \
+	    --build-arg MODEL_URL="$$ONNX_MODEL_URL" \
+	    --build-arg MODEL_SHA256="$$ONNX_MODEL_SHA256" \
+	    --build-arg TOKENIZER_URL="$$ONNX_TOKENIZER_URL" \
+	    --build-arg TOKENIZER_SHA256="$$ONNX_TOKENIZER_SHA256" \
+	    tests/sandbox
 
 # Run the ONNX scenarios (60, 61) — depends on sandbox-onnx-image
 # being built first. Scenarios SKIP if the image was built
