@@ -1,0 +1,107 @@
+name: Sandbox (ONNX)
+
+# Real-classify scenarios for the Tier-2 ONNX backend (#341).
+# Non-required because it depends on the operator hosting their
+# own SecureBERT bundle behind ONNX_MODEL_URL / TOKENIZER_URL
+# secrets — the project doesn't ship a model (licensing + 150 MB
+# size, see docs/security-guard-slm.md). Without the secrets the
+# workflow still runs but the scenarios SKIP cleanly.
+
+on:
+  pull_request:
+    paths:
+      - 'atty-guard/src/onnx_backend.rs'
+      - 'atty-guard/src/classifier.rs'
+      - 'atty-guard/src/config.rs'
+      - 'atty-guard/Cargo.toml'
+      - 'tests/sandbox/Dockerfile.onnx'
+      - 'tests/sandbox/scenarios/60-onnx-second-stage/**'
+      - 'tests/sandbox/scenarios/61-onnx-fbas-sized-buffer/**'
+      - 'tests/sandbox/lib/onnx.py'
+      - '.github/workflows/sandbox-onnx.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: sandbox-onnx-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox-onnx:
+    name: sandbox onnx
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Allow merging when this fails — the base sandbox.yml is the
+    # gate. This job is best-effort: catches model-shape drift +
+    # ONNX backend regressions when the operator has the bundle
+    # secrets set, otherwise SKIPs cleanly.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      - name: Restore docker layer cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          # ONNX cache key includes the pin file so a model bump
+          # invalidates the cached layer.
+          key: sandbox-onnx-buildx-${{ hashFiles('atty-guard/Cargo.lock', 'atty-guard/Cargo.toml', 'tests/sandbox/Dockerfile.base', 'tests/sandbox/Dockerfile.onnx', 'tests/sandbox/onnx-models.toml') }}
+          restore-keys: |
+            sandbox-onnx-buildx-
+
+      - name: Build base + ONNX images
+        env:
+          SANDBOX_BUILDX_CACHE_FROM: /tmp/.buildx-cache
+          SANDBOX_BUILDX_CACHE_TO: /tmp/.buildx-cache-new
+          ONNX_MODEL_URL: ${{ secrets.SANDBOX_ONNX_MODEL_URL }}
+          ONNX_MODEL_SHA256: ${{ secrets.SANDBOX_ONNX_MODEL_SHA256 }}
+          ONNX_TOKENIZER_URL: ${{ secrets.SANDBOX_ONNX_TOKENIZER_URL }}
+          ONNX_TOKENIZER_SHA256: ${{ secrets.SANDBOX_ONNX_TOKENIZER_SHA256 }}
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/.buildx-cache /tmp/.buildx-cache-new
+          make sandbox-onnx-image 2>&1 | tee /tmp/sandbox-onnx.log
+
+      - name: Run ONNX scenarios
+        run: |
+          set -o pipefail
+          python3 tests/sandbox/runner.py --no-build \
+              60-onnx-second-stage 61-onnx-fbas-sized-buffer 2>&1 | tee -a /tmp/sandbox-onnx.log
+
+      - name: Annotate failures
+        if: failure()
+        run: |
+          test -f /tmp/sandbox-onnx.log || { echo "::warning::sandbox-onnx log missing"; exit 0; }
+          python3 - <<'PY'
+          import re
+          log = open("/tmp/sandbox-onnx.log").read()
+          for blk in re.split(r"^FAIL: ", log, flags=re.MULTILINE)[1:]:
+              body = re.split(r"\n(?=FAIL: |\[runner\] |Traceback)", blk, maxsplit=1)[0]
+              print(f"::error::sandbox-onnx: {body.rstrip().replace(chr(10), '%0A')}")
+          PY
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: sandbox-onnx-log
+          path: /tmp/sandbox-onnx.log
+          retention-days: 7
+
+      - name: Move cache
+        if: always()
+        run: |
+          if [ ! -d /tmp/.buildx-cache-new ] || \
+             [ -z "$(ls -A /tmp/.buildx-cache-new 2>/dev/null)" ]; then
+            echo "no new cache to save"
+            exit 0
+          fi
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache

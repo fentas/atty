@@ -41,7 +41,7 @@ endif
 .PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
         clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard \
-        sandbox sandbox-rebuild sandbox-base-image sandbox-ebpf sandbox-ebpf-image
+        sandbox sandbox-rebuild sandbox-base-image sandbox-onnx sandbox-onnx-image sandbox-ebpf sandbox-ebpf-image
 
 help:
 	@printf "atty — build targets\n\n"
@@ -316,34 +316,52 @@ sandbox-rebuild:
 	-docker image rm atty-sandbox:base 2>/dev/null || true
 	$(MAKE) sandbox
 
-# Build ONLY the base image (atty-sandbox:base) without running
-# any scenarios. Used by extending-image targets so they don't
-# drag the full base-suite run as a side effect.
+# any scenarios. Used by extending-image targets as a prereq so
+# `sandbox-onnx-image` / `sandbox-ebpf-image` don't drag in the
+# full base-suite run as a side effect.
 sandbox-base-image:
 	python3 tests/sandbox/runner.py --build-only
 
-# Build the eBPF-baked sandbox image (atty-sandbox:ebpf). Extends
-# atty-sandbox:base with atty-guard rebuilt --features ebpf + the
-# compiled atty_guard.bpf.o. Requires the host kernel's BTF dump
-# accessible at /sys/kernel/btf/vmlinux during build — otherwise
-# .bpf.o isn't compiled and scenarios 51/52 SKIP at runtime.
-#
-# When SANDBOX_BUILDX_CACHE_FROM / _TO are set (CI workflow does),
-# routes through `docker buildx build --load` with type=local
-# cache directives — same shape as runner.py's base-image build,
-# so the expensive atty-guard --features ebpf rebuild + .bpf.o
-# compile layers round-trip through /tmp/.buildx-cache.
-# Same constraint as sandbox-onnx-image: plain docker driver so
-# this can read atty-sandbox:base from the local daemon. Buildx
-# cache for this extension layer is TODO (local registry sidecar
-# is the proper fix).
+# Extension-image builds (sandbox-onnx-image / sandbox-ebpf-image)
+# use the plain docker driver so they can read atty-sandbox:base
+# from the LOCAL daemon (runner.py builds the base image with
+# --load → ends up in local daemon). The buildx docker-container
+# driver enables cache-to but can't see local images even with
+# `docker-image://` named contexts — it always tries to pull from
+# registry. Workaround would be a local registry sidecar (TODO if
+# the extension-image build cost becomes a bottleneck). Base
+# image still benefits from the buildx cache via runner.py.
+
+# ── ONNX image (60-onnx-second-stage / 61-onnx-fbas-sized-buffer) ──
+# Build the ONNX-baked sandbox image. Requires the operator to
+# point at a hosted SecureBERT bundle via the *_URL / *_SHA256
+# env vars; without them the build still succeeds but the model
+# is NOT baked and scenarios 60/61 SKIP at runtime. See
+# tests/sandbox/onnx-models.toml for the pin file format.
+sandbox-onnx-image: sandbox-base-image
+	DOCKER_BUILDKIT=1 docker build \
+	    -t atty-sandbox:onnx \
+	    -f tests/sandbox/Dockerfile.onnx \
+	    --build-arg MODEL_URL="$$ONNX_MODEL_URL" \
+	    --build-arg MODEL_SHA256="$$ONNX_MODEL_SHA256" \
+	    --build-arg TOKENIZER_URL="$$ONNX_TOKENIZER_URL" \
+	    --build-arg TOKENIZER_SHA256="$$ONNX_TOKENIZER_SHA256" \
+	    tests/sandbox
+
+sandbox-onnx: sandbox-onnx-image
+	python3 tests/sandbox/runner.py --no-build 60-onnx-second-stage 61-onnx-fbas-sized-buffer
+
+# ── eBPF image (51-ebpf-threat-map-roundtrip / 52-ebpf-af-alg-tracepoint) ──
+# Extends atty-sandbox:base with atty-guard rebuilt --features
+# ebpf + the compiled atty_guard.bpf.o. Requires the host
+# kernel's BTF dump accessible at /sys/kernel/btf/vmlinux during
+# build — otherwise .bpf.o isn't compiled and scenarios 51/52
+# SKIP at runtime via lib/bpf.py's probe.
 sandbox-ebpf-image: sandbox-base-image
 	DOCKER_BUILDKIT=1 docker build \
 	    -t atty-sandbox:ebpf \
 	    -f tests/sandbox/Dockerfile.ebpf \
 	    $(CURDIR)
 
-# Run the eBPF scenarios (51, 52). Skips when the image was built
-# without .bpf.o OR when the runner kernel lacks BPF LSM.
 sandbox-ebpf: sandbox-ebpf-image
 	python3 tests/sandbox/runner.py --no-build 51-ebpf-threat-map-roundtrip 52-ebpf-af-alg-tracepoint
