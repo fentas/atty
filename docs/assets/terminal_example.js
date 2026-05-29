@@ -145,9 +145,14 @@
     });
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
+  // Defer scripts execute while readyState is "interactive", so an
+  // `=== 'loading'` check (the obvious form) takes the eager path
+  // on the very first engine tag — before later defer scripts
+  // (including more cast scripts from a second embed) have run.
+  // Wait for DOMContentLoaded unless the page is already complete.
+  if (document.readyState === 'complete') {
     init();
+  } else {
+    document.addEventListener('DOMContentLoaded', init);
   }
 })();
