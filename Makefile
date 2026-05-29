@@ -340,6 +340,7 @@ sandbox-onnx-image: sandbox-base-image
 	    DOCKER_BUILDKIT=1 docker buildx build --load \
 	        -t atty-sandbox:onnx \
 	        -f tests/sandbox/Dockerfile.onnx \
+	        --build-context base-image=docker-image://atty-sandbox:base \
 	        $${SANDBOX_BUILDX_CACHE_FROM:+--cache-from type=local,src=$$SANDBOX_BUILDX_CACHE_FROM} \
 	        $${SANDBOX_BUILDX_CACHE_TO:+--cache-to type=local,dest=$$SANDBOX_BUILDX_CACHE_TO,mode=max} \
 	        --build-arg MODEL_URL="$$ONNX_MODEL_URL" \
@@ -351,6 +352,7 @@ sandbox-onnx-image: sandbox-base-image
 	    docker build \
 	        -t atty-sandbox:onnx \
 	        -f tests/sandbox/Dockerfile.onnx \
+	        --build-context base-image=docker-image://atty-sandbox:base \
 	        --build-arg MODEL_URL="$$ONNX_MODEL_URL" \
 	        --build-arg MODEL_SHA256="$$ONNX_MODEL_SHA256" \
 	        --build-arg TOKENIZER_URL="$$ONNX_TOKENIZER_URL" \
