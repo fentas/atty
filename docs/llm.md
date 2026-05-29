@@ -28,6 +28,12 @@ Three action keys, each with its own follow-up flow:
 > `Config.enter_action = .single` (or `.dialog` / `.auto`) to
 > bring back the pre-Alt-key trigger flow if you preferred it.
 
+{% include terminal_example.html
+    cast="llm"
+    title="~/code/atty — atty bash"
+    rows_em=18
+    caption="Alt+A single rewrite · inline chat panel collapsing exec output (#311) · Alt+R recall picker showing the first user line of each persisted dialog (#328)." %}
+
 ## Quickstart
 
 Add the module to your `src/config.zig` tuple and rebuild:
