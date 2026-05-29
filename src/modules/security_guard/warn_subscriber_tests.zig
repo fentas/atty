@@ -103,3 +103,15 @@ test "rejects malformed line missing pid" {
     const result = parseWarnEvent(testing.allocator, line);
     try testing.expectError(error.FieldMissing, result);
 }
+
+test "unescapes JSON string fields" {
+    // argv0 with embedded quote + newline + backslash — should
+    // decode to the raw bytes, not the literal escape sequences.
+    const line =
+        \\{"id":0,"type":"warn_event","pid":1,"ppid":1,"comm":"bash","argv0":"echo \"hi\"\nls","timestamp_ms":0}
+    ;
+    const evt = try parseWarnEvent(testing.allocator, line);
+    var owned = evt;
+    defer owned.deinit(testing.allocator);
+    try testing.expectEqualStrings("echo \"hi\"\nls", evt.argv0);
+}

@@ -242,10 +242,14 @@ pub fn configure(comptime cfg: Config) type {
                     cfg.daemon_socket_path,
                     @intCast(std.c.getpid()),
                 );
-                ptr.start(io) catch {
+                ptr.start(io) catch |err| {
                     // Spawn failure (resource exhaustion) — log
                     // and continue without subscriber rather than
                     // failing module attach entirely.
+                    std.log.warn(
+                        "atty security_guard: warn subscriber spawn failed: {s}",
+                        .{@errorName(err)},
+                    );
                     allocator.destroy(ptr);
                     return rt;
                 };
@@ -823,6 +827,12 @@ pub fn configure(comptime cfg: Config) type {
                 .high => "high",
                 .critical => "critical",
             } else "";
+
+            // Both signals empty (only possible when active_threat
+            // is `.low` — no producer currently emits it but the
+            // variant exists, so guard defensively rather than
+            // painting "⚠ " with a trailing space).
+            if (warn_count == 0 and lvl_label.len == 0) return null;
 
             // Write into the per-Runtime buffer so the slice stays
             // valid for the gatherStatus call's writer (which

@@ -58,8 +58,12 @@ pub const Subscriber = struct {
     /// view is windowed.
     dropped_total: std.atomic.Value(u32) = .init(0),
     thread: ?std.Thread = null,
-    /// 5-second initial back-off, doubles up to 60s. Resets to
-    /// initial on a successful subscribe.
+    /// Fixed 5-second back-off between reconnect attempts when
+    /// the daemon is down. Simpler than exponential — the
+    /// downside of a tight retry is a slightly noisier log on
+    /// extended outages; the upside is faster recovery when the
+    /// operator restarts the daemon. Tune via `setBackoff` if
+    /// the workload changes.
     reconnect_backoff_ms: u32 = 5_000,
 
     pub fn init(
@@ -246,9 +250,6 @@ fn pumpEvents(fd: i32, sub: *Subscriber) !void {
             error.EndOfStream => return,
             else => return err,
         };
-        // Reset reconnect back-off on first event received — the
-        // stream is healthy.
-        if (sub.reconnect_backoff_ms > 5_000) sub.reconnect_backoff_ms = 5_000;
         try handleLine(sub, line);
     }
 }
@@ -324,14 +325,41 @@ fn parseStringField(
     prefix: []const u8,
 ) ![]u8 {
     const start = (std.mem.indexOf(u8, line, prefix) orelse return error.FieldMissing) + prefix.len;
-    // Find closing quote. Daemon-side `comm` / `argv0` are
-    // serde-serialized; bare `"` in payload would be escaped as
-    // `\"` so a literal `"` ends the value.
+    // Find the closing unescaped quote, then unescape the JSON
+    // string in-place into a fresh allocation. Daemon-side
+    // serde-emitted escapes we care about: \" \\ \n \t \r;
+    // \uXXXX comm/argv0 chars are vanishingly rare in execve
+    // payloads (kernel comm[16] is C string, ASCII in practice)
+    // so we leave them literal rather than carry a u16→utf8
+    // decoder.
     var end = start;
     while (end < line.len and line[end] != '"') : (end += 1) {
         if (line[end] == '\\' and end + 1 < line.len) end += 1;
     }
-    return try allocator.dupe(u8, line[start..end]);
+    if (end > line.len) return error.UnterminatedString;
+    var out = try std.ArrayListUnmanaged(u8).initCapacity(allocator, end - start);
+    errdefer out.deinit(allocator);
+    var i: usize = start;
+    while (i < end) : (i += 1) {
+        if (line[i] == '\\' and i + 1 < end) {
+            const next = line[i + 1];
+            const decoded: u8 = switch (next) {
+                '"' => '"',
+                '\\' => '\\',
+                '/' => '/',
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                else => next, // preserve unknown escape as the
+                              // literal char (best-effort).
+            };
+            try out.append(allocator, decoded);
+            i += 1;
+        } else {
+            try out.append(allocator, line[i]);
+        }
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 fn readLine(fd: i32, buf: []u8) ![]const u8 {
