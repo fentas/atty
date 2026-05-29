@@ -46,7 +46,6 @@ const style_mod = @import("style.zig");
 const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
 const mouse_mod = @import("mouse.zig");
-const dispatch_mod = @import("dispatch.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
 const DecstbmWatcher = @import("decstbm_watcher.zig").DecstbmWatcher;
@@ -907,10 +906,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (config.mouse.enabled and !shell_owns_input and mouse_mod.peekIsMouse(input)) {
                     if (mouse_mod.parse(input)) |parsed| {
                         const act = D.dispatchMouseClick(&runtimes, &ctx, parsed.event) catch
-                            dispatch_mod.MouseAction.passthrough;
-                        if (act == .consume) {
+                            dispatch.MouseAction.passthrough;
+                        if (act == .consume and parsed.consumed == input.len) {
+                            // Whole read was a single mouse sequence —
+                            // swallow it.
                             swallow_after_binding = true;
                         }
+                        // If `.consume` but the read also carried trailing
+                        // bytes (drag bursts on fast wheels routinely
+                        // batch a click + subsequent keystroke into one
+                        // read), fall through to forward the whole burst
+                        // unchanged. Cleanly slicing the consumed prefix
+                        // off + re-entering dispatch is the right shape,
+                        // but the keymap / line_state path expects to
+                        // see the full read — partial-burst handling
+                        // belongs in a follow-up once a consumer
+                        // surfaces a use case.
                     } else |_| {
                         // Malformed mouse sequence — let it through
                         // unchanged. Better to forward a possibly-broken
