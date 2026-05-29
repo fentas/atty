@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """52-ebpf-af-alg-tracepoint — AF_ALG syscall sanity smoke.
 
-Smoke-tests the V2-B sys_enter_execve / AF_ALG tracepoint
-attachment: opens an AF_ALG socket (the canonical
-crypto-LPE-precursor shape per atty-guard/ebpf/README.md) and
+Smoke-tests the V2-B `sys_enter_socket` tracepoint that flags
+AF_ALG socket creation (the canonical crypto-LPE-precursor shape
+per atty-guard/ebpf/README.md): opens an AF_ALG socket and
 verifies the daemon survives the syscall without panicking or
 logging an error.
 
@@ -105,7 +105,7 @@ def main() -> None:
         fail_re = re.compile(
             r"^(?:atty-guard:.*(?:error:|failed|rejected)|"
             r"thread .*panicked|panic:|fatal:)",
-            re.MULTILINE,
+            re.MULTILINE | re.IGNORECASE,
         )
         match = fail_re.search(new_lines)
         if match:

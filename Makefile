@@ -316,9 +316,10 @@ sandbox-rebuild:
 	-docker image rm atty-sandbox:base 2>/dev/null || true
 	$(MAKE) sandbox
 
-# any scenarios. Used by extending-image targets as a prereq so
-# `sandbox-onnx-image` / `sandbox-ebpf-image` don't drag in the
-# full base-suite run as a side effect.
+# Build only the base sandbox image (atty + atty-guard) without
+# running any scenarios. Used by extending-image targets as a
+# prereq so `sandbox-onnx-image` / `sandbox-ebpf-image` don't
+# drag in the full base-suite run as a side effect.
 sandbox-base-image:
 	python3 tests/sandbox/runner.py --build-only
 

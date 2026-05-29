@@ -201,14 +201,6 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
     return flags
 
 
-def docker_image_exists(image: str) -> bool:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-    )
-    return result.returncode == 0
-
-
 def run_scenario(script: Path) -> bool:
     name = script.parent.name
     print(f"\n[runner] === {name} ===")
