@@ -1,0 +1,101 @@
+# eBPF-scenario base image (#340). Extends atty-sandbox:base with:
+#   - libbpf-dev / clang / bpftool — to build the kernel-side
+#     atty_guard.bpf.o object.
+#   - atty-guard rebuilt with `--features ebpf` — userspace loader
+#     enabled.
+#   - vmlinux.h generated from the build host's BTF dump at
+#     /sys/kernel/btf/vmlinux so the .bpf.o has CO-RE
+#     relocations the runtime loader can fix up against whatever
+#     kernel the runtime host actually runs.
+#
+# The .bpf.o is BAKED into /usr/lib/atty-guard/atty_guard.bpf.o
+# (the third location atty-guard's loader probes — see
+# atty-guard/src/ebpf.rs:locate_bpf_object).
+#
+# Scenarios 51 + 52 run in --privileged containers (per their
+# docker.json) and additionally need the host kernel to have BPF
+# LSM enabled — `lib/bpf.py::skip_if_no_bpf_lsm` handles the
+# clean-skip path.
+
+FROM atty-sandbox:base AS ebpf-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
+
+# Rust toolchain matches Dockerfile.base's builder stage (rustup
+# stable). atty-guard rebuild needs cargo + clang for the .bpf.o.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl build-essential pkg-config libssl-dev \
+        clang libbpf-dev linux-tools-common bpftool \
+    && rm -rf /var/lib/apt/lists/* && \
+    if ! command -v cargo >/dev/null 2>&1; then \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path; \
+    fi
+
+# Bring the atty-guard source (re-COPY needed because the base
+# image stripped /src after the build).
+COPY atty-guard /src/atty-guard
+COPY src/modules/security_guard/data /src/src/modules/security_guard/data
+
+# Build atty-guard with the ebpf feature on top of the production
+# feature set.
+RUN cd /src/atty-guard && \
+    cargo build --release --no-default-features \
+        --features "tier2-onnx,osv-live,atoms-fetch,ebpf"
+
+# Compile the BPF object. vmlinux.h is generated from the host
+# kernel's BTF when reachable (build needs /sys/kernel/btf
+# bind-mounted, which requires a privileged build context). When
+# unreachable we skip the .bpf.o compilation — runtime scenarios
+# then SKIP cleanly via lib/bpf.py's probe. No bundled vmlinux.h
+# fallback today; a future PR can pin a known-good BTF dump if
+# the no-host-BTF case becomes common in CI.
+RUN cd /src/atty-guard/ebpf && \
+    if [ -r /sys/kernel/btf/vmlinux ] && bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h 2>/dev/null; then \
+        ARCH=$(uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/'); \
+        clang -O2 -g -Wall -target bpf -D__TARGET_ARCH_$ARCH \
+            -I/usr/include/bpf \
+            -c atty_guard.bpf.c -o atty_guard.bpf.o && \
+        echo "built atty_guard.bpf.o (host BTF, arch=$ARCH)"; \
+    else \
+        echo "warn: no host BTF reachable — skipping .bpf.o build; scenarios will SKIP at runtime"; \
+    fi && \
+    install -d /opt/ebpf-artifact && \
+    if [ -f atty_guard.bpf.o ]; then \
+        install -m 0644 atty_guard.bpf.o /opt/ebpf-artifact/atty_guard.bpf.o; \
+    fi
+    # /opt/ebpf-artifact/ contains only the .bpf.o (or is empty),
+    # never vmlinux.h / sources. The runtime stage COPYs from
+    # this small dir instead of /src/atty-guard/ebpf/ — keeps the
+    # final image lean by not pulling the multi-MB BTF dump or
+    # the source tree through the COPY layer.
+
+# ── runtime stage ────────────────────────────────────────────────
+FROM atty-sandbox:base
+
+# Drop the new atty-guard binary on top of the base image's binary.
+COPY --from=ebpf-builder /src/atty-guard/target/release/atty-guard /usr/local/bin/atty-guard
+RUN chmod 0755 /usr/local/bin/atty-guard
+
+# Stage the .bpf.o into the daemon's standard probe path
+# (atty-guard/src/ebpf.rs:locate_bpf_object). The builder
+# packaged it into /opt/ebpf-artifact/ which is either {.bpf.o}
+# or empty — direct COPY keeps the runtime image lean (no
+# vmlinux.h, no source tree carried through). Missing file is
+# fine: scenarios check BPF_OBJ.is_file() and skip cleanly.
+RUN install -d /usr/lib/atty-guard
+COPY --from=ebpf-builder /opt/ebpf-artifact/ /usr/lib/atty-guard/
+
+# Runtime deps: libbpf for the daemon's loader (libbpf-rs),
+# bpftool so scenarios can dump BPF maps directly and pin the
+# daemon→kernel map-write chain independently of LSM EPERM
+# observation. Container is already privileged with CAP_BPF +
+# CAP_SYS_ADMIN per scenarios/5*/docker.json, so bpftool's
+# privilege requirements are met.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libbpf1 linux-tools-common bpftool && \
+    rm -rf /var/lib/apt/lists/*

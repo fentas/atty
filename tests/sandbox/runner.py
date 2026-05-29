@@ -127,6 +127,14 @@ def load_scenario_image(script: Path) -> str:
     return IMAGE_TAG
 
 
+def docker_image_exists(image: str) -> bool:
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def load_scenario_docker_opts(script: Path) -> list[str]:
     """Load extra `docker run` flags for a scenario from an
     optional `docker.json` sibling. eBPF scenarios need
@@ -193,26 +201,27 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
     return flags
 
 
-def docker_image_exists(image: str) -> bool:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-    )
-    return result.returncode == 0
-
-
 def run_scenario(script: Path) -> bool:
     name = script.parent.name
     print(f"\n[runner] === {name} ===")
     extra = load_scenario_docker_opts(script)
     image = load_scenario_image(script)
-    # Scenarios that override the image (ONNX, future eBPF-kernel)
-    # SKIP cleanly when their image isn't on disk — the operator
-    # hasn't built it yet. Returning True keeps the suite green;
-    # the SKIP banner stays visible in logs.
+    # Scenarios that override the image (ONNX, eBPF-kernel) SKIP
+    # cleanly when their image isn't on disk — the operator hasn't
+    # built it yet. Returning True keeps the suite green; the SKIP
+    # banner stays visible in logs.
     if image != IMAGE_TAG and not docker_image_exists(image):
-        print(f"[runner] {name}: SKIP (image {image!r} not built — "
-              f"see make target for this scenario class)")
+        # Derive the make target from the image tag. Convention:
+        # atty-sandbox:<class> ↔ make sandbox-<class>-image.
+        # Unknown image shapes fall back to a generic hint so a
+        # third-party image override doesn't lie about a target
+        # that may not exist.
+        if image.startswith("atty-sandbox:"):
+            cls = image.split(":", 1)[1]
+            hint = f"run `make sandbox-{cls}-image`"
+        else:
+            hint = "see the make target for this scenario class"
+        print(f"[runner] {name}: SKIP (image {image!r} not built — {hint})")
         return True
     try:
         result = subprocess.run(
