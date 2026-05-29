@@ -117,6 +117,37 @@ def mark_critical_via_alice(pid: int) -> None:
         fail(f"set_threat_level rejected: {resp}")
 
 
+def threat_map_has_pid(pid: int) -> bool:
+    """Dump the daemon's threat_map via bpftool and check if
+    `pid` is keyed in it. Pins the daemon→kernel BPF map write
+    independently of the LSM hook firing — `bpftool map dump
+    name threat_map` works because the daemon pins the program
+    via SEC(".maps") + libbpf's auto-pin behaviour.
+    """
+    res = subprocess.run(
+        ["bpftool", "map", "dump", "name", "threat_map", "--json"],
+        capture_output=True, timeout=5,
+    )
+    if res.returncode != 0:
+        # Map not found / not pinned — caller decides whether
+        # that's a hard failure (block sub) or expected (observe).
+        return False
+    try:
+        entries = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return False
+    # bpftool's hash-map JSON: [{"key": [b0, b1, b2, b3], "value": [v]}]
+    # key is 4 little-endian bytes of u32 pid.
+    for entry in entries:
+        key_bytes = entry.get("key", [])
+        if len(key_bytes) != 4:
+            continue
+        entry_pid = int.from_bytes(bytes(key_bytes), "little")
+        if entry_pid == pid:
+            return True
+    return False
+
+
 def try_execve_in_bash(proc) -> tuple[int, str]:
     """Run `/bin/true; echo rc=$?` in the PTY-attached bash.
     Returns (rc, raw output). rc = -1 if no rc= line surfaced."""
@@ -145,11 +176,19 @@ def run_observe_sub() -> None:
                 d.dump_log()
                 fail(f"observe sub: daemon didn't attach eBPF; log:\n{log}")
             mark_critical_via_alice(alice_pid)
+            time.sleep(0.3)
+            # observe mode: the daemon SHOULD NOT have written to
+            # the BPF map (the classifier doesn't promote). If
+            # the entry is there, the observe semantics regressed.
+            if threat_map_has_pid(alice_pid):
+                fail(f"observe sub: threat_map contains PID {alice_pid} — "
+                     "observe mode shouldn't write to the BPF map. "
+                     "The userspace observe semantics regressed.")
             rc, out = try_execve_in_bash(proc)
             if rc != 0:
                 fail(f"observe sub: execve under alice's bash was BLOCKED "
-                     f"(rc={rc}) — the userspace classifier shouldn't "
-                     f"promote in observe mode.\noutput: {out!r}")
+                     f"(rc={rc}) — observe mode should allow.\n"
+                     f"output: {out!r}")
     finally:
         try:
             proc.kill(9)
@@ -170,11 +209,23 @@ def run_block_sub() -> None:
             # Give the BPF map write a beat to land before the
             # next execve fires.
             time.sleep(0.3)
+            # block sub: independently verify the daemon→kernel
+            # map-write chain via bpftool BEFORE checking LSM.
+            # If this assertion holds but the LSM check below
+            # doesn't, the kernel-side hook is the regression
+            # site (vs. the daemon-side write). Two-stage check
+            # = better diagnostics than a single end-to-end one.
+            if not threat_map_has_pid(alice_pid):
+                d.dump_log()
+                fail(f"block sub: threat_map missing PID {alice_pid} after "
+                     "SetThreatLevel(Critical) — daemon→BPF map write "
+                     "failed.")
             rc, out = try_execve_in_bash(proc)
             if rc == 0:
                 fail(f"block sub: execve under alice's bash was ALLOWED "
-                     f"despite SetThreatLevel(Critical) — LSM EPERM "
-                     f"didn't fire.\noutput: {out!r}")
+                     f"despite threat_map entry — LSM EPERM didn't fire. "
+                     "Map write landed but the kernel-side hook isn't "
+                     f"reading it.\noutput: {out!r}")
             if "permission denied" not in out.lower():
                 fail(f"block sub: execve failed (rc={rc}) but the bash "
                      f"didn't show 'Permission denied' — verify the "

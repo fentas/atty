@@ -81,9 +81,12 @@ RUN if [ -f /tmp/ebpf-out/atty_guard.bpf.o ]; then \
         install -m 0644 /tmp/ebpf-out/atty_guard.bpf.o /usr/lib/atty-guard/atty_guard.bpf.o; \
     fi && rm -rf /tmp/ebpf-out
 
-# Minimal runtime deps for actually loading the BPF program at
-# scenario time (the daemon uses libbpf-rs which needs libbpf
-# present + the bpf kernel module loaded).
+# Runtime deps: libbpf for the daemon's loader (libbpf-rs),
+# bpftool so scenarios can dump BPF maps directly and pin the
+# daemon→kernel map-write chain independently of LSM EPERM
+# observation. Container is already privileged with CAP_BPF +
+# CAP_SYS_ADMIN per scenarios/5*/docker.json, so bpftool's
+# privilege requirements are met.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libbpf1 && \
+    apt-get install -y --no-install-recommends libbpf1 linux-tools-common bpftool && \
     rm -rf /var/lib/apt/lists/*
