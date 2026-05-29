@@ -16,8 +16,14 @@
 # LSM enabled — `lib/bpf.py::skip_if_no_bpf_lsm` handles the
 # clean-skip path.
 
-ARG BASE_TAG=atty-sandbox:base
-FROM ${BASE_TAG} AS ebpf-builder
+# Resolved via `--build-context base-image=docker-image://atty-sandbox:base`
+# (Makefile passes this). Named-context indirection is required
+# for the buildx docker-container driver — it doesn't share an
+# image store with the local docker daemon, so a literal
+# `FROM atty-sandbox:base` would try to pull from registry and
+# fail. Plain `docker build` (local-dev path) still works because
+# the named context resolves to the local daemon's image.
+FROM base-image AS ebpf-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUSTUP_HOME=/usr/local/rustup
@@ -65,7 +71,7 @@ RUN cd /src/atty-guard/ebpf && \
     fi
 
 # ── runtime stage ────────────────────────────────────────────────
-FROM ${BASE_TAG}
+FROM base-image
 
 # Drop the new atty-guard binary on top of the base image's binary.
 COPY --from=ebpf-builder /src/atty-guard/target/release/atty-guard /usr/local/bin/atty-guard
