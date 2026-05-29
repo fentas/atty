@@ -45,6 +45,8 @@ const ansi = @import("ansi.zig");
 const style_mod = @import("style.zig");
 const status_text = @import("status_text.zig");
 const keymap = @import("keymap.zig");
+const mouse_mod = @import("mouse.zig");
+const dispatch_mod = @import("dispatch.zig");
 const Osc133 = @import("osc133.zig").Osc133;
 const AltScreen = @import("altscreen.zig").AltScreen;
 const DecstbmWatcher = @import("decstbm_watcher.zig").DecstbmWatcher;
@@ -891,6 +893,32 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // → legacy fallback below still translates protocol
                 // bytes so the TUI gets the form it understands.
                 const shell_owns_input = alt_screen.active and !ctx.module_overlay_active;
+
+                // #304 mouse intercept — must come BEFORE the
+                // binding match. CSI < sequences aren't bindings
+                // (and shouldn't be — operator-defined click
+                // handlers belong in modules, not the keymap).
+                // If a module returns `.consume`, swallow so the
+                // shell doesn't ALSO see the click. `.passthrough`
+                // falls through to the normal forward path.
+                // Shell-alt-screen TUIs (vim/lazygit) own mouse
+                // input directly via their own DECSET; atty must
+                // forward without dispatch in that case.
+                if (config.mouse.enabled and !shell_owns_input and mouse_mod.peekIsMouse(input)) {
+                    if (mouse_mod.parse(input)) |parsed| {
+                        const act = D.dispatchMouseClick(&runtimes, &ctx, parsed.event) catch
+                            dispatch_mod.MouseAction.passthrough;
+                        if (act == .consume) {
+                            swallow_after_binding = true;
+                        }
+                    } else |_| {
+                        // Malformed mouse sequence — let it through
+                        // unchanged. Better to forward a possibly-broken
+                        // CSI than to drop a TUI-bound burst that just
+                        // happened to start with a similar prefix.
+                    }
+                }
+
                 const matched_action: ?keymap.Action = if (shell_owns_input)
                     null
                 else

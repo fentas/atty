@@ -80,6 +80,24 @@ pub const Terminal = struct {
 };
 pub const terminal: Terminal = .{};
 
+// ───── Mouse ──────────────────────────────────────────────────────────────
+
+pub const Mouse = struct {
+    /// Master switch for atty's mouse handling. When true, atty
+    /// emits SGR-1006 enable sequences on startup, parses incoming
+    /// CSI < mouse events from stdin, and dispatches them through
+    /// `onMouseClick` to modules (mouse_links and future
+    /// consumers). When false, mouse events pass through to the
+    /// shell unmodified — TUIs like vim/lazygit still get their
+    /// own mouse via DECSET; atty just doesn't intercept.
+    ///
+    /// Default: false. Mouse-aware modules are opt-in per #304
+    /// design — enable when you've added a consumer that wants
+    /// the click stream.
+    enabled: bool = false,
+};
+pub const mouse: Mouse = .{};
+
 // ───── Keymap ─────────────────────────────────────────────────────────────
 
 pub const Keymap = struct {

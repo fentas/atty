@@ -48,6 +48,11 @@ pub const terminal = if (@hasDecl(user, "terminal"))
 else
     defaults.terminal;
 
+pub const mouse = if (@hasDecl(user, "mouse"))
+    user.mouse
+else
+    defaults.mouse;
+
 pub const keymap = if (@hasDecl(user, "keymap"))
     user.keymap
 else
