@@ -728,11 +728,12 @@ pub const Config = struct {
     inline_chat_top_gap: u16 = 1,
 
     /// Compact observation turns in the inline panel — show
-    /// `[output: N lines]` instead of the verbatim command output.
-    /// The full content is still in turns + reachable via
-    /// Alt+Shift+C / scroll-back to the full-size overlay. Default
-    /// true because long build/test output buries the conversation
-    /// in the narrow inline window; set false to see verbatim
-    /// output inline. Full-size overlay rendering is unaffected.
+    /// `[N line(s) · Alt+Shift+C to inspect]` instead of the
+    /// verbatim command output. The full content is still in
+    /// turns + reachable via Alt+Shift+C / scroll-back to the
+    /// full-size overlay. Default true because long build/test
+    /// output buries the conversation in the narrow inline
+    /// window; set false to see verbatim output inline.
+    /// Full-size overlay rendering is unaffected.
     inline_observation_compact: bool = true,
 };
