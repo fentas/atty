@@ -167,6 +167,26 @@ pub const Subscriber = struct {
         try self.pushLocked(evt);
     }
 
+    /// Empty the event buffer. Called from the warn-overlay action
+    /// after rendering so the `⚠ N` segment clears (next event
+    /// from the daemon re-arms it). Does NOT reset `dropped_total`
+    /// — that's a session-wide audit counter, not a "you've seen
+    /// these" indicator.
+    pub fn clear(self: *Subscriber) void {
+        if (self.io) |io| {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            self.clearLocked();
+            return;
+        }
+        self.clearLocked();
+    }
+
+    fn clearLocked(self: *Subscriber) void {
+        for (self.events.items) |*e| e.deinit(self.allocator);
+        self.events.clearRetainingCapacity();
+    }
+
     /// Caller must hold `mutex`. Drops oldest on cap overflow +
     /// bumps `dropped_total`.
     fn pushLocked(self: *Subscriber, evt: Event) std.mem.Allocator.Error!void {

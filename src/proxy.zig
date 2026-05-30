@@ -1138,6 +1138,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             renderHelp(&out_buf) catch {};
                             swallow_after_binding = true;
                         },
+                        .security_guard_show_warnings => {
+                            // security_guard owns the warn buffer;
+                            // its onAction handler renders into
+                            // scrollback + clears. Swallow the key
+                            // regardless of consumption so the meta-
+                            // bytes never reach readline (where
+                            // Alt+Shift+W has no native meaning but
+                            // a bare `W` would still echo).
+                            _ = D.dispatchAction(&runtimes, &ctx, act);
+                            swallow_after_binding = true;
+                        },
                         .llm_exec_toggle_help => {
                             // Hand to the LLM module first (it has
                             // AI-mode-only help with current model +
