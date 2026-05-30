@@ -25,12 +25,18 @@ src/
 ├── style.zig                 # Style struct + presets (ghost overlay, warnings, …)
 ├── pty.zig                   # posix_openpt / grantpt / unlockpt / fork+exec child
 ├── terminal.zig              # cfmakeraw-equivalent termios guard for our stdin
+├── mouse.zig                 # SGR-1006 mouse-event parser + DECSET sequences
 ├── line_state.zig            # best-effort user-input buffer model
 ├── ansi.zig                  # SGR/CSI helpers + escape stripping
 ├── ghost.zig                 # ghost-text overlay state machine
 ├── modules/
 │   ├── atuin.zig             # async Atuin module (suggest + record + sync)
-│   └── guardrail.zig         # dangerous-command confirmation module
+│   ├── guardrail.zig         # dangerous-command confirmation module
+│   ├── history.zig           # shell-native ~/.bash_history fallback module
+│   ├── llm/                  # AI mode (Alt+A / Alt+S / inline + overlay chat)
+│   ├── mouse_links/          # left-click on a path → `$EDITOR +LINE 'path'`
+│   ├── mouse_urls/           # left-click on a URL → opener, gated by trust posture
+│   └── security_guard/       # pre-Enter Tier-1 + UDS client to atty-guard sidecar
 ├── unit_tests.zig            # entry for `zig build test`
 └── test/
     ├── integration.zig       # PTY round-trip tests (`zig build itest`)
@@ -568,6 +574,30 @@ etc. all work normally inside the chat overlay.
 CSI-u → legacy translation in the same code path (`csiUToLegacy`)
 still fires when `!matched_binding`, so a kitty-kbd-encoded Esc
 like `\x1b[27u` lands at the inner TUI as legacy `\x1b`.
+
+### Mouse intercept
+
+`config.mouse.enabled` (opt-in; default off) wires the SGR-1006
+mouse path. When set, the proxy emits the
+`\x1b[?1000h\x1b[?1002h\x1b[?1006h` enable trio at startup and the
+matching disable trio on exit. Stdin reads are sniffed for the
+CSI-`<` mouse prefix and parsed via `src/mouse.zig` into a typed
+`mouse.Event { button, kind, col, row, mods }`. Left-press events
+flow into `dispatchMouseClick(rts, ctx, evt)` which fans out to
+modules' `onMouseClick` in declaration order — first
+`.consume` wins; otherwise the original CSI bytes are forwarded.
+
+The intercept is gated on `!shell_owns_input`: once a shell-side
+TUI takes the alt-screen (vim/htop/lazygit) the raw mouse bytes
+pass through so the inner program's own mouse handling stays
+intact. Same shape as the keystroke alt-screen bypass above.
+
+`mouse_links` (path → `$EDITOR`) and `mouse_urls` (URL → opener)
+are the two shipped consumers. Both maintain their own per-module
+output ring (SGR + OSC stripped) so the click handler can map
+screen (row, col) back to the captured text — the shared
+"termview" infrastructure is a future refactor when a third
+consumer wants it.
 
 ## Status bar + incognito
 
