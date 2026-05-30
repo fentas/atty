@@ -24,6 +24,8 @@ pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
 pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   onResize  (rt: *Runtime) void              // optional — re-arm size-aware paints
+pub fn   onMouseClick(rt: *Runtime, ctx: *Context, evt: mouse.Event) !MouseAction
+pub fn   onAction  (rt: *Runtime, ctx: *Context, action: anytype) !bool
 pub fn   deleteHistoryMatch(rt: *Runtime, ctx: *Context, line: []const u8) !void
 pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 pub fn   provideGhostList(rt: *Runtime, ctx: *Context) !?[]const []const u8
@@ -541,6 +543,54 @@ sudo usermod -aG atty $USER
 **Block-refuse path (V2-J-2).** When the daemon returns `Verdict::Block` — either via the auto-Block escalation knob (`[accumulator] block_threshold = 0.95` in TOML) or because the PID-tree threat map says this PID is already Critical — atty does NOT prompt. It writes a one-shot `REFUSED — <reason>` line styled by `Config.refused_style` (bold red 8-color default), marks the shell PID Critical, and clears readline (Ctrl+U). Trust-cache hits short-circuit BOTH the Warn-prompt path and the Block-refuse path so prior `[t]rust` choices survive.
 
 Full architecture: `docs/security-guard-design.md`. Daemon: `atty-guard/`.
+
+When the daemon runs `--ebpf-mode=warn`, daemon-side `Block` verdicts emit kernel ringbuf events (no EPERM) instead of killing the execve. atty's `WarnSubscriber` buffers them; the statusbar shows `⚠ N` and `Alt+Shift+W` dumps the buffer into scrollback + clears it (see `docs/operator-workflow.md`).
+
+### `mouse_links` — click a file path in output → `$EDITOR <path>`
+
+Wires a left-click on a path token in compiler / grep / ls output to a `$EDITOR +LINE 'path'\n` injection into the shell's input stream. Captures terminal output into a per-module ring (SGR + OSC stripped), maps screen (row, col) → captured row via a monotonic write counter, and uses the pure path detector at `src/modules/mouse_links/path_detect.zig` (handles `:LINE` / `:LINE:COL` suffixes, `~/` / `./` / `../` prefixes, quoted paths with internal spaces, bracket wrappers, common compiler punctuation, known bare filenames like `Makefile` / `README.md`).
+
+`$EDITOR` is trusted: the shell tokenises the injection so `EDITOR="code --wait"` works while `EDITOR="vim ; rm -rf"` is the user's footgun. Streaming-line capture only — TUIs like vim / htop run in the alt-screen where atty's mouse intercept is gated off (the shell owns input).
+
+Requires `mouse.enabled = true` in the user's config to pull the proxy's SGR-1006 click stream:
+
+```zig
+pub const mouse: atty.Mouse = .{ .enabled = true };
+
+pub const modules = .{
+    atty.modules.mouse_links.configure(.{}),
+    atty.modules.guardrail.configure(.{}),
+    atty.modules.history.configure(.{}),
+};
+```
+
+### `mouse_urls` — click a URL in output → opener with a trust gate
+
+Sibling of `mouse_links` for URLs. Detects `https://`, `http://`, `ftp(s)://`, `ssh://`, `git://`, `file://` with path / query / fragment / userinfo / IPv6 literals. Rejects URLs without a host (`file:///etc/passwd`), URLs in unknown schemes (`javascript://`), and emails. Default opener is `xdg-open`; spawn uses a double-fork + `setsid` so atty doesn't accumulate zombies.
+
+Three trust modes:
+
+| Mode | Behaviour |
+|---|---|
+| `.never` | Click is a no-op + status hint. Paranoid posture for shared / multi-tenant hosts. |
+| `.whitelist_only` (default) | Opens if host matches `url_whitelist` (exact or `*.example.com` suffix) OR in-memory session-trust set. Silent + hint otherwise. |
+| `.ask_each` | Banner `open <host>? [y]es / [a]llow / [t]rust / cancel`. `[a]` session-trusts; `[t]` session-trusts AND surfaces `sudo atty-guard urls allow <host>` guidance (the daemon's `urls_allow` RPC requires EUID 0, so atty can't write it directly). |
+
+Place `mouse_urls` BEFORE `guardrail` in the modules tuple so the banner's `y`/`a`/`t` keystrokes beat guardrail's own armed-banner consumption:
+
+```zig
+pub const mouse: atty.Mouse = .{ .enabled = true };
+
+pub const modules = .{
+    atty.modules.mouse_urls.configure(.{
+        .mode = .ask_each,
+        .url_whitelist = &.{ "github.com", "*.github.com", "docs.zig.dev" },
+    }),
+    atty.modules.mouse_links.configure(.{}),
+    atty.modules.guardrail.configure(.{}),
+    atty.modules.history.configure(.{}),
+};
+```
 
 ### Composing two ghost providers
 

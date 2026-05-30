@@ -383,6 +383,33 @@ Common failure: kernel doesn't ship LSM BPF hooks. Most distros do
 since 5.7; check `cat /sys/kernel/security/lsm` for `bpf` in the
 list. If absent, your kernel was built without `CONFIG_BPF_LSM=y`.
 
+### Warn mode (`--ebpf-mode=warn`)
+
+`block` mode (default when eBPF is enabled) returns EPERM from the
+LSM hook so the marked PID tree literally can't `execve()`. `warn`
+mode keeps the same classification pipeline but DOESN'T return EPERM
+— the kernel allows the execve through, emits a ringbuf event, and
+the daemon broadcasts it to subscribed atty sessions.
+
+Use warn mode as a pilot before turning on block:
+
+```sh
+sudo systemctl edit atty-guard
+# In the override file:
+# [Service]
+# ExecStart=
+# ExecStart=/usr/local/bin/atty-guard --enable-ebpf --ebpf-mode=warn
+sudo systemctl restart atty-guard
+```
+
+In an atty session connected to the daemon, the statusbar shows
+`⚠ N` when warn events accumulate. **`Alt+Shift+W`** dumps the
+buffer into shell scrollback as one line per event
+(`<sec>.<ms> pid=<P> ppid=<PP> comm=<C> argv0=<A>`) and clears the
+buffer so the segment goes away. New events from the kernel re-arm
+it. The dropped-event count appears in the header if any were lost
+to the ring's 256-event cap.
+
 ## 5. Verify with `atty doctor`
 
 ```sh

@@ -26,8 +26,9 @@ src/
 ├── root.zig              library entry — re-exports for @import("atty")
 ├── proxy.zig             poll() loop, signals, ghost-text, statusbar
 ├── module.zig            shared types: Action, Context (incl. ctx.incognito), Error
-├── dispatch.zig          Dispatcher(modules) — inline-for walker
+├── dispatch.zig          Dispatcher(modules) — inline-for walker; MouseAction
 ├── pty.zig               posix_openpt / grantpt / fork+exec child
+├── mouse.zig             SGR-1006 mouse-event parser (DECSET ?1000h?1002h?1006h)
 ├── line_state.zig        best-effort user-input buffer model + uncertain flag
 ├── ghost.zig             ghost-overlay state machine
 ├── statusbar.zig         DECSTBM bottom row
@@ -43,7 +44,10 @@ src/
 │   ├── atuin.zig         async worker; ghost + record + sync + pick list
 │   ├── guardrail.zig     dangerous-command confirmation
 │   ├── history.zig       shell-native ~/.bash_history fallback + pick list
+│   ├── mouse_links/      left-click on a path token → `$EDITOR +LINE 'path'\n`
+│   ├── mouse_urls/       left-click on a URL → xdg-open, gated by trust posture
 │   └── security_guard/   pre-Enter Tier-1 + UDS client to atty-guard sidecar
+│                         + Alt+Shift+W scrollback dump of buffered warn events
 └── test/
     ├── integration.zig   real-PTY tests (zig build itest)
     └── e2e/              .e2e DSL scenarios + VT-grid diff harness
@@ -114,6 +118,8 @@ pub fn onInput   (rt, ctx, input) !Action          // hot path
 pub fn onOutput  (rt, ctx, output) !void           // hot path
 pub fn onTick    (rt, ctx, elapsed_ms) !void
 pub fn onLineCommit(rt, ctx, line) !void           // Enter on non-empty + non-uncertain line
+pub fn onMouseClick(rt, ctx, evt) !MouseAction     // SGR-1006 click event (left-press only, today)
+pub fn onAction  (rt, ctx, action) !bool           // keymap Action dispatch; true = consumed
 pub fn provideGhostText(rt, ctx) !?[]const u8      // first non-null wins (order = priority)
 pub fn provideGhostList(rt, ctx) !?[]const []const u8 // multi-row pick list (Ctrl+1..9 / Esc+1..9)
 pub fn statusText(rt, ctx) !?[]const u8            // segment for the status bar
@@ -146,6 +152,9 @@ Modules can read `ctx.incognito` to opt into stricter behaviour. By default ghos
 - **security_guard's daemon-`Block` path refuses outright.** `queryDaemon` branches on verdict before arming: Safe → forward, Warn → arm the `[y]/[a]/[t]/[B]/cancel` banner (`[a]llow always` session-trust + `[B]lock host forever` session-block landed in #142), **Block → write a red `REFUSED — <reason>` line, mark the shell PID Critical, and clear readline (`{.replace = "\x15"}`) with no follow-up keystroke.** Trust-cache hits short-circuit BOTH paths so prior `[t]rust` choices survive auto-Block enablement. Post-#147 there's no atty-side trust file — `rt.trust` is in-memory only, seeded lazily from the daemon's `commands.trusted.txt` via TrustList on first Enter, and mirrored on every `[t]` via TrustAdd. Render style is `Config.refused_style` (bold red 8-color default, distinct from `warning_style`'s dim italic).
 - **e2e goldens are config-sensitive.** The e2e harness uses the user's compiled binary. If `src/config.zig` has `statusbar.enabled = true`, snapshots include the bar. CI/release builds use `config.def.zig` defaults (statusbar off) — that's the canonical environment.
 - **First-paint after activate** of the statusbar should clear the reserved rows (old shell content can leak through DECSTBM otherwise).
+- **Mouse intercept (`config.mouse.enabled`) is opt-in and DECSET-coupled.** When true, proxy emits `\x1b[?1000h\x1b[?1002h\x1b[?1006h` at startup and the matching disable trio on exit. The intercept is gated on `!shell_owns_input` — once a TUI takes the alt-screen, atty stops parsing CSI-`<` mouse events and lets the raw bytes through so vim/htop/lazygit keep their own mouse handling. `mouse_links` / `mouse_urls` both rely on the proxy delivering the click; no module should DECSET its own mouse stream.
+- **`mouse_urls` ordering.** Place `mouse_urls` BEFORE `guardrail` in the `modules` tuple. Its `ask_each` banner returns `.swallow` from `onInput` for `y/a/t/Esc/Ctrl-C/Ctrl-U/c`; guardrail's own armed banner also swallows keystrokes. First-match wins via declaration order, so reversing the order lets guardrail eat the URL banner's response keys.
+- **Warn-mode UX is render-and-clear.** `Alt+Shift+W` (legacy `\x1bW` + kitty kbd `\x1b[87;4u`) calls `security_guard.onAction(.security_guard_show_warnings)` which dumps the WarnSubscriber buffer to scrollback then calls `sub.clear()`. `clear()` preserves `dropped_total` — that's a session-wide audit counter, not a "you've seen these" indicator. No alt-screen overlay; the dump lives in scrollback. The proxy switch case ALWAYS sets `swallow_after_binding = true` even when dispatch returns false (security_guard not in modules tuple), so the meta bytes never reach readline.
 
 ## Things deliberately not yet built (don't propose without checking with user)
 

@@ -248,7 +248,9 @@ The image is multi-arch (`linux/amd64`, `linux/arm64`) and the binary is musl-st
 | [`guardrail`](src/modules/guardrail.zig)                     | `onInput`                                                            | Confirm-on-Enter for `rm -rf /`, `dd`, `mkfs`, fork bombs, curl-pipe-sh |
 | [`history`](src/modules/history.zig) *(default)*             | `onInput`, `onLineCommit`, `onTick`, `provideGhostText`, `provideGhostList`, `deleteHistoryMatch` | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history`     |
 | [`atuin`](src/modules/atuin.zig) *(opt-in)*                  | `onInput`, `onLineCommit`, `onTick`, `provideGhostText`, `provideGhostList`, `statusText`, `deleteHistoryMatch` | Fish-style autosuggestions from your Atuin history + record on Enter   |
-| [`security_guard`](src/modules/security_guard/)              | `onInput`, `onTick`, `statusText`                                    | Pre-Enter Tier-1 classifier + UDS client to the `atty-guard` sidecar   |
+| [`security_guard`](src/modules/security_guard/)              | `onInput`, `onAction`, `onTick`, `statusText`                        | Pre-Enter Tier-1 classifier + UDS client to the `atty-guard` sidecar; `Alt+Shift+W` dumps warn buffer |
+| [`mouse_links`](src/modules/mouse_links.zig) *(opt-in)*      | `onOutput`, `onMouseClick`, `pollShellInput`                         | Left-click a path token in output → `$EDITOR +LINE 'path'` injected into the shell |
+| [`mouse_urls`](src/modules/mouse_urls.zig) *(opt-in)*        | `onOutput`, `onMouseClick`, `onInput`, `provideHintText`, `statusText` | Left-click a URL → `xdg-open`; `whitelist_only` / `never` / `ask_each` trust modes |
 | [`llm`](src/modules/llm/)                                    | `onInput`, `onLineCommit`, `onResize`, `provideGhostText`, `provideGhostList`, `provideErrorText`, `statusText`, `isOverlayActive` | `#: intent` → shell-command rewrite; Alt+A single, Alt+S dialog, Alt+R recall |
 
 Add your own under `src/modules/` and wire it into `config.modules`. Reference docs: [atty.sh/providers](https://atty.sh/providers/).
@@ -260,7 +262,7 @@ Add your own under `src/modules/` and wire it into `config.modules`. Reference d
 ```bash
 mise use zig@0.16.0           # any other Zig 0.16.0 install also works
 zig build                     # → ./zig-out/bin/atty
-zig build test --summary all  # 949 unit tests
+zig build test --summary all  # 1112 unit tests
 zig build itest --summary all # PTY round-trip integration test
 ```
 
