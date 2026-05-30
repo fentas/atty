@@ -317,17 +317,20 @@ pub fn configure(comptime cfg: Config) type {
                 return;
             }
 
-            // Header.
+            // Header. Inline the drop count rather than referring
+            // operators to a daemon CLI — `atty-guard session list`
+            // doesn't surface warn-event drops; the count only
+            // exists in this subscriber's atomic.
             var hdr_buf: [256]u8 = undefined;
             const dropped = sub.droppedTotal();
-            const hdr = std.fmt.bufPrint(
+            const hdr = if (dropped > 0) std.fmt.bufPrint(
                 &hdr_buf,
-                "\r\natty security_guard: {d} warn event{s}{s}\r\n",
-                .{
-                    snap.len,
-                    if (snap.len == 1) "" else "s",
-                    if (dropped > 0) " (drop count visible via daemon `session list`)" else "",
-                },
+                "\r\natty security_guard: {d} warn event{s} ({d} dropped this session)\r\n",
+                .{ snap.len, if (snap.len == 1) "" else "s", dropped },
+            ) catch return else std.fmt.bufPrint(
+                &hdr_buf,
+                "\r\natty security_guard: {d} warn event{s}\r\n",
+                .{ snap.len, if (snap.len == 1) "" else "s" },
             ) catch return;
             writeSink(rt, hdr);
 
@@ -338,12 +341,13 @@ pub fn configure(comptime cfg: Config) type {
                 const sec = evt.timestamp_ms / 1000;
                 const ms = evt.timestamp_ms % 1000;
                 const comm = if (evt.comm.len <= 16) evt.comm else evt.comm[0..16];
+                const trunc_comm: []const u8 = if (evt.comm.len > 16) "…" else "";
                 const argv0 = if (evt.argv0.len <= 96) evt.argv0 else evt.argv0[0..96];
                 const trunc_argv: []const u8 = if (evt.argv0.len > 96) "…" else "";
                 const line = std.fmt.bufPrint(
                     &line_buf,
-                    "  {d}.{d:03}  pid={d}  ppid={d}  comm={s}  argv0={s}{s}\r\n",
-                    .{ sec, ms, evt.pid, evt.ppid, comm, argv0, trunc_argv },
+                    "  {d}.{d:03}  pid={d}  ppid={d}  comm={s}{s}  argv0={s}{s}\r\n",
+                    .{ sec, ms, evt.pid, evt.ppid, comm, trunc_comm, argv0, trunc_argv },
                 ) catch continue;
                 writeSink(rt, line);
             }
