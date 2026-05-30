@@ -573,7 +573,7 @@ Three trust modes:
 | Mode | Behaviour |
 |---|---|
 | `.never` | Click is a no-op + status hint. Paranoid posture for shared / multi-tenant hosts. |
-| `.whitelist_only` (default) | Opens if host matches `url_whitelist` (exact or `*.example.com` suffix) OR in-memory session-trust set. Silent + hint otherwise. |
+| `.whitelist_only` (default) | Opens if host matches `url_whitelist` (exact or `*.example.com` suffix) OR a host previously session-trusted via `.ask_each`. Silent + hint otherwise. The session-trust set is never populated in this mode itself — only the static `url_whitelist` adds. |
 | `.ask_each` | Banner `open <host>? [y]es / [a]llow / [t]rust / cancel`. `[a]` session-trusts; `[t]` session-trusts AND surfaces `sudo atty-guard urls allow <host>` guidance (the daemon's `urls_allow` RPC requires EUID 0, so atty can't write it directly). |
 
 Place `mouse_urls` BEFORE `guardrail` in the modules tuple so the banner's `y`/`a`/`t` keystrokes beat guardrail's own armed-banner consumption:
