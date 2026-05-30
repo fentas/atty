@@ -612,3 +612,118 @@ test "skip_in_incognito = true bypasses matching" {
     const action = try L.onInput(&rt, &ctx, "\r");
     try testing.expect(action == .forward);
 }
+
+// --- Alt+Shift+W warn-event dump --------------------------------
+//
+// `onAction(.security_guard_show_warnings)` snapshots the warn
+// subscriber's buffer, formats one line per event into the sink,
+// and clears the buffer so the `⚠ N` statusbar segment goes away.
+
+const warn_sub_mod = @import("security_guard/warn_subscriber.zig");
+
+fn mkWarn(allocator: std.mem.Allocator, pid: u32) !warn_sub_mod.Event {
+    return .{
+        .pid = pid,
+        .ppid = 1,
+        .comm = try allocator.dupe(u8, "bash"),
+        .argv0 = try allocator.dupe(u8, "/bin/ls"),
+        .timestamp_ms = 1234,
+    };
+}
+
+test "onAction warn dump — empty buffer surfaces a one-line notice" {
+    const L = mod.configure(.{});
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+
+    var sub = warn_sub_mod.Subscriber.init(testing.allocator, "/tmp/nope", 0);
+    defer sub.stop();
+    rt.warn_sub = &sub;
+    // Detach() would otherwise stop+destroy our stack-allocated
+    // subscriber via its production heap-cleanup path. Null it
+    // before detach runs so only our test's `defer sub.stop()` fires.
+    defer rt.warn_sub = null;
+
+    var line: LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    const consumed = try L.onAction(&rt, &ctx, .security_guard_show_warnings);
+    try testing.expect(consumed);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "no warn events buffered") != null);
+}
+
+test "onAction warn dump — renders events + clears the buffer" {
+    const L = mod.configure(.{});
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+
+    var sub = warn_sub_mod.Subscriber.init(testing.allocator, "/tmp/nope", 0);
+    defer sub.stop();
+    try sub.injectForTesting(try mkWarn(testing.allocator, 4242));
+    try sub.injectForTesting(try mkWarn(testing.allocator, 4243));
+    rt.warn_sub = &sub;
+    defer rt.warn_sub = null;
+    try testing.expectEqual(@as(usize, 2), sub.count());
+
+    var line: LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    const consumed = try L.onAction(&rt, &ctx, .security_guard_show_warnings);
+    try testing.expect(consumed);
+
+    const out = sink.buf.items;
+    try testing.expect(std.mem.indexOf(u8, out, "2 warn events") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "pid=4242") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "pid=4243") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "comm=bash") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "argv0=/bin/ls") != null);
+    // Render-and-clear: buffer should be empty afterwards.
+    try testing.expectEqual(@as(usize, 0), sub.count());
+}
+
+test "onAction warn dump — no subscriber falls through to a notice" {
+    const L = mod.configure(.{});
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+    // rt.warn_sub stays null (security_guard disabled / no daemon
+    // socket configured).
+
+    var line: LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    const consumed = try L.onAction(&rt, &ctx, .security_guard_show_warnings);
+    try testing.expect(consumed);
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "no warn-event subscriber") != null);
+}
+
+test "onAction returns false for unrelated actions" {
+    const L = mod.configure(.{});
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+
+    var line: LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    try testing.expect(!try L.onAction(&rt, &ctx, .incognito_toggle));
+    try testing.expect(!try L.onAction(&rt, &ctx, .show_help));
+}

@@ -47,6 +47,25 @@ test "ring drops oldest at cap + bumps dropped_total" {
     try testing.expectEqual(@as(u32, 5), snap[0].pid);
 }
 
+test "clear empties the buffer but preserves dropped_total" {
+    var sub = Subscriber.init(testing.allocator, "/tmp/nope", 0);
+    defer sub.stop();
+    var i: u32 = 0;
+    while (i < mod.RING_CAP + 3) : (i += 1) {
+        try sub.injectForTesting(try mkEvent(testing.allocator, i));
+    }
+    try testing.expectEqual(@as(u32, 3), sub.droppedTotal());
+
+    sub.clear();
+    try testing.expectEqual(@as(usize, 0), sub.count());
+    // dropped_total is a session-wide audit counter — clear() must NOT reset it.
+    try testing.expectEqual(@as(u32, 3), sub.droppedTotal());
+
+    // Buffer is reusable after clear.
+    try sub.injectForTesting(try mkEvent(testing.allocator, 7));
+    try testing.expectEqual(@as(usize, 1), sub.count());
+}
+
 test "snapshot returns independent copies" {
     var sub = Subscriber.init(testing.allocator, "/tmp/nope", 0);
     defer sub.stop();

@@ -230,6 +230,19 @@ pub const Action = union(enum) {
     /// keybinding. User configs that want a dedicated, unconditional
     /// cheat-sheet key can bind this action directly (e.g. `Alt+?`).
     show_help,
+    /// Dump the security_guard warn-event buffer into scrollback
+    /// and clear the buffer (clears the `⚠ N` statusbar segment;
+    /// new kernel events from the daemon re-arm it). Each event
+    /// renders as one line with timestamp / pid / parent / comm /
+    /// argv0. No-op when the buffer is empty. Default
+    /// **Alt+Shift+W**.
+    ///
+    /// Render-and-clear is the deliberate semantic — the operator
+    /// has the scrollback record; a per-event interactive picker
+    /// would require an alt-screen overlay that competes with
+    /// vim/htop/etc., and warn events are append-only audit data,
+    /// not a workflow that needs in-place mutation.
+    security_guard_show_warnings,
 };
 
 pub const Binding = struct {

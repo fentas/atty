@@ -135,6 +135,16 @@ pub const Keymap = struct {
         .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
         .{ .bytes = "\x1b[105;3u", .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match, .label = "Ctrl+Shift+D", .description = "delete the current ghost match from history" },
+        // Alt+Shift+W — dump security_guard warn events into
+        // scrollback + clear the buffer. Dual-encoded: legacy
+        // terminals emit `\x1b` + uppercase `W` for Alt+Shift+W;
+        // terminals that push the kitty kbd disambiguate flag
+        // (Ghostty / kitty / foot / WezTerm) emit `\x1b[87;4u`
+        // (87 = 'W', modifier 4 = shift+alt). The keymap parser
+        // doesn't grok `Alt+Shift+<letter>` so the raw bytes are
+        // spelled out here.
+        .{ .bytes = "\x1bW", .action = .security_guard_show_warnings, .label = "Alt+Shift+W", .description = "dump security_guard warn events to scrollback" },
+        .{ .bytes = "\x1b[87;4u", .action = .security_guard_show_warnings },
 
         // LLM-module bindings live on the module itself (see
         // `atty.modules.llm.default_bindings`). The dispatcher's

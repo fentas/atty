@@ -282,6 +282,87 @@ pub fn configure(comptime cfg: Config) type {
             rt.sink_fn = writeFn;
         }
 
+        /// Action dispatch — currently only handles the warn-event
+        /// dump (Alt+Shift+W). Returns true iff the action was
+        /// consumed; false lets the proxy try other modules / fall
+        /// through to its own switch case.
+        pub fn onAction(rt: *Runtime, ctx: *m.Context, action: anytype) m.Error!bool {
+            _ = ctx;
+            switch (action) {
+                .security_guard_show_warnings => {
+                    renderWarnDump(rt) catch return false;
+                    return true;
+                },
+                else => return false,
+            }
+        }
+
+        fn renderWarnDump(rt: *Runtime) m.Error!void {
+            const sub = rt.warn_sub orelse {
+                // No subscriber (security_guard disabled or daemon
+                // socket unset) — emit a one-line notice so the
+                // keystroke isn't silently lost.
+                writeSink(rt, "\r\natty security_guard: no warn-event subscriber attached.\r\n");
+                return;
+            };
+            const allocator = rt.allocator orelse {
+                writeSink(rt, "\r\natty security_guard: warn dump skipped — no allocator.\r\n");
+                return;
+            };
+            const snap = sub.snapshot(allocator) catch return error.OutOfMemory;
+            defer warn_subscriber_mod.Subscriber.freeSnapshot(allocator, snap);
+
+            if (snap.len == 0) {
+                writeSink(rt, "\r\natty security_guard: no warn events buffered.\r\n");
+                return;
+            }
+
+            // Header. Inline the drop count rather than referring
+            // operators to a daemon CLI — `atty-guard session list`
+            // doesn't surface warn-event drops; the count only
+            // exists in this subscriber's atomic.
+            var hdr_buf: [256]u8 = undefined;
+            const dropped = sub.droppedTotal();
+            const hdr = if (dropped > 0) std.fmt.bufPrint(
+                &hdr_buf,
+                "\r\natty security_guard: {d} warn event{s} ({d} dropped this session)\r\n",
+                .{ snap.len, if (snap.len == 1) "" else "s", dropped },
+            ) catch return else std.fmt.bufPrint(
+                &hdr_buf,
+                "\r\natty security_guard: {d} warn event{s}\r\n",
+                .{ snap.len, if (snap.len == 1) "" else "s" },
+            ) catch return;
+            writeSink(rt, hdr);
+
+            // One line per event. Format keeps fixed-width fields
+            // so multiple events line up in scrollback.
+            var line_buf: [512]u8 = undefined;
+            for (snap) |evt| {
+                const sec = evt.timestamp_ms / 1000;
+                const ms = evt.timestamp_ms % 1000;
+                const comm = if (evt.comm.len <= 16) evt.comm else evt.comm[0..16];
+                const trunc_comm: []const u8 = if (evt.comm.len > 16) "…" else "";
+                const argv0 = if (evt.argv0.len <= 96) evt.argv0 else evt.argv0[0..96];
+                const trunc_argv: []const u8 = if (evt.argv0.len > 96) "…" else "";
+                const line = std.fmt.bufPrint(
+                    &line_buf,
+                    "  {d}.{d:03}  pid={d}  ppid={d}  comm={s}{s}  argv0={s}{s}\r\n",
+                    .{ sec, ms, evt.pid, evt.ppid, comm, trunc_comm, argv0, trunc_argv },
+                ) catch continue;
+                writeSink(rt, line);
+            }
+
+            sub.clear();
+        }
+
+        fn writeSink(rt: *Runtime, bytes: []const u8) void {
+            if (rt.sink_fn) |f| {
+                f(rt.sink_ctx.?, bytes) catch {};
+                return;
+            }
+            _ = std.c.write(std.posix.STDOUT_FILENO, bytes.ptr, bytes.len);
+        }
+
         pub fn onInput(rt: *Runtime, ctx: *m.Context, input: []const u8) m.Error!m.Action {
             if (!cfg.enabled) return .forward;
             if (cfg.skip_in_incognito and ctx.incognito) return .forward;
