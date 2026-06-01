@@ -286,6 +286,34 @@ pub fn configure(comptime cfg: Config) type {
                 @compileError("Config.provider.subprocess.argv must have a non-empty argv[0]");
             },
         }
+        // Fixture-response sanity. `parseFencedResponse` accepts
+        // bare prose because real LLMs sometimes reply without a
+        // fence — the prose lands as a `.done` with the text as
+        // the reason. That fallback is correct for production but
+        // hostile to test fidelity: a stale e2e fixture (e.g.
+        // ` `{"action":"exec",…}` ` left over from before the
+        // fenced-action refactor) parses as `.done` instead of
+        // firing the `.suggesting` state the scenario was designed
+        // to pin. The PR that introduced the fenced protocol left
+        // all e2e fixtures behind in raw-JSON form and the
+        // scenarios silently passed for two weeks (see #373).
+        //
+        // Catch the drift at build time. Every `fixture_responses`
+        // entry must contain at least one recognised action fence.
+        // Real-LLM lenient parsing is unaffected — production
+        // responses never flow through `configure`.
+        for (cfg.fixture_responses, 0..) |resp, i| {
+            if (!dialog.hasActionFence(resp)) {
+                @compileError(std.fmt.comptimePrint(
+                    "Config.fixture_responses[{d}] has no ```exec / ```question / ```done fence:\n" ++
+                        "    {s}\n" ++
+                        "Fixtures must use the fenced-action protocol — without a fence " ++
+                        "parseFencedResponse falls through to its 'treat raw as done.reason' " ++
+                        "branch and the scenario silently passes without firing any state transition.",
+                    .{ i, resp },
+                ));
+            }
+        }
     }
     return struct {
         pub const name = "llm";

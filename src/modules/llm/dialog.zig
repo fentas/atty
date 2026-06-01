@@ -328,6 +328,18 @@ const ActionFenceMatch = struct {
     action: Action,
 };
 
+/// `true` iff `raw` contains at least one recognised action fence
+/// (` ```exec `, ` ```question `, ` ```done `). Used by
+/// `llm.configure` to comptime-validate that every entry in
+/// `Config.fixture_responses` actually exercises the dialog state
+/// machine — without a fence `parseFencedResponse` falls through to
+/// its lenient "no fence → treat as done.reason" branch, which is
+/// CORRECT for real LLM prose responses but silently lets e2e
+/// fixtures pass without firing any state transition.
+pub fn hasActionFence(raw: []const u8) bool {
+    return findLastActionFence(raw) != null;
+}
+
 /// Walk `raw` backward looking for the last ` ```<action> ... ``` `
 /// block. Returns null if no recognized lang tag is found.
 fn findLastActionFence(raw: []const u8) ?ActionFenceMatch {
