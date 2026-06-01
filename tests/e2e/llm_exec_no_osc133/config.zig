@@ -13,12 +13,13 @@ const atty = @import("atty");
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.llm.configure(.{
-        .api_base = "http://localhost:0",
-        .model = "fixture-model",
+        .provider = .{ .http = .{ .api_base = "http://localhost:0", .model = "fixture-model" } },
         // Single fixture entry — Alt+S must NOT consume it, the
         // hard-error path should fire BEFORE any request.
         .fixture_responses = &.{
-            \\{"action":"done","reason":"unreachable"}
+            \\```done
+            \\unreachable
+            \\```
             ,
         },
     }),

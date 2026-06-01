@@ -8,12 +8,16 @@ const atty = @import("atty");
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.llm.configure(.{
-        .api_base = "http://localhost:0",
-        .model = "fixture-model",
+        .provider = .{ .http = .{ .api_base = "http://localhost:0", .model = "fixture-model" } },
         .fixture_responses = &.{
-            \\{"action":"exec","command":"printf '\\033]133;C\\007ok\\033]133;D;0\\007'","description":"emit ok with markers"}
+            \\emit ok with markers
+            \\```exec
+            \\printf '\033]133;C\007ok\033]133;D;0\007'
+            \\```
             ,
-            \\{"action":"done","reason":"all set"}
+            \\```done
+            \\all set
+            \\```
             ,
         },
     }),

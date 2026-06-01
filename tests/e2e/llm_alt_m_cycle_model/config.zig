@@ -10,12 +10,12 @@ pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.llm.configure(.{
         // Inert (no HTTP) — the cycle and hint are pure runtime
-        // state, no worker round-trip needed.
-        .api_base = "",
-        .models = &.{
-            .{ .name = "model-alpha" },
-            .{ .name = "model-beta" },
-            .{ .name = "model-gamma" },
+        // state, no worker round-trip needed. Empty api_base
+        // inside each ProviderEntry keeps the transport dormant.
+        .providers = &.{
+            .{ .name = "model-alpha", .config = .{ .http = .{ .model = "model-alpha" } } },
+            .{ .name = "model-beta", .config = .{ .http = .{ .model = "model-beta" } } },
+            .{ .name = "model-gamma", .config = .{ .http = .{ .model = "model-gamma" } } },
         },
     }),
 };

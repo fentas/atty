@@ -3,6 +3,6 @@ $ #:
 
 
 
-model: model-alpha
+provider: model-alpha (1/3)
 
 atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-alpha · Alt+H help · Esc cancel
