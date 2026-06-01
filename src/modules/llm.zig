@@ -305,11 +305,17 @@ pub fn configure(comptime cfg: Config) type {
         for (cfg.fixture_responses, 0..) |resp, i| {
             if (!dialog.hasActionFence(resp)) {
                 @compileError(std.fmt.comptimePrint(
-                    "Config.fixture_responses[{d}] has no ```exec / ```question / ```done fence:\n" ++
-                        "    {s}\n" ++
-                        "Fixtures must use the fenced-action protocol — without a fence " ++
-                        "parseFencedResponse falls through to its 'treat raw as done.reason' " ++
-                        "branch and the scenario silently passes without firing any state transition.",
+                    "Config.fixture_responses[{d}] has no recognised action fence:\n" ++
+                        "    {s}\n\n" ++
+                        "Fixtures must use the fenced-action protocol. Valid lang tags " ++
+                        "(see `parseLangTag` in llm/dialog.zig): exec / question / done — " ++
+                        "plus aliases (sh, bash, zsh, shell, ask, q, finish, end). Example:\n" ++
+                        "    ```done\n" ++
+                        "    <reason>\n" ++
+                        "    ```\n\n" ++
+                        "Without a fence parseFencedResponse falls through to its " ++
+                        "'treat raw as done.reason' branch and the scenario silently passes " ++
+                        "without firing any state transition.",
                     .{ i, resp },
                 ));
             }
