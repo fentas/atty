@@ -15,6 +15,9 @@ Fish/zsh-autosuggestion-style ghost text driven by your [Atuin](https://github.c
 * TOC
 {:toc}
 
+### How it works
+
+**Suggest path:**
 
 1. Every keystroke updates the line model; `onInput` copies the
    current buffer into the worker's latest-wins query slot and signals.

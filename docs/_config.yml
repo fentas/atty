@@ -33,7 +33,7 @@ exclude:
   - Gemfile
   - Gemfile.lock
 
-# Permalinks: /architecture/ /modules/ /providers/
+# Permalinks: /architecture/ /modules/ /modules/<name>/
 permalink: /:title/
 
 # Defaults — every page renders with the default layout unless overridden.

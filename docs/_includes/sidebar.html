@@ -102,7 +102,8 @@
         var target = openTrigger.getAttribute('data-submenu-target');
         if (panels[target]) {
           show(target);
-          var firstLink = panels[target].querySelector('a, button');
+          var firstLink = panels[target].querySelector('ul a') ||
+            panels[target].querySelector('a, button');
           if (firstLink) firstLink.focus();
         }
         return;

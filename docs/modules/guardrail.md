@@ -15,6 +15,7 @@ Confirmation prompt for dangerous commands.
 * TOC
 {:toc}
 
+### How it works
 
 When the user presses Enter:
 

@@ -8,8 +8,8 @@
     </a>
     <nav class="topnav-links">
       <a href="{{ '/getting-started/' | relative_url }}"{% if page.url == '/getting-started/' %} class="active"{% endif %}>Guide</a>
-      <a href="{{ '/providers/' | relative_url }}"{% if page.url == '/providers/' or page.url == '/llm/' %} class="active"{% endif %}>Modules</a>
-      <a href="{{ '/architecture/' | relative_url }}"{% if page.url == '/architecture/' or page.url == '/modules/' or page.url == '/operator-workflow/' %} class="active"{% endif %}>Advanced</a>
+      <a href="{{ '/modules/' | relative_url }}"{% if page.url contains '/modules/' or page.url == '/llm/' %} class="active"{% endif %}>Modules</a>
+      <a href="{{ '/architecture/' | relative_url }}"{% if page.url == '/architecture/' or page.url == '/operator-workflow/' %} class="active"{% endif %}>Advanced</a>
       <a href="{{ '/faq/' | relative_url }}"{% if page.url == '/faq/' %} class="active"{% endif %}>FAQ</a>
     </nav>
     <div class="topnav-right">

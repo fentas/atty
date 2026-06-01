@@ -267,7 +267,7 @@ The image is multi-arch (`linux/amd64`, `linux/arm64`) and the binary is musl-st
 | [`mouse_urls`](src/modules/mouse_urls.zig) *(opt-in)*        | `onOutput`, `onMouseClick`, `onInput`, `provideHintText`, `statusText` | Left-click a URL → `xdg-open`; `whitelist_only` / `never` / `ask_each` trust modes |
 | [`llm`](src/modules/llm/)                                    | `onInput`, `onLineCommit`, `onResize`, `provideGhostText`, `provideGhostList`, `provideErrorText`, `statusText`, `isOverlayActive` | `#: intent` → shell-command rewrite; Alt+A single, Alt+S dialog, Alt+R recall |
 
-Add your own under `src/modules/` and wire it into `config.modules`. Reference docs: [atty.sh/providers](https://atty.sh/providers/).
+Add your own under `src/modules/` and wire it into `config.modules`. Reference docs: [atty.sh/modules](https://atty.sh/modules/).
 
 &nbsp;
 
