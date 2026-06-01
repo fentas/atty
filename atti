@@ -40,34 +40,26 @@ resolve_b() {
 }
 
 fetch_b() {
-    local arch os tag url
-    case "$(uname -m)" in
-        x86_64|amd64) arch=x86_64 ;;
-        aarch64|arm64) arch=aarch64 ;;
-        *) err "unsupported arch: $(uname -m)"; exit 1 ;;
-    esac
-    case "$(uname -s)" in
-        Linux) os=linux ;;
-        Darwin) os=darwin ;;
-        *) err "unsupported OS: $(uname -s)"; exit 1 ;;
-    esac
-
-    log "fetching latest fentas/b release for ${os}-${arch}"
-    tag="$(curl -fsSL https://api.github.com/repos/fentas/b/releases/latest \
-            | sed -n 's/.*"tag_name": *"\(.*\)".*/\1/p' | head -n1)"
-    if [ -z "$tag" ]; then
-        err "could not resolve fentas/b latest tag (rate-limited? offline?)"
+    if ! command -v curl >/dev/null 2>&1; then
+        err "curl is required for bootstrap — install curl and re-run"
         exit 1
     fi
-    url="https://github.com/fentas/b/releases/download/${tag}/b-${os}-${arch}"
-    log "downloading ${url}"
-    if ! curl -fsSL -o "${BIN_DIR}/b.tmp" "$url"; then
-        err "download failed; check the URL or your network"
+    log "fetching b via the canonical installer (B_INSTALL_DIR=${BIN_DIR})"
+    # Delegate to fentas/b's own install.sh. That script knows the
+    # real asset layout (Go-style amd64/arm64 in tarballs across
+    # linux/darwin/freebsd), verifies SHA256 against checksums.txt,
+    # and follows GitHub's /releases/latest/download redirect so it
+    # doesn't burn an anonymous API request against the 60/h limit.
+    if ! B_INSTALL_DIR="${BIN_DIR}" curl -fsSL \
+            https://github.com/fentas/b/releases/latest/download/install.sh | sh; then
+        err "b bootstrap failed; see install.sh output above for the precise cause"
         exit 1
     fi
-    chmod +x "${BIN_DIR}/b.tmp"
-    mv "${BIN_DIR}/b.tmp" "${BIN_DIR}/b"
-    ok "installed b ${tag} → ${BIN_DIR}/b"
+    if [ ! -x "${BIN_DIR}/b" ]; then
+        err "b installed but ${BIN_DIR}/b is not executable — check install.sh logs"
+        exit 1
+    fi
+    ok "installed b → ${BIN_DIR}/b"
 }
 
 # Materialise argsh + gum (whatever b.yaml lists). `b i` is idempotent.
@@ -164,7 +156,7 @@ cmd_install() {
     sync_deps
 
     if [ -z "$features" ]; then
-        features="$(ATTI_FEATURES="$features" pick_features)"
+        features="$(pick_features)"
     fi
     if [ -z "$features" ]; then
         err "no features selected"
@@ -204,10 +196,14 @@ cmd_doctor() {
         log "user $USER is NOT in the atty group — run \`sudo usermod -aG atty \$USER\` + new shell"
     fi
 
-    if systemctl is-active --quiet atty-guard 2>/dev/null; then
-        ok "atty-guard.service is active"
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet atty-guard; then
+            ok "atty-guard.service is active"
+        else
+            log "atty-guard.service is NOT active — start with \`sudo systemctl start atty-guard\`"
+        fi
     else
-        log "atty-guard.service is NOT active — start with \`sudo systemctl start atty-guard\`"
+        log "systemctl not on PATH — non-systemd host (Alpine/OpenRC?); skip daemon state check"
     fi
 
     if [ -S /run/atty-guard/atty-guard.sock ]; then
