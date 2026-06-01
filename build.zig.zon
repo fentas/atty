@@ -1,6 +1,6 @@
 .{
     .name = .atty,
-    .version = "0.6.0", // x-release-please-version
+    .version = "0.7.0", // x-release-please-version
     .fingerprint = 0x93acfa9c244e260b, // generated once; do not change
     .minimum_zig_version = "0.16.0",
 
