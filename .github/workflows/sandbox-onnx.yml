@@ -48,7 +48,7 @@ jobs:
           driver: docker-container
 
       - name: Restore docker layer cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/.buildx-cache
           # ONNX cache key includes the pin file so a model bump
