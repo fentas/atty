@@ -6,6 +6,20 @@ title: Writing a module
 # Writing a module
 {:.no_toc}
 
+## Built-in modules
+
+| Module | Purpose | Default |
+|---|---|---|
+| `atuin` | Ghost suggestions + recording via Atuin's `atuin search` / `atuin history start` | opt-in |
+| `guardrail` | Comptime-list confirmation for `rm -rf`, `dd`, fork bombs, `curl … \| sh` | ✅ |
+| `history` | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history` | ✅ |
+| [`llm`](/llm/) | `#: <intent>` → command rewrite; Alt+A single, Alt+S dialog, Alt+R recall | opt-in |
+| [`mouse_links`](#mouse_links--click-a-file-path-in-output--editor-path) | Left-click a path token in output → `$EDITOR +LINE 'path'` | opt-in |
+| [`mouse_urls`](#mouse_urls--click-a-url-in-output--opener-with-a-trust-gate) | Left-click a URL → opener, gated by `whitelist_only` / `ask_each` trust | opt-in |
+| [`security_guard`](#security_guard--pre-enter-dangerous-command-intercept) | Pre-Enter Tier-1 + UDS to atty-guard sidecar; `Alt+Shift+W` warn dump | opt-in |
+
+`llm` has a dedicated page at [/llm/](/llm/); the linked anchors above point into sections later in this file; the unlinked rows (`atuin` / `guardrail` / `history`) are documented inline in the framework examples ([Minimal example — Upper](#minimal-example--upper) and [Composing two ghost providers](#composing-two-ghost-providers)). Per-module pages for everything else are tracked at [#378](https://github.com/fentas/atty/issues/378).
+
 * TOC
 {:toc}
 
