@@ -1,6 +1,7 @@
 ---
 layout: default
 title: Writing a module
+permalink: /modules/
 ---
 
 # Writing a module
@@ -510,14 +511,6 @@ short-circuiting modules (guardrail) first; passive ones (Atuin) last.
 For `provideGhostText` the *first non-null* result wins, so order
 expresses priority. There's no negotiation between modules — a later
 module is asked only if every earlier one returned null.
-
-### `security_guard`, `mouse_links`, `mouse_urls`
-
-These three modules now have their own pages:
-
-- [`security_guard`]({{ '/modules/security_guard/' | relative_url }}) — pre-Enter Tier-1 + UDS to atty-guard sidecar; Alt+Shift+W warn-event dump
-- [`mouse_links`]({{ '/modules/mouse_links/' | relative_url }}) — click a file path → `$EDITOR <path>`
-- [`mouse_urls`]({{ '/modules/mouse_urls/' | relative_url }}) — click a URL → opener with a trust gate
 
 ### Composing two ghost providers
 
