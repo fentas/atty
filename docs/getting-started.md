@@ -13,7 +13,7 @@ a tour of the things you can turn on once you're comfortable.
 
 Pick whichever feels right:
 
-| | Binary | Source | Dev | **Full suite** |
+| What you get | Binary | Source | Dev | **Full suite** |
 |---|---|---|---|---|
 | atty binary | ✅ | ✅ | ✅ | ✅ |
 | atty-guard daemon (systemd) | — | — | — | ✅ |
@@ -67,7 +67,7 @@ to edit `src/config.zig` and rebuild in place.
 
 ### Full install (atty + daemon + eBPF + atoms)
 
-The supply-chain protection lives in `atty-guard`, a Rust sidecar daemon that runs as a system service and (optionally) attaches eBPF LSM hooks for kernel-level enforcement. Without it you still get `guardrail` and `security_guard`'s in-proc Tier-1 patterns; with it you get the full V2 stack: per-PID threat tracking, atom corpus updates, OSV live npm lookup, and (with eBPF) the kernel can refuse the `execve` itself.
+The supply-chain protection lives in `atty-guard`, a Rust sidecar daemon that runs as a system service and (optionally) attaches eBPF LSM hooks for kernel-level enforcement. Without it you still get `guardrail` and `security_guard`'s in-proc Tier-1 patterns; with it you get per-PID threat tracking, atom corpus updates, OSV live npm lookup, and (with eBPF) the kernel can refuse the `execve` itself.
 
 One command does the whole install:
 
@@ -98,10 +98,10 @@ Verify with `atty doctor` — it walks through the OSC 133 integration chain, da
 
 | Feature flag | What it adds |
 |---|---|
-| `tier2-onnx` | Tract-based ONNX inference for the Tier-2 SLM classifier (SecureBERT 2 / Qwen2-5-Coder) |
+| `tier2-onnx` | Tract-based ONNX inference for the Tier-2 SLM classifier (SecureBERT 2 / Qwen2.5-Coder) |
 | `osv-live` | Live OSV.dev lookup for npm/PyPI package metadata in the supply-chain classifier |
 | `atoms-fetch` | Daemon-side scheduled fetch of GTFOBins + Sigma atom corpus (writes to `/var/lib/atty-guard/atoms.system.txt`) |
-| `ebpf` | LSM + execve + AF_ALG tracepoint hooks. Triggers the systemd `ebpf.conf` drop-in automatically when present |
+| `ebpf` | LSM + execve + AF_ALG tracepoint hooks. Triggers the systemd `ebpf.conf` drop-in when included in `GUARD_FEATURES` at install time |
 
 Drop any flag you don't want — `GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch` for the full classifier without kernel involvement; `GUARD_FEATURES=ebpf` alone for kernel hooks without the SLM.
 

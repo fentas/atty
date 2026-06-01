@@ -10,15 +10,15 @@ title: Writing a module
 
 | Module | Purpose | Default |
 |---|---|---|
-| [`atuin`](#composing-two-ghost-providers) | Ghost suggestions + recording via Atuin's `atuin search` / `atuin history start` | opt-in |
-| [`guardrail`](#minimal-example--upper) | Comptime-list confirmation for `rm -rf`, `dd`, fork bombs, `curl … \| sh` | ✅ |
-| [`history`](#composing-two-ghost-providers) | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history` | ✅ |
-| [`llm`](#composing-two-ghost-providers) | `#: <intent>` → command rewrite; Alt+A single, Alt+S dialog, Alt+R recall | opt-in |
+| `atuin` | Ghost suggestions + recording via Atuin's `atuin search` / `atuin history start` | opt-in |
+| `guardrail` | Comptime-list confirmation for `rm -rf`, `dd`, fork bombs, `curl … \| sh` | ✅ |
+| `history` | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history` | ✅ |
+| `llm` | `#: <intent>` → command rewrite; Alt+A single, Alt+S dialog, Alt+R recall | opt-in |
 | [`mouse_links`](#mouse_links--click-a-file-path-in-output--editor-path) | Left-click a path token in output → `$EDITOR +LINE 'path'` | opt-in |
 | [`mouse_urls`](#mouse_urls--click-a-url-in-output--opener-with-a-trust-gate) | Left-click a URL → opener, gated by `whitelist_only` / `ask_each` trust | opt-in |
 | [`security_guard`](#security_guard--pre-enter-dangerous-command-intercept) | Pre-Enter Tier-1 + UDS to atty-guard sidecar; `Alt+Shift+W` warn dump | opt-in |
 
-A per-module page split is tracked at [#378](https://github.com/fentas/atty/issues/378). Until then the section anchors above link into this single page.
+Linked rows have dedicated sections below; the unlinked ones are documented inline in the framework examples (see [Minimal example — Upper](#minimal-example--upper) and [Composing two ghost providers](#composing-two-ghost-providers)). Per-module pages are tracked at [#378](https://github.com/fentas/atty/issues/378).
 
 * TOC
 {:toc}
