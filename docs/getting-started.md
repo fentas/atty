@@ -13,6 +13,18 @@ a tour of the things you can turn on once you're comfortable.
 
 Pick whichever feels right:
 
+| | Binary | Source | Dev | **Full suite** |
+|---|---|---|---|---|
+| atty binary | ✅ | ✅ | ✅ | ✅ |
+| atty-guard daemon (systemd) | — | — | — | ✅ |
+| eBPF kernel hooks | — | — | — | ✅ (opt-in) |
+| Atom corpus auto-fetch | — | — | — | ✅ |
+| Editable in place | — | ✅ | ✅ | ✅ |
+| Requires `sudo` | — | — | — | ✅ |
+| Section below | [binary](#pre-built-binary-fastest) | [source](#build-from-source-suckless-way) | [git + make](#git--make-clone--build) | [full](#full-install-atty--daemon--ebpf--atoms) |
+
+If you just want the prompt-side polish (ghost text, guardrail, LLM mode) → pick **Binary** or **Source**. If you want the kernel-level supply-chain protection too → jump to [Full install](#full-install-atty--daemon--ebpf--atoms).
+
 ### Pre-built binary (fastest)
 
 ```sh
@@ -50,8 +62,50 @@ to edit `src/config.zig` and rebuild in place.
 > The bare `make build` / `make link` targets also build and link
 > the `atty-guard` Rust sidecar (Cargo required). The
 > `-atty`-suffixed targets above are the minimal path — Zig only,
-> no cargo dependency. See [Security guard](/security-guard/) for
-> the daemon flow once you want it.
+> no cargo dependency. The next subsection covers the full daemon
+> install when you want it.
+
+### Full install (atty + daemon + eBPF + atoms)
+
+The supply-chain protection lives in `atty-guard`, a Rust sidecar daemon that runs as a system service and (optionally) attaches eBPF LSM hooks for kernel-level enforcement. Without it you still get `guardrail` and `security_guard`'s in-proc Tier-1 patterns; with it you get the full V2 stack: per-PID threat tracking, atom corpus updates, OSV live npm lookup, and (with eBPF) the kernel can refuse the `execve` itself.
+
+One command does the whole install:
+
+```sh
+git clone https://github.com/fentas/atty.git
+cd atty
+sudo make install GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf
+```
+
+This:
+
+- Builds atty (Zig, ~10 sec).
+- Builds atty-guard with all features (Rust, ~1 min cold).
+- Runs `atty-guard/contrib/install.sh --with-ebpf`, which:
+  - Creates `atty:atty` system user/group.
+  - Installs the binary at `/usr/local/bin/atty-guard` + systemd unit at `/etc/systemd/system/atty-guard.service`.
+  - Drops in the eBPF override (`atty-guard.service.d/ebpf.conf`) with `CAP_BPF`/`CAP_PERFMON` + widened seccomp filter + `--enable-ebpf` on `ExecStart`.
+  - `daemon-reload` → `enable` → `start`.
+
+Then add yourself to the `atty` group so atty can talk to the daemon's UDS at `/run/atty-guard/atty-guard.sock`:
+
+```sh
+sudo usermod -aG atty $USER
+newgrp atty                # or log out + back in
+```
+
+Verify with `atty doctor` — it walks through the OSC 133 integration chain, daemon reachability, eBPF attach status, and atoms file age. See [Operator workflow](/operator-workflow/) for the full runbook: atom corpus management, warn-mode (`--ebpf-mode=warn`), per-UID trust file editing.
+
+| Feature flag | What it adds |
+|---|---|
+| `tier2-onnx` | Tract-based ONNX inference for the Tier-2 SLM classifier (SecureBERT 2 / Qwen2-5-Coder) |
+| `osv-live` | Live OSV.dev lookup for npm/PyPI package metadata in the supply-chain classifier |
+| `atoms-fetch` | Daemon-side scheduled fetch of GTFOBins + Sigma atom corpus (writes to `/var/lib/atty-guard/atoms.system.txt`) |
+| `ebpf` | LSM + execve + AF_ALG tracepoint hooks. Triggers the systemd `ebpf.conf` drop-in automatically when present |
+
+Drop any flag you don't want — `GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch` for the full classifier without kernel involvement; `GUARD_FEATURES=ebpf` alone for kernel hooks without the SLM.
+
+> **Coming soon:** an `atti` lifecycle CLI ([#377](https://github.com/fentas/atty/issues/377)) that walks you through these flags interactively (gum UI) and handles updates / atom refreshes from one command.
 
 ### Docker
 

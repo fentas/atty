@@ -75,6 +75,20 @@ Either one installs to `~/.local/bin/atty` by default. Both honor
 `ATTY_VERSION=…`; the source installer honors `ATTY_SRC=…`,
 `ATTY_NONINTERACTIVE=1`, and `REPO_URL=…`.
 
+The two installers above ship the **proxy only**. If you want the full
+supply-chain protection — the `atty-guard` Rust daemon with eBPF LSM
+hooks, the threat-classification pipeline, and scheduled atom-corpus
+updates — clone the repo and run:
+
+```bash
+sudo make install GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf
+```
+
+Sets up the `atty:atty` system user, installs the systemd unit, drops
+in the eBPF override, starts the daemon. Then `sudo usermod -aG atty
+$USER` + a new shell. See [getting-started/#full-install](https://atty.sh/getting-started/#full-install-atty--daemon--ebpf--atoms)
+for the breakdown of each feature flag and [operator-workflow](https://atty.sh/operator-workflow/) for verification + atom corpus management.
+
 For container use:
 
 ```bash
