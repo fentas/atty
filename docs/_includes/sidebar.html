@@ -54,8 +54,12 @@
            | sort: "url" %}
         <ul class="sidebar-modules-list">
           {% for p in module_pages -%}
-            {% assign segments = p.url | split: '/' %}
-            {% assign label = segments | slice: -2, 1 | first %}
+            {%- comment -%}
+              `p.url` is e.g. `/modules/atuin/` or `/llm/`. Ruby's `split('/')`
+              strips the trailing empty token, so the last element is the slug
+              we want as the visible label.
+            {%- endcomment -%}
+            {% assign label = p.url | split: '/' | last %}
             {% if p.module_default %}{% assign flag = 'default' %}{% else %}{% assign flag = 'opt-in' %}{% endif %}
             <li><a href="{{ p.url | relative_url }}"{% if page.url == p.url %} class="active"{% endif %}>{{ label }} <span class="module-flag" data-flag="{{ flag }}">{{ flag }}</span></a></li>
           {%- endfor %}
