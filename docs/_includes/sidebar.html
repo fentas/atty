@@ -1,36 +1,122 @@
 <aside class="sidebar" aria-label="Documentation navigation">
-  <nav class="sidebar-nav">
-    <div class="sidebar-group">
-      <h3>Guide</h3>
-      <ul>
-        <li><a href="{{ '/getting-started/' | relative_url }}"{% if page.url == '/getting-started/' %} class="active"{% endif %}>Getting started</a></li>
-        <li><a href="{{ '/faq/' | relative_url }}"{% if page.url == '/faq/' %} class="active"{% endif %}>FAQ</a></li>
-      </ul>
+  <nav class="sidebar-nav" data-sidebar>
+    <!-- Main panel (default view). -->
+    <div class="sidebar-panel sidebar-panel-main" data-panel="main">
+      <div class="sidebar-group">
+        <h3>Guide</h3>
+        <ul>
+          <li><a href="{{ '/getting-started/' | relative_url }}"{% if page.url == '/getting-started/' %} class="active"{% endif %}>Getting started</a></li>
+          <li><a href="{{ '/faq/' | relative_url }}"{% if page.url == '/faq/' %} class="active"{% endif %}>FAQ</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-group">
+        <h3>
+          <button type="button" class="sidebar-submenu-toggle" data-submenu-target="modules" aria-haspopup="true" aria-controls="sidebar-modules">
+            Modules <span class="chevron" aria-hidden="true">›</span>
+          </button>
+        </h3>
+        <ul>
+          <li><a href="{{ '/modules/' | relative_url }}"{% if page.url == '/modules/' %} class="active"{% endif %}>Writing a module</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-group">
+        <h3>Advanced</h3>
+        <ul>
+          <li><a href="{{ '/architecture/' | relative_url }}"{% if page.url == '/architecture/' %} class="active"{% endif %}>Architecture</a></li>
+          <li><a href="{{ '/operator-workflow/' | relative_url }}"{% if page.url == '/operator-workflow/' %} class="active"{% endif %}>Operator workflow</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-group">
+        <h3>External</h3>
+        <ul>
+          <li><a href="https://github.com/fentas/atty" rel="noopener">GitHub&nbsp;↗</a></li>
+          <li><a href="https://github.com/fentas/atty/issues" rel="noopener">Report a bug&nbsp;↗</a></li>
+        </ul>
+      </div>
     </div>
-    <div class="sidebar-group">
-      <h3>Modules</h3>
-      <ul>
-        <li><a href="{{ '/providers/' | relative_url }}"{% if page.url == '/providers/' %} class="active"{% endif %}>Built-in modules</a></li>
-        <li><a href="{{ '/llm/' | relative_url }}"{% if page.url == '/llm/' %} class="active"{% endif %}>LLM module</a></li>
-        <li><a href="{{ '/modules/security_guard/' | relative_url }}"{% if page.url == '/modules/security_guard/' %} class="active"{% endif %}>security_guard</a></li>
-        <li><a href="{{ '/modules/mouse_links/' | relative_url }}"{% if page.url == '/modules/mouse_links/' %} class="active"{% endif %}>mouse_links</a></li>
-        <li><a href="{{ '/modules/mouse_urls/' | relative_url }}"{% if page.url == '/modules/mouse_urls/' %} class="active"{% endif %}>mouse_urls</a></li>
-      </ul>
-    </div>
-    <div class="sidebar-group">
-      <h3>Advanced</h3>
-      <ul>
-        <li><a href="{{ '/architecture/' | relative_url }}"{% if page.url == '/architecture/' %} class="active"{% endif %}>Architecture</a></li>
-        <li><a href="{{ '/modules/' | relative_url }}"{% if page.url == '/modules/' %} class="active"{% endif %}>Writing a module</a></li>
-        <li><a href="{{ '/operator-workflow/' | relative_url }}"{% if page.url == '/operator-workflow/' %} class="active"{% endif %}>Operator workflow</a></li>
-      </ul>
-    </div>
-    <div class="sidebar-group">
-      <h3>External</h3>
-      <ul>
-        <li><a href="https://github.com/fentas/atty" rel="noopener">GitHub&nbsp;↗</a></li>
-        <li><a href="https://github.com/fentas/atty/issues" rel="noopener">Report a bug&nbsp;↗</a></li>
-      </ul>
+
+    <!-- Modules submenu (hidden until activated). -->
+    <div class="sidebar-panel sidebar-panel-submenu" id="sidebar-modules" data-panel="modules" hidden>
+      <div class="sidebar-group">
+        <h3>
+          <button type="button" class="sidebar-submenu-back" data-submenu-back aria-label="Back to main navigation">
+            <span class="chevron chevron-back" aria-hidden="true">‹</span> Back
+          </button>
+        </h3>
+        <ul class="sidebar-modules-list">
+          <li><a href="{{ '/modules/atuin/' | relative_url }}"{% if page.url == '/modules/atuin/' %} class="active"{% endif %}>atuin <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
+          <li><a href="{{ '/modules/guardrail/' | relative_url }}"{% if page.url == '/modules/guardrail/' %} class="active"{% endif %}>guardrail <span class="module-flag" data-flag="default">default</span></a></li>
+          <li><a href="{{ '/modules/history/' | relative_url }}"{% if page.url == '/modules/history/' %} class="active"{% endif %}>history <span class="module-flag" data-flag="default">default</span></a></li>
+          <li><a href="{{ '/llm/' | relative_url }}"{% if page.url == '/llm/' %} class="active"{% endif %}>llm <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
+          <li><a href="{{ '/modules/mouse_links/' | relative_url }}"{% if page.url == '/modules/mouse_links/' %} class="active"{% endif %}>mouse_links <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
+          <li><a href="{{ '/modules/mouse_urls/' | relative_url }}"{% if page.url == '/modules/mouse_urls/' %} class="active"{% endif %}>mouse_urls <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
+          <li><a href="{{ '/modules/security_guard/' | relative_url }}"{% if page.url == '/modules/security_guard/' %} class="active"{% endif %}>security_guard <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
+        </ul>
+        <p class="sidebar-modules-footer"><a href="{{ '/modules/' | relative_url }}">Writing a module &rarr;</a></p>
+      </div>
     </div>
   </nav>
 </aside>
+
+<script>
+  (function () {
+    var root = document.querySelector('[data-sidebar]');
+    if (!root) return;
+
+    var panels = {
+      main: root.querySelector('[data-panel="main"]'),
+      modules: root.querySelector('[data-panel="modules"]')
+    };
+    var startPanel = 'main';
+    // Auto-open the modules panel when landing on a module page so the
+    // sidebar matches where the reader actually is.
+    var path = (window.location.pathname || '').replace(/\/+$/, '/');
+    if (panels.modules) {
+      var moduleLinks = panels.modules.querySelectorAll('a[href]');
+      for (var i = 0; i < moduleLinks.length; i++) {
+        var href = moduleLinks[i].getAttribute('href') || '';
+        var normalized = href.replace(/\/+$/, '/');
+        if (normalized && (path === normalized || path.indexOf(normalized) === 0)) {
+          startPanel = 'modules';
+          break;
+        }
+      }
+    }
+
+    function show(name) {
+      Object.keys(panels).forEach(function (key) {
+        var el = panels[key];
+        if (!el) return;
+        if (key === name) {
+          el.hidden = false;
+        } else {
+          el.hidden = true;
+        }
+      });
+    }
+
+    root.addEventListener('click', function (evt) {
+      var openTrigger = evt.target.closest('[data-submenu-target]');
+      if (openTrigger) {
+        evt.preventDefault();
+        var target = openTrigger.getAttribute('data-submenu-target');
+        if (panels[target]) {
+          show(target);
+          var firstLink = panels[target].querySelector('a, button');
+          if (firstLink) firstLink.focus();
+        }
+        return;
+      }
+      var backTrigger = evt.target.closest('[data-submenu-back]');
+      if (backTrigger) {
+        evt.preventDefault();
+        show('main');
+        var modulesTrigger = root.querySelector('[data-submenu-target="modules"]');
+        if (modulesTrigger) modulesTrigger.focus();
+      }
+    });
+
+    // Initialise once panels are wired.
+    show(startPanel);
+  })();
+</script>

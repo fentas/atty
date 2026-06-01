@@ -11,15 +11,15 @@ permalink: /modules/
 
 | Module | Purpose | Default |
 |---|---|---|
-| `atuin` | Ghost suggestions + recording via Atuin's `atuin search` / `atuin history start` | opt-in |
-| `guardrail` | Comptime-list confirmation for `rm -rf`, `dd`, fork bombs, `curl … \| sh` | ✅ |
-| `history` | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history` | ✅ |
-| [`llm`](/llm/) | `#: <intent>` → command rewrite; Alt+A single, Alt+S dialog, Alt+R recall | opt-in |
-| [`mouse_links`](/modules/mouse_links/) | Left-click a path token in output → `$EDITOR +LINE 'path'` | opt-in |
-| [`mouse_urls`](/modules/mouse_urls/) | Left-click a URL → opener, gated by `whitelist_only` / `ask_each` trust | opt-in |
-| [`security_guard`](/modules/security_guard/) | Pre-Enter Tier-1 + UDS to atty-guard sidecar; `Alt+Shift+W` warn dump | opt-in |
+| [`atuin`]({{ '/modules/atuin/' | relative_url }}) | Ghost suggestions + recording via Atuin's `atuin search` / `atuin history start` | opt-in |
+| [`guardrail`]({{ '/modules/guardrail/' | relative_url }}) | Comptime-list confirmation for `rm -rf`, `dd`, fork bombs, `curl … \| sh` | ✅ |
+| [`history`]({{ '/modules/history/' | relative_url }}) | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history` | ✅ |
+| [`llm`]({{ '/llm/' | relative_url }}) | `#: <intent>` → command rewrite; Alt+A single, Alt+S dialog, Alt+R recall | opt-in |
+| [`mouse_links`]({{ '/modules/mouse_links/' | relative_url }}) | Left-click a path token in output → `$EDITOR +LINE 'path'` | opt-in |
+| [`mouse_urls`]({{ '/modules/mouse_urls/' | relative_url }}) | Left-click a URL → opener, gated by `whitelist_only` / `ask_each` trust | opt-in |
+| [`security_guard`]({{ '/modules/security_guard/' | relative_url }}) | Pre-Enter Tier-1 + UDS to atty-guard sidecar; `Alt+Shift+W` warn dump | opt-in |
 
-The linked rows lead to dedicated pages; `atuin`, `guardrail`, and `history` are documented inline below in the framework examples ([Minimal example — Upper](#minimal-example--upper) and [Composing two ghost providers](#composing-two-ghost-providers)).
+Every row has a dedicated page — click through for configuration knobs and limitations.
 
 * TOC
 {:toc}

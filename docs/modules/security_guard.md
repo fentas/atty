@@ -1,6 +1,7 @@
 ---
 layout: default
 title: security_guard module
+module_default: false
 permalink: /modules/security_guard/
 ---
 
