@@ -11,7 +11,7 @@
       </div>
       <div class="sidebar-group">
         <h3>
-          <button type="button" class="sidebar-submenu-toggle" data-submenu-target="modules" aria-haspopup="true" aria-controls="sidebar-modules">
+          <button type="button" class="sidebar-submenu-toggle" data-submenu-target="modules" aria-haspopup="true" aria-controls="sidebar-modules" aria-expanded="false">
             Modules <span class="chevron" aria-hidden="true">›</span>
           </button>
         </h3>
@@ -43,14 +43,22 @@
             <span class="chevron chevron-back" aria-hidden="true">‹</span> Back
           </button>
         </h3>
+        {%- comment -%}
+          Module list is derived from front-matter — each module page declares
+          `module_default: true|false`, which doubles as both the membership
+          marker and the default/opt-in badge. Sort by URL so the order is
+          deterministic regardless of title casing.
+        {%- endcomment -%}
+        {% assign module_pages = site.pages
+           | where_exp: "p", "p.module_default == true or p.module_default == false"
+           | sort: "url" %}
         <ul class="sidebar-modules-list">
-          <li><a href="{{ '/modules/atuin/' | relative_url }}"{% if page.url == '/modules/atuin/' %} class="active"{% endif %}>atuin <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
-          <li><a href="{{ '/modules/guardrail/' | relative_url }}"{% if page.url == '/modules/guardrail/' %} class="active"{% endif %}>guardrail <span class="module-flag" data-flag="default">default</span></a></li>
-          <li><a href="{{ '/modules/history/' | relative_url }}"{% if page.url == '/modules/history/' %} class="active"{% endif %}>history <span class="module-flag" data-flag="default">default</span></a></li>
-          <li><a href="{{ '/llm/' | relative_url }}"{% if page.url == '/llm/' %} class="active"{% endif %}>llm <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
-          <li><a href="{{ '/modules/mouse_links/' | relative_url }}"{% if page.url == '/modules/mouse_links/' %} class="active"{% endif %}>mouse_links <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
-          <li><a href="{{ '/modules/mouse_urls/' | relative_url }}"{% if page.url == '/modules/mouse_urls/' %} class="active"{% endif %}>mouse_urls <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
-          <li><a href="{{ '/modules/security_guard/' | relative_url }}"{% if page.url == '/modules/security_guard/' %} class="active"{% endif %}>security_guard <span class="module-flag" data-flag="opt-in">opt-in</span></a></li>
+          {% for p in module_pages -%}
+            {% assign segments = p.url | split: '/' %}
+            {% assign label = segments | slice: -2, 1 | first %}
+            {% if p.module_default %}{% assign flag = 'default' %}{% else %}{% assign flag = 'opt-in' %}{% endif %}
+            <li><a href="{{ p.url | relative_url }}"{% if page.url == p.url %} class="active"{% endif %}>{{ label }} <span class="module-flag" data-flag="{{ flag }}">{{ flag }}</span></a></li>
+          {%- endfor %}
         </ul>
         <p class="sidebar-modules-footer"><a href="{{ '/modules/' | relative_url }}">Writing a module &rarr;</a></p>
       </div>
@@ -69,10 +77,12 @@
     };
     var startPanel = 'main';
     // Auto-open the modules panel when landing on a module page so the
-    // sidebar matches where the reader actually is.
+    // sidebar matches where the reader actually is. Only the module-detail
+    // links count; the "Writing a module" footer link would otherwise
+    // false-fire on the framework page (its href is a prefix of all others).
     var path = (window.location.pathname || '').replace(/\/+$/, '/');
     if (panels.modules) {
-      var moduleLinks = panels.modules.querySelectorAll('a[href]');
+      var moduleLinks = panels.modules.querySelectorAll('.sidebar-modules-list a[href]');
       for (var i = 0; i < moduleLinks.length; i++) {
         var href = moduleLinks[i].getAttribute('href') || '';
         var normalized = href.replace(/\/+$/, '/');
@@ -93,6 +103,8 @@
           el.hidden = true;
         }
       });
+      var toggle = root.querySelector('[data-submenu-target="modules"]');
+      if (toggle) toggle.setAttribute('aria-expanded', name === 'modules' ? 'true' : 'false');
     }
 
     root.addEventListener('click', function (evt) {

@@ -168,5 +168,3 @@ blocking window is preferable to a third worker-mailbox slot.
   (coalesced — typing 5 chars quickly results in 1–2 lookups, not 5).
 - `provideGhostText` is a mutex+memcpy, no allocations beyond the
   per-dispatch `ctx.scratch`.
-
-[Atuin]: https://github.com/atuinsh/atuin
