@@ -36,14 +36,10 @@ jobs:
         run: zig build itest --summary all
 
       - name: zig build e2e
-        # Scripted-PTY scenarios + VT grid diff. Catches drift in
-        # rendering, the LLM fixture protocol, the keymap, and
-        # OSC 133 wiring that the unit tests miss. Until this job
-        # was added, e2e ran ONLY in `release.yml` as a pre-release
-        # smoke check — two weeks of fixture + golden drift accumu-
-        # lated invisibly and v0.6.0 + v0.7.0 binary releases never
-        # shipped (see #373 / #374). Run on every push so drift
-        # surfaces the same day the code that caused it lands.
+        # Scripted-PTY scenarios + VT grid diff. Catches rendering,
+        # LLM fixture protocol, keymap and OSC 133 drift the unit
+        # tests miss. Running on every push surfaces drift the day
+        # the code that caused it lands, not at the next release.
         run: zig build e2e --summary all
 
       - name: smoke test

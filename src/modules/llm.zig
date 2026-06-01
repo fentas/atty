@@ -286,21 +286,16 @@ pub fn configure(comptime cfg: Config) type {
                 @compileError("Config.provider.subprocess.argv must have a non-empty argv[0]");
             },
         }
-        // Fixture-response sanity. `parseFencedResponse` accepts
-        // bare prose because real LLMs sometimes reply without a
-        // fence — the prose lands as a `.done` with the text as
-        // the reason. That fallback is correct for production but
-        // hostile to test fidelity: a stale e2e fixture (e.g.
-        // ` `{"action":"exec",…}` ` left over from before the
-        // fenced-action refactor) parses as `.done` instead of
-        // firing the `.suggesting` state the scenario was designed
-        // to pin. The PR that introduced the fenced protocol left
-        // all e2e fixtures behind in raw-JSON form and the
-        // scenarios silently passed for two weeks (see #373).
+        // Fixture-response sanity. `parseFencedResponse` is
+        // deliberately lenient — bare prose without a fence lands
+        // as a `.done` with the text as the reason, matching how
+        // real models sometimes reply. That fallback is wrong for
+        // test fixtures: a fixture without a fence parses as
+        // `.done` instead of firing the dialog state the scenario
+        // is designed to pin, and the scenario silently passes
+        // without exercising the protocol.
         //
-        // Catch the drift at build time. Every `fixture_responses`
-        // entry must contain at least one recognised action fence.
-        // Real-LLM lenient parsing is unaffected — production
+        // Real-LLM lenient parsing is unaffected; production
         // responses never flow through `configure`.
         for (cfg.fixture_responses, 0..) |resp, i| {
             if (!dialog.hasActionFence(resp)) {
