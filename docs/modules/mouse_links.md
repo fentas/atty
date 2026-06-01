@@ -1,6 +1,7 @@
 ---
 layout: default
 title: mouse_links module
+module_default: false
 permalink: /modules/mouse_links/
 ---
 

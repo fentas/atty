@@ -1,6 +1,7 @@
 ---
 layout: default
 title: LLM module
+module_default: false
 ---
 
 # LLM module — `#: <prompt>` for shell-command generation

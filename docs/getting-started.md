@@ -241,7 +241,7 @@ Want the LLM `#: prompt` flow? See the [LLM module page][llm].
 
 - The **[FAQ](/faq/)** answers the most common "but what about…"
   questions.
-- **[Built-in modules](/providers/)** lists every module that ships
+- **[Built-in modules](/modules/)** lists every module that ships
   with atty + its config knobs.
 - **[Operator workflow](/operator-workflow/)** is the deep security
   install (atty-guard daemon, eBPF, atom corpus) — only if you want
