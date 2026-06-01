@@ -1,6 +1,7 @@
 ---
 layout: default
 title: Writing a module
+permalink: /modules/
 ---
 
 # Writing a module
@@ -14,11 +15,11 @@ title: Writing a module
 | `guardrail` | Comptime-list confirmation for `rm -rf`, `dd`, fork bombs, `curl … \| sh` | ✅ |
 | `history` | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history` | ✅ |
 | [`llm`](/llm/) | `#: <intent>` → command rewrite; Alt+A single, Alt+S dialog, Alt+R recall | opt-in |
-| [`mouse_links`](#mouse_links--click-a-file-path-in-output--editor-path) | Left-click a path token in output → `$EDITOR +LINE 'path'` | opt-in |
-| [`mouse_urls`](#mouse_urls--click-a-url-in-output--opener-with-a-trust-gate) | Left-click a URL → opener, gated by `whitelist_only` / `ask_each` trust | opt-in |
-| [`security_guard`](#security_guard--pre-enter-dangerous-command-intercept) | Pre-Enter Tier-1 + UDS to atty-guard sidecar; `Alt+Shift+W` warn dump | opt-in |
+| [`mouse_links`](/modules/mouse_links/) | Left-click a path token in output → `$EDITOR +LINE 'path'` | opt-in |
+| [`mouse_urls`](/modules/mouse_urls/) | Left-click a URL → opener, gated by `whitelist_only` / `ask_each` trust | opt-in |
+| [`security_guard`](/modules/security_guard/) | Pre-Enter Tier-1 + UDS to atty-guard sidecar; `Alt+Shift+W` warn dump | opt-in |
 
-`llm` has a dedicated page at [/llm/](/llm/); the linked anchors above point into sections later in this file; the unlinked rows (`atuin` / `guardrail` / `history`) are documented inline in the framework examples ([Minimal example — Upper](#minimal-example--upper) and [Composing two ghost providers](#composing-two-ghost-providers)). Per-module pages for everything else are tracked at [#378](https://github.com/fentas/atty/issues/378).
+The linked rows lead to dedicated pages; `atuin`, `guardrail`, and `history` are documented inline below in the framework examples ([Minimal example — Upper](#minimal-example--upper) and [Composing two ghost providers](#composing-two-ghost-providers)).
 
 * TOC
 {:toc}
@@ -510,101 +511,6 @@ short-circuiting modules (guardrail) first; passive ones (Atuin) last.
 For `provideGhostText` the *first non-null* result wins, so order
 expresses priority. There's no negotiation between modules — a later
 module is asked only if every earlier one returned null.
-
-### `security_guard` — pre-Enter dangerous-command intercept
-
-A second module in the guardrail family. Where `guardrail` matches a comptime list of patterns with a fixed `confirm`/`block`/`warn` behaviour, `security_guard` aims at supply-chain / drive-by-install shapes (`curl … | sh`, `npm install <flagged-pkg>`, `bash -c "<long-b64>"`) and is engineered for opt-in plus a tightening V2 path:
-
-| Layer  | What runs                                                                            |
-|--------|--------------------------------------------------------------------------------------|
-| V1     | In-proc Tier-1 patterns + per-user SHA-256 trust cache. `[y]es / [t]rust / cancel`.  |
-| V2-A   | `atty-guard` Rust sidecar mirrors Tier-1; gains in-mem PID → ThreatLevel map.        |
-| V2-D   | atty queries the sidecar over UDS before its own in-proc patterns. Graceful fallback.|
-| V2-E   | `atty-guard/contrib/install.sh` + hardened `atty-guard.service` system daemon.       |
-| V2-C   | Pluggable Tier-2: `--tier2 stub|heuristic|onnx` (regex / heuristic / ONNX SLM).      |
-| V2-B   | eBPF LSM hook (`bprm_check_security`) + execve + AF_ALG tracepoints — shipped.       |
-| V2-G/H/I | AtomMatcher (Aho-Corasick) + sliding window + atom fetcher (GTFOBins / sanitized Sigma). |
-| V2-J   | Threat-level accumulator: independent-probability combine across Tier-1 + Tier-2.    |
-| V2-J-2 | Opt-in auto-Block escalation. Daemon-`Block` verdict triggers a red `REFUSED` line + clears readline atty-side (no prompt). |
-
-Default: disabled. Opt in via:
-
-```zig
-pub const modules = .{
-    atty.modules.security_guard.configure(.{ .enabled = true }),
-    atty.modules.guardrail.configure(.{}),
-    atty.modules.history.configure(.{}),
-};
-```
-
-Optional sidecar (after `atty-guard/contrib/install.sh`):
-
-```zig
-.security_guard.configure(.{
-    .enabled = true,
-    .daemon_socket_path = "/run/atty-guard/atty-guard.sock",
-}),
-```
-
-The daemon runs as a system service under `atty:atty`. Your user
-account must be in the `atty` group to connect:
-
-```sh
-sudo usermod -aG atty $USER
-# log out + back in (or `newgrp atty` for a single shell)
-```
-
-**Block-refuse path (V2-J-2).** When the daemon returns `Verdict::Block` — either via the auto-Block escalation knob (`[accumulator] block_threshold = 0.95` in TOML) or because the PID-tree threat map says this PID is already Critical — atty does NOT prompt. It writes a one-shot `REFUSED — <reason>` line styled by `Config.refused_style` (bold red 8-color default), marks the shell PID Critical, and clears readline (Ctrl+U). Trust-cache hits short-circuit BOTH the Warn-prompt path and the Block-refuse path so prior `[t]rust` choices survive.
-
-Full architecture: `docs/security-guard-design.md`. Daemon: `atty-guard/`.
-
-When the daemon runs `--ebpf-mode=warn`, daemon-side `Block` verdicts emit kernel ringbuf events (no EPERM) instead of killing the execve. atty's `WarnSubscriber` buffers them; the statusbar shows `⚠ N` and `Alt+Shift+W` dumps the buffer into scrollback + clears it (see `docs/operator-workflow.md`).
-
-### `mouse_links` — click a file path in output → `$EDITOR <path>`
-
-Wires a left-click on a path token in compiler / grep / ls output to a `$EDITOR +LINE 'path'\n` injection into the shell's input stream. Captures terminal output into a per-module ring (SGR + OSC stripped), maps screen (row, col) → captured row via a monotonic write counter, and uses the pure path detector at `src/modules/mouse_links/path_detect.zig` (handles `:LINE` / `:LINE:COL` suffixes, `~/` / `./` / `../` prefixes, quoted paths with internal spaces, bracket wrappers, common compiler punctuation, known bare filenames like `Makefile` / `README.md`).
-
-`$EDITOR` is trusted: the shell tokenises the injection so `EDITOR="code --wait"` works while `EDITOR="vim ; rm -rf"` is the user's footgun. Streaming-line capture only — TUIs like vim / htop run in the alt-screen where atty's mouse intercept is gated off (the shell owns input).
-
-Requires `mouse.enabled = true` in the user's config to pull the proxy's SGR-1006 click stream:
-
-```zig
-pub const mouse: atty.Mouse = .{ .enabled = true };
-
-pub const modules = .{
-    atty.modules.mouse_links.configure(.{}),
-    atty.modules.guardrail.configure(.{}),
-    atty.modules.history.configure(.{}),
-};
-```
-
-### `mouse_urls` — click a URL in output → opener with a trust gate
-
-Sibling of `mouse_links` for URLs. Detects `https://`, `http://`, `ftp(s)://`, `ssh://`, `git://`, `file://` with path / query / fragment / userinfo / IPv6 literals. Rejects URLs without a host (`file:///etc/passwd`), URLs in unknown schemes (`javascript://`), and emails. Default opener is `xdg-open`; spawn uses a double-fork + `setsid` so atty doesn't accumulate zombies.
-
-Three trust modes:
-
-| Mode | Behaviour |
-|---|---|
-| `.never` | Click is a no-op + status hint. Paranoid posture for shared / multi-tenant hosts. |
-| `.whitelist_only` (default) | Opens if host matches `url_whitelist` (exact or `*.example.com` suffix) OR a host previously session-trusted via `.ask_each`. Silent + hint otherwise. The session-trust set is never populated in this mode itself — only the static `url_whitelist` adds. |
-| `.ask_each` | Banner `open <host>? [y]es / [a]llow / [t]rust / cancel`. `[a]` session-trusts; `[t]` session-trusts AND surfaces `sudo atty-guard urls allow <host>` guidance (the daemon's `urls_allow` RPC requires EUID 0, so atty can't write it directly). |
-
-Place `mouse_urls` BEFORE `guardrail` in the modules tuple so the banner's `y`/`a`/`t` keystrokes beat guardrail's own armed-banner consumption:
-
-```zig
-pub const mouse: atty.Mouse = .{ .enabled = true };
-
-pub const modules = .{
-    atty.modules.mouse_urls.configure(.{
-        .mode = .ask_each,
-        .url_whitelist = &.{ "github.com", "*.github.com", "docs.zig.dev" },
-    }),
-    atty.modules.mouse_links.configure(.{}),
-    atty.modules.guardrail.configure(.{}),
-    atty.modules.history.configure(.{}),
-};
-```
 
 ### Composing two ghost providers
 
