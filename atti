@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# atti — lifecycle CLI for atty: install, doctor, update.
+#
+# Interactive by default (uses gum for prompts); pass --non-interactive
+# or set ATTI_NONINTERACTIVE=1 for scripted flows.
+#
+# Bootstrap: ensures `b` (fentas/b binary package manager) is on PATH,
+# then `b i` syncs the deps listed in .bin/b.yaml (argsh, gum). The
+# binaries land under `.bin/` which is gitignored — re-runs are
+# idempotent.
+
+set -euo pipefail
+
+# ────────────────────────────────────────────────────────────────────────
+# Bootstrap (pure POSIX-ish, no argsh dependency yet)
+# ────────────────────────────────────────────────────────────────────────
+
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN_DIR="${REPO_DIR}/.bin"
+mkdir -p "$BIN_DIR"
+
+err() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; }
+log() { printf '\033[2m→\033[0m %s\n' "$*"; }
+ok()  { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
+
+# Resolve `b` from $PATH, then `.bin/b`. Fetch the latest release if
+# neither is available — never silently downgrade an operator's system-
+# installed `b`.
+resolve_b() {
+    if command -v b >/dev/null 2>&1; then
+        printf '%s\n' "$(command -v b)"
+        return
+    fi
+    if [ -x "${BIN_DIR}/b" ]; then
+        printf '%s\n' "${BIN_DIR}/b"
+        return
+    fi
+    fetch_b
+    printf '%s\n' "${BIN_DIR}/b"
+}
+
+fetch_b() {
+    local arch os tag url
+    case "$(uname -m)" in
+        x86_64|amd64) arch=x86_64 ;;
+        aarch64|arm64) arch=aarch64 ;;
+        *) err "unsupported arch: $(uname -m)"; exit 1 ;;
+    esac
+    case "$(uname -s)" in
+        Linux) os=linux ;;
+        Darwin) os=darwin ;;
+        *) err "unsupported OS: $(uname -s)"; exit 1 ;;
+    esac
+
+    log "fetching latest fentas/b release for ${os}-${arch}"
+    tag="$(curl -fsSL https://api.github.com/repos/fentas/b/releases/latest \
+            | sed -n 's/.*"tag_name": *"\(.*\)".*/\1/p' | head -n1)"
+    if [ -z "$tag" ]; then
+        err "could not resolve fentas/b latest tag (rate-limited? offline?)"
+        exit 1
+    fi
+    url="https://github.com/fentas/b/releases/download/${tag}/b-${os}-${arch}"
+    log "downloading ${url}"
+    if ! curl -fsSL -o "${BIN_DIR}/b.tmp" "$url"; then
+        err "download failed; check the URL or your network"
+        exit 1
+    fi
+    chmod +x "${BIN_DIR}/b.tmp"
+    mv "${BIN_DIR}/b.tmp" "${BIN_DIR}/b"
+    ok "installed b ${tag} → ${BIN_DIR}/b"
+}
+
+# Materialise argsh + gum (whatever b.yaml lists). `b i` is idempotent.
+sync_deps() {
+    local b_bin
+    b_bin="$(resolve_b)"
+    log "syncing dev tools via $b_bin"
+    ( cd "$REPO_DIR" && "$b_bin" i )
+}
+
+# ────────────────────────────────────────────────────────────────────────
+# Subcommand dispatch — kept simple so the bootstrap above is the only
+# place that runs before tools are guaranteed present.
+# ────────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<'EOF'
+atti — lifecycle CLI for atty
+
+Usage:
+  atti install [--features <list>] [--non-interactive]
+  atti doctor
+  atti version
+  atti help
+
+Subcommands:
+  install      Build + install atty (proxy) and atty-guard (daemon).
+               Interactive feature picker by default; flags for CI.
+  doctor       Wraps `atty doctor` with installer-side checks
+               (group membership, file perms, daemon reachability).
+  version      Print atti version (matches the atty version it bundles).
+  help         Show this message.
+
+Install flags:
+  --features <csv>     Bypass the picker and use the given GUARD_FEATURES
+                       (e.g. tier2-onnx,osv-live,atoms-fetch,ebpf).
+  --add-user           Run `sudo usermod -aG atty $USER` after install.
+  --non-interactive    Skip all prompts; use defaults / explicit flags.
+
+Environment:
+  ATTI_NONINTERACTIVE=1     Same as --non-interactive.
+  ATTI_PREFIX               Install prefix (default: /usr/local).
+EOF
+}
+
+cmd_version() {
+    if [ -f "${REPO_DIR}/src/version.zig" ]; then
+        sed -n 's/.*version: \[\]const u8 = "\([^"]*\)".*/\1/p' "${REPO_DIR}/src/version.zig" | head -n1
+    else
+        echo "unknown"
+    fi
+}
+
+# Pick features either via gum (interactive) or env/flags (non-interactive).
+pick_features() {
+    if [ -n "${ATTI_FEATURES:-}" ]; then
+        printf '%s\n' "$ATTI_FEATURES"
+        return
+    fi
+    if [ "${ATTI_NONINTERACTIVE:-0}" = "1" ]; then
+        # Conservative default: everything except eBPF (which needs CAP_BPF).
+        printf '%s\n' "tier2-onnx,osv-live,atoms-fetch"
+        return
+    fi
+    if ! command -v gum >/dev/null 2>&1; then
+        err "gum is not available — pass --features explicitly or run with bootstrap enabled"
+        exit 1
+    fi
+    # gum-driven multi-select. Defaults marked with '*'.
+    local picked
+    picked="$(gum choose --no-limit --header 'Select atty-guard features (space to toggle, enter to confirm)' \
+        'tier2-onnx   — ONNX Tier-2 classifier (SecureBERT 2 / Qwen2.5-Coder)' \
+        'osv-live     — Live OSV.dev npm/PyPI lookup' \
+        'atoms-fetch  — Scheduled atom corpus refresh (GTFOBins + Sigma)' \
+        'ebpf         — Kernel LSM + execve + AF_ALG hooks (needs CAP_BPF)' \
+        --selected 'tier2-onnx   — ONNX Tier-2 classifier (SecureBERT 2 / Qwen2.5-Coder),osv-live     — Live OSV.dev npm/PyPI lookup,atoms-fetch  — Scheduled atom corpus refresh (GTFOBins + Sigma)' )"
+    # Extract just the feature name (first whitespace-delimited token per line).
+    printf '%s\n' "$picked" | awk '{print $1}' | paste -sd, -
+}
+
+cmd_install() {
+    local features="" add_user=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --features) features="$2"; shift 2 ;;
+            --features=*) features="${1#--features=}"; shift ;;
+            --add-user) add_user=1; shift ;;
+            --non-interactive) ATTI_NONINTERACTIVE=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) err "unknown install flag: $1"; usage; exit 2 ;;
+        esac
+    done
+
+    sync_deps
+
+    if [ -z "$features" ]; then
+        features="$(ATTI_FEATURES="$features" pick_features)"
+    fi
+    if [ -z "$features" ]; then
+        err "no features selected"
+        exit 2
+    fi
+    ok "GUARD_FEATURES=$features"
+
+    log "running: sudo make install GUARD_FEATURES=$features"
+    ( cd "$REPO_DIR" && sudo make install GUARD_FEATURES="$features" )
+
+    if [ "$add_user" = "1" ]; then
+        log "adding $USER to atty group"
+        sudo usermod -aG atty "$USER"
+        ok "added $USER to atty group — log out + back in (or run \`newgrp atty\`)"
+    else
+        log "next: \`sudo usermod -aG atty \$USER\` + new shell so atty-guard's UDS is reachable"
+    fi
+    ok "install complete. Verify with: atti doctor"
+}
+
+cmd_doctor() {
+    local atty_bin
+    if command -v atty >/dev/null 2>&1; then
+        atty_bin="$(command -v atty)"
+    elif [ -x "${REPO_DIR}/zig-out/bin/atty" ]; then
+        atty_bin="${REPO_DIR}/zig-out/bin/atty"
+    else
+        err "atty binary not found — run \`atti install\` first"
+        exit 1
+    fi
+    log "atty: $atty_bin"
+    "$atty_bin" doctor || true
+
+    if id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx atty; then
+        ok "user $USER is in the atty group"
+    else
+        log "user $USER is NOT in the atty group — run \`sudo usermod -aG atty \$USER\` + new shell"
+    fi
+
+    if systemctl is-active --quiet atty-guard 2>/dev/null; then
+        ok "atty-guard.service is active"
+    else
+        log "atty-guard.service is NOT active — start with \`sudo systemctl start atty-guard\`"
+    fi
+
+    if [ -S /run/atty-guard/atty-guard.sock ]; then
+        ok "daemon UDS at /run/atty-guard/atty-guard.sock is present"
+    else
+        log "daemon UDS at /run/atty-guard/atty-guard.sock is missing"
+    fi
+}
+
+main() {
+    local cmd="${1:-help}"
+    [ $# -gt 0 ] && shift
+    case "$cmd" in
+        install) cmd_install "$@" ;;
+        doctor) cmd_doctor "$@" ;;
+        version) cmd_version "$@" ;;
+        help|-h|--help) usage ;;
+        *) err "unknown subcommand: $cmd"; usage; exit 2 ;;
+    esac
+}
+
+main "$@"

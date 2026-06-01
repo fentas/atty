@@ -1,7 +1,7 @@
+# Don't commit fetched binaries — atti's bootstrap pulls them from
+# GitHub releases on first run (`b i` reads b.yaml).
 *
 !.gitignore
 !b.lock
 !b.yaml
-# for ease of use, no big overhead
-!b
 !argsh
