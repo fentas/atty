@@ -35,6 +35,13 @@ jobs:
         # spawns /bin/echo through a real PTY.
         run: zig build itest --summary all
 
+      - name: zig build e2e
+        # Scripted-PTY scenarios + VT grid diff. Catches rendering,
+        # LLM fixture protocol, keymap and OSC 133 drift the unit
+        # tests miss. Running on every push surfaces drift the day
+        # the code that caused it lands, not at the next release.
+        run: zig build e2e --summary all
+
       - name: smoke test
         # atty refuses non-TTY stdio (src/main.zig), so we wrap it in
         # `script` (util-linux on the runner host, NOT inside the

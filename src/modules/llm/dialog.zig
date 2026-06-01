@@ -328,6 +328,11 @@ const ActionFenceMatch = struct {
     action: Action,
 };
 
+/// Whether `raw` contains a recognised action fence.
+pub fn hasActionFence(raw: []const u8) bool {
+    return findLastActionFence(raw) != null;
+}
+
 /// Walk `raw` backward looking for the last ` ```<action> ... ``` `
 /// block. Returns null if no recognized lang tag is found.
 fn findLastActionFence(raw: []const u8) ?ActionFenceMatch {

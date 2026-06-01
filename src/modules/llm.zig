@@ -286,6 +286,35 @@ pub fn configure(comptime cfg: Config) type {
                 @compileError("Config.provider.subprocess.argv must have a non-empty argv[0]");
             },
         }
+        // Fixture-response sanity. `parseFencedResponse` is
+        // deliberately lenient — bare prose without a fence lands
+        // as a `.done` with the text as the reason, matching how
+        // real models sometimes reply. That fallback is wrong for
+        // test fixtures: a fixture without a fence parses as
+        // `.done` instead of firing the dialog state the scenario
+        // is designed to pin, and the scenario silently passes
+        // without exercising the protocol.
+        //
+        // Real-LLM lenient parsing is unaffected; production
+        // responses never flow through `configure`.
+        for (cfg.fixture_responses, 0..) |resp, i| {
+            if (!dialog.hasActionFence(resp)) {
+                @compileError(std.fmt.comptimePrint(
+                    "Config.fixture_responses[{d}] has no recognised action fence:\n" ++
+                        "    {s}\n\n" ++
+                        "Fixtures must use the fenced-action protocol. Valid lang tags " ++
+                        "(see `parseLangTag` in llm/dialog.zig): exec / question / done — " ++
+                        "plus aliases (sh, bash, zsh, shell, ask, q, finish, end). Example:\n" ++
+                        "    ```done\n" ++
+                        "    <reason>\n" ++
+                        "    ```\n\n" ++
+                        "Without a fence parseFencedResponse falls through to its " ++
+                        "'treat raw as done.reason' branch and the scenario silently passes " ++
+                        "without firing any state transition.",
+                    .{ i, resp },
+                ));
+            }
+        }
     }
     return struct {
         pub const name = "llm";
