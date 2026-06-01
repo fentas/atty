@@ -1,8 +1,8 @@
 $
-
-
-
-
-shouldn't run
-
+╭─ ✨ atty · LLM session complete ─────────────────────────
+│ ✓ {"action":"exec","command":"echo never","description":"shouldn't run"}
+│ 0 execs / 0 obs / 1 turns
+╰──────────────────────────────────────────────────────────
+✓ done — {"action":"exec","command":"echo never","description":"shouldn't run"} · 0 execs / 0 obs / 
+1 turns
 atty │ ✨ Alt+C chat · Alt+S dialog · Alt+H help

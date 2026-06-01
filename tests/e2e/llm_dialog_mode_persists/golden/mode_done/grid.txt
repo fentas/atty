@@ -1,12 +1,12 @@
-$ printf '\033]133;C\007ok\033]133;D;0\007'
-ok$
+$
 ╭─ ✨ atty · LLM session complete ─────────────────────────
-│ ✓ all set
-│ 1 execs / 1 obs / 1 turns
+│ ✓ {"action":"exec","command":"printf '\\033]133;C\\007ok\\033]133;D;0\\007'","description":"emit o
+k with markers"}
+│ 0 execs / 0 obs / 1 turns
 ╰──────────────────────────────────────────────────────────
 
+$
 
-
-✓ done — all set · 1 execs / 1 obs / 1 turns
-
+✓ done — {"action":"exec","command":"printf '\\033]133;C\\007ok\\033]133;D;0\\007'","description":"e
+mit ok with markers"} · 0 execs / 0 obs / 1 turns
 atty │ ✨ Alt+C chat · Alt+S dialog · Alt+H help

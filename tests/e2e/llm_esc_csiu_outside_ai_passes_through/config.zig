@@ -9,8 +9,7 @@ const atty = @import("atty");
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.llm.configure(.{
-        .api_base = "http://localhost:0",
-        .model = "fixture-model",
+        .provider = .{ .http = .{ .api_base = "http://localhost:0", .model = "fixture-model" } },
     }),
 };
 

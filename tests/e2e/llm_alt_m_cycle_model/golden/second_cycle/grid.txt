@@ -3,6 +3,6 @@ $ #:
 
 
 
-model: model-gamma
+provider: model-gamma (3/3)
 
 atty │ ✨ AI · Alt+A single · Alt+S dialog · Alt+Shift+S auto · Alt+M model-gamma · Alt+H help · Esc cancel

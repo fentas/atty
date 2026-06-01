@@ -11,10 +11,11 @@ const atty = @import("atty");
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.llm.configure(.{
-        .api_base = "",
-        .models = &.{
-            .{ .name = "model-alpha" },
-            .{ .name = "model-beta" },
+        // Empty api_base inside ProviderEntry → inert transport;
+        // the overlay still surfaces the cycle indicator (`2/2`).
+        .providers = &.{
+            .{ .name = "model-alpha", .config = .{ .http = .{ .model = "model-alpha" } } },
+            .{ .name = "model-beta", .config = .{ .http = .{ .model = "model-beta" } } },
         },
     }),
 };

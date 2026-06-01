@@ -15,9 +15,9 @@ const atty = @import("atty");
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.llm.configure(.{
-        // Empty api_base = inert mode. We don't want the e2e
-        // scenario to make real HTTP calls.
-        .api_base = "",
+        // No `.provider` override → defaults to `.http = .{}`
+        // with an empty api_base = inert mode. We don't want the
+        // e2e scenario to make real HTTP calls.
     }),
 };
 

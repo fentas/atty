@@ -20,8 +20,7 @@ pub const modules = .{
         // Set a non-empty api_base so the inert-mode guard doesn't
         // short-circuit Alt+S; the fixture cursor kicks in inside
         // the worker before any HTTP call.
-        .api_base = "http://localhost:0",
-        .model = "fixture-model",
+        .provider = .{ .http = .{ .api_base = "http://localhost:0", .model = "fixture-model" } },
         .fixture_responses = &.{
             // Step 1: exec a command that emits ;C + "ok" + ;D
             // inline via printf, so OSC 133 capture has something

@@ -1,4 +1,18 @@
-R5 C0-12 dim italic
+R1 C0-2 dim
+R1 C3-8 fg=141
+R1 C9-57 dim
+R2 C0-0 dim
+R2 C2-2 bold fg=14
+R3 C0-0 dim
+R3 C2-2 bold fg=14
+R3 C3-11 dim
+R3 C12-12 bold fg=14
+R3 C13-19 dim
+R3 C20-20 bold fg=14
+R3 C21-26 dim
+R4 C0-58 dim
+R5 C0-99 dim italic
+R6 C0-6 dim italic
 R7 C0-6 dim
 R7 C7-7 fg=141
 R7 C8-8 dim
