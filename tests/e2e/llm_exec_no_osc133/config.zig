@@ -17,7 +17,9 @@ pub const modules = .{
         // Single fixture entry — Alt+S must NOT consume it, the
         // hard-error path should fire BEFORE any request.
         .fixture_responses = &.{
-            \\{"action":"done","reason":"unreachable"}
+            \\```done
+            \\unreachable
+            \\```
             ,
         },
     }),

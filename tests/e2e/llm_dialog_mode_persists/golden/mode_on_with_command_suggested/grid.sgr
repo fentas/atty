@@ -1,24 +1,8 @@
-R1 C0-2 dim
-R1 C3-8 fg=141
-R1 C9-57 dim
-R2 C0-0 dim
-R2 C2-2 bold fg=14
-R4 C0-0 dim
-R4 C2-2 bold fg=14
-R4 C3-11 dim
-R4 C12-12 bold fg=14
-R4 C13-19 dim
-R4 C20-20 bold fg=14
-R4 C21-26 dim
-R5 C0-58 dim
-R9 C0-99 dim italic
-R10 C0-48 dim italic
+R9 C0-19 dim italic
 R11 C0-6 dim
 R11 C7-7 fg=141
-R11 C8-8 dim
-R11 C9-13 bold fg=14
-R11 C14-21 dim
-R11 C22-26 bold fg=14
-R11 C27-36 dim
-R11 C37-41 bold fg=14
-R11 C42-46 dim
+R11 C8-44 dim
+R11 C45-47 bold fg=14
+R11 C48-50 dim
+R11 C51-62 bold fg=14
+R11 C63-70 dim

@@ -11,7 +11,10 @@ pub const modules = .{
     atty.modules.llm.configure(.{
         .provider = .{ .http = .{ .api_base = "http://localhost:0", .model = "fixture-model" } },
         .fixture_responses = &.{
-            \\{"action":"exec","command":"echo never","description":"shouldn't run"}
+            \\shouldn't run
+            \\```exec
+            \\echo never
+            \\```
             ,
         },
     }),

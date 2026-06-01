@@ -10,9 +10,13 @@ pub const modules = .{
     atty.modules.llm.configure(.{
         .provider = .{ .http = .{ .api_base = "http://localhost:0", .model = "fixture-model" } },
         .fixture_responses = &.{
-            \\{"action":"question","question":"which folder?"}
+            \\```question
+            \\which folder?
+            \\```
             ,
-            \\{"action":"done","reason":"got it"}
+            \\```done
+            \\got it
+            \\```
             ,
         },
     }),

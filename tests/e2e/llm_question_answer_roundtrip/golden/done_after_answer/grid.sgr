@@ -11,7 +11,7 @@ R3 C13-19 dim
 R3 C20-20 bold fg=14
 R3 C21-26 dim
 R4 C0-58 dim
-R7 C2-84 dim italic
+R7 C0-42 dim italic
 R9 C0-6 dim
 R9 C7-7 fg=141
 R9 C8-8 dim

@@ -1,10 +1,10 @@
 $
 ╭─ ✨ atty · LLM session complete ─────────────────────────
-│ ✓ {"action":"question","question":"which folder?"}
-│ 0 execs / 0 obs / 1 turns
+│ ✓ got it
+│ 1 execs / 0 obs / 2 turns
 ╰──────────────────────────────────────────────────────────
-logs
-bash: logs: command not found
-$ done — {"action":"question","question":"which folder?"} · 0 execs / 0 obs / 1 turns
+
+
+✓ done — got it · 1 execs / 0 obs / 2 turns
 
 atty │ ✨ Alt+C chat · Alt+S dialog · Alt+H help

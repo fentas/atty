@@ -10,9 +10,14 @@ pub const modules = .{
     atty.modules.llm.configure(.{
         .provider = .{ .http = .{ .api_base = "http://localhost:0", .model = "fixture-model" } },
         .fixture_responses = &.{
-            \\{"action":"exec","command":"printf '\\033]133;C\\007ok\\033]133;D;0\\007'","description":"emit ok with markers"}
+            \\emit ok with markers
+            \\```exec
+            \\printf '\033]133;C\007ok\033]133;D;0\007'
+            \\```
             ,
-            \\{"action":"done","reason":"all set"}
+            \\```done
+            \\all set
+            \\```
             ,
         },
     }),
