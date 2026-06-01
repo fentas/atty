@@ -58,7 +58,7 @@ jobs:
       # atoms-fetch features). Layer cache covers all but the actual
       # build step on warm runs.
       - name: Restore docker layer cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/.buildx-cache
           # Cargo.toml in the key so a feature-flag flip (osv-live

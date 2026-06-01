@@ -255,22 +255,50 @@ jobs:
           echo "--- preview (first 20 lines) ---"
           head -20 /tmp/release_body.md || true
 
-      - uses: softprops/action-gh-release@v3
-        with:
-          # `atty-*` globs naturally catch BOTH `atty-*` and
-          # `atty-guard-*` versioned filenames. Only the bare
-          # unversioned aliases need their own line — those use
-          # the literal prefix `atty-linux-` / `atty-guard-linux-`
-          # which doesn't share a glob.
-          files: |
-            dist/atty-*.tar.gz
-            dist/atty-*.tar.gz.sha256
-            dist/atty-*-linux-*
-            dist/atty-linux-*
-            dist/atty-guard-linux-*
-          body_path: /tmp/release_body.md
-          generate_release_notes: false
-          fail_on_unmatched_files: true
+      # Create or update the GitHub release + upload assets via the
+      # `gh` CLI. Replaces `softprops/action-gh-release@v3`, whose
+      # PATCH-first ("upsert") asset-metadata call races against
+      # GitHub's eventually-consistent read replica and can fail
+      # nondeterministically on the final asset (see #376). `gh
+      # release upload --clobber` is a single POST per file with no
+      # metadata sidecar; the action's intermittent late-asset 404
+      # disappears.
+      - name: create or update release + upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(
+            { find dist -maxdepth 1 -type f \( \
+                -name 'atty-*.tar.gz' -o \
+                -name 'atty-*.tar.gz.sha256' -o \
+                -name 'atty-*-linux-*' -o \
+                -name 'atty-linux-*' -o \
+                -name 'atty-guard-linux-*' \
+              \) | sort -u
+            }
+          )
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "::error::No release assets matched in dist/ — refusing to publish an empty release"
+            ls -la dist/ || true
+            exit 1
+          fi
+          echo "Found ${#assets[@]} assets:"
+          printf '  %s\n' "${assets[@]}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating body"
+            gh release edit "$TAG" --notes-file /tmp/release_body.md
+          else
+            echo "Creating release $TAG"
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release_body.md
+          fi
+
+          # `--clobber` overwrites an existing asset (idempotent
+          # re-runs are safe). One POST per file; no metadata
+          # update step that could 404.
+          gh release upload "$TAG" --clobber "${assets[@]}"
 
   # ---------------------------------------------------------------------------
   # Multi-arch Docker image to ghcr.io/<owner>/atty.
