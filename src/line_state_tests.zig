@@ -371,7 +371,8 @@ test "mid-line + sync to shorter capture is refused (BS-poisoned OSC guard)" {
     // Reproduces the scenario from
     // `tests/e2e/ghost_midline_insert_after_uparrow`: Arrow-Up →
     // syncFromCapture("open ./test/foo"); Arrow-Left × 11 →
-    // cursor_pos = 4; mid-line space → applyInput markUncertain;
+    // cursor_pos = 4; mid-line space → applyInput splices in-place
+    // (buffer grows to 16 chars, cursor 5, `uncertain` stays false);
     // bash echoes `\b` after its ICH insert, OSC pops down to "open".
     var l = LineState{};
     _ = l.applyInput("\x1B[A"); // Arrow-Up

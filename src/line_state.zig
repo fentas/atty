@@ -317,6 +317,11 @@ pub const LineState = struct {
         // for genuine unmodelled mid-line edits (Tab completion that
         // shrinks the buffer, Ctrl-W mid-line, …) — those legitimately
         // need the OSC capture to repair the keystroke model.
+        //
+        // Sibling guard at the proxy's setCommitted-from-OSC site uses
+        // the same "shorter-than-baseline → refuse" fingerprint with
+        // `committed_len` as its baseline; both protect against the
+        // same BS-poisoning class. Keep both in sync if either evolves.
         if (!self.uncertain and self.cursor_pos < self.len and n <= self.cursor_pos) {
             return;
         }

@@ -1338,8 +1338,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     // the keystroke-derived submit; the commit may miss
                     // a freshly-typed mid-line char but won't be mangled
                     // down to a 4-byte prefix of the recalled line.
+                    // (Sibling guard in `LineState.syncFromCapture` —
+                    // same "shorter-than-baseline → refuse" fingerprint,
+                    // different baseline (cursor_pos vs committed_len).)
+                    //
+                    // Also require `committed_len > 0`: when `submit()`
+                    // short-circuits on an empty buffer (Enter on a
+                    // bare prompt), `committed_len` retains its prior
+                    // value, possibly 0 (after the immediately-prior
+                    // `clearLastCommitted` at the end of last iteration).
+                    // Without this gate, a non-empty `osc_in` would
+                    // get propagated as a phantom commit even though
+                    // the user hit Enter on nothing.
                     const committed_len: usize = if (line_state.lastCommitted()) |c| c.len else 0;
-                    if (osc_in.len > 0 and osc_in.len >= committed_len) {
+                    if (osc_in.len > 0 and committed_len > 0 and osc_in.len >= committed_len) {
                         line_state.setCommitted(osc_in);
                     }
                 }
