@@ -10,9 +10,16 @@
 #   4. Arrow-Right all the way to EOL.
 #   5. Backspace one char.
 #
-# Expected: the visible buffer is `npm run  gen:do` (two spaces, ends
-# in `do`). It doesn't match any history entry, so no ghost should
-# render. Reported bug: a dim trailing ghost paints after the cursor.
+# Expected: the visible buffer is `prefix-x run  gen:do` (two spaces,
+# ends in `do`). It doesn't match any history entry, so no ghost
+# should render. Reported bug: a dim trailing ghost paints after the
+# cursor.
+#
+# Uses the `prefix-x` convention from `ghost_pick` — a clearly-
+# nonexistent command — so the bash "command not found" output stays
+# deterministic regardless of what's installed in the CI runner.
+# (User's original report cited `npm run gen:dog`; the structure is
+# identical, only the command name differs.)
 #
 # This test pins the regression: snapshot the row + grid.sgr should
 # both be clean (no dim cells on the prompt row).
@@ -34,19 +41,19 @@ wait_for "$"
 sleep 200
 
 # Seed history with the single-space form so a ghost would match the
-# 14-char prefix `npm run gen:do` if `line_state.current()` ever
+# 19-char prefix `prefix-x run gen:do` if `line_state.current()` ever
 # falsely loses the inserted second space.
-type "npm run gen:dog\r"
+type "prefix-x run gen:dog\r"
 wait_for "$"
 sleep 300
 
 # Type the line verbatim — single space between `run` and `gen`.
-type "npm run gen:dog"
+type "prefix-x run gen:dog"
 sleep 200
 
-# Arrow-Left × 7: from position 15 (EOL) back to position 8 — cursor
-# lands right before `g` of `gen` (between the space at byte 7 and
-# `g` at byte 8).
+# Arrow-Left × 7: from position 20 (EOL) back to position 13 — cursor
+# lands right before `g` of `gen` (between the space at byte 12 and
+# `g` at byte 13).
 key Left
 key Left
 key Left
@@ -56,14 +63,14 @@ key Left
 key Left
 sleep 200
 
-# Mid-line space insertion. Bash inserts at position 8 + shifts the
+# Mid-line space insertion. Bash inserts at position 13 + shifts the
 # tail via ICH. `LineState.append`'s mid-line splice mirrors that:
-# buffer grows to 16 chars with the new space at byte 8, cursor lands
-# at 9, `cursor_moved` stays true so renderGhost is suppressed.
+# buffer grows to 21 chars with the new space at byte 13, cursor
+# lands at 14, `cursor_moved` stays true so renderGhost is suppressed.
 type " "
 sleep 200
 
-# Arrow-Right × 8 to reach the new EOL (bash buffer is 16 chars).
+# Arrow-Right × 8 to reach the new EOL (bash buffer is 21 chars).
 key Right
 key Right
 key Right

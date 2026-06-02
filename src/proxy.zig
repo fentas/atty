@@ -1328,14 +1328,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // and over.
                 if (osc133_tracker.inInputPhase() and containsEnter(input)) {
                     const osc_in = osc133_tracker.currentInput();
-                    // Skip the override when the capture region is shorter
-                    // than the keystroke buffer — that's the bash-cursor-
-                    // motion-BS poisoning fingerprint (Arrow-Left × N
-                    // shrinks `osc.input` because OSC 133 pops on `\b`).
-                    // Trust the keystroke buffer instead; the commit may
-                    // miss a freshly-typed mid-line char but won't be
-                    // mangled down to a 4-byte prefix of the recalled line.
-                    if (osc_in.len > 0 and osc_in.len >= line_state.current().len) {
+                    // Compare against the just-snapshotted committed line,
+                    // NOT `current()` — `applyInput()` above has already
+                    // run `submit()` for the Enter, clearing the live
+                    // buffer. Skip the override when OSC is shorter than
+                    // that snapshot: that's the bash-cursor-motion-BS
+                    // poisoning fingerprint (Arrow-Left × N shrinks
+                    // `osc.input` because OSC 133 pops on `\b`). Trust
+                    // the keystroke-derived submit; the commit may miss
+                    // a freshly-typed mid-line char but won't be mangled
+                    // down to a 4-byte prefix of the recalled line.
+                    const committed_len: usize = if (line_state.lastCommitted()) |c| c.len else 0;
+                    if (osc_in.len > 0 and osc_in.len >= committed_len) {
                         line_state.setCommitted(osc_in);
                     }
                 }

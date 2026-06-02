@@ -311,11 +311,13 @@ pub const LineState = struct {
         // delete). Trusting the shrunk capture would land cursor_pos at
         // the new EOL via the `min(prior, n)` clamp below and clear
         // `cursor_moved`, re-engaging ghost paint over the right-side
-        // text. Refuse the rewrite — keep the keystroke buffer, just
-        // clear `uncertain` so the next resync (Tab, Right back to EOL,
-        // …) can recover.
-        if (self.cursor_pos < self.len and n <= self.cursor_pos) {
-            self.uncertain = false;
+        // text. Refuse the rewrite — keep the keystroke buffer.
+        //
+        // Gated on `!self.uncertain` so the recovery path stays open
+        // for genuine unmodelled mid-line edits (Tab completion that
+        // shrinks the buffer, Ctrl-W mid-line, …) — those legitimately
+        // need the OSC capture to repair the keystroke model.
+        if (!self.uncertain and self.cursor_pos < self.len and n <= self.cursor_pos) {
             return;
         }
         const cursor_was_at_eol = self.isAtEol();

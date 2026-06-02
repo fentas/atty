@@ -1,6 +1,6 @@
-$ npm run gen:dog
-bash: npm: command not found
-$ npm run  gen:do
+$ prefix-x run gen:dog
+bash: prefix-x: command not found
+$ prefix-x run  gen:do
 
 
 
