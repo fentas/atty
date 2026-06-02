@@ -290,6 +290,68 @@ test "uncertain + same content + Tab + sync preserves cursor_pos (Tab-no-match g
     try std.testing.expectEqual(@as(usize, 12), l.cursor_pos);
 }
 
+test "mid-line + sync to shorter capture is refused (BS-poisoned OSC guard)" {
+    // Bash echoes every Arrow-Left keystroke as `\b` on the master
+    // fd, and `Osc133.processInputByte` currently pops a byte from
+    // the captured-input region on BS — so the OSC capture shrinks
+    // by one byte per arrow-left even though the on-screen content
+    // didn't change. After N lefts on an Arrow-Up-recalled line, the
+    // OSC capture has lost N bytes from the tail.
+    //
+    // If `syncFromCapture` then trusted that shrunk capture, the
+    // `min(prior_cursor, n)` clamp would land cursor_pos at the new
+    // EOL (because the user's prior cursor was inside the truncated
+    // region), clearing `cursor_moved`. The ghost overlay would
+    // re-engage and paint dim text over bash's right-side echo. The
+    // guard refuses the rewrite entirely — just clears `uncertain`
+    // so the next clean resync can recover.
+    //
+    // Reproduces the scenario from
+    // `tests/e2e/ghost_midline_insert_after_uparrow`: Arrow-Up →
+    // syncFromCapture("open ./test/foo"); Arrow-Left × 11 →
+    // cursor_pos = 4; mid-line space → applyInput markUncertain;
+    // bash echoes `\b` after its ICH insert, OSC pops down to "open".
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A"); // Arrow-Up
+    l.syncFromCapture("open ./test/foo");
+    var k: usize = 0;
+    while (k < 11) : (k += 1) _ = l.applyInput("\x1B[D");
+    try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput(" "); // mid-line printable → markUncertain
+    try std.testing.expect(l.uncertain);
+
+    // Capture has been chewed down to "open" (4 chars). Trusting
+    // it would set cursor_pos = min(4, 4) = 4 == new_len → clear
+    // cursor_moved. The guard skips the rewrite.
+    l.syncFromCapture("open");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "open ./test/foo", l.current());
+    try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+}
+
+test "mid-line + sync to capture that grows past cursor still rewrites" {
+    // Counterpart to the BS-poisoned-OSC guard above: when the new
+    // content reaches PAST the prior cursor, the OSC capture has
+    // genuinely caught up (paste, completion-fragment, mid-line
+    // redraw with full content). Sync as normal.
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A");
+    l.syncFromCapture("hello world");
+    _ = l.applyInput("\x1B[D"); // cursor 10
+    _ = l.applyInput("\x1B[D"); // cursor 9
+    _ = l.applyInput("\x1B[D"); // cursor 8
+    try std.testing.expectEqual(@as(usize, 8), l.cursor_pos);
+
+    // Capture stayed at full length; rewrite proceeds; cursor
+    // preserved at 8 (mid-line) and stays mid-line.
+    l.syncFromCapture("hello world!");
+    try std.testing.expectEqualSlices(u8, "hello world!", l.current());
+    try std.testing.expectEqual(@as(usize, 8), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+}
+
 test "uncertain + same content + Left + sync preserves cursor_pos (mid-typing redraw guard)" {
     // The proxy-side gate (`osc_input.len >= line.len` OR
     // `uncertain`) lets bash's mid-typing PS1 redraws sync back —

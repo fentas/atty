@@ -255,6 +255,20 @@ pub const LineState = struct {
             self.uncertain = false;
             return;
         }
+        // Mid-line + capture shrinks to or below the cursor → OSC 133
+        // input region was poisoned by bash's cursor-motion backspace
+        // echoes (each Arrow-Left makes bash emit `\b` to master, which
+        // `Osc133.processInputByte` currently pops as if it were a
+        // delete). Trusting the shrunk capture would land cursor_pos at
+        // the new EOL via the `min(prior, n)` clamp below and clear
+        // `cursor_moved`, re-engaging ghost paint over the right-side
+        // text. Refuse the rewrite — keep the keystroke buffer, just
+        // clear `uncertain` so the next resync (Tab, Right back to EOL,
+        // …) can recover.
+        if (self.cursor_pos < self.len and n <= self.cursor_pos) {
+            self.uncertain = false;
+            return;
+        }
         const cursor_was_at_eol = self.cursor_pos == self.len;
         const prior_cursor = self.cursor_pos;
         @memcpy(self.buffer[0..n], content[0..n]);

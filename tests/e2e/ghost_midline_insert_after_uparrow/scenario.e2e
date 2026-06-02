@@ -1,0 +1,97 @@
+# ghost_midline_insert_after_uparrow — ghost overlay must NOT paint
+# over the right-side text when the user inserts a character mid-line
+# after an Arrow-Up history recall.
+#
+# Reproduction (reported by the user):
+#   1. Arrow-Up to recall an entry that contains a space (e.g.
+#      `open ./test/foo`).
+#   2. Arrow-Left back across the tail until the cursor lands on the
+#      first space (right after `n`).
+#   3. Type a single space — bash inserts it mid-line.
+#
+# Observed bug: ghost text re-paints starting at the cursor and
+# visually overwrites the bash-redrawn tail (`./test/foo`).
+#
+# Expected: the prompt row reads `open  ./test/foo` (the typed extra
+# space + the original tail, unstyled) and NO dim cells appear past
+# the cursor — the line model is uncertain *and* the cursor is
+# mid-line, both of which independently suppress the overlay.
+#
+# We record TWO entries through atty so the in-memory ring has both:
+#   • a longer entry `open ./test/foo --verbose` (provideGhostText
+#     suggestion target — its trailing `" --verbose"` would be the
+#     dim overlay if the suppression breaks).
+#   • a shorter entry `open ./test/foo` (the Arrow-Up recall target —
+#     bash's history puts it on the prompt verbatim).
+# Order matters: the newer-equal-length match is skipped by
+# `findSuggestion` (it requires `len > query.len`), so the older
+# longer entry remains the ghost candidate.
+
+cols 60
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Deterministic re-runs: wipe the history file.
+type "rm -f /tmp/atty-e2e-ghost-midline\r"
+wait_for "$"
+
+# Mirror what `atty init bash` injects: PS1 with `;A`+`;B` markers so
+# the OSC 133 tracker captures the recalled + edited line.
+type "PS1=$'\\[\\033]133;A\\007\\]$ \\[\\033]133;B\\007\\]' && clear\r"
+wait_for "$"
+sleep 200
+
+# Seed: longer-then-shorter so Arrow-Up recalls the shorter form and
+# `findSuggestion` returns the longer one (it walks newest→oldest and
+# requires `e.len > query.len`).
+type "open ./test/foo --verbose\r"
+wait_for "$"
+sleep 200
+type "open ./test/foo\r"
+wait_for "$"
+sleep 200
+
+# Arrow-Up — bash recalls `open ./test/foo`. atty's keystroke model
+# marks `uncertain`; the OSC 133 capture region picks up the recall
+# and syncFromCapture restores `cursor_pos = len` (EOL).
+key Up
+sleep 300
+
+# Walk back across `./test/foo ` — eleven Lefts land the cursor right
+# after `n` of `open`, i.e. position 4 in the input (0-indexed). After
+# this `cursor_moved` is true and ghost paint must be suppressed.
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+sleep 200
+
+# The bug-triggering keystroke — mid-line space insertion. atty's
+# keystroke model can't splice mid-line, so `applyInput` calls
+# `markUncertain` and leaves the buffer untouched. Bash inserts the
+# space at position 4 and rewrites the tail to the master fd.
+type " "
+sleep 400
+
+# Snapshot. Expected `grid.txt` row 2 is `$ open  ./test/foo` (note
+# the double space — the inserted char + the original space). The
+# `grid.sgr` MUST NOT have any dim spans on row 2: the line model is
+# `uncertain` AND the cursor is mid-line, both of which independently
+# gate ghost paint.
+snapshot midline_no_ghost
+
+# Clean exit.
+key Enter
+sleep 200
+type "exit\r"
+exit_code 0

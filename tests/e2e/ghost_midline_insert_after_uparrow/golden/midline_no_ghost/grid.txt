@@ -1,0 +1,8 @@
+$ open ./test/foo --verbose
+bash: open: command not found
+$ open ./test/foo
+bash: open: command not found
+$ open  ./test/foo
+
+
+
