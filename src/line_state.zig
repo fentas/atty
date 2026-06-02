@@ -323,25 +323,30 @@ pub const LineState = struct {
                     const c = input[run_end];
                     if (c < 0x20 or c == 0x7F) break;
                 }
-                // The per-byte `append` bails in two distinct shapes:
-                // mid-line insertion → `markUncertain()` (drops staged
-                // author + intent); full buffer → bare `uncertain =
-                // true` (keeps staged author so the post-resync line
-                // still carries the LLM tag). Mirror BOTH below so
-                // the bulk path is a pure optimisation with no
-                // behaviour delta vs. N `append` calls.
-                if (self.cursor_pos != self.len) {
-                    self.markUncertain();
-                    i = run_end;
-                    continue;
-                }
                 const want = run_end - i;
                 const room = if (self.len < max_line) max_line - self.len else 0;
                 const take = @min(want, room);
                 if (take > 0) {
-                    @memcpy(self.buffer[self.len .. self.len + take], input[i .. i + take]);
-                    self.len += take;
-                    self.cursor_pos = self.len;
+                    if (self.cursor_pos != self.len) {
+                        // Mid-line splice: shift tail right by `take`,
+                        // then write the run at `cursor_pos`. Mirrors
+                        // bash's ICH-based insert — keeps the keystroke
+                        // model in sync with the on-screen buffer so
+                        // ghost prefix queries stay accurate after the
+                        // user resumes typing.
+                        std.mem.copyBackwards(
+                            u8,
+                            self.buffer[self.cursor_pos + take .. self.len + take],
+                            self.buffer[self.cursor_pos..self.len],
+                        );
+                        @memcpy(self.buffer[self.cursor_pos .. self.cursor_pos + take], input[i .. i + take]);
+                        self.len += take;
+                        self.cursor_pos += take;
+                    } else {
+                        @memcpy(self.buffer[self.len .. self.len + take], input[i .. i + take]);
+                        self.len += take;
+                        self.cursor_pos = self.len;
+                    }
                     self.syncCursorMoved();
                     self.generation +%= 1;
                 }
@@ -513,15 +518,26 @@ pub const LineState = struct {
             self.uncertain = true;
             return;
         }
-        // Mid-line insertion isn't modeled: bash splices the byte
-        // at cursor_pos and shifts the tail right; we'd need a
-        // memmove and bookkeeping we don't have. Mark uncertain
-        // so a subsequent OSC 133 capture restores the post-insert
-        // truth. Without this, len would lag the screen while
-        // cursor_pos slid back to len via Right-stepping, and
-        // ghost would re-engage on a stale buffer.
         if (self.cursor_pos != self.len) {
-            self.markUncertain();
+            // Mid-line splice: bash inserts the byte at `cursor_pos`
+            // and shifts the tail right. Mirror that on `buffer` so
+            // the keystroke model stays in sync — otherwise OSC 133
+            // would need the shell to re-echo the tail to recover,
+            // and modern bash uses ICH for mid-line inserts (only
+            // the new byte hits the wire, the tail stays put on
+            // screen via terminal-side shift). Without mirroring,
+            // `line_state` and bash diverge and ghost text reflects
+            // a stale prefix of the line.
+            std.mem.copyBackwards(
+                u8,
+                self.buffer[self.cursor_pos + 1 .. self.len + 1],
+                self.buffer[self.cursor_pos..self.len],
+            );
+            self.buffer[self.cursor_pos] = b;
+            self.len += 1;
+            self.cursor_pos += 1;
+            self.syncCursorMoved();
+            self.generation +%= 1;
             return;
         }
         self.buffer[self.len] = b;
@@ -545,14 +561,26 @@ pub const LineState = struct {
             self.pending_intent_len = 0;
             return;
         }
-        // Mid-line backspace isn't modeled: bash removes at
-        // `cursor_pos - 1` and shifts the tail left. We'd be
-        // dropping the LAST byte of the buffer (wrong) — over time
-        // the buffer + screen would diverge silently. Mark
-        // uncertain and let OSC 133 resync. Same rationale as the
-        // append() mid-line guard above.
         if (self.cursor_pos != self.len) {
-            self.markUncertain();
+            // Mid-line splice: remove byte at `cursor_pos - 1`,
+            // shift the tail left, decrement `len` + `cursor_pos`.
+            // Cursor-at-BOL (`cursor_pos == 0`) is a no-op — there's
+            // no byte before the cursor to delete.
+            if (self.cursor_pos == 0) return;
+            std.mem.copyForwards(
+                u8,
+                self.buffer[self.cursor_pos - 1 .. self.len - 1],
+                self.buffer[self.cursor_pos..self.len],
+            );
+            self.len -= 1;
+            self.cursor_pos -= 1;
+            if (self.len == 0) {
+                self.uncertain = false;
+                self.pending_author = .user;
+                self.pending_intent_len = 0;
+            }
+            self.syncCursorMoved();
+            self.generation +%= 1;
             return;
         }
         self.len -= 1;

@@ -1,0 +1,8 @@
+$ npm run gen:dog
+bash: npm: command not found
+$ npm run  gen:do
+
+
+
+
+

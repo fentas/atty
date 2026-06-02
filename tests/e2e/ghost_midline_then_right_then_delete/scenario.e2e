@@ -1,0 +1,88 @@
+# ghost_midline_then_right_then_delete — second user-reported flavour
+# of the mid-line ghost overpaint bug, distinct from
+# `ghost_midline_insert_after_uparrow`.
+#
+# Sequence:
+#   1. Type a command verbatim (no Arrow-Up recall here — this isn't a
+#      history-recall scenario, the line was just typed).
+#   2. Arrow-Left back into the word boundary.
+#   3. Insert a space mid-line.
+#   4. Arrow-Right all the way to EOL.
+#   5. Backspace one char.
+#
+# Expected: the visible buffer is `npm run  gen:do` (two spaces, ends
+# in `do`). It doesn't match any history entry, so no ghost should
+# render. Reported bug: a dim trailing ghost paints after the cursor.
+#
+# This test pins the regression: snapshot the row + grid.sgr should
+# both be clean (no dim cells on the prompt row).
+
+cols 60
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Reset the scenario-private history file.
+type "rm -f /tmp/atty-e2e-ghost-midline-right\r"
+wait_for "$"
+
+# Mirror what `atty init bash` injects (PS1 with `;A`+`;B` markers).
+type "PS1=$'\\[\\033]133;A\\007\\]$ \\[\\033]133;B\\007\\]' && clear\r"
+wait_for "$"
+sleep 200
+
+# Seed history with the single-space form so a ghost would match the
+# 14-char prefix `npm run gen:do` if `line_state.current()` ever
+# falsely loses the inserted second space.
+type "npm run gen:dog\r"
+wait_for "$"
+sleep 300
+
+# Type the line verbatim — single space between `run` and `gen`.
+type "npm run gen:dog"
+sleep 200
+
+# Arrow-Left × 7: from position 15 (EOL) back to position 8 — cursor
+# lands right before `g` of `gen` (between the space at byte 7 and
+# `g` at byte 8).
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+sleep 200
+
+# Mid-line space insertion. Bash inserts at position 8, shifting tail.
+# `line_state.applyInput` markUncertains because cursor_pos(8) !=
+# len(15). The proxy gate added in #386 refuses the
+# `syncFromCapture("npm run ")` rewrite because cursor is mid-line and
+# the capture has been chewed below the cursor.
+type " "
+sleep 200
+
+# Arrow-Right × 8 to reach the new EOL (bash buffer is 16 chars).
+key Right
+key Right
+key Right
+key Right
+key Right
+key Right
+key Right
+key Right
+sleep 200
+
+# Delete one char from the end (Backspace at EOL).
+key Backspace
+sleep 400
+
+snapshot midline_right_delete_no_ghost
+
+# Clean exit.
+key Enter
+sleep 200
+type "exit\r"
+exit_code 0
