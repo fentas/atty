@@ -365,8 +365,9 @@ test "mid-line + sync to shorter capture is refused (BS-poisoned OSC guard)" {
     // EOL (because the user's prior cursor was inside the truncated
     // region), clearing `cursor_moved`. The ghost overlay would
     // re-engage and paint dim text over bash's right-side echo. The
-    // guard refuses the rewrite entirely — just clears `uncertain`
-    // so the next clean resync can recover.
+    // guard refuses the rewrite entirely — keystroke buffer + cursor
+    // are preserved; `uncertain` is already false here (the splice
+    // path doesn't set it), so nothing else changes.
     //
     // Reproduces the scenario from
     // `tests/e2e/ghost_midline_insert_after_uparrow`: Arrow-Up →
