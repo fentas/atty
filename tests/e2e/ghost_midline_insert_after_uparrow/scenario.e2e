@@ -81,7 +81,7 @@ sleep 200
 # `markUncertain` and leaves the buffer untouched. Bash inserts the
 # space at position 4 and rewrites the tail to the master fd.
 type " "
-sleep 400
+sleep 600
 
 # Snapshot. Expected `grid.txt` row 2 is `$ open  ./test/foo` (note
 # the double space — the inserted char + the original space). The

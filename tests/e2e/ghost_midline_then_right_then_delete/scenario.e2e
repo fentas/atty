@@ -77,7 +77,7 @@ sleep 200
 
 # Delete one char from the end (Backspace at EOL).
 key Backspace
-sleep 400
+sleep 600
 
 snapshot midline_right_delete_no_ghost
 

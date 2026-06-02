@@ -218,6 +218,60 @@ test "mid-line append + backspace splice the buffer (mirror bash readline)" {
     try std.testing.expectEqualSlices(u8, "hello world", l.current());
 }
 
+test "splice boundary: insert just before last byte (cursor_pos == len - 1)" {
+    // The classic off-by-one boundary for `copyBackwards`. Insert at
+    // `len - 1` shifts a single tail byte right by 1 and writes the
+    // new byte one in from EOL.
+    var l = LineState{};
+    _ = l.applyInput("ls foo");
+    _ = l.applyInput("\x1B[D"); // ← × 1 → cursor_pos = 5 (between 'o' at byte[4] and 'o' at byte[5])
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
+    _ = l.applyInput("X");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "ls foXo", l.current());
+    try std.testing.expectEqual(@as(usize, 6), l.cursor_pos);
+}
+
+test "splice boundary: backspace at BOL (cursor_pos == 0) is a no-op" {
+    // Readline rings the bell terminal-side; the model leaves buffer
+    // and generation untouched. Asserting the generation guards
+    // against a future drift that bumps it on no-op paths.
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x01"); // Ctrl-A → cursor_pos = 0
+    const gen_before = l.generation;
+    _ = l.applyInput("\x7F"); // BS at BOL
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "hello", l.current());
+    try std.testing.expectEqual(@as(usize, 0), l.cursor_pos);
+    try std.testing.expectEqual(gen_before, l.generation);
+}
+
+test "splice + overflow: mid-line bulk insert past max_line caps + flags uncertain" {
+    // Pre-fill the buffer to (max_line - 2), park cursor mid-line,
+    // then paste a 10-byte run. `take` is capped at 2; the splice
+    // path writes those 2 bytes at the cursor and marks `uncertain`
+    // for the dropped suffix. Buffer must stay internally coherent
+    // (no out-of-bounds memmove, len + cursor_pos still consistent).
+    var l = LineState{};
+    var fill: [max_line - 2]u8 = undefined;
+    @memset(&fill, 'a');
+    _ = l.applyInput(&fill);
+    try std.testing.expectEqual(max_line - 2, l.len);
+    _ = l.applyInput("\x1B[D"); // ← × 1: cursor_pos = max_line - 3 (mid-line)
+    try std.testing.expectEqual(max_line - 3, l.cursor_pos);
+
+    _ = l.applyInput("XYZABCDEFG"); // 10-byte run, only 2 fit
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqual(max_line, l.len);
+    try std.testing.expectEqual(max_line - 1, l.cursor_pos);
+    // The two spliced bytes land at the cursor, the prior tail byte
+    // 'a' got pushed right by 2 to byte[max_line - 1].
+    try std.testing.expectEqual(@as(u8, 'X'), l.current()[max_line - 3]);
+    try std.testing.expectEqual(@as(u8, 'Y'), l.current()[max_line - 2]);
+    try std.testing.expectEqual(@as(u8, 'a'), l.current()[max_line - 1]);
+}
+
 test "uncertain + DIFFERENT content + Tab + sync still clamps cursor_pos (Tab-with-completion path)" {
     // Counterpart to the no-match guard below: Tab WITH a completion
     // that grew the buffer falls through to the rewrite branch and

@@ -136,6 +136,12 @@ pub const LineState = struct {
         self.committed_intent_len = 0;
     }
 
+    /// `cursor_pos == self.len` — the cursor is at logical EOL. Splice
+    /// fast paths and cursor-motion gates check this predicate.
+    fn isAtEol(self: *const LineState) bool {
+        return self.cursor_pos == self.len;
+    }
+
     /// Sync the cached `cursor_moved` flag from `cursor_pos` / `len`.
     /// Call after any operation that changes either. Keeping the flag
     /// as a cached derivation lets existing read-sites stay unchanged
@@ -143,7 +149,49 @@ pub const LineState = struct {
     /// answers — Right-arrow stepping back to EOL now re-engages the
     /// ghost overlay (the old sticky-flag model couldn't tell).
     fn syncCursorMoved(self: *LineState) void {
-        self.cursor_moved = self.cursor_pos != self.len;
+        self.cursor_moved = !self.isAtEol();
+    }
+
+    /// Splice `bytes` into the buffer at `cursor_pos`, shifting the
+    /// tail right. Caller must have verified `take > 0` and that
+    /// `take` bytes will fit (`self.len + take <= max_line`). Mirrors
+    /// bash readline's ICH-based mid-line insert so the keystroke
+    /// model stays in sync with the on-screen buffer.
+    fn spliceInsertAtCursor(self: *LineState, bytes: []const u8) void {
+        std.debug.assert(self.cursor_pos <= self.len);
+        std.debug.assert(self.len + bytes.len <= max_line);
+        std.mem.copyBackwards(
+            u8,
+            self.buffer[self.cursor_pos + bytes.len .. self.len + bytes.len],
+            self.buffer[self.cursor_pos..self.len],
+        );
+        @memcpy(self.buffer[self.cursor_pos .. self.cursor_pos + bytes.len], bytes);
+        self.len += bytes.len;
+        self.cursor_pos += bytes.len;
+        self.syncCursorMoved();
+        self.generation +%= 1;
+    }
+
+    /// Splice the byte at `cursor_pos - 1` out of the buffer, shifting
+    /// the tail left. Caller must have verified `cursor_pos > 0`.
+    /// Mirrors readline's mid-line backspace (`\b<rest> <CSI back>`).
+    fn spliceDeleteBeforeCursor(self: *LineState) void {
+        std.debug.assert(self.cursor_pos > 0);
+        std.debug.assert(self.cursor_pos <= self.len);
+        std.mem.copyForwards(
+            u8,
+            self.buffer[self.cursor_pos - 1 .. self.len - 1],
+            self.buffer[self.cursor_pos..self.len],
+        );
+        self.len -= 1;
+        self.cursor_pos -= 1;
+        if (self.len == 0) {
+            self.uncertain = false;
+            self.pending_author = .user;
+            self.pending_intent_len = 0;
+        }
+        self.syncCursorMoved();
+        self.generation +%= 1;
     }
 
     pub fn reset(self: *LineState) void {
@@ -269,7 +317,7 @@ pub const LineState = struct {
             self.uncertain = false;
             return;
         }
-        const cursor_was_at_eol = self.cursor_pos == self.len;
+        const cursor_was_at_eol = self.isAtEol();
         const prior_cursor = self.cursor_pos;
         @memcpy(self.buffer[0..n], content[0..n]);
         self.len = n;
@@ -327,28 +375,15 @@ pub const LineState = struct {
                 const room = if (self.len < max_line) max_line - self.len else 0;
                 const take = @min(want, room);
                 if (take > 0) {
-                    if (self.cursor_pos != self.len) {
-                        // Mid-line splice: shift tail right by `take`,
-                        // then write the run at `cursor_pos`. Mirrors
-                        // bash's ICH-based insert — keeps the keystroke
-                        // model in sync with the on-screen buffer so
-                        // ghost prefix queries stay accurate after the
-                        // user resumes typing.
-                        std.mem.copyBackwards(
-                            u8,
-                            self.buffer[self.cursor_pos + take .. self.len + take],
-                            self.buffer[self.cursor_pos..self.len],
-                        );
-                        @memcpy(self.buffer[self.cursor_pos .. self.cursor_pos + take], input[i .. i + take]);
-                        self.len += take;
-                        self.cursor_pos += take;
-                    } else {
+                    if (self.isAtEol()) {
                         @memcpy(self.buffer[self.len .. self.len + take], input[i .. i + take]);
                         self.len += take;
                         self.cursor_pos = self.len;
+                        self.syncCursorMoved();
+                        self.generation +%= 1;
+                    } else {
+                        self.spliceInsertAtCursor(input[i .. i + take]);
                     }
-                    self.syncCursorMoved();
-                    self.generation +%= 1;
                 }
                 if (take < want) {
                     // Overflow — mirror `append`'s capacity gate.
@@ -518,26 +553,8 @@ pub const LineState = struct {
             self.uncertain = true;
             return;
         }
-        if (self.cursor_pos != self.len) {
-            // Mid-line splice: bash inserts the byte at `cursor_pos`
-            // and shifts the tail right. Mirror that on `buffer` so
-            // the keystroke model stays in sync — otherwise OSC 133
-            // would need the shell to re-echo the tail to recover,
-            // and modern bash uses ICH for mid-line inserts (only
-            // the new byte hits the wire, the tail stays put on
-            // screen via terminal-side shift). Without mirroring,
-            // `line_state` and bash diverge and ghost text reflects
-            // a stale prefix of the line.
-            std.mem.copyBackwards(
-                u8,
-                self.buffer[self.cursor_pos + 1 .. self.len + 1],
-                self.buffer[self.cursor_pos..self.len],
-            );
-            self.buffer[self.cursor_pos] = b;
-            self.len += 1;
-            self.cursor_pos += 1;
-            self.syncCursorMoved();
-            self.generation +%= 1;
+        if (!self.isAtEol()) {
+            self.spliceInsertAtCursor(&.{b});
             return;
         }
         self.buffer[self.len] = b;
@@ -561,26 +578,12 @@ pub const LineState = struct {
             self.pending_intent_len = 0;
             return;
         }
-        if (self.cursor_pos != self.len) {
-            // Mid-line splice: remove byte at `cursor_pos - 1`,
-            // shift the tail left, decrement `len` + `cursor_pos`.
-            // Cursor-at-BOL (`cursor_pos == 0`) is a no-op — there's
-            // no byte before the cursor to delete.
+        if (!self.isAtEol()) {
+            // Cursor-at-BOL (`cursor_pos == 0`) is a no-op — readline
+            // rings the bell terminal-side; nothing in the buffer to
+            // delete, nothing to mark uncertain.
             if (self.cursor_pos == 0) return;
-            std.mem.copyForwards(
-                u8,
-                self.buffer[self.cursor_pos - 1 .. self.len - 1],
-                self.buffer[self.cursor_pos..self.len],
-            );
-            self.len -= 1;
-            self.cursor_pos -= 1;
-            if (self.len == 0) {
-                self.uncertain = false;
-                self.pending_author = .user;
-                self.pending_intent_len = 0;
-            }
-            self.syncCursorMoved();
-            self.generation +%= 1;
+            self.spliceDeleteBeforeCursor();
             return;
         }
         self.len -= 1;
@@ -633,7 +636,7 @@ pub const LineState = struct {
         // here scans from the end of the buffer — wrong when the
         // cursor is mid-line. Mark uncertain and let OSC 133 sync.
         // Same rationale as the append/backspace mid-line guards.
-        if (self.cursor_pos != self.len) {
+        if (!self.isAtEol()) {
             self.markUncertain();
             return;
         }
