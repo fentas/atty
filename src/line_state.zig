@@ -136,6 +136,12 @@ pub const LineState = struct {
         self.committed_intent_len = 0;
     }
 
+    /// `cursor_pos == self.len` — the cursor is at logical EOL. Splice
+    /// fast paths and cursor-motion gates check this predicate.
+    fn isAtEol(self: *const LineState) bool {
+        return self.cursor_pos == self.len;
+    }
+
     /// Sync the cached `cursor_moved` flag from `cursor_pos` / `len`.
     /// Call after any operation that changes either. Keeping the flag
     /// as a cached derivation lets existing read-sites stay unchanged
@@ -143,7 +149,50 @@ pub const LineState = struct {
     /// answers — Right-arrow stepping back to EOL now re-engages the
     /// ghost overlay (the old sticky-flag model couldn't tell).
     fn syncCursorMoved(self: *LineState) void {
-        self.cursor_moved = self.cursor_pos != self.len;
+        self.cursor_moved = !self.isAtEol();
+    }
+
+    /// Splice `bytes` into the buffer at `cursor_pos`, shifting the
+    /// tail right. Caller is responsible for ensuring the buffer has
+    /// room (`self.len + bytes.len <= max_line`); the assert
+    /// enforces it at debug time. Mirrors bash readline's ICH-based
+    /// mid-line insert so the keystroke model stays in sync with the
+    /// on-screen buffer.
+    fn spliceInsertAtCursor(self: *LineState, bytes: []const u8) void {
+        std.debug.assert(self.cursor_pos <= self.len);
+        std.debug.assert(self.len + bytes.len <= max_line);
+        std.mem.copyBackwards(
+            u8,
+            self.buffer[self.cursor_pos + bytes.len .. self.len + bytes.len],
+            self.buffer[self.cursor_pos..self.len],
+        );
+        @memcpy(self.buffer[self.cursor_pos .. self.cursor_pos + bytes.len], bytes);
+        self.len += bytes.len;
+        self.cursor_pos += bytes.len;
+        self.syncCursorMoved();
+        self.generation +%= 1;
+    }
+
+    /// Splice the byte at `cursor_pos - 1` out of the buffer, shifting
+    /// the tail left. Caller must have verified `cursor_pos > 0`.
+    /// Mirrors readline's mid-line backspace (`\b<rest> <CSI back>`).
+    fn spliceDeleteBeforeCursor(self: *LineState) void {
+        std.debug.assert(self.cursor_pos > 0);
+        std.debug.assert(self.cursor_pos <= self.len);
+        std.mem.copyForwards(
+            u8,
+            self.buffer[self.cursor_pos - 1 .. self.len - 1],
+            self.buffer[self.cursor_pos..self.len],
+        );
+        self.len -= 1;
+        self.cursor_pos -= 1;
+        if (self.len == 0) {
+            self.uncertain = false;
+            self.pending_author = .user;
+            self.pending_intent_len = 0;
+        }
+        self.syncCursorMoved();
+        self.generation +%= 1;
     }
 
     pub fn reset(self: *LineState) void {
@@ -255,7 +304,28 @@ pub const LineState = struct {
             self.uncertain = false;
             return;
         }
-        const cursor_was_at_eol = self.cursor_pos == self.len;
+        // Mid-line + capture shrinks to or below the cursor → OSC 133
+        // input region was poisoned by bash's cursor-motion backspace
+        // echoes (each Arrow-Left makes bash emit `\b` to master, which
+        // `Osc133.processInputByte` currently pops as if it were a
+        // delete). Trusting the shrunk capture would land cursor_pos at
+        // the new EOL via the `min(prior, n)` clamp below and clear
+        // `cursor_moved`, re-engaging ghost paint over the right-side
+        // text. Refuse the rewrite — keep the keystroke buffer.
+        //
+        // Gated on `!self.uncertain` so the recovery path stays open
+        // for genuine unmodelled mid-line edits (Tab completion that
+        // shrinks the buffer, Ctrl-W mid-line, …) — those legitimately
+        // need the OSC capture to repair the keystroke model.
+        //
+        // Sibling guard at the proxy's setCommitted-from-OSC site uses
+        // the same "shorter-than-baseline → refuse" fingerprint with
+        // `committed_len` as its baseline; both protect against the
+        // same BS-poisoning class. Keep both in sync if either evolves.
+        if (!self.uncertain and self.cursor_pos < self.len and n <= self.cursor_pos) {
+            return;
+        }
+        const cursor_was_at_eol = self.isAtEol();
         const prior_cursor = self.cursor_pos;
         @memcpy(self.buffer[0..n], content[0..n]);
         self.len = n;
@@ -309,27 +379,19 @@ pub const LineState = struct {
                     const c = input[run_end];
                     if (c < 0x20 or c == 0x7F) break;
                 }
-                // The per-byte `append` bails in two distinct shapes:
-                // mid-line insertion → `markUncertain()` (drops staged
-                // author + intent); full buffer → bare `uncertain =
-                // true` (keeps staged author so the post-resync line
-                // still carries the LLM tag). Mirror BOTH below so
-                // the bulk path is a pure optimisation with no
-                // behaviour delta vs. N `append` calls.
-                if (self.cursor_pos != self.len) {
-                    self.markUncertain();
-                    i = run_end;
-                    continue;
-                }
                 const want = run_end - i;
                 const room = if (self.len < max_line) max_line - self.len else 0;
                 const take = @min(want, room);
                 if (take > 0) {
-                    @memcpy(self.buffer[self.len .. self.len + take], input[i .. i + take]);
-                    self.len += take;
-                    self.cursor_pos = self.len;
-                    self.syncCursorMoved();
-                    self.generation +%= 1;
+                    if (self.isAtEol()) {
+                        @memcpy(self.buffer[self.len .. self.len + take], input[i .. i + take]);
+                        self.len += take;
+                        self.cursor_pos = self.len;
+                        self.syncCursorMoved();
+                        self.generation +%= 1;
+                    } else {
+                        self.spliceInsertAtCursor(input[i .. i + take]);
+                    }
                 }
                 if (take < want) {
                     // Overflow — mirror `append`'s capacity gate.
@@ -499,15 +561,8 @@ pub const LineState = struct {
             self.uncertain = true;
             return;
         }
-        // Mid-line insertion isn't modeled: bash splices the byte
-        // at cursor_pos and shifts the tail right; we'd need a
-        // memmove and bookkeeping we don't have. Mark uncertain
-        // so a subsequent OSC 133 capture restores the post-insert
-        // truth. Without this, len would lag the screen while
-        // cursor_pos slid back to len via Right-stepping, and
-        // ghost would re-engage on a stale buffer.
-        if (self.cursor_pos != self.len) {
-            self.markUncertain();
+        if (!self.isAtEol()) {
+            self.spliceInsertAtCursor(&.{b});
             return;
         }
         self.buffer[self.len] = b;
@@ -531,14 +586,12 @@ pub const LineState = struct {
             self.pending_intent_len = 0;
             return;
         }
-        // Mid-line backspace isn't modeled: bash removes at
-        // `cursor_pos - 1` and shifts the tail left. We'd be
-        // dropping the LAST byte of the buffer (wrong) — over time
-        // the buffer + screen would diverge silently. Mark
-        // uncertain and let OSC 133 resync. Same rationale as the
-        // append() mid-line guard above.
-        if (self.cursor_pos != self.len) {
-            self.markUncertain();
+        if (!self.isAtEol()) {
+            // Cursor-at-BOL (`cursor_pos == 0`) is a no-op — readline
+            // rings the bell terminal-side; nothing in the buffer to
+            // delete, nothing to mark uncertain.
+            if (self.cursor_pos == 0) return;
+            self.spliceDeleteBeforeCursor();
             return;
         }
         self.len -= 1;
@@ -591,7 +644,7 @@ pub const LineState = struct {
         // here scans from the end of the buffer — wrong when the
         // cursor is mid-line. Mark uncertain and let OSC 133 sync.
         // Same rationale as the append/backspace mid-line guards.
-        if (self.cursor_pos != self.len) {
+        if (!self.isAtEol()) {
             self.markUncertain();
             return;
         }

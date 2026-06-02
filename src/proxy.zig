@@ -1326,8 +1326,34 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // command phase would set lastCommitted to the
                 // stale prompt text → recording the same line over
                 // and over.
-                if (osc133_tracker.inInputPhase() and containsEnter(input) and osc133_tracker.currentInput().len > 0) {
-                    line_state.setCommitted(osc133_tracker.currentInput());
+                if (osc133_tracker.inInputPhase() and containsEnter(input)) {
+                    const osc_in = osc133_tracker.currentInput();
+                    // Compare against the just-snapshotted committed line,
+                    // NOT `current()` — `applyInput()` above has already
+                    // run `submit()` for the Enter, clearing the live
+                    // buffer. Skip the override when OSC is shorter than
+                    // that snapshot: that's the bash-cursor-motion-BS
+                    // poisoning fingerprint (Arrow-Left × N shrinks
+                    // `osc.input` because OSC 133 pops on `\b`). Trust
+                    // the keystroke-derived submit; the commit may miss
+                    // a freshly-typed mid-line char but won't be mangled
+                    // down to a 4-byte prefix of the recalled line.
+                    // (Sibling guard in `LineState.syncFromCapture` —
+                    // same "shorter-than-baseline → refuse" fingerprint,
+                    // different baseline (cursor_pos vs committed_len).)
+                    //
+                    // Also require `committed_len > 0`: when `submit()`
+                    // short-circuits on an empty buffer (Enter on a
+                    // bare prompt), `committed_len` retains its prior
+                    // value, possibly 0 (after the immediately-prior
+                    // `clearLastCommitted` at the end of last iteration).
+                    // Without this gate, a non-empty `osc_in` would
+                    // get propagated as a phantom commit even though
+                    // the user hit Enter on nothing.
+                    const committed_len: usize = if (line_state.lastCommitted()) |c| c.len else 0;
+                    if (osc_in.len > 0 and committed_len > 0 and osc_in.len >= committed_len) {
+                        line_state.setCommitted(osc_in);
+                    }
                 }
 
                 const action = D.dispatchInput(&runtimes, &ctx, input) catch .forward;

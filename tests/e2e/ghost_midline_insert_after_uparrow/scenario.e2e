@@ -1,0 +1,104 @@
+# ghost_midline_insert_after_uparrow — ghost overlay must NOT paint
+# over the right-side text when the user inserts a character mid-line
+# after an Arrow-Up history recall.
+#
+# Reproduction (reported by the user — original was `open ./test/foo`,
+# substituted with `prefix-x` here for CI determinism; same structure):
+#   1. Arrow-Up to recall an entry that contains a space (e.g.
+#      `prefix-x ./test/foo`).
+#   2. Arrow-Left back across the tail until the cursor lands on the
+#      first space (right after `x`).
+#   3. Type a single space — bash inserts it mid-line.
+#
+# Observed bug: ghost text re-paints starting at the cursor and
+# visually overwrites the bash-redrawn tail (`./test/foo`).
+#
+# Expected: the prompt row reads `prefix-x  ./test/foo` (the typed
+# extra space + the original tail, unstyled) and NO dim cells appear
+# past the cursor — the mid-line splice in LineState keeps the cursor
+# at `cursor_pos < len`, so `cursor_moved` stays true and
+# `renderGhost` suppresses the overlay.
+#
+# `prefix-x` follows the `ghost_pick` convention so the bash "command
+# not found" output stays deterministic regardless of what's installed
+# on the CI runner (GitHub Actions ubuntu-latest ships various
+# utilities under common short names like `open`).
+#
+# We record TWO entries through atty so the in-memory ring has both:
+#   • a longer entry `prefix-x ./test/foo --verbose` (provideGhostText
+#     suggestion target — its trailing `" --verbose"` would be the
+#     dim overlay if the suppression breaks).
+#   • a shorter entry `prefix-x ./test/foo` (the Arrow-Up recall
+#     target — bash's history puts it on the prompt verbatim).
+# Order matters: the newer-equal-length match is skipped by
+# `findSuggestion` (it requires `len > query.len`), so the older
+# longer entry remains the ghost candidate.
+
+cols 60
+rows 8
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+# Deterministic re-runs: wipe the history file.
+type "rm -f /tmp/atty-e2e-ghost-midline\r"
+wait_for "$"
+
+# Mirror what `atty init bash` injects: PS1 with `;A`+`;B` markers so
+# the OSC 133 tracker captures the recalled + edited line.
+type "PS1=$'\\[\\033]133;A\\007\\]$ \\[\\033]133;B\\007\\]' && clear\r"
+wait_for "$"
+sleep 200
+
+# Seed: longer-then-shorter so Arrow-Up recalls the shorter form and
+# `findSuggestion` returns the longer one (it walks newest→oldest and
+# requires `e.len > query.len`).
+type "prefix-x ./test/foo --verbose\r"
+wait_for "$"
+sleep 200
+type "prefix-x ./test/foo\r"
+wait_for "$"
+sleep 200
+
+# Arrow-Up — bash recalls `prefix-x ./test/foo`. atty's keystroke
+# model marks `uncertain`; the OSC 133 capture region picks up the
+# recall and syncFromCapture restores `cursor_pos = len` (EOL).
+key Up
+sleep 300
+
+# Walk back across `./test/foo ` — eleven Lefts land the cursor right
+# after `x` of `prefix-x`, i.e. position 8 in the input (0-indexed).
+# After this `cursor_moved` is true and ghost paint must be
+# suppressed.
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+key Left
+sleep 200
+
+# The bug-triggering keystroke — mid-line space insertion. atty's
+# keystroke model splices the space at `cursor_pos`, advances the
+# cursor by one, and bash (independently) emits an ICH echo that
+# shifts the on-screen tail. Both tracks stay coherent.
+type " "
+sleep 600
+
+# Snapshot. Expected `grid.txt` row reads `$ prefix-x  ./test/foo`
+# (note the double space — the inserted char + the original space).
+# The `grid.sgr` MUST NOT have any dim spans on the prompt row: the
+# cursor is mid-line (`cursor_pos < len`), which gates ghost paint.
+snapshot midline_no_ghost
+
+# Clean exit.
+key Enter
+sleep 200
+type "exit\r"
+exit_code 0

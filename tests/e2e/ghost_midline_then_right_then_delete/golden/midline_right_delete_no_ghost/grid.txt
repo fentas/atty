@@ -1,0 +1,8 @@
+$ prefix-x run gen:dog
+bash: prefix-x: command not found
+$ prefix-x run  gen:do
+
+
+
+
+

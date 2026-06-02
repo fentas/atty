@@ -1,0 +1,8 @@
+$ prefix-x ./test/foo --verbose
+bash: prefix-x: command not found
+$ prefix-x ./test/foo
+bash: prefix-x: command not found
+$ prefix-x  ./test/foo
+
+
+

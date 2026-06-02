@@ -174,40 +174,102 @@ test "Up + sync(recall) + Ctrl-A + End + type 'e' preserves recalled line conten
     try std.testing.expectEqualSlices(u8, "which pvcontrole", l.current());
 }
 
-test "mid-line append/backspace/killWord markUncertain instead of corrupting buffer" {
-    // Copilot review caught the hole: the cursor_pos refactor's
-    // "assume EOL" shortcut for append / backspace / killWord
-    // breaks when the user is actually mid-line. Bash splices the
-    // insert/delete at cursor_pos; line_state's keystroke model
-    // only knows EOL operations. Mark uncertain when mid-line so
-    // an OSC 133 syncFromCapture restores the post-edit content
-    // instead of letting buffer + screen drift apart silently.
+test "mid-line append + backspace splice the buffer (mirror bash readline)" {
+    // The keystroke model splices mid-line edits into `buffer` so it
+    // stays in sync with what bash actually has on the prompt — modern
+    // readline uses ICH for inserts and `\b<rest> <CSI back>` for
+    // deletes (only the changed bytes hit the wire), so OSC 133 alone
+    // can't restore the post-edit truth. Without the splice, the
+    // model would diverge and ghost text would query a stale prefix
+    // of the line.
     var l = LineState{};
     _ = l.applyInput("hello world");
     _ = l.applyInput("\x01"); // Ctrl-A → cursor_pos = 0
     try std.testing.expect(l.cursor_moved);
 
-    // Mid-line typing: buffer should NOT mutate; uncertain set.
+    // Mid-line insert at position 0: 'X' splices in, tail shifts right.
     _ = l.applyInput("X");
-    try std.testing.expect(l.uncertain);
-    try std.testing.expectEqualSlices(u8, "hello world", l.current());
-    try std.testing.expectEqual(@as(usize, 11), l.len);
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "Xhello world", l.current());
+    try std.testing.expectEqual(@as(usize, 12), l.len);
+    try std.testing.expectEqual(@as(usize, 1), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved); // 1 != 12 → still mid-line
 
-    // Reset to a fresh state; same shape for backspace.
+    // Mid-line backspace: remove byte at cursor_pos - 1, shift left.
     l.reset();
     _ = l.applyInput("hello world");
-    _ = l.applyInput("\x01"); // Ctrl-A
-    _ = l.applyInput("\x7F"); // Backspace
-    try std.testing.expect(l.uncertain);
-    try std.testing.expectEqualSlices(u8, "hello world", l.current()); // untouched
+    _ = l.applyInput("\x01"); // Ctrl-A → cursor_pos = 0
+    _ = l.applyInput("\x06"); // Ctrl-F → cursor_pos = 1
+    _ = l.applyInput("\x06"); // Ctrl-F → cursor_pos = 2 (between 'e' and 'l')
+    _ = l.applyInput("\x7F"); // Backspace deletes 'e' at position 1
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "hllo world", l.current());
+    try std.testing.expectEqual(@as(usize, 1), l.cursor_pos);
 
-    // killWord (Ctrl-W) mid-line.
+    // killWord still markUncertains mid-line — the readline kill-word
+    // scan from end-of-buffer is wrong when cursor is mid-line, and
+    // the model doesn't yet implement the splice for it. Documented
+    // as a deliberate gap until a user-visible symptom motivates it.
     l.reset();
     _ = l.applyInput("hello world");
     _ = l.applyInput("\x01"); // Ctrl-A
     _ = l.applyInput("\x17"); // Ctrl-W
     try std.testing.expect(l.uncertain);
     try std.testing.expectEqualSlices(u8, "hello world", l.current());
+}
+
+test "splice boundary: insert just before last byte (cursor_pos == len - 1)" {
+    // The classic off-by-one boundary for `copyBackwards`. Insert at
+    // `len - 1` shifts a single tail byte right by 1 and writes the
+    // new byte one in from EOL.
+    var l = LineState{};
+    _ = l.applyInput("ls foo");
+    _ = l.applyInput("\x1B[D"); // ← × 1 → cursor_pos = 5 (between 'o' at byte[4] and 'o' at byte[5])
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
+    _ = l.applyInput("X");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "ls foXo", l.current());
+    try std.testing.expectEqual(@as(usize, 6), l.cursor_pos);
+}
+
+test "splice boundary: backspace at BOL (cursor_pos == 0) is a no-op" {
+    // Readline rings the bell terminal-side; the model leaves buffer
+    // and generation untouched. Asserting the generation guards
+    // against a future drift that bumps it on no-op paths.
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x01"); // Ctrl-A → cursor_pos = 0
+    const gen_before = l.generation;
+    _ = l.applyInput("\x7F"); // BS at BOL
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "hello", l.current());
+    try std.testing.expectEqual(@as(usize, 0), l.cursor_pos);
+    try std.testing.expectEqual(gen_before, l.generation);
+}
+
+test "splice + overflow: mid-line bulk insert past max_line caps + flags uncertain" {
+    // Pre-fill the buffer to (max_line - 2), park cursor mid-line,
+    // then paste a 10-byte run. `take` is capped at 2; the splice
+    // path writes those 2 bytes at the cursor and marks `uncertain`
+    // for the dropped suffix. Buffer must stay internally coherent
+    // (no out-of-bounds memmove, len + cursor_pos still consistent).
+    var l = LineState{};
+    var fill: [max_line - 2]u8 = undefined;
+    @memset(&fill, 'a');
+    _ = l.applyInput(&fill);
+    try std.testing.expectEqual(max_line - 2, l.len);
+    _ = l.applyInput("\x1B[D"); // ← × 1: cursor_pos = max_line - 3 (mid-line)
+    try std.testing.expectEqual(max_line - 3, l.cursor_pos);
+
+    _ = l.applyInput("XYZABCDEFG"); // 10-byte run, only 2 fit
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqual(max_line, l.len);
+    try std.testing.expectEqual(max_line - 1, l.cursor_pos);
+    // The two spliced bytes land at the cursor, the prior tail byte
+    // 'a' got pushed right by 2 to byte[max_line - 1].
+    try std.testing.expectEqual(@as(u8, 'X'), l.current()[max_line - 3]);
+    try std.testing.expectEqual(@as(u8, 'Y'), l.current()[max_line - 2]);
+    try std.testing.expectEqual(@as(u8, 'a'), l.current()[max_line - 1]);
 }
 
 test "uncertain + DIFFERENT content + Tab + sync still clamps cursor_pos (Tab-with-completion path)" {
@@ -288,6 +350,74 @@ test "uncertain + same content + Tab + sync preserves cursor_pos (Tab-no-match g
     try std.testing.expect(!l.uncertain); // sync cleared it
     try std.testing.expect(l.cursor_moved); // cursor STILL mid-line
     try std.testing.expectEqual(@as(usize, 12), l.cursor_pos);
+}
+
+test "mid-line + sync to shorter capture is refused (BS-poisoned OSC guard)" {
+    // Bash echoes every Arrow-Left keystroke as `\b` on the master
+    // fd, and `Osc133.processInputByte` currently pops a byte from
+    // the captured-input region on BS — so the OSC capture shrinks
+    // by one byte per arrow-left even though the on-screen content
+    // didn't change. After N lefts on an Arrow-Up-recalled line, the
+    // OSC capture has lost N bytes from the tail.
+    //
+    // If `syncFromCapture` then trusted that shrunk capture, the
+    // `min(prior_cursor, n)` clamp would land cursor_pos at the new
+    // EOL (because the user's prior cursor was inside the truncated
+    // region), clearing `cursor_moved`. The ghost overlay would
+    // re-engage and paint dim text over bash's right-side echo. The
+    // guard refuses the rewrite entirely — keystroke buffer + cursor
+    // are preserved; `uncertain` is already false here (the splice
+    // path doesn't set it), so nothing else changes.
+    //
+    // Reproduces the scenario from
+    // `tests/e2e/ghost_midline_insert_after_uparrow`: Arrow-Up →
+    // syncFromCapture("open ./test/foo"); Arrow-Left × 11 →
+    // cursor_pos = 4; mid-line space → applyInput splices in-place
+    // (buffer grows to 16 chars, cursor 5, `uncertain` stays false);
+    // bash echoes `\b` after its ICH insert, OSC pops down to "open".
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A"); // Arrow-Up
+    l.syncFromCapture("open ./test/foo");
+    var k: usize = 0;
+    while (k < 11) : (k += 1) _ = l.applyInput("\x1B[D");
+    try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+    _ = l.applyInput(" "); // mid-line splice — buffer now 16 chars, cursor 5
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "open  ./test/foo", l.current());
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+
+    // Capture has been chewed down to "open" (4 chars) by `\b` echoes
+    // from the prior Arrow-Lefts. Trusting it would set
+    // cursor_pos = min(5, 4) = 4 == new_len → clear cursor_moved.
+    // The guard skips the rewrite.
+    l.syncFromCapture("open");
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "open  ./test/foo", l.current());
+    try std.testing.expectEqual(@as(usize, 5), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+}
+
+test "mid-line + sync to capture that grows past cursor still rewrites" {
+    // Counterpart to the BS-poisoned-OSC guard above: when the new
+    // content reaches PAST the prior cursor, the OSC capture has
+    // genuinely caught up (paste, completion-fragment, mid-line
+    // redraw with full content). Sync as normal.
+    var l = LineState{};
+    _ = l.applyInput("\x1B[A");
+    l.syncFromCapture("hello world");
+    _ = l.applyInput("\x1B[D"); // cursor 10
+    _ = l.applyInput("\x1B[D"); // cursor 9
+    _ = l.applyInput("\x1B[D"); // cursor 8
+    try std.testing.expectEqual(@as(usize, 8), l.cursor_pos);
+
+    // Capture stayed at full length; rewrite proceeds; cursor
+    // preserved at 8 (mid-line) and stays mid-line.
+    l.syncFromCapture("hello world!");
+    try std.testing.expectEqualSlices(u8, "hello world!", l.current());
+    try std.testing.expectEqual(@as(usize, 8), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
 }
 
 test "uncertain + same content + Left + sync preserves cursor_pos (mid-typing redraw guard)" {
@@ -871,53 +1001,35 @@ test "setCommitted with non-empty content does not snapshot pending_author" {
     try std.testing.expectEqual(Author.llm, l.pending_author);
 }
 
-test "syncFromCapture preserves cursor when mid-line delete shrinks the buffer" {
-    // Reproduction of the user-reported "ghost re-engages after
-    // mid-line backspace" bug. Sequence:
-    //   1. Buffer matches an in-flight line ("comand tesd aaa").
-    //   2. User Arrow-Lefts back across whitespace + cursor lands
-    //      mid-line.
-    //   3. Backspace marks `uncertain` (mid-line edits aren't
-    //      modeled — the byte-level applyInput can't tell which
-    //      byte readline removed).
-    //   4. Bash's PS1 redraw triggers `syncFromCapture` with the
-    //      post-delete content shorter by one byte ("comand tes
-    //      aaa").
-    //
-    // Invariant under test: after the sync the cursor stays
-    // mid-line, `cursor_moved` stays true, ghost remains
-    // suppressed. Clamping cursor to EOL (the new len) would
-    // flip `cursor_moved` false and let ghost paint over the
-    // live characters to the cursor's right.
+test "mid-line backspace splices buffer + preserves cursor accurately" {
+    // Mid-line BS splices the byte at `cursor_pos - 1` out of the
+    // buffer and decrements both `len` and `cursor_pos`. No drift,
+    // no `uncertain` set, no need for a post-edit OSC 133 redraw to
+    // restore the truth — the keystroke model is now authoritative
+    // for the splice itself.
     var l = LineState{};
     // Simulate the in-flight "comand tesd aaa" state (15 bytes).
     l.syncFromCapture("comand tesd aaa");
     // Arrow-Left × 4 lands cursor at position 11 (between 'd' at
-    // byte[10] and ' ' at byte[11]). Left = `\x1B[D`;
-    // applyInput's modeled-CSI branch decrements cursor_pos
-    // without touching uncertain.
+    // byte[10] and ' ' at byte[11]).
     _ = l.applyInput("\x1B[D\x1B[D\x1B[D\x1B[D");
     try std.testing.expectEqual(@as(usize, 11), l.cursor_pos);
     try std.testing.expect(!l.uncertain);
     try std.testing.expect(l.cursor_moved);
 
-    // Backspace (0x7F) mid-line — readline removes the byte
-    // BEFORE the cursor (the 'd' at byte[10]). applyInput's
-    // backspace handler sees cursor_pos != len and marks
-    // uncertain (it can't model which byte readline removed).
+    // Backspace mid-line — splice removes 'd' at byte[10].
     _ = l.applyInput("\x7F");
-    try std.testing.expect(l.uncertain);
-    try std.testing.expect(l.cursor_moved);
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "comand tes aaa", l.current());
+    try std.testing.expectEqual(@as(usize, 10), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved); // 10 != 14 → still mid-line
 
-    // PS1 redraw delivers "comand tes aaa" — 14 bytes, 'd' gone.
+    // A subsequent same-content OSC sync is a no-op via the early
+    // return path; cursor stays at 10.
     l.syncFromCapture("comand tes aaa");
     try std.testing.expect(!l.uncertain);
-    try std.testing.expect(l.cursor_moved); // 11 != 14 → mid-line → ghost still suppressed
-    // Modeled cursor sits at 11 (drifts 1 right of physical pos
-    // 10 where the readline cursor actually landed post-delete
-    // — documented in syncFromCapture's docstring). Harmless for
-    // ghost gating.
-    try std.testing.expectEqual(@as(usize, 11), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved);
+    try std.testing.expectEqual(@as(usize, 10), l.cursor_pos);
 }
 
 test "syncFromCapture lands cursor at new EOL when prior cursor WAS at EOL" {
@@ -999,16 +1111,22 @@ test "applyInput: bulk-append stops at control byte (Enter mid-paste)" {
     try std.testing.expectEqualStrings("echo foo", l.lastCommitted().?);
 }
 
-test "applyInput: bulk-append refuses mid-line insertion (uncertain)" {
-    // Mid-line insertion isn't modeled. The bulk path mirrors
-    // `append`'s `markUncertain` bail so an interactive paste
-    // landing mid-line forces an OSC 133 resync.
+test "applyInput: bulk-append splices mid-line insertion (mirrors per-byte append)" {
+    // The bulk path runs the same splice as the per-byte `append`:
+    // a paste landing mid-line shifts the tail right by `take` bytes
+    // and writes the run at `cursor_pos`. Keeps the keystroke model
+    // in sync with bash readline's ICH-based insert.
     var l = LineState{};
     _ = l.applyInput("ls foo");
-    _ = l.applyInput("\x1B[D\x1B[D"); // ← × 2: cursor mid-line.
+    _ = l.applyInput("\x1B[D\x1B[D"); // ← × 2: cursor at position 4 (between 'f' and 'o').
+    try std.testing.expectEqual(@as(usize, 4), l.cursor_pos);
     try std.testing.expect(!l.uncertain);
+
     _ = l.applyInput("INSERT");
-    try std.testing.expect(l.uncertain);
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "ls fINSERToo", l.current());
+    try std.testing.expectEqual(@as(usize, 10), l.cursor_pos);
+    try std.testing.expect(l.cursor_moved); // 10 != 12 → still mid-line
 }
 
 test "applyInput: bulk-append honours max_line capacity gate" {
