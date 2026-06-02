@@ -153,10 +153,11 @@ pub const LineState = struct {
     }
 
     /// Splice `bytes` into the buffer at `cursor_pos`, shifting the
-    /// tail right. Caller must have verified `take > 0` and that
-    /// `take` bytes will fit (`self.len + take <= max_line`). Mirrors
-    /// bash readline's ICH-based mid-line insert so the keystroke
-    /// model stays in sync with the on-screen buffer.
+    /// tail right. Caller is responsible for ensuring the buffer has
+    /// room (`self.len + bytes.len <= max_line`); the assert
+    /// enforces it at debug time. Mirrors bash readline's ICH-based
+    /// mid-line insert so the keystroke model stays in sync with the
+    /// on-screen buffer.
     fn spliceInsertAtCursor(self: *LineState, bytes: []const u8) void {
         std.debug.assert(self.cursor_pos <= self.len);
         std.debug.assert(self.len + bytes.len <= max_line);
