@@ -56,11 +56,10 @@ key Left
 key Left
 sleep 200
 
-# Mid-line space insertion. Bash inserts at position 8, shifting tail.
-# `line_state.applyInput` markUncertains because cursor_pos(8) !=
-# len(15). The proxy gate added in #386 refuses the
-# `syncFromCapture("npm run ")` rewrite because cursor is mid-line and
-# the capture has been chewed below the cursor.
+# Mid-line space insertion. Bash inserts at position 8 + shifts the
+# tail via ICH. `LineState.append`'s mid-line splice mirrors that:
+# buffer grows to 16 chars with the new space at byte 8, cursor lands
+# at 9, `cursor_moved` stays true so renderGhost is suppressed.
 type " "
 sleep 200
 

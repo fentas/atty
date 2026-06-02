@@ -14,8 +14,9 @@
 #
 # Expected: the prompt row reads `open  ./test/foo` (the typed extra
 # space + the original tail, unstyled) and NO dim cells appear past
-# the cursor — the line model is uncertain *and* the cursor is
-# mid-line, both of which independently suppress the overlay.
+# the cursor — the mid-line splice in LineState keeps the cursor at
+# `cursor_pos < len`, so `cursor_moved` stays true and `renderGhost`
+# suppresses the overlay.
 #
 # We record TWO entries through atty so the in-memory ring has both:
 #   • a longer entry `open ./test/foo --verbose` (provideGhostText
@@ -77,17 +78,16 @@ key Left
 sleep 200
 
 # The bug-triggering keystroke — mid-line space insertion. atty's
-# keystroke model can't splice mid-line, so `applyInput` calls
-# `markUncertain` and leaves the buffer untouched. Bash inserts the
-# space at position 4 and rewrites the tail to the master fd.
+# keystroke model splices the space at `cursor_pos`, advances the
+# cursor by one, and bash (independently) emits an ICH echo that
+# shifts the on-screen tail. Both tracks stay coherent.
 type " "
 sleep 600
 
 # Snapshot. Expected `grid.txt` row 2 is `$ open  ./test/foo` (note
 # the double space — the inserted char + the original space). The
-# `grid.sgr` MUST NOT have any dim spans on row 2: the line model is
-# `uncertain` AND the cursor is mid-line, both of which independently
-# gate ghost paint.
+# `grid.sgr` MUST NOT have any dim spans on row 2: the cursor is
+# mid-line (`cursor_pos < len`), which gates ghost paint.
 snapshot midline_no_ghost
 
 # Clean exit.

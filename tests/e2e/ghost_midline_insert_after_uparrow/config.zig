@@ -1,11 +1,14 @@
 //! ghost_midline_insert_after_uparrow — Arrow-Up history recall +
 //! Left back into the line + a typed space mid-line must NOT cause
-//! the ghost overlay to paint over the right-side text. The line
-//! model is `uncertain` AND `cursor_moved` after the space; both gate
-//! ghost paint independently in `renderGhost`.
+//! the ghost overlay to paint over the right-side text. The mid-line
+//! splice in `LineState.append` keeps the cursor at `cursor_pos < len`
+//! after the insert, so `cursor_moved` stays true and `renderGhost`
+//! suppresses the overlay.
 //!
-//! Only the history module is enabled so the snapshot grid carries
-//! the prompt + the recalled line and nothing else.
+//! Modules: guardrail (proxy default) + history. The history module
+//! is what would surface a ghost suggestion if the cursor + line
+//! state ever wrongly cleared; with the splice in place no candidate
+//! ever reaches `renderGhost`.
 
 const atty = @import("atty");
 
