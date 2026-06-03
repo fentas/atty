@@ -6,6 +6,26 @@ that point are merged into the relevant release on the next run.
 
 [release-please]: https://github.com/googleapis/release-please
 
+## [0.7.0](https://github.com/fentas/atty/compare/v0.6.0...v0.7.0) (2026-06-02)
+
+
+### Features
+
+* **atti:** lifecycle CLI for atty (install + doctor + version) ([#383](https://github.com/fentas/atty/issues/383)) ([e5feedd](https://github.com/fentas/atty/commit/e5feedd87e168ba26bdf55734866e34490b1a80a))
+
+
+### Bug Fixes
+
+* **docs:** use last URL segment as sidebar module label ([#385](https://github.com/fentas/atty/issues/385)) ([91c0a1e](https://github.com/fentas/atty/commit/91c0a1e88600e9604ad74dd0459194fd126222b4))
+* **proxy:** suppress ghost re-engagement after mid-line insert post-recall ([#386](https://github.com/fentas/atty/issues/386)) ([83d33a7](https://github.com/fentas/atty/commit/83d33a714aa003b186fcc43d157100c5fd155eeb))
+
+
+### Documentation
+
+* split modules page for security_guard / mouse_links / mouse_urls ([#382](https://github.com/fentas/atty/issues/382)) ([7f3d947](https://github.com/fentas/atty/commit/7f3d9475ab96a1b1d878d3aceaa6c848195db680))
+* split providers page into per-module pages + sidebar drawer ([#384](https://github.com/fentas/atty/issues/384)) ([5739855](https://github.com/fentas/atty/commit/573985547f8b6e230021a20eb5f89e8faab51f74))
+* surface the full-suite install path + modules TOC ([#379](https://github.com/fentas/atty/issues/379)) ([bb5b2a6](https://github.com/fentas/atty/commit/bb5b2a6166a0118dc689f277e0266c4ad149e6fe))
+
 ## [0.6.0](https://github.com/fentas/atty/compare/v0.5.0...v0.6.0) (2026-06-01)
 
 
