@@ -1699,6 +1699,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 path_buf[cwd_path.len] = 0;
                                 _ = std.c.chdir(@ptrCast(&path_buf));
                             }
+                            // Re-emit OSC 7 from atty itself so the outer
+                            // terminal sees a sequence attributed to atty's
+                            // PTY (some terminals — Ghostty in particular —
+                            // tag the cached cwd by which surface wrote it,
+                            // and bash's own emission passing through atty
+                            // is still tagged "the shell that atty wraps"
+                            // rather than atty's surface). The bytes
+                            // would otherwise be no-op duplicates of what
+                            // bash just sent.
+                            if (args.is_tty and cwd_path.len > 0) {
+                                var osc_buf: [4200]u8 = undefined;
+                                var hostname: [256]u8 = undefined;
+                                const hn = std.c.gethostname(&hostname, hostname.len);
+                                const hn_slice: []const u8 = if (hn == 0) std.mem.sliceTo(&hostname, 0) else "localhost";
+                                var w: std.Io.Writer = .fixed(&osc_buf);
+                                w.print("\x1B]7;file://{s}{s}\x07", .{ hn_slice, cwd_path }) catch {};
+                                if (w.end > 0) writeAll(posix.STDOUT_FILENO, osc_buf[0..w.end]) catch {};
+                            }
                         } else {
                             subprocess_tracker.onRemoteCwd(cwd_path);
                         }
