@@ -1577,7 +1577,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 trace.logBytes(.input, "master_read", output);
                 const alt_before = alt_screen.active;
 
-                if (ghost.visible) try clearGhost(&ghost, &out_buf);
+                // `cursor_tracker` here reflects the PRIOR chunk's
+                // last-byte state — `feed(output)` for this chunk
+                // runs ~40 lines below. If the previous chunk ended
+                // mid-escape and this new chunk continues it,
+                // emitting clearGhost's `\x1B[K` here lands between
+                // the two halves of the shell's escape sequence; the
+                // fresh `\x1B` aborts it terminal-side. Defer the
+                // clear to the next iteration that starts at ground.
+                if (ghost.visible and !cursor_tracker.inEscape()) try clearGhost(&ghost, &out_buf);
                 // List sits below the prompt — shell echo lands on
                 // the prompt row, no overlap. renderGhostList below
                 // handles repaint/deactivate when content changes.
