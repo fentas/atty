@@ -1672,7 +1672,36 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     const edge_off: u32 = if (ei < edges.len) osc133_tracker.edgeOffset(ei) else std.math.maxInt(u32);
                     const cwd_off: u32 = if (ci < osc7_tracker.count) osc7_tracker.offsetAt(ci) else std.math.maxInt(u32);
                     if (cwd_off <= edge_off) {
-                        subprocess_tracker.onRemoteCwd(osc7_tracker.path(ci));
+                        const cwd_path = osc7_tracker.path(ci);
+                        if (subprocess_tracker.depth == 0) {
+                            // Local shell — sync atty's process cwd to
+                            // the inner shell's so the outer terminal's
+                            // "new window from this pane" keybind
+                            // (which reads `/proc/<atty-pid>/cwd` on
+                            // some terminals — Ghostty, kitty, foot)
+                            // lands at the user's actual cwd instead
+                            // of where atty was first spawned. OSC 7
+                            // forwarding alone isn't enough because
+                            // those terminals fall back to proc-walking
+                            // when the focused process is atty itself.
+                            //
+                            // Silently ignore failures: the path may
+                            // not exist locally (e.g. atty wrapping a
+                            // remote shell without subprocess-tracker
+                            // detection, atty in a sandbox with a
+                            // narrower view of the filesystem). The
+                            // user-visible cwd is whatever bash thinks
+                            // it is; this is just keeping the proc
+                            // entry honest.
+                            var path_buf: [4096]u8 = undefined;
+                            if (cwd_path.len > 0 and cwd_path.len < path_buf.len) {
+                                @memcpy(path_buf[0..cwd_path.len], cwd_path);
+                                path_buf[cwd_path.len] = 0;
+                                _ = std.c.chdir(@ptrCast(&path_buf));
+                            }
+                        } else {
+                            subprocess_tracker.onRemoteCwd(cwd_path);
+                        }
                         ci += 1;
                     } else {
                         switch (edges[ei]) {
