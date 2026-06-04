@@ -143,6 +143,19 @@ pub const CursorTracker = struct {
         self.col = if (col == 0 or col > self.max_cols) self.max_cols else col;
     }
 
+    /// True iff the shell is mid-escape — i.e., we've seen the leading
+    /// `\x1B` (or a `\x1B[` / `\x1B]` / `\x1BP` / `\x1B_` / `\x1BX` /
+    /// `\x1B^` introducer) and have not yet seen the terminator. atty
+    /// must NOT write its own ANSI between two halves of one shell
+    /// escape: terminals abort the in-progress sequence on a fresh
+    /// `\x1B`, so the tail bytes of the shell's sequence end up
+    /// rendered as plain text. Used to gate `renderStatus` and any
+    /// other atty-side stdout write that fires inside the master-output
+    /// poll path.
+    pub fn inEscape(self: *const CursorTracker) bool {
+        return self.state != .ground;
+    }
+
     pub fn feed(self: *CursorTracker, bytes: []const u8) void {
         for (bytes) |b| self.feedByte(b);
     }
@@ -170,7 +183,16 @@ pub const CursorTracker = struct {
                     self.params = .{ 0, 0 };
                     self.param_idx = 0;
                 },
-                ']' => {
+                // OSC `]`, DCS `P`, SOS `X`, PM `^`, APC `_`. All
+                // four share the same termination semantics (BEL or
+                // ST = `\x1B\\`), so funnel them into the same
+                // string-mode states. `.osc_buf` content is only
+                // dispatched for `]133;…` markers; bytes from the
+                // others are absorbed without being parsed, which is
+                // what we want — the tracker only needs to know that
+                // a string sequence is OPEN so atty's paints stay
+                // off-stream.
+                ']', 'P', '_', 'X', '^' => {
                     self.state = .osc;
                     self.osc_len = 0;
                 },

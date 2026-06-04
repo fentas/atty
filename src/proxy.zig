@@ -756,7 +756,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             }
             if (statusbar) |*sb| {
-                if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             }
             continue;
         }
@@ -874,7 +874,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     line_state.reset();
                     line_state.clearLastCommitted();
                     if (statusbar) |*sb| {
-                        if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                        if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     }
                     continue;
                 }
@@ -1275,7 +1275,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
                 if (swallow_after_binding) {
                     if (statusbar) |*sb| {
-                        if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                        if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     }
                     continue;
                 }
@@ -1559,7 +1559,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // the "flickers one char left/right" jitter on every
                 // keystroke.
                 if (statusbar) |*sb| {
-                    if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                 }
             }
         }
@@ -1918,7 +1918,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
                 }
                 if (statusbar) |*sb| {
-                    if (!alt_screen.active) {
+                    // Skip atty's paints when the shell's output left
+                    // us mid-escape — the read boundary landed inside
+                    // a CSI / OSC / DCS / APC sequence and atty's
+                    // statusbar bytes would terminate the in-progress
+                    // sequence terminal-side. The tail bytes (e.g.,
+                    // `;2;255;255;255m` for a 24-bit SGR or the body
+                    // of viu's kitty-graphics APC) then render as
+                    // visible text. The latch + render fire on the
+                    // next iteration that ends at ground state.
+                    if (!alt_screen.active and !cursor_tracker.inEscape()) {
                         // Issue #249 — if an inline TUI just clobbered
                         // DECSTBM (Claude Code etc.), re-assert atty's
                         // scroll region BEFORE the next render so the
