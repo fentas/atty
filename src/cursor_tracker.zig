@@ -106,6 +106,12 @@ pub const CursorTracker = struct {
     /// Bounded; longer OSCs get truncated but still consumed.
     osc_buf: [32]u8 = undefined,
     osc_len: u8 = 0,
+    /// Introducer byte that opened the current string-mode escape:
+    /// `]` for OSC, `P` for DCS, `_` for APC, `X` for SOS, `^` for
+    /// PM. `handleOsc()` only dispatches the OSC 133 markers when
+    /// `osc_intro == ']'` — a DCS / APC body that happens to start
+    /// with `133;A` must NOT falsely mark a prompt start.
+    osc_intro: u8 = 0,
 
     const State = enum { ground, esc, csi, osc, osc_esc };
 
@@ -195,6 +201,7 @@ pub const CursorTracker = struct {
                 ']', 'P', '_', 'X', '^' => {
                     self.state = .osc;
                     self.osc_len = 0;
+                    self.osc_intro = b;
                 },
                 else => self.state = .ground,
             },
@@ -327,6 +334,12 @@ pub const CursorTracker = struct {
     }
 
     fn handleOsc(self: *CursorTracker) void {
+        // Only true OSC ( `\x1B]…` ) gets the `133;A`/`;B` dispatch.
+        // DCS / APC / SOS / PM share the `.osc` state machine for
+        // termination detection (BEL / ST), but their bodies are not
+        // OSC — a DCS body of `133;A` must not be mistaken for a
+        // prompt marker.
+        if (self.osc_intro != ']') return;
         const body = self.osc_buf[0..self.osc_len];
         if (std.mem.startsWith(u8, body, "133;A")) {
             // Prompt start. The terminal places the cursor at the

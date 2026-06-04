@@ -742,7 +742,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // a non-TTY invocation (CI, piped/redirected stdout,
             // capture-the-binary integration tests) doesn't bleed
             // escape sequences into the captured stream.
-            if (args.is_tty) {
+            // Same `inEscape()` gate as the statusbar paint sites —
+            // modules' `provideTermBytes` emit ANSI (LLM's cursor-
+            // colour transitions, etc.) and would interleave with an
+            // in-progress shell escape if we wrote here mid-stream.
+            // Defer to the next tick that ends at ground state.
+            if (args.is_tty and !cursor_tracker.inEscape()) {
                 if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
                     if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
                 }
