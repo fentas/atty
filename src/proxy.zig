@@ -742,7 +742,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // a non-TTY invocation (CI, piped/redirected stdout,
             // capture-the-binary integration tests) doesn't bleed
             // escape sequences into the captured stream.
-            if (args.is_tty) {
+            // Same `inEscape()` gate as the statusbar paint sites —
+            // modules' `provideTermBytes` emit ANSI (LLM's cursor-
+            // colour transitions, etc.) and would interleave with an
+            // in-progress shell escape if we wrote here mid-stream.
+            // Defer to the next tick that ends at ground state.
+            if (args.is_tty and !cursor_tracker.inEscape()) {
                 if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
                     if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
                 }
@@ -751,12 +756,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // open: the panel claims the bottom rows and parks the
             // cursor in its input row; an unrelated ghost overlay
             // would paint OVER the panel chrome.
-            if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes)) {
+            if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes) and !cursor_tracker.inEscape()) {
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             }
             if (statusbar) |*sb| {
-                if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
             }
             continue;
         }
@@ -874,7 +879,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     line_state.reset();
                     line_state.clearLastCommitted();
                     if (statusbar) |*sb| {
-                        if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                        if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     }
                     continue;
                 }
@@ -1275,7 +1280,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
                 if (swallow_after_binding) {
                     if (statusbar) |*sb| {
-                        if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                        if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     }
                     continue;
                 }
@@ -1559,7 +1564,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // the "flickers one char left/right" jitter on every
                 // keystroke.
                 if (statusbar) |*sb| {
-                    if (!alt_screen.active) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                    if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                 }
             }
         }
@@ -1572,7 +1577,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 trace.logBytes(.input, "master_read", output);
                 const alt_before = alt_screen.active;
 
-                if (ghost.visible) try clearGhost(&ghost, &out_buf);
+                // `cursor_tracker` here reflects the PRIOR chunk's
+                // last-byte state — `feed(output)` for this chunk
+                // runs ~40 lines below. If the previous chunk ended
+                // mid-escape and this new chunk continues it,
+                // emitting clearGhost's `\x1B[K` here lands between
+                // the two halves of the shell's escape sequence; the
+                // fresh `\x1B` aborts it terminal-side. Defer the
+                // clear to the next iteration that starts at ground.
+                if (ghost.visible and !cursor_tracker.inEscape()) try clearGhost(&ghost, &out_buf);
                 // List sits below the prompt — shell echo lands on
                 // the prompt row, no overlap. renderGhostList below
                 // handles repaint/deactivate when content changes.
@@ -1913,12 +1926,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
-                if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes)) {
+                if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes) and !cursor_tracker.inEscape()) {
                     renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                     renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
                 }
                 if (statusbar) |*sb| {
-                    if (!alt_screen.active) {
+                    // Skip atty's paints when the shell's output left
+                    // us mid-escape — the read boundary landed inside
+                    // a CSI / OSC / DCS / APC sequence and atty's
+                    // statusbar bytes would terminate the in-progress
+                    // sequence terminal-side. The tail bytes (e.g.,
+                    // `;2;255;255;255m` for a 24-bit SGR or the body
+                    // of viu's kitty-graphics APC) then render as
+                    // visible text. The latch + render fire on the
+                    // next iteration that ends at ground state.
+                    if (!alt_screen.active and !cursor_tracker.inEscape()) {
                         // Issue #249 — if an inline TUI just clobbered
                         // DECSTBM (Claude Code etc.), re-assert atty's
                         // scroll region BEFORE the next render so the

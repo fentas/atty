@@ -106,6 +106,12 @@ pub const CursorTracker = struct {
     /// Bounded; longer OSCs get truncated but still consumed.
     osc_buf: [32]u8 = undefined,
     osc_len: u8 = 0,
+    /// Introducer byte that opened the current string-mode escape:
+    /// `]` for OSC, `P` for DCS, `_` for APC, `X` for SOS, `^` for
+    /// PM. `handleOsc()` only dispatches the OSC 133 markers when
+    /// `osc_intro == ']'` — a DCS / APC body that happens to start
+    /// with `133;A` must NOT falsely mark a prompt start.
+    osc_intro: u8 = 0,
 
     const State = enum { ground, esc, csi, osc, osc_esc };
 
@@ -143,6 +149,19 @@ pub const CursorTracker = struct {
         self.col = if (col == 0 or col > self.max_cols) self.max_cols else col;
     }
 
+    /// True iff the shell is mid-escape — i.e., we've seen the leading
+    /// `\x1B` (or a `\x1B[` / `\x1B]` / `\x1BP` / `\x1B_` / `\x1BX` /
+    /// `\x1B^` introducer) and have not yet seen the terminator. atty
+    /// must NOT write its own ANSI between two halves of one shell
+    /// escape: terminals abort the in-progress sequence on a fresh
+    /// `\x1B`, so the tail bytes of the shell's sequence end up
+    /// rendered as plain text. Used to gate `renderStatus` and any
+    /// other atty-side stdout write that fires inside the master-output
+    /// poll path.
+    pub fn inEscape(self: *const CursorTracker) bool {
+        return self.state != .ground;
+    }
+
     pub fn feed(self: *CursorTracker, bytes: []const u8) void {
         for (bytes) |b| self.feedByte(b);
     }
@@ -170,9 +189,19 @@ pub const CursorTracker = struct {
                     self.params = .{ 0, 0 };
                     self.param_idx = 0;
                 },
-                ']' => {
+                // OSC `]`, DCS `P`, SOS `X`, PM `^`, APC `_`. All
+                // four share the same termination semantics (BEL or
+                // ST = `\x1B\\`), so funnel them into the same
+                // string-mode states. `.osc_buf` content is only
+                // dispatched for `]133;…` markers; bytes from the
+                // others are absorbed without being parsed, which is
+                // what we want — the tracker only needs to know that
+                // a string sequence is OPEN so atty's paints stay
+                // off-stream.
+                ']', 'P', '_', 'X', '^' => {
                     self.state = .osc;
                     self.osc_len = 0;
+                    self.osc_intro = b;
                 },
                 else => self.state = .ground,
             },
@@ -181,6 +210,7 @@ pub const CursorTracker = struct {
                 0x07 => { // BEL — OSC terminator
                     self.handleOsc();
                     self.state = .ground;
+                    self.osc_intro = 0;
                 },
                 0x1B => self.state = .osc_esc,
                 else => {
@@ -194,10 +224,12 @@ pub const CursorTracker = struct {
                 '\\' => { // ESC '\' — OSC ST terminator
                     self.handleOsc();
                     self.state = .ground;
+                    self.osc_intro = 0;
                 },
                 else => {
                     // Bogus ESC inside OSC — abandon, treat as ground.
                     self.state = .ground;
+                    self.osc_intro = 0;
                 },
             },
         }
@@ -305,6 +337,12 @@ pub const CursorTracker = struct {
     }
 
     fn handleOsc(self: *CursorTracker) void {
+        // Only true OSC ( `\x1B]…` ) gets the `133;A`/`;B` dispatch.
+        // DCS / APC / SOS / PM share the `.osc` state machine for
+        // termination detection (BEL / ST), but their bodies are not
+        // OSC — a DCS body of `133;A` must not be mistaken for a
+        // prompt marker.
+        if (self.osc_intro != ']') return;
         const body = self.osc_buf[0..self.osc_len];
         if (std.mem.startsWith(u8, body, "133;A")) {
             // Prompt start. The terminal places the cursor at the

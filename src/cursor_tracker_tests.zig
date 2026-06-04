@@ -306,3 +306,55 @@ test "CursorTracker: setPosition trusts the caller (used by DSR-6n reply)" {
     try testing.expectEqual(@as(u16, 10), c.currentRow());
     try testing.expectEqual(@as(u16, 25), c.currentCol());
 }
+
+test "CursorTracker: inEscape is true mid-CSI across feed boundaries" {
+    // The proxy uses `inEscape()` to gate `renderStatus` so atty's
+    // statusbar paint doesn't land mid-shell-escape. Verify the state
+    // survives chunk splits — a master read that lands inside `\x1B[`
+    // leaves the tracker in `.csi` until the next chunk delivers the
+    // final byte.
+    var c = CursorTracker.init(24, 80);
+    c.feed("\x1B[38;2;255;");
+    try testing.expect(c.inEscape());
+    c.feed("128;0m▀");
+    try testing.expect(!c.inEscape());
+}
+
+test "CursorTracker: APC (`\\x1B_…\\x1B\\\\`) is recognised as string-mode escape" {
+    // viu's kitty graphics protocol output uses APC (`\x1B_G…\x1B\\`).
+    // Without this, the cursor_tracker's `.esc` state would fall
+    // through to `.ground` on the `_` byte, leaving the proxy
+    // wrongly thinking it's safe to inject a statusbar paint inside
+    // viu's image-render APC body. Same logic for DCS `\x1BP`, SOS
+    // `\x1BX`, PM `\x1B^`.
+    var c = CursorTracker.init(24, 80);
+    c.feed("\x1B_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA");
+    try testing.expect(c.inEscape());
+    c.feed("\x1B\\"); // ST terminator
+    try testing.expect(!c.inEscape());
+
+    c.feed("\x1BP1$rm");
+    try testing.expect(c.inEscape());
+    c.feed("\x1B\\");
+    try testing.expect(!c.inEscape());
+}
+
+test "CursorTracker: DCS body `133;A` does NOT mark a prompt start" {
+    // OSC / DCS / APC / SOS / PM all share the `.osc` state for
+    // termination tracking, but only true OSC (`\x1B]…`) is allowed
+    // to dispatch the `133;A` / `133;B` prompt markers. A DCS body
+    // that happens to look like an OSC 133 marker must not advance
+    // `prompt_row` or snapshot `prompt_end_col` — that would feed
+    // the proxy a phantom prompt anchor mid-image.
+    var c = CursorTracker.init(24, 80);
+    c.feed("\x1BP133;A\x1B\\");
+    try testing.expectEqual(@as(u16, 0), c.prompt_row);
+    try testing.expectEqual(@as(u16, 0), c.prompt_end_col);
+
+    c.feed("\x1BP133;B\x1B\\");
+    try testing.expectEqual(@as(u16, 0), c.prompt_end_col);
+
+    // Sanity: a real OSC 133 marker DOES dispatch.
+    c.feed("\x1B]133;A\x07");
+    try testing.expectEqual(@as(u16, 1), c.prompt_row);
+}
