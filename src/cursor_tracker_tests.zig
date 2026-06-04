@@ -338,3 +338,23 @@ test "CursorTracker: APC (`\\x1B_…\\x1B\\\\`) is recognised as string-mode esc
     c.feed("\x1B\\");
     try testing.expect(!c.inEscape());
 }
+
+test "CursorTracker: DCS body `133;A` does NOT mark a prompt start" {
+    // OSC / DCS / APC / SOS / PM all share the `.osc` state for
+    // termination tracking, but only true OSC (`\x1B]…`) is allowed
+    // to dispatch the `133;A` / `133;B` prompt markers. A DCS body
+    // that happens to look like an OSC 133 marker must not advance
+    // `prompt_row` or snapshot `prompt_end_col` — that would feed
+    // the proxy a phantom prompt anchor mid-image.
+    var c = CursorTracker.init(24, 80);
+    c.feed("\x1BP133;A\x1B\\");
+    try testing.expectEqual(@as(u16, 0), c.prompt_row);
+    try testing.expectEqual(@as(u16, 0), c.prompt_end_col);
+
+    c.feed("\x1BP133;B\x1B\\");
+    try testing.expectEqual(@as(u16, 0), c.prompt_end_col);
+
+    // Sanity: a real OSC 133 marker DOES dispatch.
+    c.feed("\x1B]133;A\x07");
+    try testing.expectEqual(@as(u16, 1), c.prompt_row);
+}

@@ -210,6 +210,7 @@ pub const CursorTracker = struct {
                 0x07 => { // BEL — OSC terminator
                     self.handleOsc();
                     self.state = .ground;
+                    self.osc_intro = 0;
                 },
                 0x1B => self.state = .osc_esc,
                 else => {
@@ -223,10 +224,12 @@ pub const CursorTracker = struct {
                 '\\' => { // ESC '\' — OSC ST terminator
                     self.handleOsc();
                     self.state = .ground;
+                    self.osc_intro = 0;
                 },
                 else => {
                     // Bogus ESC inside OSC — abandon, treat as ground.
                     self.state = .ground;
+                    self.osc_intro = 0;
                 },
             },
         }

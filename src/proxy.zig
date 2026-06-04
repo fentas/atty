@@ -756,7 +756,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // open: the panel claims the bottom rows and parks the
             // cursor in its input row; an unrelated ghost overlay
             // would paint OVER the panel chrome.
-            if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes)) {
+            if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes) and !cursor_tracker.inEscape()) {
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             }
@@ -1918,7 +1918,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
-                if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes)) {
+                if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes) and !cursor_tracker.inEscape()) {
                     renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                     renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
                 }
