@@ -25,6 +25,23 @@ __atty_osc133_d() {
     printf '\033]133;D;%s\007' "$__code"
     return "$__code"
 }
+# OSC 7 — cwd report. The outer terminal (Ghostty, kitty, foot,
+# WezTerm, VS Code's integrated, …) caches the focused pane's cwd
+# from this sequence, and "duplicate this window" / "new window
+# from this pane" keybinds open the new shell there instead of
+# `$HOME`. Without this, bash inside atty inherits the outer
+# terminal's env but Ghostty's own shell-integration injection
+# is bypassed (it auto-injects into the shell ghostty spawned,
+# which is atty, not bash) and the cwd-tracking chain breaks.
+# Idempotent — emits one OSC 7 per prompt cycle; receivers
+# overwrite their cached cwd on each one.
+#
+# Path bytes are sent raw. kitty / Ghostty / foot / WezTerm all
+# accept UTF-8 in OSC 7 directly; bash 5 doesn't have a native
+# URL-encoder and the gain is "debug logs look prettier" only.
+__atty_osc7_cwd() {
+    printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD"
+}
 __atty_osc133_wrap_ps1() {
     # Skip ONLY when both `;A` and `;B` are already in PS1
     # (in order) — that's atty's wrap signature. A partial
@@ -97,9 +114,10 @@ __atty_osc133_setup_debug_trap() {
     fi
 }
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-    PROMPT_COMMAND=("__atty_osc133_d" "${PROMPT_COMMAND[@]}" "__atty_osc133_wrap_ps1" "__atty_osc133_reset_c")
+    PROMPT_COMMAND=("__atty_osc133_d" "${PROMPT_COMMAND[@]}" "__atty_osc133_wrap_ps1" "__atty_osc7_cwd" "__atty_osc133_reset_c")
 else
-    PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-};__atty_osc133_wrap_ps1;__atty_osc133_reset_c"
+    PROMPT_COMMAND="__atty_osc133_d${PROMPT_COMMAND:+;}${PROMPT_COMMAND:-};__atty_osc133_wrap_ps1;__atty_osc7_cwd;__atty_osc133_reset_c"
 fi
 __atty_osc133_setup_debug_trap
 __atty_osc133_wrap_ps1
+__atty_osc7_cwd
