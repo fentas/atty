@@ -337,8 +337,46 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// runtime; deferred. Terminals emit cursor-keys atomically
         /// in one write, so a split is unusual outside signal-
         /// interrupt cases.
-        fn parseChatKey(input: []const u8, i: *usize) ChatKey {
+        fn parseChatKey(input: []const u8, i: *usize, paste_active: *bool) ChatKey {
             const b = input[i.*];
+
+            // Bracketed paste mode. While the terminal has framed
+            // bytes between `\x1B[200~` and `\x1B[201~`, treat every
+            // byte as content — `\r`/`\n` insert as literal newlines
+            // (NOT submit), and control bytes that would otherwise
+            // edit the buffer are dropped so a paste of e.g. a python
+            // script with embedded backspaces doesn't shred the
+            // buffer. The closing marker can straddle a chunk
+            // boundary; if we see `\x1B` here we wait for at least 6
+            // bytes before declaring the marker malformed and falling
+            // back to literal insert.
+            if (paste_active.*) {
+                if (b == 0x1B) {
+                    if (i.* + 5 < input.len and std.mem.startsWith(u8, input[i.*..], "\x1B[201~")) {
+                        i.* += 6;
+                        paste_active.* = false;
+                        return .none;
+                    }
+                    // Partial marker or some other ESC — wait for
+                    // more bytes. (Adversarial paste content
+                    // containing a literal `\x1B[201~` would end the
+                    // paste early; terminals double-escape internal
+                    // ESC bytes to prevent this in well-behaved
+                    // implementations.)
+                    if (i.* + 5 >= input.len) {
+                        i.* = input.len;
+                        return .none;
+                    }
+                    // Not a closing marker — treat the ESC as content.
+                }
+                i.* += 1;
+                return switch (b) {
+                    0x0D, 0x0A => .{ .insert = '\n' },
+                    0x09, 0x20...0x7E, 0x80...0xFF => .{ .insert = b },
+                    else => .none, // drop other control bytes inside paste
+                };
+            }
+
             // Incomplete escape tail (chunk ends with `ESC`, `ESC [`,
             // or `ESC O`). Treat as a standalone Esc keystroke when
             // the chat-mode question UI consumer wants to react to
@@ -348,6 +386,36 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (b == 0x1B and i.* + 1 >= input.len) {
                 i.* = input.len;
                 return .escape;
+            }
+            // Alt+Enter — legacy fallback for Shift+Enter on terminals
+            // not in kitty kbd mode (where Enter and Shift+Enter share
+            // the same byte). Common chat-UI convention (Slack, Discord,
+            // …) and harmless on kitty-kbd terminals since they
+            // wouldn't emit this shape for Shift+Enter anyway.
+            if (b == 0x1B and i.* + 1 < input.len and
+                (input[i.* + 1] == 0x0D or input[i.* + 1] == 0x0A))
+            {
+                i.* += 2;
+                return .{ .insert = '\n' };
+            }
+            // Bracketed paste start: `\x1B[200~`. Mark the state and
+            // consume the marker bytes silently. The next iteration
+            // will hit the `paste_active` branch above.
+            if (b == 0x1B and i.* + 5 < input.len and
+                std.mem.startsWith(u8, input[i.*..], "\x1B[200~"))
+            {
+                i.* += 6;
+                paste_active.* = true;
+                return .none;
+            }
+            // Incomplete `\x1B[200~` straddling a chunk boundary —
+            // wait for more bytes rather than mis-classify.
+            if (b == 0x1B and i.* + 1 < input.len and input[i.* + 1] == '[' and
+                i.* + 5 >= input.len and
+                std.mem.startsWith(u8, "\x1B[200~"[0..(input.len - i.*)], input[i.*..]))
+            {
+                i.* = input.len;
+                return .none;
             }
             if (b == 0x1B and (input[i.* + 1] == '[' or input[i.* + 1] == 'O') and i.* + 2 >= input.len) {
                 i.* = input.len;
@@ -603,7 +671,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (rt.chat_inline_open and rt.chat_focus_in_panel) {
                 var i: usize = 0;
                 while (i < input.len) {
-                    const key = parseChatKey(input, &i);
+                    const key = parseChatKey(input, &i, &rt.chat_paste_active);
                     // Chat-mode question pick-list (#214) intercept.
                     // Up/Down navigate the choices + free-text row.
                     // Enter on a choice submits the choice text;
@@ -769,7 +837,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // keystroke; only arrows / Enter / Esc do anything.
                 var i: usize = 0;
                 while (i < input.len) {
-                    const key = parseChatKey(input, &i);
+                    const key = parseChatKey(input, &i, &rt.chat_paste_active);
                     switch (key) {
                         .move_up => {
                             if (rt.chat_recall_selected_idx > 0) {
@@ -864,7 +932,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (rt.chat_overlay_open) {
                 var i: usize = 0;
                 while (i < input.len) {
-                    const key = parseChatKey(input, &i);
+                    const key = parseChatKey(input, &i, &rt.chat_paste_active);
                     // Chat-mode question pick-list (#214) — same
                     // shape as the inline panel handler above.
                     if (rt.chat_question_active and rt.chat_question_choice_count > 0) {

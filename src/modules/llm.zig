@@ -1012,6 +1012,16 @@ pub fn configure(comptime cfg: Config) type {
             /// Insertion cursor offset within `chat_inline_input_buf` —
             /// same invariants as `chat_input_cursor` above.
             chat_inline_input_cursor: usize = 0,
+            /// `true` between `\x1B[200~` (paste begin) and `\x1B[201~`
+            /// (paste end). The chat keystroke parser treats every byte
+            /// in this window as content — `\r`/`\n` become literal
+            /// newline inserts instead of submit, control bytes that
+            /// would otherwise edit the buffer are dropped — so pasted
+            /// multi-line text lands in one piece instead of submitting
+            /// at the first newline. Persists across `onInput` calls
+            /// because the surrounding markers may straddle read
+            /// boundaries.
+            chat_paste_active: bool = false,
 
             /// Turns scrolled back from the live tail in the overlay /
             /// inline panel respectively. 0 = pinned to latest; every
