@@ -2163,6 +2163,58 @@ test "inline chat: panel close resets chat_paste_active (no leaked paste mode)" 
     try testing.expect(!rt.chat_paste_active);
 }
 
+test "inline chat: Alt+C toggle close also resets chat_paste_active" {
+    // Round-2 subagent caught this site: the panel-close direction of
+    // `llm_inline_chat_toggle` flips `chat_inline_open` via `= !…`,
+    // which the round-1 textual sweep for `= false` missed. Without
+    // the reset there, a paste interrupted by Alt+C-close left the
+    // flag stuck `true` and the next session's Enter folded to `\n`.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Statusbar must be configured for the inline chat toggle action
+    // to actually flip `chat_inline_open` — atty refuses to open the
+    // inline panel without reserved rows underneath it.
+    ctx.statusbar_base_reserve = 3;
+    ctx.statusbar_reserve = 3;
+    ctx.terminal_rows = 24;
+    ctx.terminal_cols = 80;
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(rt.chat_inline_open);
+    rt.chat_focus_in_panel = true;
+
+    // Start a paste, then close via Alt+C before the closing marker.
+    _ = try L.onInput(&rt, &ctx, "\x1B[200~half a paste");
+    try testing.expect(rt.chat_paste_active);
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(!rt.chat_paste_active);
+}
+
 test "inline chat: Alt+Enter inserts a newline (legacy Shift+Enter fallback)" {
     // Terminals not in kitty kbd mode can't distinguish Enter from
     // Shift+Enter. Alt+Enter (`\x1B\r` or `\x1B\n`) is the standard

@@ -1513,6 +1513,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // for THIS session, not as a persistent
                         // preference.
                         rt.chat_inline_rows_override = null;
+                        // Also drop any in-flight bracketed paste —
+                        // same rationale as the other close sites
+                        // (stuck flag would make next session's Enter
+                        // insert `\n` instead of submit). Round-2
+                        // subagent caught this site because the close
+                        // is via `= !rt.chat_inline_open` rather than
+                        // `= false`, so the regex sweep missed it.
+                        rt.chat_paste_active = false;
                     }
                     if (rt.chat_inline_open) {
                         // Disarm the conclusion auto-emit latch so the
