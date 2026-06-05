@@ -1020,7 +1020,16 @@ pub fn configure(comptime cfg: Config) type {
             /// multi-line text lands in one piece instead of submitting
             /// at the first newline. Persists across `onInput` calls
             /// because the surrounding markers may straddle read
-            /// boundaries.
+            /// boundaries. Reset to `false` at every chat-panel close
+            /// site so a paste interrupted by Ctrl+D / Esc doesn't leak
+            /// into the next session.
+            ///
+            /// Known hazard: a literal `\x1B[201~` IN paste content
+            /// (someone pasting an ANSI snippet that contains the
+            /// close marker as text) ends the paste early. Well-behaved
+            /// terminals double-escape internal ESC bytes; this is
+            /// also documented by the bracketed-paste spec itself as
+            /// an "adversarial content" limitation.
             chat_paste_active: bool = false,
 
             /// Turns scrolled back from the live tail in the overlay /

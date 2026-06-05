@@ -2119,6 +2119,50 @@ test "inline chat: bracketed paste straddling chunk boundaries (\\r → \\n in c
     try testing.expectEqualStrings("first\nsecond", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
 }
 
+test "inline chat: panel close resets chat_paste_active (no leaked paste mode)" {
+    // Regression: a paste interrupted mid-stream (terminal sends
+    // `\x1B[200~` then the user hits Ctrl+D before the closing marker
+    // arrives) used to leave `chat_paste_active = true` forever. The
+    // next session's Enter then folded to `\n` instead of submit.
+    // Every chat-panel close site now resets the flag.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Start a paste, then close via Ctrl+D before the closing marker
+    // arrives.
+    _ = try L.onInput(&rt, &ctx, "\x1B[200~half a paste");
+    try testing.expect(rt.chat_paste_active);
+    _ = try L.onInput(&rt, &ctx, "\x04");
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(!rt.chat_paste_active);
+}
+
 test "inline chat: Alt+Enter inserts a newline (legacy Shift+Enter fallback)" {
     // Terminals not in kitty kbd mode can't distinguish Enter from
     // Shift+Enter. Alt+Enter (`\x1B\r` or `\x1B\n`) is the standard

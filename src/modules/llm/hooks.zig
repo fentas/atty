@@ -351,30 +351,43 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // bytes before declaring the marker malformed and falling
             // back to literal insert.
             if (paste_active.*) {
-                if (b == 0x1B) {
-                    if (i.* + 5 < input.len and std.mem.startsWith(u8, input[i.*..], "\x1B[201~")) {
-                        i.* += 6;
-                        paste_active.* = false;
-                        return .none;
+                // Emergency abort: Ctrl+C / Ctrl+D bypass paste mode
+                // unconditionally so the user can always escape a
+                // stuck paste (terminal crashed mid-paste, closing
+                // marker never arrived) — otherwise the panel can't
+                // be closed at all once we've entered paste mode.
+                // Fall through to the normal handling below by
+                // clearing the flag and letting the rest of the
+                // function classify the byte.
+                if (b == 0x03 or b == 0x04) {
+                    paste_active.* = false;
+                } else {
+                    if (b == 0x1B) {
+                        if (i.* + 5 < input.len and std.mem.startsWith(u8, input[i.*..], "\x1B[201~")) {
+                            i.* += 6;
+                            paste_active.* = false;
+                            return .none;
+                        }
+                        // Partial marker or some other ESC — wait for
+                        // more bytes. (Adversarial paste content
+                        // containing a literal `\x1B[201~` would end
+                        // the paste early; terminals double-escape
+                        // internal ESC bytes to prevent this in
+                        // well-behaved implementations.)
+                        if (i.* + 5 >= input.len) {
+                            i.* = input.len;
+                            return .none;
+                        }
+                        // Not a closing marker — treat the ESC as
+                        // content.
                     }
-                    // Partial marker or some other ESC — wait for
-                    // more bytes. (Adversarial paste content
-                    // containing a literal `\x1B[201~` would end the
-                    // paste early; terminals double-escape internal
-                    // ESC bytes to prevent this in well-behaved
-                    // implementations.)
-                    if (i.* + 5 >= input.len) {
-                        i.* = input.len;
-                        return .none;
-                    }
-                    // Not a closing marker — treat the ESC as content.
+                    i.* += 1;
+                    return switch (b) {
+                        0x0D, 0x0A => .{ .insert = '\n' },
+                        0x09, 0x20...0x7E, 0x80...0xFF => .{ .insert = b },
+                        else => .none, // drop other control bytes inside paste
+                    };
                 }
-                i.* += 1;
-                return switch (b) {
-                    0x0D, 0x0A => .{ .insert = '\n' },
-                    0x09, 0x20...0x7E, 0x80...0xFF => .{ .insert = b },
-                    else => .none, // drop other control bytes inside paste
-                };
             }
 
             // Incomplete escape tail (chunk ends with `ESC`, `ESC [`,
@@ -751,6 +764,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // post-Ctrl+D bytes don't land in the
                             // now-closed panel's buffer.
                             rt.chat_inline_open = false;
+                            rt.chat_paste_active = false;
                             rt.chat_inline_rows_override = null;
                             rt.chat_inline_paint_pending = true;
                             return .swallow;
@@ -825,6 +839,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 key,
                             )) {
                                 rt.chat_inline_input_dirty = true;
+                            } else if (rt.chat_paste_active and key == .insert) {
+                                // Buffer hit cap mid-paste. Without
+                                // surfacing this, users believe the
+                                // whole paste landed and assistant
+                                // replies refer to a phantom tail.
+                                latchHint(rt, "paste truncated — chat input buffer full");
                             }
                         },
                     }
@@ -998,6 +1018,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // chunk so post-Ctrl+D bytes don't land
                             // in the now-closed overlay's buffer.
                             rt.chat_overlay_open = false;
+                            rt.chat_paste_active = false;
                             rt.chat_overlay_paint_pending = true;
                             return .swallow;
                         },
@@ -1429,6 +1450,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // to zero. Mirror of the inline-toggle arm.
                         if (rt.chat_inline_open) {
                             rt.chat_inline_open = false;
+                            rt.chat_paste_active = false;
                             rt.chat_inline_rows_override = null;
                             rt.chat_inline_paint_pending = true;
                         }
@@ -1443,6 +1465,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         rt.conclusion_pending = false;
                     } else {
                         rt.chat_overlay_open = false;
+                        rt.chat_paste_active = false;
                     }
                     rt.chat_overlay_paint_pending = true;
                     return true;
@@ -1473,6 +1496,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // Close the overlay first; its exit sequence
                         // lands via provideTermBytes on the next tick.
                         rt.chat_overlay_open = false;
+                        rt.chat_paste_active = false;
                         rt.chat_overlay_paint_pending = true;
                     }
                     rt.chat_inline_open = !rt.chat_inline_open;
@@ -1591,6 +1615,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Ctrl+D, Alt+C, overlay handoff, recall load).
                     if (rt.chat_inline_open) {
                         rt.chat_inline_open = false;
+                        rt.chat_paste_active = false;
                         rt.chat_focus_in_panel = false;
                         rt.chat_inline_rows_override = null;
                         rt.chat_inline_paint_pending = true;
@@ -1846,10 +1871,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     @memcpy(probe[carry_prefix.len .. carry_prefix.len + head_len], output[0..head_len]);
                     if (containsClearSequence(probe[0 .. carry_prefix.len + head_len])) {
                         rt.chat_inline_open = false;
+                        rt.chat_paste_active = false;
                     }
                 }
                 if (rt.chat_inline_open and containsClearSequence(output)) {
                     rt.chat_inline_open = false;
+                    rt.chat_paste_active = false;
                 }
                 const tail_len: usize = @min(output.len, rt.clear_seq_carry.len);
                 @memcpy(rt.clear_seq_carry[0..tail_len], output[output.len - tail_len ..]);
