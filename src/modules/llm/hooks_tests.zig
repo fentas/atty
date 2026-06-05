@@ -2035,6 +2035,227 @@ test "inline chat: pasted UTF-8 (e.g. `•` = 0xE2 0x80 0xA2) lands in the buffe
     try testing.expectEqualStrings("\u{2022} bullet", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
 }
 
+test "inline chat: bracketed paste of multi-line text inserts newlines (no submit)" {
+    // Without bracketed-paste detection, pasted text containing `\n`
+    // hit the `.enter` arm of parseChatKey and submitted at the first
+    // newline (the tail was lost). With the `\x1B[200~ … \x1B[201~`
+    // framing, every byte between the markers is content: `\n` and
+    // `\r` insert as literal newlines, control bytes are dropped, the
+    // markers themselves are swallowed silently.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "\x1B[200~line one\nline two\nline three\x1B[201~");
+    try testing.expectEqualStrings("line one\nline two\nline three", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+    try testing.expect(!rt.chat_paste_active);
+    // Cursor lands at end of pasted content.
+    try testing.expectEqual(rt.chat_inline_input_len, rt.chat_inline_input_cursor);
+}
+
+test "inline chat: bracketed paste straddling chunk boundaries (\\r → \\n in content)" {
+    // The closing marker can arrive in a separate `onInput` call from
+    // the opening marker — verify state survives. Also pin that `\r`
+    // inside the paste is normalised to `\n` (some clipboards inject
+    // CR line endings).
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "\x1B[200~first\r");
+    try testing.expect(rt.chat_paste_active);
+    _ = try L.onInput(&rt, &ctx, "second\x1B[201~");
+    try testing.expect(!rt.chat_paste_active);
+    try testing.expectEqualStrings("first\nsecond", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "inline chat: panel close resets chat_paste_active (no leaked paste mode)" {
+    // Regression: a paste interrupted mid-stream (terminal sends
+    // `\x1B[200~` then the user hits Ctrl+D before the closing marker
+    // arrives) used to leave `chat_paste_active = true` forever. The
+    // next session's Enter then folded to `\n` instead of submit.
+    // Every chat-panel close site now resets the flag.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Start a paste, then close via Ctrl+D before the closing marker
+    // arrives.
+    _ = try L.onInput(&rt, &ctx, "\x1B[200~half a paste");
+    try testing.expect(rt.chat_paste_active);
+    _ = try L.onInput(&rt, &ctx, "\x04");
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(!rt.chat_paste_active);
+}
+
+test "inline chat: Alt+C toggle close also resets chat_paste_active" {
+    // Round-2 subagent caught this site: the panel-close direction of
+    // `llm_inline_chat_toggle` flips `chat_inline_open` via `= !…`,
+    // which the round-1 textual sweep for `= false` missed. Without
+    // the reset there, a paste interrupted by Alt+C-close left the
+    // flag stuck `true` and the next session's Enter folded to `\n`.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    // Statusbar must be configured for the inline chat toggle action
+    // to actually flip `chat_inline_open` — atty refuses to open the
+    // inline panel without reserved rows underneath it.
+    ctx.statusbar_base_reserve = 3;
+    ctx.statusbar_reserve = 3;
+    ctx.terminal_rows = 24;
+    ctx.terminal_cols = 80;
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(rt.chat_inline_open);
+    rt.chat_focus_in_panel = true;
+
+    // Start a paste, then close via Alt+C before the closing marker.
+    _ = try L.onInput(&rt, &ctx, "\x1B[200~half a paste");
+    try testing.expect(rt.chat_paste_active);
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(!rt.chat_paste_active);
+}
+
+test "inline chat: Alt+Enter inserts a newline (legacy Shift+Enter fallback)" {
+    // Terminals not in kitty kbd mode can't distinguish Enter from
+    // Shift+Enter. Alt+Enter (`\x1B\r` or `\x1B\n`) is the standard
+    // chat-UI workaround (Slack, Discord, ChatGPT web, …) and lands
+    // on the same `.insert = '\n'` action as the kitty-kbd
+    // `\x1B[13;2u`.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "hi");
+    _ = try L.onInput(&rt, &ctx, "\x1B\r");
+    _ = try L.onInput(&rt, &ctx, "there");
+    try testing.expectEqualStrings("hi\nthere", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
 test "Alt+M cycle arms chat panel repaint so divider shows the new provider" {
     // Regression: cycle_model bumped `current_provider_idx` and
     // emitted a statusbar hint, but never armed

@@ -337,8 +337,59 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// runtime; deferred. Terminals emit cursor-keys atomically
         /// in one write, so a split is unusual outside signal-
         /// interrupt cases.
-        fn parseChatKey(input: []const u8, i: *usize) ChatKey {
+        fn parseChatKey(input: []const u8, i: *usize, paste_active: *bool) ChatKey {
             const b = input[i.*];
+
+            // Bracketed paste mode. While the terminal has framed
+            // bytes between `\x1B[200~` and `\x1B[201~`, treat every
+            // byte as content — `\r`/`\n` insert as literal newlines
+            // (NOT submit), and control bytes that would otherwise
+            // edit the buffer are dropped so a paste of e.g. a python
+            // script with embedded backspaces doesn't shred the
+            // buffer. The closing marker can straddle a chunk
+            // boundary; if we see `\x1B` here we wait for at least 6
+            // bytes before declaring the marker malformed and falling
+            // back to literal insert.
+            if (paste_active.*) {
+                // Emergency abort: Ctrl+C / Ctrl+D bypass paste mode
+                // unconditionally so the user can always escape a
+                // stuck paste (terminal crashed mid-paste, closing
+                // marker never arrived) — otherwise the panel can't
+                // be closed at all once we've entered paste mode.
+                // Fall through to the normal handling below by
+                // clearing the flag and letting the rest of the
+                // function classify the byte.
+                if (b == 0x03 or b == 0x04) {
+                    paste_active.* = false;
+                } else {
+                    if (b == 0x1B) {
+                        if (i.* + 5 < input.len and std.mem.startsWith(u8, input[i.*..], "\x1B[201~")) {
+                            i.* += 6;
+                            paste_active.* = false;
+                            return .none;
+                        }
+                        // Partial marker or some other ESC — wait for
+                        // more bytes. (Adversarial paste content
+                        // containing a literal `\x1B[201~` would end
+                        // the paste early; terminals double-escape
+                        // internal ESC bytes to prevent this in
+                        // well-behaved implementations.)
+                        if (i.* + 5 >= input.len) {
+                            i.* = input.len;
+                            return .none;
+                        }
+                        // Not a closing marker — treat the ESC as
+                        // content.
+                    }
+                    i.* += 1;
+                    return switch (b) {
+                        0x0D, 0x0A => .{ .insert = '\n' },
+                        0x09, 0x20...0x7E, 0x80...0xFF => .{ .insert = b },
+                        else => .none, // drop other control bytes inside paste
+                    };
+                }
+            }
+
             // Incomplete escape tail (chunk ends with `ESC`, `ESC [`,
             // or `ESC O`). Treat as a standalone Esc keystroke when
             // the chat-mode question UI consumer wants to react to
@@ -348,6 +399,36 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (b == 0x1B and i.* + 1 >= input.len) {
                 i.* = input.len;
                 return .escape;
+            }
+            // Alt+Enter — legacy fallback for Shift+Enter on terminals
+            // not in kitty kbd mode (where Enter and Shift+Enter share
+            // the same byte). Common chat-UI convention (Slack, Discord,
+            // …) and harmless on kitty-kbd terminals since they
+            // wouldn't emit this shape for Shift+Enter anyway.
+            if (b == 0x1B and i.* + 1 < input.len and
+                (input[i.* + 1] == 0x0D or input[i.* + 1] == 0x0A))
+            {
+                i.* += 2;
+                return .{ .insert = '\n' };
+            }
+            // Bracketed paste start: `\x1B[200~`. Mark the state and
+            // consume the marker bytes silently. The next iteration
+            // will hit the `paste_active` branch above.
+            if (b == 0x1B and i.* + 5 < input.len and
+                std.mem.startsWith(u8, input[i.*..], "\x1B[200~"))
+            {
+                i.* += 6;
+                paste_active.* = true;
+                return .none;
+            }
+            // Incomplete `\x1B[200~` straddling a chunk boundary —
+            // wait for more bytes rather than mis-classify.
+            if (b == 0x1B and i.* + 1 < input.len and input[i.* + 1] == '[' and
+                i.* + 5 >= input.len and
+                std.mem.startsWith(u8, "\x1B[200~"[0..(input.len - i.*)], input[i.*..]))
+            {
+                i.* = input.len;
+                return .none;
             }
             if (b == 0x1B and (input[i.* + 1] == '[' or input[i.* + 1] == 'O') and i.* + 2 >= input.len) {
                 i.* = input.len;
@@ -603,7 +684,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (rt.chat_inline_open and rt.chat_focus_in_panel) {
                 var i: usize = 0;
                 while (i < input.len) {
-                    const key = parseChatKey(input, &i);
+                    const key = parseChatKey(input, &i, &rt.chat_paste_active);
                     // Chat-mode question pick-list (#214) intercept.
                     // Up/Down navigate the choices + free-text row.
                     // Enter on a choice submits the choice text;
@@ -683,6 +764,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // post-Ctrl+D bytes don't land in the
                             // now-closed panel's buffer.
                             rt.chat_inline_open = false;
+                            rt.chat_paste_active = false;
                             rt.chat_inline_rows_override = null;
                             rt.chat_inline_paint_pending = true;
                             return .swallow;
@@ -757,6 +839,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 key,
                             )) {
                                 rt.chat_inline_input_dirty = true;
+                            } else if (rt.chat_paste_active and key == .insert) {
+                                // Buffer hit cap mid-paste. Without
+                                // surfacing this, users believe the
+                                // whole paste landed and assistant
+                                // replies refer to a phantom tail.
+                                latchHint(rt, "paste truncated — chat input buffer full");
                             }
                         },
                     }
@@ -769,7 +857,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // keystroke; only arrows / Enter / Esc do anything.
                 var i: usize = 0;
                 while (i < input.len) {
-                    const key = parseChatKey(input, &i);
+                    const key = parseChatKey(input, &i, &rt.chat_paste_active);
                     switch (key) {
                         .move_up => {
                             if (rt.chat_recall_selected_idx > 0) {
@@ -864,7 +952,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (rt.chat_overlay_open) {
                 var i: usize = 0;
                 while (i < input.len) {
-                    const key = parseChatKey(input, &i);
+                    const key = parseChatKey(input, &i, &rt.chat_paste_active);
                     // Chat-mode question pick-list (#214) — same
                     // shape as the inline panel handler above.
                     if (rt.chat_question_active and rt.chat_question_choice_count > 0) {
@@ -930,6 +1018,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // chunk so post-Ctrl+D bytes don't land
                             // in the now-closed overlay's buffer.
                             rt.chat_overlay_open = false;
+                            rt.chat_paste_active = false;
                             rt.chat_overlay_paint_pending = true;
                             return .swallow;
                         },
@@ -1361,6 +1450,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // to zero. Mirror of the inline-toggle arm.
                         if (rt.chat_inline_open) {
                             rt.chat_inline_open = false;
+                            rt.chat_paste_active = false;
                             rt.chat_inline_rows_override = null;
                             rt.chat_inline_paint_pending = true;
                         }
@@ -1375,6 +1465,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         rt.conclusion_pending = false;
                     } else {
                         rt.chat_overlay_open = false;
+                        rt.chat_paste_active = false;
                     }
                     rt.chat_overlay_paint_pending = true;
                     return true;
@@ -1405,6 +1496,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // Close the overlay first; its exit sequence
                         // lands via provideTermBytes on the next tick.
                         rt.chat_overlay_open = false;
+                        rt.chat_paste_active = false;
                         rt.chat_overlay_paint_pending = true;
                     }
                     rt.chat_inline_open = !rt.chat_inline_open;
@@ -1421,6 +1513,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // for THIS session, not as a persistent
                         // preference.
                         rt.chat_inline_rows_override = null;
+                        // Also drop any in-flight bracketed paste —
+                        // same rationale as the other close sites
+                        // (stuck flag would make next session's Enter
+                        // insert `\n` instead of submit). Round-2
+                        // subagent caught this site because the close
+                        // is via `= !rt.chat_inline_open` rather than
+                        // `= false`, so the regex sweep missed it.
+                        rt.chat_paste_active = false;
                     }
                     if (rt.chat_inline_open) {
                         // Disarm the conclusion auto-emit latch so the
@@ -1523,6 +1623,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Ctrl+D, Alt+C, overlay handoff, recall load).
                     if (rt.chat_inline_open) {
                         rt.chat_inline_open = false;
+                        rt.chat_paste_active = false;
                         rt.chat_focus_in_panel = false;
                         rt.chat_inline_rows_override = null;
                         rt.chat_inline_paint_pending = true;
@@ -1778,10 +1879,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     @memcpy(probe[carry_prefix.len .. carry_prefix.len + head_len], output[0..head_len]);
                     if (containsClearSequence(probe[0 .. carry_prefix.len + head_len])) {
                         rt.chat_inline_open = false;
+                        rt.chat_paste_active = false;
                     }
                 }
                 if (rt.chat_inline_open and containsClearSequence(output)) {
                     rt.chat_inline_open = false;
+                    rt.chat_paste_active = false;
                 }
                 const tail_len: usize = @min(output.len, rt.clear_seq_carry.len);
                 @memcpy(rt.clear_seq_carry[0..tail_len], output[output.len - tail_len ..]);
