@@ -40,6 +40,7 @@ endif
 
 .PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
+        register-shell unregister-shell \
         clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard \
         sandbox sandbox-rebuild sandbox-base-image sandbox-onnx sandbox-onnx-image sandbox-ebpf sandbox-ebpf-image
 
@@ -76,6 +77,14 @@ help:
 	@printf "  unlink          Remove BOTH symlinks (only if they're symlinks).\n"
 	@printf "  unlink-atty     Only remove the atty symlink.\n"
 	@printf "  unlink-guard    Only remove the atty-guard symlink.\n\n"
+	@printf "Shell registration\n"
+	@printf "  register-shell  Append \$$PREFIX/bin/atty to /etc/shells (needs sudo;\n"
+	@printf "                  idempotent). DE/WM \"new-terminal-window\" helpers that\n"
+	@printf "                  inherit cwd by walking the focused process and matching\n"
+	@printf "                  /proc/<pid>/exe against /etc/shells (omarchy's\n"
+	@printf "                  omarchy-cmd-terminal-cwd, several i3/Sway scripts) will\n"
+	@printf "                  then honour atty as the focused shell and read its cwd.\n"
+	@printf "  unregister-shell Remove that line again. Idempotent.\n\n"
 	@printf "Run / reload\n"
 	@printf "  run             Build atty and run.\n"
 	@printf "  reload-guard    systemctl --user restart atty-guard (re-attaches eBPF when built\n"
@@ -165,6 +174,49 @@ link-atty: build-atty
 	install -d $(PREFIX)/bin
 	ln -sfn $(CURDIR)/zig-out/bin/atty $(PREFIX)/bin/atty
 	@printf "→ linked %s/bin/atty → %s/zig-out/bin/atty\n" "$(PREFIX)" "$(CURDIR)"
+
+# Register atty as a recognised "shell" so cwd-inheriting "new
+# terminal window" keybinds in DE/WM scripts (omarchy's
+# `omarchy-cmd-terminal-cwd`, several i3 / Sway helpers, gnome-shell
+# extensions) honour atty as the focused process's exe.
+#
+# Background: those scripts walk the focused terminal's process tree
+# looking for a `/proc/<pid>/exe` listed in `/etc/shells`, then read
+# THAT pid's `/proc/<pid>/cwd` to spawn the new window. When atty
+# wraps bash via `exec atty bash` (the default integration), atty
+# itself becomes the terminal's direct child — and atty isn't in
+# `/etc/shells`, so the script falls through to `$HOME`.
+#
+# Idempotent — checks first, only appends if absent. Asks sudo
+# unless run as root. Targets the binary at $(PREFIX)/bin/atty so a
+# `make link` or `make install-atty` ahead of this picks up the
+# right path (symlinks are resolved via `readlink -f`).
+register-shell:
+	@target="$$(readlink -f $(PREFIX)/bin/atty 2>/dev/null || true)"; \
+	if [ -z "$$target" ]; then \
+	    printf "→ %s/bin/atty not installed — run \`make link\` or \`make install-atty\` first\n" "$(PREFIX)"; exit 1; \
+	fi; \
+	if grep -qsxF "$$target" /etc/shells; then \
+	    printf "→ %s already in /etc/shells\n" "$$target"; \
+	else \
+	    printf "→ registering %s in /etc/shells (needs sudo)…\n" "$$target"; \
+	    printf '%s\n' "$$target" | sudo tee -a /etc/shells > /dev/null && \
+	    printf "✓ %s added to /etc/shells\n" "$$target"; \
+	fi
+
+# Inverse of `register-shell` — removes the atty entry. Idempotent.
+unregister-shell:
+	@target="$$(readlink -f $(PREFIX)/bin/atty 2>/dev/null || true)"; \
+	if [ -z "$$target" ]; then \
+	    printf "→ %s/bin/atty not installed — nothing to unregister\n" "$(PREFIX)"; exit 0; \
+	fi; \
+	if ! grep -qsxF "$$target" /etc/shells; then \
+	    printf "→ %s not in /etc/shells\n" "$$target"; \
+	else \
+	    printf "→ removing %s from /etc/shells (needs sudo)…\n" "$$target"; \
+	    sudo sed -i "\\|^$$target$$|d" /etc/shells && \
+	    printf "✓ %s removed from /etc/shells\n" "$$target"; \
+	fi
 
 # Meta unlink — both subprojects.
 unlink: unlink-atty unlink-guard
