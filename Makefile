@@ -38,6 +38,10 @@ ifdef CONFIG
 ZIG_CONFIG_ARG := -Dconfig=$(CONFIG)
 endif
 
+# Centralise the installed-binary path so install / link / register-
+# shell agree on what to touch.
+ATTY_BIN := $(PREFIX)/bin/atty
+
 .PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
         register-shell unregister-shell \
@@ -158,7 +162,7 @@ install:
 
 install-atty: build-atty
 	install -d $(PREFIX)/bin
-	install -m 0755 zig-out/bin/atty $(PREFIX)/bin/atty
+	install -m 0755 zig-out/bin/atty $(ATTY_BIN)
 	@printf "→ installed to %s/bin/atty\n" "$(PREFIX)"
 
 # Meta link — symlink BOTH binaries from this clone. Source-of-truth
@@ -172,7 +176,7 @@ link: link-atty link-guard
 # updates the live binary with no extra step.
 link-atty: build-atty
 	install -d $(PREFIX)/bin
-	ln -sfn $(CURDIR)/zig-out/bin/atty $(PREFIX)/bin/atty
+	ln -sfn $(CURDIR)/zig-out/bin/atty $(ATTY_BIN)
 	@printf "→ linked %s/bin/atty → %s/zig-out/bin/atty\n" "$(PREFIX)" "$(CURDIR)"
 
 # Register atty as a recognised "shell" so cwd-inheriting "new
@@ -192,9 +196,15 @@ link-atty: build-atty
 # `make link` or `make install-atty` ahead of this picks up the
 # right path (symlinks are resolved via `readlink -f`).
 register-shell:
-	@target="$$(readlink -f $(PREFIX)/bin/atty 2>/dev/null || true)"; \
+	@target="$$(readlink -f $(ATTY_BIN) 2>/dev/null || true)"; \
 	if [ -z "$$target" ]; then \
-	    printf "→ %s/bin/atty not installed — run \`make link\` or \`make install-atty\` first\n" "$(PREFIX)"; exit 1; \
+	    printf "→ %s not installed — run \`make link\` or \`make install-atty\` first\n" "$(ATTY_BIN)"; exit 1; \
+	fi; \
+	if [ ! -x "$$target" ]; then \
+	    printf "→ %s is not executable — refusing to register\n" "$$target"; exit 1; \
+	fi; \
+	if [ ! -f /etc/shells ]; then \
+	    printf "→ /etc/shells does not exist — refusing to create it (touch it yourself if your distro needs one)\n"; exit 1; \
 	fi; \
 	if grep -qsxF "$$target" /etc/shells; then \
 	    printf "→ %s already in /etc/shells\n" "$$target"; \
@@ -205,16 +215,23 @@ register-shell:
 	fi
 
 # Inverse of `register-shell` — removes the atty entry. Idempotent.
+# Uses a `grep -vxF` rewrite instead of `sed` so paths containing `\`
+# or `|` are handled losslessly: sed's `\|...|d` address treats those
+# as regex metacharacters (silent no-op on `\`, loud error on `|`).
 unregister-shell:
-	@target="$$(readlink -f $(PREFIX)/bin/atty 2>/dev/null || true)"; \
+	@target="$$(readlink -f $(ATTY_BIN) 2>/dev/null || true)"; \
 	if [ -z "$$target" ]; then \
-	    printf "→ %s/bin/atty not installed — nothing to unregister\n" "$(PREFIX)"; exit 0; \
+	    printf "→ %s not installed — nothing to unregister\n" "$(ATTY_BIN)"; exit 0; \
+	fi; \
+	if [ ! -f /etc/shells ]; then \
+	    printf "→ /etc/shells does not exist — nothing to unregister\n"; exit 0; \
 	fi; \
 	if ! grep -qsxF "$$target" /etc/shells; then \
 	    printf "→ %s not in /etc/shells\n" "$$target"; \
 	else \
 	    printf "→ removing %s from /etc/shells (needs sudo)…\n" "$$target"; \
-	    sudo sed -i "\\|^$$target$$|d" /etc/shells && \
+	    grep -vxF "$$target" /etc/shells | sudo tee /etc/shells.new > /dev/null && \
+	    sudo mv /etc/shells.new /etc/shells && \
 	    printf "✓ %s removed from /etc/shells\n" "$$target"; \
 	fi
 
@@ -223,9 +240,9 @@ unlink: unlink-atty unlink-guard
 
 # Remove the symlink (but never a real file — guarded by [ -L ]).
 unlink-atty:
-	@if [ -L "$(PREFIX)/bin/atty" ]; then \
-	    rm "$(PREFIX)/bin/atty" && printf "→ removed %s/bin/atty\n" "$(PREFIX)"; \
-	elif [ -e "$(PREFIX)/bin/atty" ]; then \
+	@if [ -L "$(ATTY_BIN)" ]; then \
+	    rm "$(ATTY_BIN)" && printf "→ removed %s\n" "$(ATTY_BIN)"; \
+	elif [ -e "$(ATTY_BIN)" ]; then \
 	    printf "⚠ %s/bin/atty is a real file, not a symlink — refusing to remove\n" "$(PREFIX)"; exit 1; \
 	else \
 	    printf "(nothing to unlink)\n"; \
