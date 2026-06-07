@@ -313,7 +313,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             delete_forward,
             move_left,
             move_right,
-            move_up, // chat-mode question pick-list (#214)
+            // chat-mode question pick-list (#214) consumes these to
+            // navigate choices; when no pick-list is active they
+            // walk the cursor across `\n` boundaries inside the
+            // multi-line input buffer (column-preserving, clamped).
+            move_up,
             move_down,
             move_home,
             move_end,
@@ -1748,13 +1752,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 .llm_chat_inline_grow, .llm_chat_inline_shrink => {
                     if (!rt.chat_inline_open) return false;
                     const current: u16 = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
-                    // Upper bound is loose — proxy.zig's
-                    // `applyReserveRows` clamps against the live
-                    // terminal height. Hard-cap at u16/4 here just
-                    // so a stuck-key user can't push the override
-                    // into nonsensical territory.
+                    // Terminal-aware upper bound. proxy.zig's
+                    // `applyReserveRows` clamps the reservation
+                    // against the live terminal height, but
+                    // `paintInlineChat` uses the OVERRIDE directly to
+                    // lay out rows — without a runtime cap, a held
+                    // Ctrl+Alt+Up keeps growing the override past
+                    // `terminal_rows`, paintInlineChat overflows the
+                    // fixed paint buffer, and recoverInlineChatPaintFailure
+                    // slams the panel closed. Reserve at least 4 rows
+                    // above the panel for the shell prompt + breathing
+                    // room; fall back to a permissive cap when the
+                    // terminal geometry hasn't been populated yet
+                    // (test fixtures, pre-first-resize state).
+                    const max_panel: u16 = blk: {
+                        // Fall through to the original permissive cap
+                        // when terminal geometry hasn't been populated
+                        // (test fixtures, pre-first-resize state). The
+                        // clamp at proxy.zig's `applyReserveRows` is the
+                        // safety net in those modes.
+                        const t_rows = ctx.terminal_rows orelse 0;
+                        const base = ctx.statusbar_base_reserve orelse 0;
+                        const headroom: u16 = 4;
+                        if (t_rows == 0 or t_rows <= base + headroom + cfg.inline_chat_top_gap) {
+                            break :blk std.math.maxInt(u16) / 4;
+                        }
+                        break :blk t_rows - base - headroom - cfg.inline_chat_top_gap;
+                    };
                     const next: u16 = switch (action) {
-                        .llm_chat_inline_grow => if (current < std.math.maxInt(u16) / 4) current + 1 else current,
+                        .llm_chat_inline_grow => if (current < max_panel) current + 1 else current,
                         .llm_chat_inline_shrink => if (current > 3) current - 1 else current,
                         else => unreachable,
                     };

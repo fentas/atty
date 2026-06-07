@@ -1574,10 +1574,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// proxy shrinks the reservation on the next tick; latch
         /// the error hint and write a stderr line so the failure
         /// isn't silent.
+        pub fn recoverInlineChatPaintFailureForTest(rt: *Runtime) void {
+            recoverInlineChatPaintFailure(rt);
+        }
+
         fn recoverInlineChatPaintFailure(rt: *Runtime) void {
             rt.chat_inline_paint_cache_valid = false;
             if (rt.chat_inline_open) {
                 rt.chat_inline_open = false;
+                // Drop the height override so a follow-up Alt+C
+                // reopens at the default panel size. Without this,
+                // a held Ctrl+Alt+Up that grew past terminal height
+                // and triggered overflow would leave the oversized
+                // value in place, and the very next reopen would
+                // overflow again on first paint.
+                rt.chat_inline_rows_override = null;
                 latchErr(rt, "inline chat: terminal too small or paint buffer overflow");
                 const inline_overflow_msg = "atty: inline chat: terminal too small or paint buffer overflow\n";
                 _ = std.c.write(2, inline_overflow_msg, inline_overflow_msg.len);

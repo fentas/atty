@@ -2406,6 +2406,95 @@ test "inline chat: Up arrow clamps column when the prior line is shorter" {
     try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
 }
 
+test "inline chat: grow action clamps the override to terminal height" {
+    // A held Ctrl+Alt+Up previously kept incrementing
+    // `chat_inline_rows_override` past the terminal's real height —
+    // paintInlineChat would then overflow its fixed buffer and trip
+    // recoverInlineChatPaintFailure, slamming the panel shut. With
+    // the terminal-aware cap in place, grow stops at
+    // `terminal_rows - base_reserve - headroom - top_gap`.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+    };
+
+    rt.chat_inline_open = true;
+
+    // top_gap default is 1, base_reserve=3, headroom=4 ⇒ cap = 24-3-4-1 = 16.
+    // Fire grow 200 times to mimic a held key. After saturation the
+    // override should stop at 16 — never exceeding `terminal_rows`.
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        _ = try L.onAction(&rt, &ctx, .llm_chat_inline_grow);
+    }
+    try testing.expect(rt.chat_inline_rows_override != null);
+    try testing.expect(rt.chat_inline_rows_override.? <= 16);
+    try testing.expect(rt.chat_inline_open);
+}
+
+test "inline chat: paint failure clears the height override" {
+    // Belt-and-braces for the grow clamp above. Even if some future
+    // change re-introduces an unclamped override (or the user
+    // shrinks the terminal so a previously-fine value now overflows),
+    // recoverInlineChatPaintFailure must drop the override so the
+    // next reopen starts at the default size — otherwise the overflow
+    // loops forever on every Alt+C.
+    const paint = @import("paint.zig");
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    rt.chat_inline_open = true;
+    rt.chat_inline_rows_override = 200;
+    rt.chat_inline_paint_pending = true;
+
+    // The paint buffer is ~64 KB; 200 rows of input chrome fit, so
+    // we can't reliably force the overflow path via paintInlineChat
+    // alone. Hit recoverInlineChatPaintFailure directly — its
+    // contract is "panel closed AND override cleared," which is
+    // what the held-key recovery relies on.
+    paint.Module(L.config, L.Runtime).recoverInlineChatPaintFailureForTest(&rt);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(rt.chat_inline_rows_override == null);
+}
+
 test "Alt+M cycle arms chat panel repaint so divider shows the new provider" {
     // Regression: cycle_model bumped `current_provider_idx` and
     // emitted a statusbar hint, but never armed
