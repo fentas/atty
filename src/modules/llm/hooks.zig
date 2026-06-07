@@ -2055,26 +2055,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.clear_seq_carry_len = @intCast(tail_len);
             }
 
-            // Even when no dialog is actively executing, we still
-            // walk the edge stream below so the refocus latch (set
-            // by the `.exec` action arm) gets cleared on the next
-            // `;D` / implicit `;A`. The previous early-return
-            // here was a USER-REPORTED bug: edges drained at
-            // `drainEdges()` above were lost forever, so a `;D`
-            // arriving with `dialog_state` still at `.suggesting`
-            // (e.g. a race where the shell's command-end marker
-            // overtakes atty's `.suggesting → .executing`
-            // transition, OR a stray `;C/;D` pair from an
-            // unrelated shell action between the LLM's reply and
-            // the user's Enter) silently dropped both the refocus
-            // AND the state advance. The inner state-machine
-            // gates below already guard against transitions out of
-            // wrong states, so processing every edge is safe.
-            //
-            // No-op short-circuit when nothing in the edge stream
-            // could possibly matter — saves the loop spin on the
-            // common case of "shell wrote some bytes, no OSC 133
-            // markers, no pending refocus."
+            // Walk edges whenever there's anything to do — a pending
+            // refocus latch (from `.exec`) needs the next `;D` even
+            // when dialog_state hasn't reached `.executing` yet
+            // (see exec-no-return regression test). Inner gates
+            // guard transitions.
             if (edges.len == 0 and !rt.chat_refocus_pending) return;
 
             // `edgeOffset(i)` returns the byte index of the OSC
