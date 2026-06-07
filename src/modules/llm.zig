@@ -391,15 +391,16 @@ pub fn configure(comptime cfg: Config) type {
             .{ .bytes = keymap.key("Ctrl+End"), .action = .chat_scroll_to_tail, .label = "Ctrl+End", .description = "chat: jump back to the live tail (when scrolled up)" },
             .{ .bytes = "\x1b[1;5F", .action = .chat_scroll_to_tail },
             // Chat recall — loads the newest persisted dialog into
-            // the inline panel. Dual-encoded: legacy `\x1bR` for
-            // terminals without kitty kbd flag 1; CSI-u
-            // `\x1b[114;3u` for those that do (Ghostty / kitty /
-            // foot / WezTerm). Without the CSI-u sibling Alt+R
-            // would silently miss on those terminals — same
-            // rationale as the other Alt+letter bindings in this
-            // module.
-            .{ .bytes = keymap.key("Alt+R"), .action = .chat_recall, .label = "Alt+R", .description = "recall the most recent persisted dialog into the chat panel" },
-            .{ .bytes = "\x1b[114;3u", .action = .chat_recall },
+            // the inline panel. Dual-encoded: legacy `\x1bR`
+            // (Alt+Shift+R — capital R = shift implicit on most
+            // terminals) for sessions without kitty kbd flag 1;
+            // CSI-u `\x1b[114;4u` (modifier 4 = Shift+Alt) for
+            // those that do. Earlier code mistakenly used
+            // `\x1b[114;3u` (modifier 3 = Alt-only) here — which
+            // collided with the Alt+r retry binding below on kitty
+            // kbd terminals and silently lost one of the two.
+            .{ .bytes = keymap.key("Alt+R"), .action = .chat_recall, .label = "Alt+Shift+R", .description = "recall the most recent persisted dialog into the chat panel" },
+            .{ .bytes = "\x1b[114;4u", .action = .chat_recall },
             // Inline panel resize — grow/shrink the panel one row
             // per press. Dual encoded: `keymap.key("Ctrl+Alt+Up")`
             // resolves to the kitty kbd CSI-u form on terminals
@@ -956,6 +957,16 @@ pub fn configure(comptime cfg: Config) type {
             /// cancel paths so an aborted dialog doesn't ambush
             /// the user with a focus jump.
             chat_refocus_pending: bool = false,
+            /// After a soft failure (timeout, transport blip) inside
+            /// a chat surface, this flag arms a one-row "↻ Enter
+            /// retry · Esc dismiss" banner inside the panel's input
+            /// area in place of the normal `❯ ` prompt. Mirrors the
+            /// chat_question pattern's affordance — the user gets a
+            /// single-keystroke retry instead of having to remember
+            /// the Alt+r binding. Cleared on retry fire, on Esc, on
+            /// any printable insert (user wants to type a new
+            /// prompt instead), and on panel close.
+            chat_retry_pending: bool = false,
             /// Flag the proxy reads via `extraReserveRows` — the
             /// proxy compares it to the live reserve baseline and
             /// emits `setReserveRows + activate` on the open/close

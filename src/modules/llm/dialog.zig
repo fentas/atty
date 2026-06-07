@@ -1170,6 +1170,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // command-runs-cleanly path. Clearing keeps focus
             // wherever the user last had it.
             rt.chat_refocus_pending = false;
+            // Hard reset wipes turns; the retry banner has nothing
+            // to resend after this so drop it. (The soft variant
+            // deliberately preserves it.)
+            rt.chat_retry_pending = false;
         }
 
         /// Soft reset for retry-eligible failures (worker timeout,
@@ -1203,6 +1207,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.pending_command_len = 0;
             rt.pending_description_len = 0;
             rt.dialog_parse_retry_count = 0;
+            // Both question state stripes — the storage count
+            // (`question_choices_count`) AND the chat-mode pick-list
+            // UI count (`chat_question_choice_count`). Must mirror
+            // `dialogReset`'s coverage at lines 1151-1156 — if a new
+            // question-related field gets added to that list, mirror
+            // here too. Drift between the two reset paths leaks
+            // stale UI state into the next dialog.
+            rt.question_choices_count = 0;
             rt.chat_question_active = false;
             rt.chat_question_choice_count = 0;
             rt.chat_question_selected_idx = 0;
@@ -1214,6 +1226,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             //   - rt.turns      → user's last prompt stays visible.
             //   - rt.session_id → retry resumes the same CLI session.
             //   - rt.auto_mode_active → user's auto/dialog choice persists.
+            //   - rt.chat_retry_pending → set/cleared by the caller
+            //     (handleDialogResponse arms it after this reset;
+            //     the Alt+r action handler clears it after firing).
         }
 
         /// Abort the dialog with an error notification. Surfaces in

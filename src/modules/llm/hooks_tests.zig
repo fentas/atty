@@ -1740,6 +1740,12 @@ test "dialogResetSoft: preserves turns + session_id for retry-eligible failures"
     try testing.expect(!rt.in_flight);
     try testing.expectEqual(@as(usize, 1), rt.turns_len);
     try testing.expectEqualStrings("sess-abc-123", rt.session_id);
+    // The soft path must also reset the question-storage stripe
+    // (`question_choices_count`) — the chat-mode UI count
+    // (`chat_question_choice_count`) was already covered, but the
+    // storage count drifted in an earlier revision. Reset-list
+    // parity with `dialogReset` is documented inline.
+    try testing.expectEqual(@as(usize, 0), rt.question_choices_count);
     // dialogResetSoft preserves session_id; shutdownAndFree doesn't
     // free it for non-empty values, so free here to keep the test
     // leak-clean.
@@ -1897,6 +1903,166 @@ test "llm_chat_retry: no-op (with hint) when last turn isn't a user turn" {
     // the shell) but dialog_state stays idle — no request fired.
     try testing.expect(consumed);
     try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .idle), rt.dialog_state);
+}
+
+test "retry banner: Enter fires the retry when chat_retry_pending + .user turn at tail" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "explain"));
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    rt.chat_retry_pending = true;
+    rt.dialog_state = .idle;
+
+    _ = try L.onInput(&rt, &ctx, "\r");
+    try testing.expect(!rt.chat_retry_pending);
+    try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .generating), rt.dialog_state);
+}
+
+test "retry banner: Esc dismisses without firing" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "explain"));
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    rt.chat_retry_pending = true;
+    rt.dialog_state = .idle;
+
+    _ = try L.onInput(&rt, &ctx, "\x1B");
+    try testing.expect(!rt.chat_retry_pending);
+    try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .idle), rt.dialog_state);
+}
+
+test "retry banner: typing a printable clears the banner and lands in the buffer" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "explain"));
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    rt.chat_retry_pending = true;
+
+    _ = try L.onInput(&rt, &ctx, "hi");
+    try testing.expect(!rt.chat_retry_pending);
+    try testing.expectEqualStrings("hi", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "retry banner: panel close (Ctrl+D) clears the pending flag" {
+    // Otherwise the banner would survive a panel close → reopen
+    // cycle and ambush the user on the next session.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "explain"));
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    rt.chat_retry_pending = true;
+
+    _ = try L.onInput(&rt, &ctx, "\x04"); // Ctrl+D close
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(!rt.chat_retry_pending);
 }
 
 test "inline-chat autofocus: config knob off — no field-level coverage but pin defaults" {
