@@ -1563,6 +1563,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Sub-millisecond delay on a local shell; eliminates
                 // the "flickers one char left/right" jitter on every
                 // keystroke.
+                //
+                // Drain module-emitted term bytes (e.g., inline chat
+                // panel cursor moves on a held arrow key) on every
+                // stdin event, not just on tick. A held arrow saturates
+                // the poll cycle with input bytes so the `n == 0`
+                // timeout branch — where gatherTermBytes runs — never
+                // gets a chance to fire, and the panel's cursor stays
+                // painted at its pre-burst position until the user
+                // releases the key.
+                if (args.is_tty and !cursor_tracker.inEscape()) {
+                    if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                        if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+                    }
+                }
                 if (statusbar) |*sb| {
                     if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                 }

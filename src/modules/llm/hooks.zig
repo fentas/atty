@@ -321,6 +321,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             kill_to_start,
             kill_to_end,
             kill_word_back,
+            clear_all, // Ctrl+C — wipe buffer, keep panel open
         };
 
         /// Pull the next chat-input keystroke from `input[i..]`.
@@ -572,6 +573,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 0x02 => .move_left, // Ctrl+B
                 0x06 => .move_right, // Ctrl+F
                 0x08, 0x7F => .backspace, // Ctrl+H / DEL
+                0x03 => .clear_all, // Ctrl+C — wipe the prompt
                 0x04 => .close, // Ctrl+D
                 0x0B => .kill_to_end, // Ctrl+K
                 0x15 => .kill_to_start, // Ctrl+U
@@ -629,6 +631,32 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     cursor.* += 1;
                     return true;
                 },
+                .move_up => {
+                    var line_start: usize = cursor.*;
+                    while (line_start > 0 and buf[line_start - 1] != '\n') : (line_start -= 1) {}
+                    if (line_start == 0) return false;
+                    const col = cursor.* - line_start;
+                    const prev_line_end = line_start - 1;
+                    var prev_line_start: usize = prev_line_end;
+                    while (prev_line_start > 0 and buf[prev_line_start - 1] != '\n') : (prev_line_start -= 1) {}
+                    const prev_line_len = prev_line_end - prev_line_start;
+                    cursor.* = prev_line_start + @min(col, prev_line_len);
+                    return true;
+                },
+                .move_down => {
+                    var line_start: usize = cursor.*;
+                    while (line_start > 0 and buf[line_start - 1] != '\n') : (line_start -= 1) {}
+                    var line_end: usize = cursor.*;
+                    while (line_end < len.* and buf[line_end] != '\n') : (line_end += 1) {}
+                    if (line_end >= len.*) return false;
+                    const col = cursor.* - line_start;
+                    const next_line_start = line_end + 1;
+                    var next_line_end: usize = next_line_start;
+                    while (next_line_end < len.* and buf[next_line_end] != '\n') : (next_line_end += 1) {}
+                    const next_line_len = next_line_end - next_line_start;
+                    cursor.* = next_line_start + @min(col, next_line_len);
+                    return true;
+                },
                 .move_home => {
                     if (cursor.* == 0) return false;
                     cursor.* = 0;
@@ -650,6 +678,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 .kill_to_end => {
                     if (cursor.* == len.*) return false;
                     len.* = cursor.*;
+                    return true;
+                },
+                .clear_all => {
+                    if (len.* == 0 and cursor.* == 0) return false;
+                    len.* = 0;
+                    cursor.* = 0;
                     return true;
                 },
                 .kill_word_back => {
