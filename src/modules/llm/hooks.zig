@@ -1772,6 +1772,38 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
                     return true;
                 },
+                .llm_chat_retry => {
+                    // Re-fire the LAST in-flight dialog request after
+                    // a soft-reset failure (timeout, transport blip).
+                    // Gated on: a chat surface is open, no request
+                    // currently in flight, dialog is idle, and the
+                    // last turn is a `.user` turn (so re-sending makes
+                    // sense — re-firing after an `.assistant_exec`
+                    // would re-suggest the same command, which is not
+                    // what the user wants here). Surface a quick hint
+                    // when the gate fails so the user knows why the
+                    // binding did nothing.
+                    if (!(rt.chat_inline_open or rt.chat_overlay_open)) return false;
+                    if (rt.in_flight or rt.dialog_state != .idle) {
+                        latchHint(rt, "retry: request already in flight");
+                        return true;
+                    }
+                    if (rt.turns_len == 0 or rt.turns[rt.turns_len - 1].kind != .user) {
+                        latchHint(rt, "retry: no pending user turn to resend");
+                        return true;
+                    }
+                    fireDialogRequest(rt, ctx) catch |err| {
+                        latchErr(rt, switch (err) {
+                            error.BodyTooLarge => "retry: request body too large",
+                            error.OutOfMemory => "retry: out of memory",
+                            else => "retry: internal error",
+                        });
+                        return true;
+                    };
+                    if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                    if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+                    return true;
+                },
                 .llm_chat_inline_grow, .llm_chat_inline_shrink => {
                     if (!rt.chat_inline_open) return false;
                     const current: u16 = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
@@ -2353,8 +2385,26 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// it's null.
         fn handleDialogResponse(rt: *Runtime, ctx: *m.Context, n: usize) m.Error!?[]const u8 {
             if (n == 0) {
-                // Worker reported failure; the error slot already
-                // has the diagnostic. End the dialog cleanly.
+                // Worker reported failure (timeout, transport error,
+                // HTTP non-2xx). The error slot already has the
+                // diagnostic. End the in-flight state cleanly.
+                //
+                // Chat surface open → SOFT reset (preserve turns +
+                // session_id) so the user can press Alt+Shift+R to
+                // retry the same conversation from where it stalled.
+                // The shell-prompt path falls through to the
+                // historical hard reset + Ctrl+U injection (no chat
+                // surface = no turn buffer to keep, and the shell may
+                // have the `#: <prompt>` line typed which we need to
+                // wipe so the next Enter doesn't run it as a literal
+                // command).
+                if (rt.chat_inline_open or rt.chat_overlay_open) {
+                    dialog_helpers.dialogResetSoft(rt, ctx.io);
+                    if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                    if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+                    rt.ai_mode_active = false;
+                    return null;
+                }
                 dialogReset(rt, ctx.io);
                 rt.ai_mode_active = false;
                 queueInjection(rt, "\x15");

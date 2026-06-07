@@ -419,6 +419,15 @@ pub fn configure(comptime cfg: Config) type {
             // encoded: kitty kbd CSI-u + legacy Alt+T.
             .{ .bytes = keymap.key("Alt+t"), .action = .llm_chat_toggle_auto, .label = "Alt+T", .description = "chat: toggle auto-exec" },
             .{ .bytes = "\x1b[116;3u", .action = .llm_chat_toggle_auto },
+            // Retry the last in-flight dialog request after a soft
+            // failure (timeout, transport blip). The committed
+            // chat_recall binding above uses `\x1bR` (Alt+Shift+R on
+            // most terminals) so retry takes the lowercase byte
+            // `\x1br` — paired with the kitty kbd CSI-u sibling for
+            // terminals that disambiguate. Same dual-encoding
+            // rationale as every other Alt+letter binding here.
+            .{ .bytes = keymap.key("Alt+r"), .action = .llm_chat_retry, .label = "Alt+r", .description = "chat: retry the last failed request (preserves turns)" },
+            .{ .bytes = "\x1b[114;3u", .action = .llm_chat_retry },
         };
 
         // HTTP worker thread + request/response plumbing extracted

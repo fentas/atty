@@ -1172,6 +1172,50 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             rt.chat_refocus_pending = false;
         }
 
+        /// Soft reset for retry-eligible failures (worker timeout,
+        /// transport hiccup, dialog n==0). Clears the shared
+        /// req/res slots + in-flight flag so the next request can
+        /// fire cleanly, but PRESERVES `rt.turns` and `rt.session_id`
+        /// so the user can press the retry binding and the LLM
+        /// continues the same conversation from where it stalled.
+        /// `dialogReset` (the full variant) wipes both — appropriate
+        /// for user-initiated cancels and unrecoverable parse
+        /// failures, NOT for transient network failures where the
+        /// user's last typed turn is still on screen and the
+        /// expected UX is "press a key, try again."
+        pub fn dialogResetSoft(rt: *Runtime, io: std.Io) void {
+            rt.shared.mutex.lockUncancelable(io);
+            rt.shared.req_gen +%= 1;
+            rt.shared.req_pending = false;
+            rt.shared.res_done = false;
+            if (rt.shared.res_buf) |old| {
+                rt.allocator.free(old);
+                rt.shared.res_buf = null;
+            }
+            rt.shared.res_len = 0;
+            rt.shared.request_session_id_len = 0;
+            rt.shared.response_session_id_len = 0;
+            rt.shared.mutex.unlock(io);
+
+            rt.dialog_state = .idle;
+            rt.captured_output_len = 0;
+            rt.captured_truncated = false;
+            rt.pending_command_len = 0;
+            rt.pending_description_len = 0;
+            rt.dialog_parse_retry_count = 0;
+            rt.chat_question_active = false;
+            rt.chat_question_choice_count = 0;
+            rt.chat_question_selected_idx = 0;
+            rt.conclusion_pending = false;
+            rt.in_flight = false;
+            rt.auto_exec_armed = false;
+            rt.chat_refocus_pending = false;
+            // DELIBERATELY NOT touched:
+            //   - rt.turns      → user's last prompt stays visible.
+            //   - rt.session_id → retry resumes the same CLI session.
+            //   - rt.auto_mode_active → user's auto/dialog choice persists.
+        }
+
         /// Abort the dialog with an error notification. Surfaces in
         /// the ⚠ row and resets to idle. Used for unrecoverable
         /// states mid-loop (OOM, body too large, malformed JSON
