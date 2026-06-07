@@ -1733,6 +1733,11 @@ test "dialogResetSoft: preserves turns + session_id for retry-eligible failures"
     rt.dialog_state = .generating;
     rt.in_flight = true;
     rt.chat_inline_open = true;
+    // Seed the question-storage stripe to non-zero so the post-reset
+    // assertion below actually proves the soft path clears it (otherwise
+    // the field default of 0 would let the test pass vacuously and a
+    // future revision that drops the clear would silently fall through).
+    rt.question_choices_count = 3;
 
     helpers.dialogResetSoft(&rt, real_io);
 
