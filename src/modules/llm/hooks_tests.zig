@@ -1529,23 +1529,30 @@ test "inline-chat autofocus: ;D edge clears refocus latch + restores panel focus
     try testing.expect(!rt.chat_refocus_pending);
 }
 
-test "chat exec continuation: onLineCommit transitions .suggesting → .executing when focus is parked on shell" {
-    // Regression for the post-#392 silence: after the LLM emitted
-    // `.exec`, the panel defocused (chat_focus_in_panel=false) so
-    // the Enter that runs the injected command flows to bash. The
-    // proxy used to unconditionally skip line_state.applyInput
-    // whenever the panel was open (anyInlineChatActive), which
-    // meant submit() never fired, lastCommitted() returned null,
-    // dispatchLineCommit was short-circuited, and onLineCommit's
-    // .suggesting → .executing transition never ran. Visible as
-    // "exec runs but the LLM never continues" — `;C`/`;D` couldn't
-    // start capturing because the state never reached .executing.
+test "chat exec continuation: onLineCommit advances .suggesting → .executing on a non-empty line" {
+    // Module-side contract that the proxy-side bugfix relies on.
+    //
+    // Background (the full chain): after the LLM emitted `.exec`,
+    // the panel defocused (chat_focus_in_panel=false) so the Enter
+    // that runs the injected command flows to bash. The proxy used
+    // to unconditionally skip line_state.applyInput whenever the
+    // panel was open (anyInlineChatActive), which meant submit()
+    // never fired on that Enter, lastCommitted() returned null,
+    // dispatchLineCommit was short-circuited, and `onLineCommit`
+    // never ran at all. Visible as "exec runs but the LLM never
+    // continues" — `;C`/`;D` couldn't start capturing because the
+    // state never reached `.executing`.
     //
     // The proxy now uses the focus-aware
-    // anyInlineChatConsumingInput dispatcher (panel open AND focus
-    // in panel). This test pins the module-side contract that
-    // onLineCommit, when invoked with a non-empty line and state
-    // .suggesting, advances to .executing.
+    // `anyInlineChatConsumingInput` dispatcher so the Enter does
+    // reach line_state and dispatchLineCommit fires. This test
+    // pins the MODULE-SIDE contract that, once dispatchLineCommit
+    // fires, `onLineCommit` advances `.suggesting → .executing`
+    // on any non-empty trimmed line (the gate that determines
+    // whether `;C`/`;D` start capturing). `onLineCommit` itself
+    // doesn't read `chat_focus_in_panel`; the parked-focus state
+    // in the setup is documentary, reflecting the user-visible
+    // scenario the assertion stands in for.
     const L = configure(.{
         .provider = .{ .http = .{
             .model = "x",
