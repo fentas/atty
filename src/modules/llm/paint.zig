@@ -1574,10 +1574,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// proxy shrinks the reservation on the next tick; latch
         /// the error hint and write a stderr line so the failure
         /// isn't silent.
+        pub fn recoverInlineChatPaintFailureForTest(rt: *Runtime) void {
+            recoverInlineChatPaintFailure(rt);
+        }
+
         fn recoverInlineChatPaintFailure(rt: *Runtime) void {
             rt.chat_inline_paint_cache_valid = false;
             if (rt.chat_inline_open) {
                 rt.chat_inline_open = false;
+                // Drop the height override so a follow-up Alt+C
+                // reopens at the default panel size. Without this,
+                // a held Ctrl+Alt+Up that grew past terminal height
+                // and triggered overflow would leave the oversized
+                // value in place, and the very next reopen would
+                // overflow again on first paint.
+                rt.chat_inline_rows_override = null;
                 latchErr(rt, "inline chat: terminal too small or paint buffer overflow");
                 const inline_overflow_msg = "atty: inline chat: terminal too small or paint buffer overflow\n";
                 _ = std.c.write(2, inline_overflow_msg, inline_overflow_msg.len);
@@ -1591,6 +1602,31 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // panel is what the user is interacting with when its
             // paint latch is set.
             if (rt.chat_inline_paint_pending) {
+                // Transient stale-reserve guard. When Alt+C just
+                // opened the panel inside the proxy's stdin path,
+                // the swallow_after_binding drain calls us BEFORE
+                // the next iteration's top-of-loop `applyReserveRows`
+                // has had a chance to enlarge `sb.reserve_rows` for
+                // the new `extraReserveRows`. ctx.statusbar_reserve
+                // is still the pre-open base value, paintInlineChat
+                // would hit its "too small" early-out, and the
+                // recovery path would close the panel + emit a
+                // stderr line. Detect that exact transient — open
+                // flag set, panel wants extra rows, ctx still
+                // reports only the base reservation — and skip
+                // this tick. Paint latch stays armed for the next
+                // iteration, by which point the proxy has caught
+                // up and a clean paint runs.
+                const base_reserve_now: u16 = ctx.statusbar_base_reserve orelse 3;
+                const live_reserve_now: u16 = ctx.statusbar_reserve orelse base_reserve_now;
+                const extra_want: u16 = blk: {
+                    if (!rt.chat_inline_open) break :blk 0;
+                    const rows = rt.chat_inline_rows_override orelse cfg.inline_chat_rows;
+                    break :blk rows + cfg.inline_chat_top_gap;
+                };
+                if (extra_want > 0 and live_reserve_now <= base_reserve_now) {
+                    return null;
+                }
                 rt.chat_inline_paint_pending = false;
                 rt.chat_inline_input_dirty = false;
                 if (paintInlineChat(rt, ctx)) {

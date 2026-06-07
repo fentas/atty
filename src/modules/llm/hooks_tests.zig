@@ -177,10 +177,14 @@ test "chat overlay: onInput swallows all keystrokes while open" {
     try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x08"));
     try testing.expectEqualStrings("hell", rt.chat_input_buf[0..rt.chat_input_len]);
 
-    // Control byte (Ctrl+C) silently dropped — neither appended
-    // nor surfaced.
+    // Ctrl+C clears the typed prompt without closing the overlay
+    // (PR follow-up to #390 — quick "scrub and start over" UX).
     try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "\x03"));
-    try testing.expectEqualStrings("hell", rt.chat_input_buf[0..rt.chat_input_len]);
+    try testing.expectEqual(@as(usize, 0), rt.chat_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.chat_input_cursor);
+    try testing.expect(rt.chat_overlay_open);
+    // Retype so the rest of the assertions have a buffer to consume.
+    try testing.expectEqual(m.Action{ .swallow = {} }, try L.onInput(&rt, &ctx, "hell"));
 
     // Enter clears the buffer (submitted as a turn) — even
     // though fireDialogRequest will fail in the inert test
@@ -2254,6 +2258,380 @@ test "inline chat: Alt+Enter inserts a newline (legacy Shift+Enter fallback)" {
     _ = try L.onInput(&rt, &ctx, "\x1B\r");
     _ = try L.onInput(&rt, &ctx, "there");
     try testing.expectEqualStrings("hi\nthere", rt.chat_inline_input_buf[0..rt.chat_inline_input_len]);
+}
+
+test "inline chat: Ctrl+C clears the typed prompt (keeps panel open)" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    _ = try L.onInput(&rt, &ctx, "explain this");
+    try testing.expectEqual(@as(usize, 12), rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 12), rt.chat_inline_input_cursor);
+
+    _ = try L.onInput(&rt, &ctx, "\x03");
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+    try testing.expect(rt.chat_inline_open);
+    try testing.expect(rt.chat_focus_in_panel);
+}
+
+test "inline chat: Up/Down arrow navigates between lines (column-preserving)" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Buffer: "hello\nworld\nhi"   indices: h(0)e(1)l(2)l(3)o(4)\n(5)w(6)o(7)r(8)l(9)d(10)\n(11)h(12)i(13).
+    // Populate directly — onInput would interpret a literal `\n`
+    // chunk as Enter and submit; multi-line content comes in via
+    // bracketed paste / Alt+Enter / Shift+Enter in practice.
+    const buf_contents = "hello\nworld\nhi";
+    @memcpy(rt.chat_inline_input_buf[0..buf_contents.len], buf_contents);
+    rt.chat_inline_input_len = buf_contents.len;
+    rt.chat_inline_input_cursor = buf_contents.len;
+
+    // Up from end-of-last-line (col 2) → land on "world" at col 2 (between `o` and `r`, position 8).
+    _ = try L.onInput(&rt, &ctx, "\x1B[A");
+    try testing.expectEqual(@as(usize, 8), rt.chat_inline_input_cursor);
+
+    // Up again → "hello" at col 2 (position 2).
+    _ = try L.onInput(&rt, &ctx, "\x1B[A");
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
+
+    // Up from the first line → no-op.
+    _ = try L.onInput(&rt, &ctx, "\x1B[A");
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
+
+    // Down → "world" col 2 (position 8).
+    _ = try L.onInput(&rt, &ctx, "\x1B[B");
+    try testing.expectEqual(@as(usize, 8), rt.chat_inline_input_cursor);
+
+    // Down → "hi" — only 2 chars, col 2 means EOL (position 14).
+    _ = try L.onInput(&rt, &ctx, "\x1B[B");
+    try testing.expectEqual(@as(usize, 14), rt.chat_inline_input_cursor);
+
+    // Down from the last line → no-op.
+    _ = try L.onInput(&rt, &ctx, "\x1B[B");
+    try testing.expectEqual(@as(usize, 14), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: Up arrow clamps column when the prior line is shorter" {
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+
+    // Buffer: "hi\nworld" — cursor at EOL position 8 (col 5 in line "world").
+    const buf_contents = "hi\nworld";
+    @memcpy(rt.chat_inline_input_buf[0..buf_contents.len], buf_contents);
+    rt.chat_inline_input_len = buf_contents.len;
+    rt.chat_inline_input_cursor = buf_contents.len;
+
+    // Up: prior line "hi" is only 2 chars — clamp to EOL of "hi" = position 2.
+    _ = try L.onInput(&rt, &ctx, "\x1B[A");
+    try testing.expectEqual(@as(usize, 2), rt.chat_inline_input_cursor);
+}
+
+test "inline chat: grow action clamps the override to terminal height" {
+    // A held Ctrl+Alt+Up previously kept incrementing
+    // `chat_inline_rows_override` past the terminal's real height —
+    // paintInlineChat would then overflow its fixed buffer and trip
+    // recoverInlineChatPaintFailure, slamming the panel shut. With
+    // the terminal-aware cap in place, grow stops at
+    // `terminal_rows - base_reserve - headroom - top_gap`.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+    };
+
+    rt.chat_inline_open = true;
+
+    // top_gap default is 1, base_reserve=3, headroom=4 ⇒ cap = 24-3-4-1 = 16.
+    // Fire grow 200 times to mimic a held key. After saturation the
+    // override should stop at 16 — never exceeding `terminal_rows`.
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        _ = try L.onAction(&rt, &ctx, .llm_chat_inline_grow);
+    }
+    try testing.expect(rt.chat_inline_rows_override != null);
+    try testing.expect(rt.chat_inline_rows_override.? <= 16);
+    try testing.expect(rt.chat_inline_open);
+}
+
+test "inline chat: paint failure clears the height override" {
+    // Belt-and-braces for the grow clamp above. Even if some future
+    // change re-introduces an unclamped override (or the user
+    // shrinks the terminal so a previously-fine value now overflows),
+    // recoverInlineChatPaintFailure must drop the override so the
+    // next reopen starts at the default size — otherwise the overflow
+    // loops forever on every Alt+C.
+    const paint = @import("paint.zig");
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    rt.chat_inline_open = true;
+    rt.chat_inline_rows_override = 200;
+    rt.chat_inline_paint_pending = true;
+
+    // The paint buffer is ~64 KB; 200 rows of input chrome fit, so
+    // we can't reliably force the overflow path via paintInlineChat
+    // alone. Hit recoverInlineChatPaintFailure directly — its
+    // contract is "panel closed AND override cleared," which is
+    // what the held-key recovery relies on.
+    paint.Module(L.config, L.Runtime).recoverInlineChatPaintFailureForTest(&rt);
+    try testing.expect(!rt.chat_inline_open);
+    try testing.expect(rt.chat_inline_rows_override == null);
+}
+
+test "inline chat: Alt+C refuses to open when terminal is too short for minimum layout" {
+    // Before this gate, paintInlineChat's "live_reserve - base <
+    // top_gap + 3" early-out fired on every Alt+C in a too-short
+    // terminal, recoverInlineChatPaintFailure closed the panel AND
+    // wrote a stderr line each time. Repeated Alt+C → repeated
+    // stderr spam (screenshot from PR #392 review). The action
+    // handler now refuses the open with a single statusbar hint
+    // and no stderr.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .terminal_rows = 6,
+        .terminal_cols = 80,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(!rt.chat_inline_open);
+    // Re-trying must keep refusing without leaving stale state.
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(!rt.chat_inline_open);
+}
+
+test "inline chat: Alt+C opens normally when terminal is exactly at the floor" {
+    // Floor = base(3) + top_gap(1) + 3 + 1 = 8 rows. At 8 the panel
+    // fits a divider + 1 scrollback row + input + a shell row.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .terminal_rows = 8,
+        .terminal_cols = 80,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(rt.chat_inline_open);
+}
+
+test "inline chat: provideTermBytes skips paint when reserve hasn't caught up to fresh open" {
+    // Bug reproduced from PR #392 review: the swallow_after_binding
+    // drain (d5540f5) fires the panel paint immediately after Alt+C
+    // sets `chat_inline_open = true`, BEFORE the proxy's top-of-
+    // iteration `applyReserveRows` enlarges `sb.reserve_rows` for
+    // the panel's `extraReserveRows`. In that window paintInlineChat
+    // sees `ctx.statusbar_reserve = base_reserve` (stale, pre-open
+    // value), hits the "live_reserve <= base_reserve" early-out,
+    // recoverInlineChatPaintFailure closes the panel + writes a
+    // stderr line. provideTermBytes now detects the transient
+    // (open + wants extra rows + ctx still reports base only) and
+    // returns null without clearing paint_pending — the next
+    // iteration runs with the caught-up reserve and paints cleanly.
+    const paint = @import("paint.zig");
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .terminal_rows = 30,
+        .terminal_cols = 80,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3, // proxy hasn't applied the panel's reserve yet
+    };
+
+    // Mimic the post-Alt+C state at the swallow_after_binding drain
+    // site: panel is open, paint is pending, proxy hasn't caught up.
+    rt.chat_inline_open = true;
+    rt.chat_inline_paint_pending = true;
+
+    const P = paint.Module(L.config, L.Runtime);
+    const bytes = try P.provideTermBytes(&rt, &ctx);
+    try testing.expect(bytes == null);
+    // Crucially: paint_pending stays armed AND panel stays open.
+    try testing.expect(rt.chat_inline_paint_pending);
+    try testing.expect(rt.chat_inline_open);
 }
 
 test "Alt+M cycle arms chat panel repaint so divider shows the new provider" {

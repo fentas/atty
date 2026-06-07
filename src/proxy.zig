@@ -642,6 +642,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
+                // applyReserveRows just blanked the reserved zone
+                // via its per-row erase. Any module owning paint
+                // surface in that area (LLM's inline chat panel)
+                // must re-arm its paint latch or its chrome stays
+                // missing until the user does something else that
+                // arms it (resize-burst paint races: chrome was
+                // drawn pre-grow into the smaller area, applyReserveRows
+                // then grew the area and erased the chrome, and
+                // paint_pending was already cleared so nothing
+                // redrew). `notifyResize` is the existing hook
+                // SIGWINCH uses for the same kind of re-arm.
+                D.notifyResize(&runtimes);
                 // Refresh the tracker after the DECSTBM + erase
                 // sequence above — it may have moved the cursor in
                 // ways the byte-level model doesn't perfectly
@@ -1279,6 +1291,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 if (swallow_after_binding) {
+                    // Same rationale as the post-dispatchInput drain
+                    // below: an action handler (e.g. Ctrl+Alt+Up/Down
+                    // chat-panel grow/shrink) just armed
+                    // `chat_inline_paint_pending`. Without flushing
+                    // here, a held action key saturates the poll
+                    // cycle, the tick branch never fires, and the
+                    // top-of-iteration `applyReserveRows` keeps
+                    // erasing the panel while the paint that would
+                    // redraw the header / divider waits for a
+                    // timeout that never comes — visible as a
+                    // flicker with the panel chrome blanked.
+                    if (args.is_tty and !cursor_tracker.inEscape()) {
+                        if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                            if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+                        }
+                    }
                     if (statusbar) |*sb| {
                         if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     }
@@ -1563,6 +1591,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Sub-millisecond delay on a local shell; eliminates
                 // the "flickers one char left/right" jitter on every
                 // keystroke.
+                //
+                // Drain module-emitted term bytes (e.g., inline chat
+                // panel cursor moves on a held arrow key) on every
+                // stdin event, not just on tick. A held arrow saturates
+                // the poll cycle with input bytes so the `n == 0`
+                // timeout branch — where gatherTermBytes runs — never
+                // gets a chance to fire, and the panel's cursor stays
+                // painted at its pre-burst position until the user
+                // releases the key.
+                if (args.is_tty and !cursor_tracker.inEscape()) {
+                    if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                        if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+                    }
+                }
                 if (statusbar) |*sb| {
                     if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                 }
