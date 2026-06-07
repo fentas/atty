@@ -361,9 +361,12 @@ pub fn hasActionFence(raw: []const u8) bool {
 /// Single-line commands and blank-line-only inputs fall through
 /// unchanged.
 ///
-/// Returns the count of bytes written into `dest`. `dest` must be at
-/// least as large as `src` (` && ` separators only ever ≤ original
-/// `\n` bytes plus 3 per chain; size grows by at most `4*(lines-1)`).
+/// Returns the count of bytes written into `dest`. Worst-case output
+/// length is `src.len + 3*(N-1)` where N is the non-blank line count
+/// (the joiner ` && ` is 4 bytes replacing a 1-byte `\n` → +3 per
+/// join); `dest` must be sized for that ceiling. Overflow silently
+/// truncates — bash would syntax-error on the partial chain, which
+/// surfaces back to the LLM via `;D`.
 pub fn chainCommandLines(src: []const u8, dest: []u8) usize {
     if (src.len == 0) return 0;
     // Quick path: no newlines → nothing to chain.
@@ -372,14 +375,20 @@ pub fn chainCommandLines(src: []const u8, dest: []u8) usize {
         @memcpy(dest[0..n], src[0..n]);
         return n;
     }
-    // Bail conditions force a verbatim copy.
+    // Bail conditions force a verbatim copy. Trim includes `\r` so
+    // CRLF-emitting LLM output doesn't leave a trailing carriage
+    // return that breaks the `endsWith` chain-op detector AND
+    // corrupts the joined command's middle clause (bash would see
+    // `echo a\r && echo b` and treat the `\r` as part of `a`'s arg).
+    const trim_set = " \t\r";
     var has_continuation = false;
     var has_heredoc = false;
     var has_trailing_op = false;
+    var has_inline_comment = false;
     var it1 = std.mem.splitScalar(u8, src, '\n');
     var line_idx: usize = 0;
     while (it1.next()) |raw_line| : (line_idx += 1) {
-        const trimmed = std.mem.trim(u8, raw_line, " \t");
+        const trimmed = std.mem.trim(u8, raw_line, trim_set);
         if (trimmed.len == 0) continue;
         // Heredoc opener — naive but conservative.
         if (std.mem.indexOf(u8, trimmed, "<<") != null) {
@@ -389,6 +398,23 @@ pub fn chainCommandLines(src: []const u8, dest: []u8) usize {
         // Trailing backslash on a non-empty line = bash continuation.
         if (trimmed[trimmed.len - 1] == '\\') {
             has_continuation = true;
+            break;
+        }
+        // Inline shell comment. A `#` at the START of a line is a
+        // standalone comment-only line (handled by the join phase
+        // below — skipped like a blank). A `#` PRECEDED by
+        // whitespace IS a bash inline-comment-to-EOL — chaining
+        // would put the ` && next-cmd` INSIDE the comment, silently
+        // swallowing every subsequent clause. Conservative quote-
+        // unaware check; lines containing `#` in legitimate
+        // contexts (e.g. `echo "#tag"`) bail to verbatim, which
+        // re-exposes the original `\n`-as-Enter behavior for that
+        // batch. Acceptable trade-off — `#`-in-string is rare in
+        // real LLM-emitted exec payloads.
+        if (std.mem.indexOf(u8, trimmed, " #") != null or
+            std.mem.indexOf(u8, trimmed, "\t#") != null)
+        {
+            has_inline_comment = true;
             break;
         }
         // Already-chained — don't double up.
@@ -402,18 +428,22 @@ pub fn chainCommandLines(src: []const u8, dest: []u8) usize {
             break;
         }
     }
-    if (has_continuation or has_heredoc or has_trailing_op) {
+    if (has_continuation or has_heredoc or has_trailing_op or has_inline_comment) {
         const n = @min(src.len, dest.len);
         @memcpy(dest[0..n], src[0..n]);
         return n;
     }
-    // Safe path: drop blank lines, join non-blank with ` && `.
+    // Safe path: drop blank + comment-only lines, join the rest with ` && `.
     var out_len: usize = 0;
     var it2 = std.mem.splitScalar(u8, src, '\n');
     var first = true;
     while (it2.next()) |raw_line| {
-        const trimmed = std.mem.trim(u8, raw_line, " \t");
+        const trimmed = std.mem.trim(u8, raw_line, trim_set);
         if (trimmed.len == 0) continue;
+        // Comment-only line — bash semantics: no-op. Skip rather
+        // than emit ` && # foo && next` (which would be a syntax
+        // error inside chained-command position).
+        if (trimmed[0] == '#') continue;
         if (!first) {
             const sep = " && ";
             if (out_len + sep.len > dest.len) break;
@@ -1903,6 +1933,45 @@ test "chainCommandLines: empty input returns 0" {
     var buf: [16]u8 = undefined;
     const n = chainCommandLines("", &buf);
     try testing.expectEqual(@as(usize, 0), n);
+}
+
+test "chainCommandLines: CRLF trim leaves clean chain (no \\r in dest)" {
+    var buf: [256]u8 = undefined;
+    const src = "echo a\r\necho b\r\necho c";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings("echo a && echo b && echo c", buf[0..n]);
+    try testing.expect(std.mem.indexOfScalar(u8, buf[0..n], '\r') == null);
+}
+
+test "chainCommandLines: bails on inline `#` comment (silent-swallow trap)" {
+    var buf: [256]u8 = undefined;
+    const src = "echo a # tag\necho b";
+    const n = chainCommandLines(src, &buf);
+    // Verbatim: joining would put ` && echo b` INSIDE the bash
+    // comment and silently drop the second clause.
+    try testing.expectEqualStrings(src, buf[0..n]);
+}
+
+test "chainCommandLines: skips comment-only lines while chaining the rest" {
+    var buf: [256]u8 = undefined;
+    const src = "# this is a header\necho a\n# another header\necho b";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings("echo a && echo b", buf[0..n]);
+}
+
+test "chainCommandLines: bails on `<<-` heredoc opener too" {
+    var buf: [256]u8 = undefined;
+    const src = "cat <<-EOF\n  hello\nEOF\necho done";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings(src, buf[0..n]);
+}
+
+test "chainCommandLines: bails on `||` and `&` trailing chain ops" {
+    var buf: [256]u8 = undefined;
+    const src1 = "echo a ||\necho b";
+    try testing.expectEqualStrings(src1, buf[0..chainCommandLines(src1, &buf)]);
+    const src2 = "echo a &\necho b";
+    try testing.expectEqualStrings(src2, buf[0..chainCommandLines(src2, &buf)]);
 }
 
 test "chainCommandLines: realistic batch from user bug report" {
