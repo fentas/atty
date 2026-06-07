@@ -862,6 +862,21 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// byte. Lines that exceed `input_row` get clipped — the
         /// caller's `input_lines` math already accounts for the cap.
         fn paintInputBlock(w: *std.Io.Writer, rt: *Runtime, input_top_row: u16, input_row: u16) !void {
+            // Retry banner takes over the input row when a soft
+            // failure armed `chat_retry_pending` AND the input is
+            // empty (any typed byte clears the flag via the input-
+            // handler intercept, so a non-empty buffer here means
+            // the user already started a new prompt). Single muted-
+            // orange row that mirrors the question-pickerlist's
+            // "this is what Enter does right now" affordance.
+            if (rt.chat_retry_pending and rt.chat_inline_input_len == 0) {
+                try w.print("\x1B[{d};1H\x1B[2K", .{input_top_row});
+                // ↻ in bold orange, then dim "Enter retry · Esc dismiss".
+                try w.writeAll("\x1B[22;1;38;5;208m\u{21BB}\x1B[0m  ");
+                try w.writeAll("\x1B[1;38;5;208mEnter\x1B[22;2m retry  ");
+                try w.writeAll("\x1B[22;1;38;5;245mEsc\x1B[22;2m dismiss\x1B[0m");
+                return;
+            }
             // When the free-text "type your own answer" row is the
             // active pick-list option, the prompt glyph switches to
             // mauve ▶ so the input row mirrors the selection state

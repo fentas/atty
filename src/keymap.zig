@@ -218,6 +218,16 @@ pub const Action = union(enum) {
     /// from non-chat contexts). Default **Alt+T** with kitty kbd
     /// CSI-u sibling.
     llm_chat_toggle_auto,
+    /// Retry the last in-flight LLM request after a non-fatal
+    /// failure (timeout, network blip, OOM during request build).
+    /// Re-fires `fireDialogRequest` against the existing turn
+    /// buffer — preserved across the failure since the dialog
+    /// teardown for chat-mode errors now keeps turns + session_id
+    /// instead of nuking the whole conversation. No-op when no
+    /// chat surface is open, when a request is still in flight,
+    /// or when the last turn isn't a `.user` turn. Default
+    /// **Alt+Shift+R** with kitty kbd CSI-u sibling.
+    llm_chat_retry,
     /// Render a one-screen cheat-sheet of every keybinding atty
     /// surfaces — pulled from `config.keymap.bindings`. Scrolls into
     /// shell history (like the LLM conclusion banner) so it stays

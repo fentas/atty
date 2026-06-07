@@ -723,6 +723,49 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 var i: usize = 0;
                 while (i < input.len) {
                     const key = parseChatKey(input, &i, &rt.chat_paste_active);
+                    // Retry banner intercept. After a soft failure
+                    // the panel's prompt row carries a "↻ Enter
+                    // retry · Esc dismiss" banner. Enter fires the
+                    // retry; Esc clears the banner; any insert /
+                    // edit keystroke also clears it (user wants to
+                    // type a fresh prompt instead — we let the
+                    // first byte through to the normal editor
+                    // below). Question pick-list still takes
+                    // precedence when it's also active — the
+                    // question is the more specific UI.
+                    if (rt.chat_retry_pending and !rt.chat_question_active) {
+                        switch (key) {
+                            .enter => {
+                                rt.chat_retry_pending = false;
+                                if (rt.turns_len > 0 and rt.turns[rt.turns_len - 1].kind == .user and
+                                    !rt.in_flight and rt.dialog_state == .idle)
+                                {
+                                    fireDialogRequest(rt, ctx) catch |err| {
+                                        latchErr(rt, switch (err) {
+                                            error.BodyTooLarge => "retry: request body too large",
+                                            error.OutOfMemory => "retry: out of memory",
+                                            else => "retry: internal error",
+                                        });
+                                    };
+                                }
+                                rt.chat_inline_paint_pending = true;
+                                continue;
+                            },
+                            .escape => {
+                                rt.chat_retry_pending = false;
+                                rt.chat_inline_paint_pending = true;
+                                continue;
+                            },
+                            .insert, .backspace, .delete_forward, .kill_to_start, .kill_to_end, .kill_word_back, .clear_all => {
+                                // Drop the banner and fall through so
+                                // the keystroke lands in the input
+                                // buffer like normal.
+                                rt.chat_retry_pending = false;
+                                rt.chat_inline_paint_pending = true;
+                            },
+                            else => {}, // cursor moves, close, etc. — leave banner alone.
+                        }
+                    }
                     // Chat-mode question pick-list (#214) intercept.
                     // Up/Down navigate the choices + free-text row.
                     // Enter on a choice submits the choice text;
@@ -804,6 +847,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             rt.chat_inline_open = false;
                             rt.chat_paste_active = false;
                             rt.chat_inline_rows_override = null;
+                            rt.chat_retry_pending = false;
                             rt.chat_inline_paint_pending = true;
                             return .swallow;
                         },
@@ -963,6 +1007,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 rt.chat_focus_in_panel = true;
                                 rt.chat_refocus_pending = false;
                                 rt.chat_inline_rows_override = null;
+                                rt.chat_retry_pending = false;
                                 rt.conclusion_pending = false;
                                 const loaded_any = rt.turns_len > 0 or rt.conclusion_formatted != null;
                                 var name_buf: [128]u8 = undefined;
@@ -1490,6 +1535,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             rt.chat_inline_open = false;
                             rt.chat_paste_active = false;
                             rt.chat_inline_rows_override = null;
+                            rt.chat_retry_pending = false;
                             rt.chat_inline_paint_pending = true;
                         }
                         rt.chat_overlay_open = true;
@@ -1574,6 +1620,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         // for THIS session, not as a persistent
                         // preference.
                         rt.chat_inline_rows_override = null;
+                        rt.chat_retry_pending = false;
                         // Also drop any in-flight bracketed paste —
                         // same rationale as the other close sites
                         // (stuck flag would make next session's Enter
@@ -1687,6 +1734,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         rt.chat_paste_active = false;
                         rt.chat_focus_in_panel = false;
                         rt.chat_inline_rows_override = null;
+                        rt.chat_retry_pending = false;
                         rt.chat_inline_paint_pending = true;
                     }
 
@@ -1768,6 +1816,39 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // the new state.
                     if (!(rt.chat_inline_open or rt.chat_overlay_open)) return false;
                     rt.auto_mode_active = !rt.auto_mode_active;
+                    if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                    if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+                    return true;
+                },
+                .llm_chat_retry => {
+                    // Re-fire the LAST in-flight dialog request after
+                    // a soft-reset failure (timeout, transport blip).
+                    // Gated on: a chat surface is open, no request
+                    // currently in flight, dialog is idle, and the
+                    // last turn is a `.user` turn (so re-sending makes
+                    // sense — re-firing after an `.assistant_exec`
+                    // would re-suggest the same command, which is not
+                    // what the user wants here). Surface a quick hint
+                    // when the gate fails so the user knows why the
+                    // binding did nothing.
+                    if (!(rt.chat_inline_open or rt.chat_overlay_open)) return false;
+                    if (rt.in_flight or rt.dialog_state != .idle) {
+                        latchHint(rt, "retry: request already in flight");
+                        return true;
+                    }
+                    if (rt.turns_len == 0 or rt.turns[rt.turns_len - 1].kind != .user) {
+                        latchHint(rt, "retry: no pending user turn to resend");
+                        return true;
+                    }
+                    fireDialogRequest(rt, ctx) catch |err| {
+                        latchErr(rt, switch (err) {
+                            error.BodyTooLarge => "retry: request body too large",
+                            error.OutOfMemory => "retry: out of memory",
+                            else => "retry: internal error",
+                        });
+                        return true;
+                    };
+                    rt.chat_retry_pending = false;
                     if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
                     if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
                     return true;
@@ -2353,8 +2434,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// it's null.
         fn handleDialogResponse(rt: *Runtime, ctx: *m.Context, n: usize) m.Error!?[]const u8 {
             if (n == 0) {
-                // Worker reported failure; the error slot already
-                // has the diagnostic. End the dialog cleanly.
+                // Worker reported failure (timeout, transport error,
+                // HTTP non-2xx). The error slot already has the
+                // diagnostic. End the in-flight state cleanly.
+                //
+                // Chat surface open → SOFT reset (preserve turns +
+                // session_id) so the user can press Alt+Shift+R to
+                // retry the same conversation from where it stalled.
+                // The shell-prompt path falls through to the
+                // historical hard reset + Ctrl+U injection (no chat
+                // surface = no turn buffer to keep, and the shell may
+                // have the `#: <prompt>` line typed which we need to
+                // wipe so the next Enter doesn't run it as a literal
+                // command).
+                if (rt.chat_inline_open or rt.chat_overlay_open) {
+                    dialog_helpers.dialogResetSoft(rt, ctx.io);
+                    // Arm the retry banner when the last turn is a
+                    // `.user` turn — that's the one the soft reset
+                    // preserved and the one Alt+r / Enter-on-banner
+                    // will resend. After an assistant turn the
+                    // banner would mislead (retry would replay a
+                    // turn whose response is already in the buffer).
+                    if (rt.turns_len > 0 and rt.turns[rt.turns_len - 1].kind == .user) {
+                        rt.chat_retry_pending = true;
+                    }
+                    if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+                    if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+                    rt.ai_mode_active = false;
+                    return null;
+                }
                 dialogReset(rt, ctx.io);
                 rt.ai_mode_active = false;
                 queueInjection(rt, "\x15");
