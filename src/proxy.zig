@@ -1279,6 +1279,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 if (swallow_after_binding) {
+                    // Same rationale as the post-dispatchInput drain
+                    // below: an action handler (e.g. Ctrl+Alt+Up/Down
+                    // chat-panel grow/shrink) just armed
+                    // `chat_inline_paint_pending`. Without flushing
+                    // here, a held action key saturates the poll
+                    // cycle, the tick branch never fires, and the
+                    // top-of-iteration `applyReserveRows` keeps
+                    // erasing the panel while the paint that would
+                    // redraw the header / divider waits for a
+                    // timeout that never comes — visible as a
+                    // flicker with the panel chrome blanked.
+                    if (args.is_tty and !cursor_tracker.inEscape()) {
+                        if (D.gatherTermBytes(&runtimes, &ctx) catch null) |term_bytes| {
+                            if (term_bytes.len > 0) writeAll(posix.STDOUT_FILENO, term_bytes) catch {};
+                        }
+                    }
                     if (statusbar) |*sb| {
                         if (!alt_screen.active and !cursor_tracker.inEscape()) renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                     }
