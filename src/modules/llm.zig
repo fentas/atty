@@ -997,11 +997,17 @@ pub fn configure(comptime cfg: Config) type {
             /// fast-path detects the toggle and bails to a full
             /// repaint.
             chat_inline_paint_incognito: bool = false,
-            /// Sized like the overlay's `chat_overlay_buf`. The
-            /// inline panel is smaller (~8 rows × 200 cols) so 4 KB
-            /// is plenty; matching the overlay's buffer keeps the
-            /// rendering helpers fungible.
-            chat_inline_buf: [4096]u8 = undefined,
+            /// Sized for a grown panel — 4 KB sufficed at the
+            /// committed default (10 rows × 200 cols) but `Ctrl+Alt+Up`
+            /// can push the override to terminal height. With ~80
+            /// bytes/row of chrome on a wide TUI (CUP + EL + SGR + UTF-8
+            /// content), a 40-row panel pushes ~3.2 KB; the 4 KB cap
+            /// then overflows on the first repaint after any colour
+            /// turn arrives and recoverInlineChatPaintFailure slams
+            /// the panel shut. 16 KB covers ~200 rows of rich chrome
+            /// at typical widths — well past anything a real terminal
+            /// can display.
+            chat_inline_buf: [16384]u8 = undefined,
             chat_inline_buf_len: usize = 0,
             /// Input buffer for inline chat — separate from
             /// `chat_input_buf` so the user can have an in-flight

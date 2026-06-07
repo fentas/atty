@@ -2495,6 +2495,88 @@ test "inline chat: paint failure clears the height override" {
     try testing.expect(rt.chat_inline_rows_override == null);
 }
 
+test "inline chat: Alt+C refuses to open when terminal is too short for minimum layout" {
+    // Before this gate, paintInlineChat's "live_reserve - base <
+    // top_gap + 3" early-out fired on every Alt+C in a too-short
+    // terminal, recoverInlineChatPaintFailure closed the panel AND
+    // wrote a stderr line each time. Repeated Alt+C → repeated
+    // stderr spam (screenshot from PR #392 review). The action
+    // handler now refuses the open with a single statusbar hint
+    // and no stderr.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .terminal_rows = 6,
+        .terminal_cols = 80,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(!rt.chat_inline_open);
+    // Re-trying must keep refusing without leaving stale state.
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(!rt.chat_inline_open);
+}
+
+test "inline chat: Alt+C opens normally when terminal is exactly at the floor" {
+    // Floor = base(3) + top_gap(1) + 3 + 1 = 8 rows. At 8 the panel
+    // fits a divider + 1 scrollback row + input + a shell row.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .terminal_rows = 8,
+        .terminal_cols = 80,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(rt.chat_inline_open);
+}
+
 test "Alt+M cycle arms chat panel repaint so divider shows the new provider" {
     // Regression: cycle_model bumped `current_provider_idx` and
     // emitted a statusbar hint, but never armed

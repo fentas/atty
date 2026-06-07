@@ -1530,6 +1530,29 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         _ = std.c.write(2, no_sb_msg, no_sb_msg.len);
                         return true;
                     }
+                    // Refuse to open on a terminal that's too short to
+                    // host the panel's minimum layout (top_gap + divider
+                    // + ≥1 scrollback + input row, plus base_reserve and
+                    // at least one shell row above). Without this gate,
+                    // paintInlineChat trips its own "terminal too small"
+                    // early-out, recoverInlineChatPaintFailure closes the
+                    // panel and writes to stderr — and repeated Alt+C
+                    // (or any auto-trigger) spams the same error per
+                    // attempt. Same hint surface as the statusbar
+                    // refusal above; no stderr line because the user
+                    // can already see their tiny terminal.
+                    if (!rt.chat_inline_open) {
+                        const t_rows = ctx.terminal_rows orelse 0;
+                        const base = ctx.statusbar_base_reserve orelse 3;
+                        // Minimum panel: top_gap + 3 (divider + scrollback + input).
+                        // Need one shell row above too, so total floor =
+                        // base + top_gap + 3 + 1.
+                        const floor: u16 = base + cfg.inline_chat_top_gap + 4;
+                        if (t_rows > 0 and t_rows < floor) {
+                            latchHint(rt, "inline chat: terminal too small — needs more rows");
+                            return true;
+                        }
+                    }
                     if (rt.chat_overlay_open) {
                         // Close the overlay first; its exit sequence
                         // lands via provideTermBytes on the next tick.
