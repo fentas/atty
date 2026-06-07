@@ -1529,6 +1529,120 @@ test "inline-chat autofocus: ;D edge clears refocus latch + restores panel focus
     try testing.expect(!rt.chat_refocus_pending);
 }
 
+test "exec-no-return: ;D fires refocus + state advance even when ;C raced state .suggesting" {
+    // User-reported regression: "sometimes I execute a command from
+    // the LLM but it does not return to it (also does not refocus
+    // chat)." Root cause: the previous early-return at onOutput
+    // line ~2063 (gated on `dialog_state == .executing or
+    // .capturing_output`) dropped every edge that arrived while
+    // dialog_state was still `.suggesting` — including the `;C`
+    // for the just-confirmed command, IF the shell raced ahead of
+    // the proxy's `.suggesting → .executing` transition. Capture
+    // never started, `;D` was a no-op for the state machine, AND
+    // refocus never fired because the early-return ran ABOVE the
+    // refocus block.
+    //
+    // The fix walks every edge regardless of dialog_state; the
+    // inner gates guard transitions and `;C` now also accepts
+    // `.suggesting` as a valid starting state. Net: even when
+    // `;C → ;D` arrives in a single chunk with state `.suggesting`,
+    // capturing kicks off, the buffer fills, state advances to
+    // `.observation_ready`, AND refocus fires.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    rt.chat_refocus_pending = true;
+    // The race: state still `.suggesting` when `;C`/`;D` arrive.
+    rt.dialog_state = .suggesting;
+
+    try L.onOutput(&rt, &ctx, "\x1b]133;C\x07hello world\x1b]133;D\x07");
+
+    try testing.expect(rt.chat_focus_in_panel);
+    try testing.expect(!rt.chat_refocus_pending);
+    try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .observation_ready), rt.dialog_state);
+    try testing.expectEqualStrings("hello world", rt.captured_output[0..rt.captured_output_len]);
+}
+
+test "exec-no-return: refocus fires even when no capture is in progress (state .idle)" {
+    // The defensive sub-case: the early-return previously also blocked
+    // refocus on a stray `;D` (e.g. the user ran an unrelated shell
+    // command in between Alt+S and Enter, the chain emitted `;C`/`;D`
+    // with the LLM dialog stuck at `.idle`/`.suggesting`). Refocus
+    // should fire on ANY `;D` while `chat_refocus_pending` is armed —
+    // the latch is a one-shot, the panel rejoining focus is always
+    // the right call.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    rt.chat_refocus_pending = true;
+    rt.dialog_state = .idle; // no dialog active at all
+
+    // No `;C` — just a bare `;D` (e.g. an unrelated shell command
+    // finishing). The refocus block must still fire.
+    try L.onOutput(&rt, &ctx, "stuff\x1b]133;D\x07");
+
+    try testing.expect(rt.chat_focus_in_panel);
+    try testing.expect(!rt.chat_refocus_pending);
+}
+
 test "chat exec continuation: onLineCommit advances .suggesting → .executing on a non-empty line" {
     // Module-side contract that the proxy-side bugfix relies on.
     //

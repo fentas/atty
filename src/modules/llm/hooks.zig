@@ -2055,12 +2055,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.clear_seq_carry_len = @intCast(tail_len);
             }
 
-            // Outside dialog execution, the only reason to feed was
-            // to keep `active` tracking up to date. No state work
-            // needed when we're idle/generating/suggesting (the
-            // command hasn't run yet, so `;C` hasn't fired).
-            const tracking = rt.dialog_state == .executing or rt.dialog_state == .capturing_output;
-            if (!tracking) return;
+            // Walk edges whenever there's anything to do — a pending
+            // refocus latch (from `.exec`) needs the next `;D` even
+            // when dialog_state hasn't reached `.executing` yet
+            // (see exec-no-return regression test). Inner gates
+            // guard transitions.
+            if (edges.len == 0 and !rt.chat_refocus_pending) return;
 
             // `edgeOffset(i)` returns the byte index of the OSC
             // marker's LEADING ESC. So `output[cursor..offset]`
@@ -2089,7 +2089,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         if (capturing and offset > cursor) {
                             appendCaptured(rt, output[cursor..@min(offset, output.len)]);
                         }
-                        if (!capturing and rt.dialog_state == .executing) {
+                        // Accept `.suggesting` too — the
+                        // `.suggesting → .executing` transition
+                        // runs in onLineCommit on the user's
+                        // Enter, but the shell can race ahead and
+                        // emit `;C` before the proxy's stdin
+                        // pipeline finishes its turn (the bytes
+                        // are independent: PTY-write of `\r` and
+                        // onLineCommit dispatch happen in the
+                        // same iteration but the shell's
+                        // response read is the NEXT iteration's
+                        // master pump). Treat either state as
+                        // valid for starting capture — without
+                        // this fallback the `;C` is a no-op,
+                        // capturing never starts, `;D` doesn't
+                        // transition to `.observation_ready`,
+                        // and the LLM never sees the command
+                        // output (user-visible: "command runs
+                        // but the LLM never continues").
+                        if (!capturing and
+                            (rt.dialog_state == .executing or rt.dialog_state == .suggesting))
+                        {
                             rt.dialog_state = .capturing_output;
                             rt.captured_output_len = 0;
                             rt.captured_truncated = false;
