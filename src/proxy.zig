@@ -642,6 +642,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
                 sb.applyReserveRows(&w_re, want_reserve) catch {};
+                // applyReserveRows just blanked the reserved zone
+                // via its per-row erase. Any module owning paint
+                // surface in that area (LLM's inline chat panel)
+                // must re-arm its paint latch or its chrome stays
+                // missing until the user does something else that
+                // arms it (resize-burst paint races: chrome was
+                // drawn pre-grow into the smaller area, applyReserveRows
+                // then grew the area and erased the chrome, and
+                // paint_pending was already cleared so nothing
+                // redrew). `notifyResize` is the existing hook
+                // SIGWINCH uses for the same kind of re-arm.
+                D.notifyResize(&runtimes);
                 // Refresh the tracker after the DECSTBM + erase
                 // sequence above — it may have moved the cursor in
                 // ways the byte-level model doesn't perfectly
