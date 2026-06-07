@@ -2055,12 +2055,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.clear_seq_carry_len = @intCast(tail_len);
             }
 
-            // Outside dialog execution, the only reason to feed was
-            // to keep `active` tracking up to date. No state work
-            // needed when we're idle/generating/suggesting (the
-            // command hasn't run yet, so `;C` hasn't fired).
-            const tracking = rt.dialog_state == .executing or rt.dialog_state == .capturing_output;
-            if (!tracking) return;
+            // Even when no dialog is actively executing, we still
+            // walk the edge stream below so the refocus latch (set
+            // by the `.exec` action arm) gets cleared on the next
+            // `;D` / implicit `;A`. The previous early-return
+            // here was a USER-REPORTED bug: edges drained at
+            // `drainEdges()` above were lost forever, so a `;D`
+            // arriving with `dialog_state` still at `.suggesting`
+            // (e.g. a race where the shell's command-end marker
+            // overtakes atty's `.suggesting → .executing`
+            // transition, OR a stray `;C/;D` pair from an
+            // unrelated shell action between the LLM's reply and
+            // the user's Enter) silently dropped both the refocus
+            // AND the state advance. The inner state-machine
+            // gates below already guard against transitions out of
+            // wrong states, so processing every edge is safe.
+            //
+            // No-op short-circuit when nothing in the edge stream
+            // could possibly matter — saves the loop spin on the
+            // common case of "shell wrote some bytes, no OSC 133
+            // markers, no pending refocus."
+            if (edges.len == 0 and !rt.chat_refocus_pending) return;
 
             // `edgeOffset(i)` returns the byte index of the OSC
             // marker's LEADING ESC. So `output[cursor..offset]`
@@ -2089,7 +2104,27 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         if (capturing and offset > cursor) {
                             appendCaptured(rt, output[cursor..@min(offset, output.len)]);
                         }
-                        if (!capturing and rt.dialog_state == .executing) {
+                        // Accept `.suggesting` too — the
+                        // `.suggesting → .executing` transition
+                        // runs in onLineCommit on the user's
+                        // Enter, but the shell can race ahead and
+                        // emit `;C` before the proxy's stdin
+                        // pipeline finishes its turn (the bytes
+                        // are independent: PTY-write of `\r` and
+                        // onLineCommit dispatch happen in the
+                        // same iteration but the shell's
+                        // response read is the NEXT iteration's
+                        // master pump). Treat either state as
+                        // valid for starting capture — without
+                        // this fallback the `;C` is a no-op,
+                        // capturing never starts, `;D` doesn't
+                        // transition to `.observation_ready`,
+                        // and the LLM never sees the command
+                        // output (user-visible: "command runs
+                        // but the LLM never continues").
+                        if (!capturing and
+                            (rt.dialog_state == .executing or rt.dialog_state == .suggesting))
+                        {
                             rt.dialog_state = .capturing_output;
                             rt.captured_output_len = 0;
                             rt.captured_truncated = false;
