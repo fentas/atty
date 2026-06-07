@@ -2560,15 +2560,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         return null;
                     };
 
-                    // Stage the command for injection. Cap +
-                    // copy in case the LLM's command exceeds
-                    // `cfg.max_response_bytes` (shouldn't — the
-                    // command field is bounded at parse time —
-                    // but defensive).
+                    // Stage the command for injection. Multi-line
+                    // commands get flattened to ` && ` chains so the
+                    // user runs the whole thing with one Enter
+                    // (otherwise readline treats each `\n` as Enter
+                    // and the shell runs the first line in
+                    // isolation — see `chainCommandLines` for the
+                    // bail conditions on heredocs / continuations /
+                    // already-chained input).
                     const cmd = parsed.command();
-                    const cmd_n = @min(cmd.len, rt.pending_command.len);
-                    @memcpy(rt.pending_command[0..cmd_n], cmd[0..cmd_n]);
-                    rt.pending_command_len = cmd_n;
+                    rt.pending_command_len = dialog.chainCommandLines(cmd, &rt.pending_command);
 
                     if (parsed.description_len > 0) {
                         const desc = parsed.description();

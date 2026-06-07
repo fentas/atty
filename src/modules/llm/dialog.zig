@@ -333,6 +333,133 @@ pub fn hasActionFence(raw: []const u8) bool {
     return findLastActionFence(raw) != null;
 }
 
+/// Stage the LLM's `command` payload into the injection buffer with
+/// multi-line commands flattened to ` && ` chains so the user runs
+/// the whole thing with one Enter.
+///
+/// User-reported regression: the LLM occasionally emits a
+/// "diagnostic batch" as a newline-separated list:
+///
+///     echo "=== process check ==="    && pgrep -af vpn-border.sh
+///     echo "=== nmcli connections ===" && nmcli -t -f NAME,TYPE,STATE …
+///     echo "=== current border ===" && hyprctl getoption …
+///
+/// Injected verbatim, readline treats each `\n` as Enter — the shell
+/// runs the FIRST line, then the LLM only sees that single output and
+/// can't reason about the batch as a whole. Joining with ` && ` keeps
+/// the original short-circuit semantics (failure aborts the batch),
+/// surfaces a single line readline can edit if the user wants to
+/// tweak before submitting, and lets the OSC 133 `;D` capture the
+/// FULL output back to the LLM.
+///
+/// Bails (copies verbatim) when joining would corrupt the shell
+/// semantics:
+///   * Any non-trailing line ends with `\` — bash-style continuation.
+///   * Any line contains `<<` or `<<-` — likely a heredoc body opener.
+///   * Any non-blank line ends with `;`, `&&`, `||`, `|`, `&` — the
+///     LLM already chained explicitly; we'd duplicate the operator.
+/// Single-line commands and blank-line-only inputs fall through
+/// unchanged.
+///
+/// Returns the count of bytes written into `dest`. Worst-case output
+/// length is `src.len + 3*(N-1)` where N is the non-blank line count
+/// (the joiner ` && ` is 4 bytes replacing a 1-byte `\n` → +3 per
+/// join); `dest` must be sized for that ceiling. Overflow silently
+/// truncates — bash would syntax-error on the partial chain, which
+/// surfaces back to the LLM via `;D`.
+pub fn chainCommandLines(src: []const u8, dest: []u8) usize {
+    if (src.len == 0) return 0;
+    // Quick path: no newlines → nothing to chain.
+    if (std.mem.indexOfScalar(u8, src, '\n') == null) {
+        const n = @min(src.len, dest.len);
+        @memcpy(dest[0..n], src[0..n]);
+        return n;
+    }
+    // Bail conditions force a verbatim copy. Trim includes `\r` so
+    // CRLF-emitting LLM output doesn't leave a trailing carriage
+    // return that breaks the `endsWith` chain-op detector AND
+    // corrupts the joined command's middle clause (bash would see
+    // `echo a\r && echo b` and treat the `\r` as part of `a`'s arg).
+    const trim_set = " \t\r";
+    var has_continuation = false;
+    var has_heredoc = false;
+    var has_trailing_op = false;
+    var has_inline_comment = false;
+    var it1 = std.mem.splitScalar(u8, src, '\n');
+    var line_idx: usize = 0;
+    while (it1.next()) |raw_line| : (line_idx += 1) {
+        const trimmed = std.mem.trim(u8, raw_line, trim_set);
+        if (trimmed.len == 0) continue;
+        // Heredoc opener — naive but conservative.
+        if (std.mem.indexOf(u8, trimmed, "<<") != null) {
+            has_heredoc = true;
+            break;
+        }
+        // Trailing backslash on a non-empty line = bash continuation.
+        if (trimmed[trimmed.len - 1] == '\\') {
+            has_continuation = true;
+            break;
+        }
+        // Inline shell comment. A `#` at the START of a line is a
+        // standalone comment-only line (handled by the join phase
+        // below — skipped like a blank). A `#` PRECEDED by
+        // whitespace IS a bash inline-comment-to-EOL — chaining
+        // would put the ` && next-cmd` INSIDE the comment, silently
+        // swallowing every subsequent clause. Conservative quote-
+        // unaware check; lines containing `#` in legitimate
+        // contexts (e.g. `echo "#tag"`) bail to verbatim, which
+        // re-exposes the original `\n`-as-Enter behavior for that
+        // batch. Acceptable trade-off — `#`-in-string is rare in
+        // real LLM-emitted exec payloads.
+        if (std.mem.indexOf(u8, trimmed, " #") != null or
+            std.mem.indexOf(u8, trimmed, "\t#") != null)
+        {
+            has_inline_comment = true;
+            break;
+        }
+        // Already-chained — don't double up.
+        if (std.mem.endsWith(u8, trimmed, ";") or
+            std.mem.endsWith(u8, trimmed, "&&") or
+            std.mem.endsWith(u8, trimmed, "||") or
+            std.mem.endsWith(u8, trimmed, "|") or
+            std.mem.endsWith(u8, trimmed, "&"))
+        {
+            has_trailing_op = true;
+            break;
+        }
+    }
+    if (has_continuation or has_heredoc or has_trailing_op or has_inline_comment) {
+        const n = @min(src.len, dest.len);
+        @memcpy(dest[0..n], src[0..n]);
+        return n;
+    }
+    // Safe path: drop blank + comment-only lines, join the rest with ` && `.
+    var out_len: usize = 0;
+    var it2 = std.mem.splitScalar(u8, src, '\n');
+    var first = true;
+    while (it2.next()) |raw_line| {
+        const trimmed = std.mem.trim(u8, raw_line, trim_set);
+        if (trimmed.len == 0) continue;
+        // Comment-only line — bash semantics: no-op. Skip rather
+        // than emit ` && # foo && next` (which would be a syntax
+        // error inside chained-command position).
+        if (trimmed[0] == '#') continue;
+        if (!first) {
+            const sep = " && ";
+            if (out_len + sep.len > dest.len) break;
+            @memcpy(dest[out_len .. out_len + sep.len], sep);
+            out_len += sep.len;
+        }
+        const room = if (dest.len > out_len) dest.len - out_len else 0;
+        const take = @min(trimmed.len, room);
+        if (take == 0) break;
+        @memcpy(dest[out_len .. out_len + take], trimmed[0..take]);
+        out_len += take;
+        first = false;
+    }
+    return out_len;
+}
+
 /// Walk `raw` backward looking for the last ` ```<action> ... ``` `
 /// block. Returns null if no recognized lang tag is found.
 fn findLastActionFence(raw: []const u8) ?ActionFenceMatch {
@@ -1751,4 +1878,117 @@ test "parseFencedResponse: multi-paragraph question prompt before bullets" {
     // sentences before the first bullet).
     try testing.expect(std.mem.indexOf(u8, r.question(), "12 commits and master") != null);
     try testing.expectEqual(@as(usize, 3), r.choices_count);
+}
+
+test "chainCommandLines: single line passes through unchanged" {
+    var buf: [256]u8 = undefined;
+    const n = chainCommandLines("ls -la", &buf);
+    try testing.expectEqualStrings("ls -la", buf[0..n]);
+}
+
+test "chainCommandLines: multi-line joins with ` && `" {
+    var buf: [512]u8 = undefined;
+    const src = "echo a\necho b\necho c";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings("echo a && echo b && echo c", buf[0..n]);
+}
+
+test "chainCommandLines: trims per-line whitespace + drops blank lines" {
+    var buf: [512]u8 = undefined;
+    const src = "  echo a  \n\n\techo b\n  ";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings("echo a && echo b", buf[0..n]);
+}
+
+test "chainCommandLines: bails on heredoc" {
+    var buf: [512]u8 = undefined;
+    const src = "cat <<EOF\nhello\nEOF\necho done";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings(src, buf[0..n]);
+}
+
+test "chainCommandLines: bails on backslash continuation" {
+    var buf: [512]u8 = undefined;
+    const src = "echo really long line \\\n  continuing here\necho second";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings(src, buf[0..n]);
+}
+
+test "chainCommandLines: bails when a line already ends with a chain operator" {
+    var buf: [512]u8 = undefined;
+    const src = "echo a;\necho b";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings(src, buf[0..n]);
+
+    const src2 = "echo a &&\necho b";
+    const n2 = chainCommandLines(src2, &buf);
+    try testing.expectEqualStrings(src2, buf[0..n2]);
+
+    const src3 = "echo a |\necho b";
+    const n3 = chainCommandLines(src3, &buf);
+    try testing.expectEqualStrings(src3, buf[0..n3]);
+}
+
+test "chainCommandLines: empty input returns 0" {
+    var buf: [16]u8 = undefined;
+    const n = chainCommandLines("", &buf);
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+test "chainCommandLines: CRLF trim leaves clean chain (no \\r in dest)" {
+    var buf: [256]u8 = undefined;
+    const src = "echo a\r\necho b\r\necho c";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings("echo a && echo b && echo c", buf[0..n]);
+    try testing.expect(std.mem.indexOfScalar(u8, buf[0..n], '\r') == null);
+}
+
+test "chainCommandLines: bails on inline `#` comment (silent-swallow trap)" {
+    var buf: [256]u8 = undefined;
+    const src = "echo a # tag\necho b";
+    const n = chainCommandLines(src, &buf);
+    // Verbatim: joining would put ` && echo b` INSIDE the bash
+    // comment and silently drop the second clause.
+    try testing.expectEqualStrings(src, buf[0..n]);
+}
+
+test "chainCommandLines: skips comment-only lines while chaining the rest" {
+    var buf: [256]u8 = undefined;
+    const src = "# this is a header\necho a\n# another header\necho b";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings("echo a && echo b", buf[0..n]);
+}
+
+test "chainCommandLines: bails on `<<-` heredoc opener too" {
+    var buf: [256]u8 = undefined;
+    const src = "cat <<-EOF\n  hello\nEOF\necho done";
+    const n = chainCommandLines(src, &buf);
+    try testing.expectEqualStrings(src, buf[0..n]);
+}
+
+test "chainCommandLines: bails on `||` and `&` trailing chain ops" {
+    var buf: [256]u8 = undefined;
+    const src1 = "echo a ||\necho b";
+    try testing.expectEqualStrings(src1, buf[0..chainCommandLines(src1, &buf)]);
+    const src2 = "echo a &\necho b";
+    try testing.expectEqualStrings(src2, buf[0..chainCommandLines(src2, &buf)]);
+}
+
+test "chainCommandLines: realistic batch from user bug report" {
+    var buf: [1024]u8 = undefined;
+    const src =
+        "echo \"=== process check ===\" && pgrep -af vpn-border.sh\n" ++
+        "echo \"=== nmcli active connections ===\" && nmcli -t -f NAME,TYPE,STATE connection show --active\n" ++
+        "echo \"=== current border color ===\" && hyprctl getoption general:col.active_border | head -5";
+    // Each line already contains `&&` mid-line, but ends with a
+    // command (not a chain operator) → the per-line endsWith check
+    // sees "head -5" / "vpn-border.sh" / "--active" as terminators
+    // and the chainer joins the three rows with ` && `. (One of the
+    // lines ends in `head -5` not `|`, so the `|`-bail doesn't fire.)
+    const n = chainCommandLines(src, &buf);
+    const got = buf[0..n];
+    try testing.expect(std.mem.indexOf(u8, got, "vpn-border.sh && echo") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "--active && echo") != null);
+    try testing.expect(std.mem.endsWith(u8, got, "| head -5"));
+    try testing.expect(std.mem.indexOfScalar(u8, got, '\n') == null);
 }
