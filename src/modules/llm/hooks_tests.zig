@@ -1529,6 +1529,108 @@ test "inline-chat autofocus: ;D edge clears refocus latch + restores panel focus
     try testing.expect(!rt.chat_refocus_pending);
 }
 
+test "chat exec continuation: onLineCommit advances .suggesting → .executing on a non-empty line" {
+    // Module-side contract that the proxy-side bugfix relies on.
+    //
+    // Background (the full chain): after the LLM emitted `.exec`,
+    // the panel defocused (chat_focus_in_panel=false) so the Enter
+    // that runs the injected command flows to bash. The proxy used
+    // to unconditionally skip line_state.applyInput whenever the
+    // panel was open (anyInlineChatActive), which meant submit()
+    // never fired on that Enter, lastCommitted() returned null,
+    // dispatchLineCommit was short-circuited, and `onLineCommit`
+    // never ran at all. Visible as "exec runs but the LLM never
+    // continues" — `;C`/`;D` couldn't start capturing because the
+    // state never reached `.executing`.
+    //
+    // The proxy now uses the focus-aware
+    // `anyInlineChatConsumingInput` dispatcher so the Enter does
+    // reach line_state and dispatchLineCommit fires. This test
+    // pins the MODULE-SIDE contract that, once dispatchLineCommit
+    // fires, `onLineCommit` advances `.suggesting → .executing`
+    // on any non-empty trimmed line (the gate that determines
+    // whether `;C`/`;D` start capturing). `onLineCommit` itself
+    // doesn't read `chat_focus_in_panel`; the parked-focus state
+    // in the setup is documentary, reflecting the user-visible
+    // scenario the assertion stands in for.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    // Mimic the state immediately after the LLM emitted .exec and
+    // the proxy injected the suggested command: chat is open,
+    // focus parked on shell, dialog in .suggesting.
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    rt.dialog_state = .suggesting;
+
+    // User presses Enter on the injected command. The proxy's
+    // focus-aware gate now lets line_state observe the Enter,
+    // submit() fires, lastCommitted() returns the line, and
+    // dispatchLineCommit routes here.
+    try L.onLineCommit(&rt, &ctx, "ls -la");
+    try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .executing), rt.dialog_state);
+}
+
+test "chat exec continuation: isInlineChatConsumingInput false when focus is parked on shell" {
+    // Pins the dispatcher contract that fixes the above stall.
+    // Open + focused → consuming (proxy suppresses line_state).
+    // Open + parked  → NOT consuming (proxy must feed line_state).
+    // Closed         → NOT consuming.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .model = "x",
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    rt.chat_inline_open = false;
+    rt.chat_focus_in_panel = true;
+    try testing.expect(!L.isInlineChatConsumingInput(&rt));
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    try testing.expect(L.isInlineChatConsumingInput(&rt));
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = false;
+    try testing.expect(!L.isInlineChatConsumingInput(&rt));
+}
+
 test "inline-chat autofocus: implicit ;A (prompt_start) also restores focus" {
     const L = configure(.{
         .provider = .{ .http = .{
