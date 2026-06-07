@@ -240,6 +240,26 @@ pub fn Dispatcher(comptime modules: anytype) type {
             return false;
         }
 
+        /// Focus-aware variant: true only when a module's inline chat
+        /// is open AND consuming keystrokes (i.e. focus is in the
+        /// panel, not parked on the shell). The proxy uses this to
+        /// gate `line_state.applyInput` — when focus is parked on
+        /// the shell after an LLM `.exec` defocused the panel,
+        /// keystrokes flow to the shell and line_state MUST track
+        /// them so `submit()` fires on Enter, `dispatchLineCommit`
+        /// runs, and the dialog's `.suggesting → .executing`
+        /// transition gets executed (otherwise `;C`/`;D` never
+        /// transition the state and the auto-continuation pipeline
+        /// stalls in `.suggesting`).
+        pub fn anyInlineChatConsumingInput(rts: *Runtimes) bool {
+            inline for (modules, 0..) |M, i| {
+                if (comptime @hasDecl(M, "isInlineChatConsumingInput")) {
+                    if (M.isInlineChatConsumingInput(rts[i])) return true;
+                }
+            }
+            return false;
+        }
+
         /// Comptime-concatenate every module's `default_bindings`
         /// decl into a single slice. Modules opt in by declaring a
         /// `pub const default_bindings: []const keymap.Binding = &.{ ... }`

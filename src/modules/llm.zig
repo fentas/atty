@@ -1440,6 +1440,18 @@ pub fn configure(comptime cfg: Config) type {
             return rt.chat_inline_open;
         }
 
+        /// True only when the panel is open AND focus is in the
+        /// panel — i.e. user keystrokes will land in the chat input
+        /// buffer (onInput returns `.swallow`). When the LLM's
+        /// `.exec` action defocuses the panel so Enter runs the
+        /// injected command, this returns false and the proxy
+        /// resumes feeding stdin into line_state (so
+        /// dispatchLineCommit fires on the next Enter and the
+        /// dialog's `.suggesting → .executing` transition runs).
+        pub fn isInlineChatConsumingInput(rt: *Runtime) bool {
+            return rt.chat_inline_open and rt.chat_focus_in_panel;
+        }
+
         /// Rows the inline chat panel wants reserved *above* the
         /// statusbar's base reservation. Returns 0 when the panel is
         /// closed; otherwise `cfg.inline_chat_rows + cfg.inline_chat_top_gap`

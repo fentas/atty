@@ -1337,7 +1337,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // would mark as `uncertain` and leave ghost text
                 // suppressed at the next shell prompt — same
                 // rationale.
-                if (!alt_screen.active and !D.anyInlineChatActive(&runtimes)) {
+                // Focus-aware skip: only suppress when the panel is
+                // ACTUALLY consuming keystrokes (open + focus in
+                // panel). When the LLM's `.exec` action has parked
+                // focus on the shell so the next Enter runs the
+                // injected command, keystrokes flow to bash and
+                // line_state MUST track them — otherwise
+                // `submit()` never fires, `dispatchLineCommit` is
+                // short-circuited, and the dialog's
+                // `.suggesting → .executing` transition (the gate
+                // for `;C`/`;D` capture) never runs. Visible as
+                // "exec runs but the LLM never continues" — the
+                // pipeline silently stalls in `.suggesting`.
+                if (!alt_screen.active and !D.anyInlineChatConsumingInput(&runtimes)) {
                     _ = line_state.applyInput(input);
                 }
 
