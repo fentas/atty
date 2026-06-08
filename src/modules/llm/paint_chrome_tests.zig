@@ -670,11 +670,11 @@ test "inline chat: observation collapses to line-count stub when compact (#311)"
     const out = (try L.provideTermBytes(&rt, &ctx)).?;
 
     // Compact stub (Proposal G phase 2) shows the line count and
-    // the keybinding via the ⌥⇧C glyph cluster (Option/Alt + Shift
-    // + C). The old "Alt+Shift+C to inspect" text was dropped in
-    // favour of a compact icon.
+    // the Linux-friendly `Alt+Shift+C` keychord. The earlier `⌥⇧C`
+    // Mac glyphs read as foreign on the project's primary platform
+    // and were swapped back to plain text.
     try testing.expect(std.mem.indexOf(u8, out, "3 lines") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\u{2325}\u{21E7}C") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Alt+Shift+C") != null);
     // ╰ corner closes the exec box visually (see `╭ exec ─` opener
     // pinned by the sibling test below). Without this assertion a
     // revision that drops the corner glyph would silently regress

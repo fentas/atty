@@ -609,8 +609,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             if (saw_text) lines += 1;
             // Proposal G phase 2: the ╰ corner glyph already lives
             // in the per-turn prefix, so the body just has to say
-            // "N lines · ⌥⇧C" without redundant brackets.
-            try w.print("\x1B[2m{d} line{s} \u{00B7} \u{2325}\u{21E7}C\x1B[0m", .{
+            // "N lines · Alt+Shift+C" without redundant brackets.
+            // Linux-friendly keychord text (the previous `⌥⇧C` Mac
+            // glyphs read as foreign to the project's primary
+            // platform).
+            try w.print("\x1B[2m{d} line{s} \u{00B7} Alt+Shift+C\x1B[0m", .{
                 lines,
                 if (lines == 1) "" else "s",
             });
