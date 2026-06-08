@@ -730,7 +730,13 @@ pub fn configure(comptime cfg: Config) type {
             /// Lives separately from `inject_buf` because the
             /// single-mode path uses that buffer with different
             /// lifetime semantics.
-            pending_command: [cfg.max_response_bytes]u8 = undefined,
+            // +12 covers the bracketed-paste markers
+            // (`\x1B[200~` + `\x1B[201~` = 12 bytes) added by
+            // wrapForBracketedPaste so a command that fills the
+            // full response ceiling still wraps without falling
+            // back to raw-newline injection (which would re-fire
+            // each `\n` as Enter).
+            pending_command: [cfg.max_response_bytes + 12]u8 = undefined,
             pending_command_len: usize = 0,
             /// Description of the pending command (model's
             /// `description` field). Surfaced as the hint above

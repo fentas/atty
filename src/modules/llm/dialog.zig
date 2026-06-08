@@ -359,6 +359,13 @@ pub fn hasActionFence(raw: []const u8) bool {
 /// Buffer overflow falls back to verbatim copy — better to send
 /// the unwrapped newlines (the prior bug) than a half-wrapped
 /// paste the terminal would mis-parse as a runaway paste.
+///
+/// Adversarial input: a literal `\x1B[201~` byte sequence inside
+/// `src` will terminate the paste early on the receiving terminal
+/// — the bytes after that point land at the next prompt as a
+/// separate command. Not defended against here (rare in real LLM
+/// output + would be ambiguous to escape); same trade-off as the
+/// chat-panel paste path documented in llm.zig.
 pub fn wrapForBracketedPaste(src: []const u8, dest: []u8) usize {
     if (src.len == 0) return 0;
     if (std.mem.indexOfScalar(u8, src, '\n') == null) {
@@ -1847,6 +1854,15 @@ test "wrapForBracketedPaste: inline `#` comment + multi-line stays intact" {
         "\x1B[200~echo a # tag\necho b\x1B[201~",
         buf[0..n],
     );
+}
+
+test "wrapForBracketedPaste: dest exactly src.len + 12 fits the wrap" {
+    var buf: [25]u8 = undefined;
+    const src = "echo a\necho b";
+    try testing.expectEqual(@as(usize, 25), src.len + 12);
+    const n = wrapForBracketedPaste(src, &buf);
+    try testing.expectEqual(@as(usize, 25), n);
+    try testing.expectEqualStrings("\x1B[200~echo a\necho b\x1B[201~", buf[0..n]);
 }
 
 test "wrapForBracketedPaste: buffer overflow falls back to verbatim" {
