@@ -878,11 +878,10 @@ pub fn Module(comptime cfg: Config) type {
         /// built (by `dialog.buildRequestBody` on the main thread)
         /// because it depends on conversation history that lives in
         /// `Runtime`; the worker just POSTs it and extracts the
-        /// raw assistant `content` field. Differs from `doRequest`
-        /// in that the result `out` slice holds the JSON envelope
-        /// (`{"action":...,"command":...}`) — the dialog state
-        /// machine on the main thread does the second-stage parse
-        /// via `dialog.parseResponse`.
+        /// raw assistant `content` field. The result `out` slice
+        /// holds the fenced LLM reply (` ```exec\n…\n``` ` etc.);
+        /// the dialog state machine on the main thread does the
+        /// second-stage parse via `dialog.parseFencedResponse`.
         pub fn doDialogRequest(
             gpa: std.mem.Allocator,
             io: std.Io,

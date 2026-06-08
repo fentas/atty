@@ -69,10 +69,13 @@ test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
     try testing.expect(!rt.cursor_signal_active);
 }
 
-test "overlay: assistant_exec turn renders structured (description + `$ command`) instead of raw JSON" {
+test "overlay: assistant_exec turn renders as `╭ exec ─` box (Proposal G), no raw JSON" {
     // Regression guard: the structured renderer must split the
-    // envelope into description + indented cyan command and never
-    // leak the raw `{"action":"exec",...}` JSON to the user.
+    // envelope into the timeline-rail box (`╭ exec ─` opener +
+    // command row) and never leak the raw `{"action":"exec",...}`
+    // JSON. Mirrors the inline panel's exec rendering — both
+    // surfaces share the same visual vocabulary so recall + view
+    // switching stays consistent.
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -102,21 +105,20 @@ test "overlay: assistant_exec turn renders structured (description + `$ command`
     const helpers = dialog.Module(L.config, L.Runtime);
     defer helpers.freeTurns(&rt);
     try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "list zig files"));
-    const envelope = "{\"action\":\"exec\",\"description\":\"find Zig sources\",\"command\":\"find . -name '*.zig'\"}";
+    // Fenced reply — matches the production protocol
+    // (hooks.parseDialogResponse → parseFencedResponse).
+    const envelope = "find Zig sources\n\n```exec\nfind . -name '*.zig'\n```\n";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
 
     rt.chat_overlay_open = true;
     rt.chat_overlay_paint_pending = true;
     const bytes = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(bytes != null);
-    // Description visible.
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "find Zig sources") != null);
-    // Command rendered as `$ <cmd>` on its own row.
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "$ ") != null);
+    // Box opener present, command visible, description dropped.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{256D} exec \u{2500}") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "find . -name '*.zig'") != null);
-    // The raw JSON envelope MUST NOT appear verbatim in the paint
-    // (no `"action":"exec"` substring).
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "\"action\":\"exec\"") == null);
+    // Raw fence markers must NOT leak into the paint.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "```exec") == null);
 }
 
 test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON)" {
@@ -148,7 +150,9 @@ test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON
 
     const helpers = dialog.Module(L.config, L.Runtime);
     defer helpers.freeTurns(&rt);
-    const envelope = "{\"action\":\"done\",\"reason\":\"task complete: 42 files\"}";
+    // Pure-prose reply — parseFencedResponse degrades to .done with
+    // reason = full prose. No fence needed.
+    const envelope = "task complete: 42 files";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
 
     rt.chat_overlay_open = true;
@@ -157,10 +161,9 @@ test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON
     try testing.expect(bytes != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{2713}") != null); // check glyph
     try testing.expect(std.mem.indexOf(u8, bytes.?, "task complete: 42 files") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "\"action\":\"done\"") == null);
 }
 
-test "overlay: malformed assistant envelope falls back to raw render so nothing vanishes" {
+test "overlay: malformed assistant content surfaces verbatim as .done reason" {
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -231,7 +234,7 @@ test "overlay: assistant_exec with action=question + choices renders italic prom
     const helpers = dialog.Module(L.config, L.Runtime);
     defer helpers.freeTurns(&rt);
     const envelope =
-        "{\"action\":\"question\",\"question\":\"Which directory?\",\"choices\":[\"src\",\"tests\",\"docs\"]}";
+        "```question\nWhich directory?\n- src\n- tests\n- docs\n```\n";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
 
     rt.chat_overlay_open = true;
@@ -247,8 +250,8 @@ test "overlay: assistant_exec with action=question + choices renders italic prom
     try testing.expect(std.mem.indexOf(u8, bytes.?, "src") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "tests") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "docs") != null);
-    // Raw JSON envelope must NOT leak.
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "\"choices\"") == null);
+    // Raw fence markers must NOT leak.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "```question") == null);
 }
 
 test "overlay input: cursor-split rendering puts reverse-video on the cursor byte" {
