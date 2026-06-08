@@ -554,7 +554,7 @@ test "inline scroll: per-row offset scrolls THROUGH a single tall turn" {
     // Per-#213: when a single turn is taller than the visible
     // panel, the per-row offset must walk it row-by-row. The
     // top of the turn becomes visible as offset grows; the
-    // kind-prefix ("atty:") suppresses when row 1 of the turn
+    // kind-prefix (the ◇ glyph) suppresses when row 1 of the turn
     // is above the cut.
     const L = configure(.{
         .provider = .{ .http = .{
