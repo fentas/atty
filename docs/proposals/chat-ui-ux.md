@@ -283,6 +283,286 @@ But the statusbar gains a `chat` segment cluster:
 
 ---
 
+## Proposal F — Margin gutter (left rail)
+
+**Premise:** the noisiest part of today's chrome is per-row author
+labels mid-text. Lift them into a fixed 4-char left margin so the
+body has a clean leading edge and continuation lines naturally hang
+off the rail.
+
+### What the user sees
+
+```
+─── chat · opus ──────────────────────────────────── ⌥C close ─
+
+ you │ rebuild the failing test fixture for the parser
+ atty│ I'll regenerate it from the seed JSON.
+     │   $ python scripts/gen_fixture.py --seed parser.json
+     │   ✓ wrote tests/fixtures/parser.json (8 lines)
+     │
+ you │ perfect, push
+ atty│ pushing now
+     │   $ git push origin main
+     │   ✓ pushed to origin/main
+     │
+   ❯ │ |
+```
+
+- 4-character gutter on the left (`you ` / `atty` right-aligned),
+  followed by a vertical rail (`│`).
+- Body always starts at column 6; the gutter+rail visually anchors
+  the conversation.
+- Continuation lines (multi-line user input, exec output, status
+  indicators) have a blank gutter — the rail keeps the eye moving
+  down without the noise of repeated labels.
+- Input row prompt glyph (`❯`) lives in the gutter slot.
+
+### Implementation
+
+- New `gutter_width: u8 = 5` in `Config`.
+- `paintInputBlock` walks turns; for each line within a turn, emits
+  the gutter (label OR blank), then `│ `, then the body.
+- The rail uses a dim 256-color escape (`\x1B[2;38;5;243m│\x1B[0m`)
+  so it visually recedes while still anchoring.
+
+### Tradeoffs
+
+- Clean and structured; great for "I scan a long conversation."
+- Costs 6 columns of body width permanently. On 80-col terminals that
+  shrinks the typing area to ~70 cols. Mitigated by the existing
+  long-line wrap in `paint_width.zig`.
+- Doesn't help with vertical density (each turn still takes ≥1 row);
+  pairs naturally with Proposal A's other simplifications.
+
+---
+
+## Proposal G — Timeline rail
+
+**Premise:** the conversation IS a thread of turns + sub-actions
+(LLM proposes `exec`, shell runs it, output flows back). Render that
+structure explicitly with a vertical timeline and T/L junctions.
+
+### What the user sees
+
+```
+─── chat · opus ──────────────────────────────────── ⌥C close ─
+
+  ◆ you  rebuild the failing test fixture for the parser
+  │
+  ◇ atty I'll regenerate it from the seed JSON.
+  ├──$ python scripts/gen_fixture.py --seed parser.json
+  └──✓ wrote tests/fixtures/parser.json (8 lines)
+
+  ◆ you  perfect, push
+  │
+  ◇ atty pushing now
+  ├──$ git push origin main
+  └──✓ pushed to origin/main
+
+  ❯ |
+```
+
+- `◆` user turn / `◇` assistant turn nodes at the rail.
+- `├──` for "still more to come in this turn" (intermediate exec or
+  observation).
+- `└──` closes the assistant's turn (last action).
+- Plain `│` between turns spaces them visually.
+
+### Implementation
+
+- `paintTurnNode(w, kind, is_last)` helper that emits the right
+  prefix glyph based on whether more turns/actions follow.
+- Requires the painter to look one turn ahead (or a two-pass walk:
+  count actions in this turn, then render with junction kind).
+- Works gracefully on terminals that lack the geometric glyphs (fall
+  back to `*` / `o` / `+--` / `+--`).
+
+### Tradeoffs
+
+- Most "structured" of the proposals — answers "which exec belongs
+  to which turn" at a glance.
+- Costs ~1 extra column for the rail. Glyph density is moderate;
+  feels rich without being noisy.
+- Look-ahead requirement adds one pass through the turn buffer at
+  paint time. Cheap (turns are small) but a new computational
+  pattern.
+
+---
+
+## Proposal H — Magazine typography
+
+**Premise:** terminals can do typographic hierarchy too — bold,
+underlines, color, whitespace, rules. Treat the conversation like a
+magazine spread where each turn has a clear visual weight.
+
+### What the user sees
+
+```
+─── ATTY CHAT · opus ──────────────────────────── ⌥C close ─
+
+  YOU       rebuild the failing test fixture for the parser
+
+  ATTY      I'll regenerate it from the seed JSON.
+  ──────
+            $ python scripts/gen_fixture.py --seed parser.json
+
+            ┌─ output ──────────────────────────────────┐
+            │ Wrote tests/fixtures/parser.json (8 lines)│
+            └───────────────────────────────────────────┘
+
+  YOU       perfect, push
+
+  ATTY      pushing now
+  ──────
+            $ git push origin main
+            ✓ pushed to origin/main
+
+  ❯ |
+```
+
+- Bold uppercase author labels in a fixed-width slot (~10 cols).
+- Assistant turns get a thin rule (`──────`) under the label,
+  reinforcing "this is a section."
+- Captured output rendered inside a soft box for visual separation
+  from prose.
+- Generous interline whitespace; conversations breathe.
+
+### Implementation
+
+- Config knob `chat_typography: enum { compact, magazine } = .compact`
+  with `.compact` matching today's behavior.
+- `paintMagazineTurn(w, turn)` is a new ~30-line helper that emits
+  label + rule + indented body.
+- Output box is the same drawing logic as Proposal B's card; share
+  the helper.
+
+### Tradeoffs
+
+- Most readable of the proposals — easy on the eye, well-suited to
+  long conversations the user reviews later.
+- Most vertical-space-hungry: 3-4 rows per turn before content. On
+  small terminals (≤20 rows) it eats the panel fast. Mitigation:
+  collapse magazine mode to compact when `panel_rows < 12`.
+- Color-blind/mono terminals lose the rule + label color hierarchy.
+  Mitigated by the bold-uppercase fallback that still reads cleanly.
+
+---
+
+## Proposal I — Ticker mode (single-row, ambient)
+
+**Premise:** for power users in deep auto-mode flow, full chat panel
+is overkill. Show ONE row above the statusbar with the latest
+assistant action; scroll left to fade older turns.
+
+### What the user sees
+
+```
+$ make build
+… (shell output continues)
+…
+─── chat · opus · ◯you rebuild fixture · ◉atty ✓ wrote 8 lines · ◯you push · ◉atty ✓ pushed · ❯ │
+[atuin] ✱ master ▴2 ▾1 │ ⌥M opus · ⌥H help
+```
+
+- ONE reserved row above the statusbar.
+- Turn ring rendered horizontally: `◯you <prompt summary> · ◉atty
+  <action summary>`. Truncated to fit; older turns slide left and
+  fade dim.
+- `❯` cursor at the right edge — type to compose.
+- `Alt+Shift+C` opens the full overlay to see the actual conversation
+  history.
+
+### Implementation
+
+- `cfg.chat_chrome_style = .ticker` (new variant).
+- `paintTickerRow(w, rt, total_cols)` walks turns from newest backward,
+  summarizing each as `<icon> <kind> <first-N-bytes>·`, until the
+  width budget runs out.
+- Composer is the same horizontal-line input as today but rendered
+  inline after the last turn segment.
+
+### Tradeoffs
+
+- Most space-efficient — single row, no DECSTBM growth.
+- Only viable for users in auto-mode who don't actively read mid-flow.
+  Dialog-mode users will find it cramped.
+- Turn summary heuristics (first N bytes, trailing `…`) can lose
+  context. Mitigated by the `Alt+Shift+C` escape hatch.
+- Composer's typing area is bounded by the leftover after the turn
+  summary — wraps awkwardly on long prompts.
+
+---
+
+## Proposal J — Floating composer (no reservation)
+
+**Premise:** the inline panel's biggest cost is the permanent
+DECSTBM reservation — it shrinks the shell's usable height even
+when chat is idle. Float a composer over the cursor while focused;
+let transcript live in shell scrollback like any other command's
+output.
+
+### What the user sees
+
+```
+$ ls -la                                    ← shell output unchanged
+total 24
+drwx... .
+drwx... ..
+-rw-r-- README.md
+
+$ # (shell prompt unaffected)
+                                            ← floating box appears
+   ┌─ chat · opus ──────────────────────┐     below cursor while
+   │ ❯ rebuild the failing test fixture │     focus is in chat;
+   │                       1/4096 ⏎ send│     vanishes when not.
+   └────────────────────────────────────┘
+
+$ █                                         ← cursor stays here
+                                            ← transcript prints
+                                              into scrollback when
+                                              LLM responds:
+You: rebuild the failing test fixture for the parser
+atty: I'll regenerate it from the seed JSON.
+$ python scripts/gen_fixture.py --seed parser.json
+✓ wrote tests/fixtures/parser.json (8 lines)
+
+$ █                                         ← back at shell
+```
+
+- No DECSTBM reservation. Composer is a small box rendered
+  ON-DEMAND below the shell's prompt row, only when chat is focused.
+- LLM responses print into shell scrollback like a normal command's
+  output (with a small `You: …` / `atty: …` prefix).
+- `Alt+C` opens the composer; pressing Esc or running an exec
+  closes it and lets the response stream into scrollback.
+
+### Implementation
+
+- New `paintFloatingComposer(w, rt, anchor_row, anchor_col)` that
+  positions a small box (5 rows × 40 cols) below the shell's
+  current prompt row. Saves/restores cursor via DECSC/DECRC.
+- Turns print to shell stdout (not pty.master) via `provideTermBytes`
+  with a one-shot `\x1B[?25l … \x1B[?25h` cursor hide/show wrapper.
+- No more reservation arithmetic; no clamp logic; no scrollback
+  windowing inside the panel.
+
+### Tradeoffs
+
+- Most disruptive to today's architecture: removes the reservation
+  scheme entirely, removes scrollback semantics inside a panel,
+  changes how turns interact with shell history.
+- Cleanest end result: chat feels like it belongs to the shell, not
+  to atty.
+- Loses the "shell stays visible above the panel" invariant the
+  inline mode is built on; the user sees shell scrollback AND chat
+  scrollback intermixed. Some users will love this, some will hate
+  it. Add `cfg.chat_chrome_style = .floating` and let the user opt
+  in.
+- The "↻ Enter retry" banner has nowhere to render — would need
+  the full overlay or a one-shot scrollback line.
+
+---
+
 ## Recommendation
 
 Start with **Proposal A** (minimal mode). It's the smallest scope —
@@ -297,11 +577,27 @@ disclosure — keep the minimal frame, but add empty-state hint,
 question pick-list affordance, and collapse for long turns. That
 gives the best balance of "clean and clear" with "discoverable."
 
+The newer batch (F-J) sit along orthogonal axes:
+
+| Want | Pick |
+|---|---|
+| Clean leading edge, structured scanning | F (margin gutter) |
+| Visualise turn/sub-action threading | G (timeline rail) |
+| Typographic hierarchy for long review sessions | H (magazine) |
+| Minimal vertical footprint in auto-mode | I (ticker) |
+| Chat blends into shell scrollback, no DECSTBM | J (floating) |
+
+F and G compose well with A's stripped-down chrome (use A's divider
++ F's gutter for "clean + scannable"). H is the heavyweight option
+for users who'd rather read than skim. I and J are radical
+departures — best as opt-in `chat_chrome_style` variants rather
+than the default.
+
 ---
 
 ## Implementation seam — common to all proposals
 
-All five proposals share a small refactor of `paintInputBlock` (in
+All ten proposals share a small refactor of `paintInputBlock` (in
 `src/modules/llm/paint.zig`) into composable chrome helpers:
 
 ```zig
