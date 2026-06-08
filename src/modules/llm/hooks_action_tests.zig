@@ -1020,3 +1020,125 @@ test "retry banner: Enter fires the retry when chat_retry_pending + .user turn a
     try testing.expect(!rt.chat_retry_pending);
     try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .generating), rt.dialog_state);
 }
+
+test "inline chat: free-text answer to a question clears chat_question_active" {
+    // User-reported: when a question pick-list is on screen and the
+    // user types a custom answer (selected_idx == choice_count → the
+    // free-text row), pressing Enter pushes the answer turn but the
+    // question chrome stays painted above the input. Next round of
+    // model output writes ABOVE the stale question. The picker-arm
+    // already clears `chat_question_active`; the free-text path must
+    // do the same.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_inline_open = true;
+    rt.chat_focus_in_panel = true;
+    rt.dialog_state = .awaiting_question_answer;
+
+    // Stage an active question. choice_count = 2; selected_idx = 2
+    // (one past the last choice) → free-text row.
+    rt.chat_question_active = true;
+    rt.chat_question_choice_count = 2;
+    rt.chat_question_selected_idx = 2;
+    const choices = [_][]const u8{ "option one", "option two" };
+    for (choices, 0..) |c, idx| {
+        const dst = rt.question_choices_storage[idx][0..@min(c.len, rt.question_choices_storage[idx].len)];
+        @memcpy(dst, c[0..dst.len]);
+        rt.question_choices_lens[idx] = dst.len;
+    }
+
+    // User types a custom answer + Enter.
+    _ = try L.onInput(&rt, &ctx, "my custom answer\r");
+
+    // The user turn was pushed.
+    try testing.expect(rt.turns_len >= 1);
+    const last = rt.turns[rt.turns_len - 1];
+    try testing.expectEqual(@import("dialog.zig").TurnKind.user, last.kind);
+    try testing.expectEqualStrings("my custom answer", last.content);
+    // Question chrome cleared so the next paint sheds it.
+    try testing.expect(!rt.chat_question_active);
+    // Input buffer empty + cursor home.
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_input_cursor);
+}
+
+test "chat overlay: free-text answer to a question clears chat_question_active" {
+    // Sibling test for the overlay path. Same bug, same fix —
+    // ensures both surfaces stay in sync.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    rt.chat_overlay_open = true;
+    rt.dialog_state = .awaiting_question_answer;
+
+    rt.chat_question_active = true;
+    rt.chat_question_choice_count = 1;
+    rt.chat_question_selected_idx = 1; // free-text row
+    const choice = "the only choice";
+    const dst = rt.question_choices_storage[0][0..@min(choice.len, rt.question_choices_storage[0].len)];
+    @memcpy(dst, choice[0..dst.len]);
+    rt.question_choices_lens[0] = dst.len;
+
+    _ = try L.onInput(&rt, &ctx, "overlay free-text answer\r");
+
+    try testing.expect(rt.turns_len >= 1);
+    const last = rt.turns[rt.turns_len - 1];
+    try testing.expectEqual(@import("dialog.zig").TurnKind.user, last.kind);
+    try testing.expectEqualStrings("overlay free-text answer", last.content);
+    try testing.expect(!rt.chat_question_active);
+    try testing.expectEqual(@as(usize, 0), rt.chat_input_len);
+    try testing.expectEqual(@as(usize, 0), rt.chat_input_cursor);
+}

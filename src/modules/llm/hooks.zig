@@ -914,6 +914,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 rt.chat_inline_paint_pending = true;
                                 continue;
                             };
+                            // Free-text answer path: when a question
+                            // was on screen and the user typed an
+                            // answer instead of picking, the regular
+                            // .enter handler fires here. The picker-
+                            // arm above already clears the question
+                            // state on pick; the free-text answer
+                            // must do the same so the next paint
+                            // sheds the stale question chrome.
+                            rt.chat_question_active = false;
                             rt.chat_inline_input_len = 0;
                             rt.chat_inline_input_cursor = 0;
                             fireDialogRequest(rt, ctx) catch {
@@ -1155,6 +1164,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 rt.chat_overlay_paint_pending = true;
                                 continue;
                             };
+                            // Free-text answer path — see the inline
+                            // sibling for the rationale.
+                            rt.chat_question_active = false;
                             rt.chat_input_len = 0;
                             rt.chat_input_cursor = 0;
                             fireDialogRequest(rt, ctx) catch {
