@@ -989,6 +989,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 const pos = inlineRestorePos(rt, ct_rows, ct_base);
                 w.print("\x1B[?25h\x1B[{d};{d}H", .{ pos.row, pos.col }) catch return false;
                 rt.chat_inline_buf_len = w.end;
+                // Reset paint-geometry cache so a re-open doesn't
+                // shrink-clear rows that no longer apply (terminal
+                // size may have changed; statusbar reservation
+                // shrank to base while the panel was closed).
+                rt.chat_inline_paint_top_row = 0;
+                rt.chat_inline_paint_input_row = 0;
                 return true;
             }
 
@@ -1075,6 +1081,46 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 w.writeAll("\x1B[?25l\x1B[s") catch return false;
             } else {
                 w.writeAll("\x1B[?25h\x1B[s") catch return false;
+            }
+
+            // Clear the top-gap rows so any leftover content there
+            // (statusbar reservation grew but cleared the wrong
+            // band, prior paint at a different top_gap, shell
+            // wrote into the gap before SIGWINCH applied) doesn't
+            // ghost between the shell prompt and the divider.
+            {
+                const gap_start: u16 = if (top_row > top_gap) top_row - top_gap else 1;
+                var gr: u16 = gap_start;
+                while (gr < top_row) : (gr += 1) {
+                    w.print("\x1B[{d};1H\x1B[2K", .{gr}) catch return false;
+                }
+            }
+            // If the previous paint had a HIGHER top_row (smaller
+            // panel that just grew, or override flipped), the rows
+            // BELOW the old top divider are now the new panel —
+            // already handled by the divider + scrollback clears
+            // below. But if the previous paint had a LOWER top_row
+            // (bigger panel that just shrank), the rows between
+            // the new top_row and the old top_row are no longer
+            // ours; clear them so old divider / scrollback chrome
+            // doesn't linger.
+            if (rt.chat_inline_paint_top_row > 0 and rt.chat_inline_paint_top_row < top_row) {
+                var sr: u16 = rt.chat_inline_paint_top_row;
+                while (sr < top_row) : (sr += 1) {
+                    w.print("\x1B[{d};1H\x1B[2K", .{sr}) catch return false;
+                }
+            }
+            // Mirror for the bottom edge: if the previous panel's
+            // input row sat BELOW the new input row, the released
+            // rows between are now statusbar reservation — but the
+            // statusbar may not write to them on every tick, and
+            // any old panel chrome there would ghost. Belt-and-
+            // braces with applyReserveRows's own shrink clear.
+            if (rt.chat_inline_paint_input_row > input_row) {
+                var br: u16 = input_row + 1;
+                while (br <= rt.chat_inline_paint_input_row) : (br += 1) {
+                    w.print("\x1B[{d};1H\x1B[2K", .{br}) catch return false;
+                }
             }
 
             // Top divider row — dim chrome + mauve icon + cyan
@@ -1437,6 +1483,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // this full-paint path and refresh the values.
             rt.chat_inline_paint_input_top_row = input_top_row;
             rt.chat_inline_paint_input_row = input_row;
+            rt.chat_inline_paint_top_row = top_row;
             rt.chat_inline_paint_input_lines = input_lines;
             rt.chat_inline_paint_input_lines_cap = input_lines_cap;
             rt.chat_inline_paint_total_cols = total_cols;
