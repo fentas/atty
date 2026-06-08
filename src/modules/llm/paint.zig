@@ -996,6 +996,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.chat_inline_paint_top_row = 0;
                 rt.chat_inline_paint_input_row = 0;
                 rt.chat_inline_paint_input_top_row = 0;
+                // Reset the scroll clamp too — a re-open with new
+                // turn content shouldn't inherit the previous
+                // session's max for the window between toggle and
+                // first paint.
+                rt.chat_inline_paint_max_offset = 0;
                 return true;
             }
 
@@ -1404,7 +1409,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // so effective budget stays at scrollback_rows there.
             // max_offset = content - effective_budget.
             const effective_budget: usize = if (scrollback_rows <= 1) scrollback_rows else scrollback_rows - 1;
-            const max_inline_offset: usize = if (content_total_rows > effective_budget)
+            // scrollback_rows == 0 means the panel can't render
+            // ANY content row (terminal too small after divider +
+            // input). Scrolling is meaningless — pin at 0 instead
+            // of letting the formula yield `content_total_rows`
+            // which would let a single PageUp jump to a nonsense
+            // offset just to be reclamped on the next paint.
+            const max_inline_offset: usize = if (scrollback_rows == 0)
+                0
+            else if (content_total_rows > effective_budget)
                 content_total_rows - effective_budget
             else
                 0;
