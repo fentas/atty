@@ -995,6 +995,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // shrank to base while the panel was closed).
                 rt.chat_inline_paint_top_row = 0;
                 rt.chat_inline_paint_input_row = 0;
+                rt.chat_inline_paint_input_top_row = 0;
                 return true;
             }
 
@@ -1116,9 +1117,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // statusbar may not write to them on every tick, and
             // any old panel chrome there would ghost. Belt-and-
             // braces with applyReserveRows's own shrink clear.
+            // Cap at `total_rows - base_reserve` so we never clear
+            // INTO the statusbar's own paint band — the proxy
+            // repaints the bar on the next tick, but a sub-tick
+            // flash of cleared statusbar would be visible.
             if (rt.chat_inline_paint_input_row > input_row) {
+                const bottom_cap: u16 = if (total_rows > base_reserve) total_rows - base_reserve else input_row;
+                const stop: u16 = @min(rt.chat_inline_paint_input_row, bottom_cap);
                 var br: u16 = input_row + 1;
-                while (br <= rt.chat_inline_paint_input_row) : (br += 1) {
+                while (br <= stop) : (br += 1) {
                     w.print("\x1B[{d};1H\x1B[2K", .{br}) catch return false;
                 }
             }

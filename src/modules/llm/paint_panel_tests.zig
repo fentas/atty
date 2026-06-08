@@ -786,9 +786,15 @@ test "inline chat: shrink — released top + bottom rows get cleared on the next
     // Top edge: rows 8..11 should each get a clear.
     try testing.expect(std.mem.indexOf(u8, out, "\x1B[8;1H\x1B[2K") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\x1B[9;1H\x1B[2K") != null);
-    // Bottom edge: row 22 (the old input row, now beyond new input_row=21)
-    // should get cleared.
-    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1H\x1B[2K") != null);
+    // Bottom edge: but the cap stops at total_rows - base_reserve
+    // = 24 - 3 = 21. Row 22 sits INSIDE the statusbar reservation
+    // and must NOT be cleared by the panel paint — that would
+    // flash blank rows in the statusbar band before the proxy's
+    // next bar repaint. Old _input_row = 22 stays unwritten.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1H\x1B[2K") == null);
+    // Tight bounds against a widened shrink band:
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[7;1H\x1B[2K") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H\x1B[2K") == null);
 }
 
 test "inline chat: close resets the paint-geometry cache so re-open doesn't shrink-clear with stale rows" {
