@@ -2058,11 +2058,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (containsClearSequence(probe[0 .. carry_prefix.len + head_len])) {
                         rt.chat_inline_open = false;
                         rt.chat_paste_active = false;
+                        // Arm a paint so the close-frame runs and
+                        // resets the paint-geometry cache; otherwise
+                        // a later re-open could shrink-clear with
+                        // stale top/input rows across a SIGWINCH.
+                        rt.chat_inline_paint_pending = true;
                     }
                 }
                 if (rt.chat_inline_open and containsClearSequence(output)) {
                     rt.chat_inline_open = false;
                     rt.chat_paste_active = false;
+                    rt.chat_inline_paint_pending = true;
                 }
                 const tail_len: usize = @min(output.len, rt.clear_seq_carry.len);
                 @memcpy(rt.clear_seq_carry[0..tail_len], output[output.len - tail_len ..]);

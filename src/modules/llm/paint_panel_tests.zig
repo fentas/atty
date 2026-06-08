@@ -685,3 +685,217 @@ test "inline chat: paint ignores live ctx.cursor_row drift while panel is open" 
     try testing.expect(std.mem.endsWith(u8, second.?, "\x1B[10;1H"));
     try testing.expectEqual(@as(u16, 10), rt.chat_open_cursor_row);
 }
+
+test "inline chat: paint clears the top-gap rows so shell content can't ghost between prompt and divider" {
+    // The top_gap rows live INSIDE the statusbar reservation but
+    // ABOVE the divider. They stay visually blank but applyReserveRows's
+    // clear can miss them on rare reservation transitions (panel
+    // override flipped, SIGWINCH mid-tick). The paint now defensively
+    // emits `\x1B[<row>;1H\x1B[2K` for each top_gap row so any
+    // leftover content there gets wiped.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    const out = (try L.provideTermBytes(&rt, &ctx)).?;
+
+    // Geometry at default config: top_gap = 1, inline_chat_rows = 10
+    // (per cfg defaults), terminal_rows = 24, base = 3.
+    // live_reserve = 3 + 10 + 1 = 14. top_row = 24 - 14 + 1 + 1 = 12.
+    // So top_gap row is row 11 (top_row - 1). Pin the clear sequence.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[11;1H\x1B[2K") != null);
+}
+
+test "inline chat: shrink — released top + bottom rows get cleared on the next paint" {
+    // When the panel was painted with a HIGHER input_row (tall
+    // panel) and the next paint comes in with a LOWER input_row
+    // (panel shrunk via Ctrl+Alt+Down or override flip), the rows
+    // BETWEEN the new and old input_row are no longer ours. Paint
+    // clears them so old panel chrome doesn't ghost above the
+    // statusbar. Mirror for the top edge: a LOWER previous
+    // top_row → released rows above the new divider.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // Stage a "prior paint" with a bigger panel: top_row=8, input_row=22.
+    // Cache must be marked valid — shrink-clears intentionally skip
+    // when the cache could carry partial-frame geometry from a
+    // failed paint (see recoverInlineChatPaintFailure).
+    rt.chat_inline_paint_top_row = 8;
+    rt.chat_inline_paint_input_row = 22;
+    rt.chat_inline_paint_cache_valid = true;
+
+    rt.chat_inline_paint_pending = true;
+    const out = (try L.provideTermBytes(&rt, &ctx)).?;
+
+    // New paint at default geometry (top_row=12, input_row=21).
+    // Top edge: rows 8..11 should each get a clear.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[8;1H\x1B[2K") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[9;1H\x1B[2K") != null);
+    // Bottom edge: but the cap stops at total_rows - base_reserve
+    // = 24 - 3 = 21. Row 22 sits INSIDE the statusbar reservation
+    // and must NOT be cleared by the panel paint — that would
+    // flash blank rows in the statusbar band before the proxy's
+    // next bar repaint. Old _input_row = 22 stays unwritten.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[22;1H\x1B[2K") == null);
+    // Tight bounds against a widened shrink band:
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[7;1H\x1B[2K") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H\x1B[2K") == null);
+}
+
+test "inline chat: shrink-clear is GATED on chat_inline_paint_cache_valid" {
+    // recoverInlineChatPaintFailure invalidates the cache without
+    // zeroing the row fields. Without the gate, a follow-up open
+    // would shrink-clear arbitrary rows based on partial-frame
+    // geometry that doesn't match anything on screen.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // Same stale rows as the prior test, but cache is INVALID
+    // (mimicking the post-paint-failure state).
+    rt.chat_inline_paint_top_row = 8;
+    rt.chat_inline_paint_input_row = 22;
+    rt.chat_inline_paint_cache_valid = false;
+
+    rt.chat_inline_paint_pending = true;
+    const out = (try L.provideTermBytes(&rt, &ctx)).?;
+
+    // The stale rows MUST NOT be cleared — the cache is invalid.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[8;1H\x1B[2K") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[9;1H\x1B[2K") == null);
+}
+
+test "inline chat: close resets the paint-geometry cache so re-open doesn't shrink-clear with stale rows" {
+    // Panel close → paint geometry cache is wiped so a later
+    // re-open doesn't think the previous (closed) session's
+    // top_row / input_row are still in play and shrink-clear
+    // arbitrary rows in the shell area.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    // Pretend a previous paint left state behind.
+    rt.chat_inline_paint_top_row = 5;
+    rt.chat_inline_paint_input_row = 18;
+    // Panel is closed — paint the close-frame.
+    rt.chat_inline_open = false;
+    rt.chat_inline_paint_pending = true;
+    _ = try L.provideTermBytes(&rt, &ctx);
+
+    try testing.expectEqual(@as(u16, 0), rt.chat_inline_paint_top_row);
+    try testing.expectEqual(@as(u16, 0), rt.chat_inline_paint_input_row);
+}
