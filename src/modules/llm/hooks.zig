@@ -2563,15 +2563,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     };
 
                     // Stage the command for injection. Multi-line
-                    // commands get flattened to ` && ` chains so the
-                    // user runs the whole thing with one Enter
-                    // (otherwise readline treats each `\n` as Enter
-                    // and the shell runs the first line in
-                    // isolation — see `chainCommandLines` for the
-                    // bail conditions on heredocs / continuations /
-                    // already-chained input).
+                    // commands get wrapped in xterm bracketed-paste
+                    // markers so readline accepts the whole script
+                    // as a single paste (newlines stay literal in
+                    // the input buffer rather than firing as Enter).
+                    // The user sees the multi-line command at the
+                    // prompt and runs it with one Enter — same UX
+                    // as pasting a script from clipboard.
                     const cmd = parsed.command();
-                    rt.pending_command_len = dialog.chainCommandLines(cmd, &rt.pending_command);
+                    rt.pending_command_len = dialog.wrapForBracketedPaste(cmd, &rt.pending_command);
 
                     if (parsed.description_len > 0) {
                         const desc = parsed.description();
