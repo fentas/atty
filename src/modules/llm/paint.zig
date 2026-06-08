@@ -1512,10 +1512,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // the turn. Skip emitting it when row 1 isn't in
                 // the window (skip > 0).
                 if (skip == 0) {
-                    // Same timeline-rail glyphs as the overlay path
-                    // (see Proposal G in docs/proposals/chat-ui-ux.md).
-                    // Inline panel inherits identical visual semantics
-                    // for cross-surface consistency.
+                    // Match the overlay path's per-kind glyphs so a
+                    // turn renders the same in both surfaces.
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14m\u{25C6}\x1B[0m  ",
                         .assistant_exec => "\x1B[22;38;5;141m\u{25C7}\x1B[0m  ",
