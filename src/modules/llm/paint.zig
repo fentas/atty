@@ -189,7 +189,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         .observation => "\x1B[2m\u{2570}\x1B[0m ",
                     };
                     w.writeAll(prefix) catch return false;
-                    renderOverlayTurnContent(w, rt.allocator, turn) catch return false;
+                    renderOverlayTurnContent(w, turn) catch return false;
                     w.writeAll("\r\n\r\n") catch return false;
                 }
                 if (has_conclusion and !has_turns) {
@@ -455,8 +455,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// capped at 1024 bytes with a dim `[…truncated]` marker.
         /// The point is the user sees SOMETHING the model emitted
         /// rather than a blank turn — even if it's not pretty.
-        fn renderOverlayTurnContent(w: *std.Io.Writer, allocator: std.mem.Allocator, turn: dialog.Turn) !void {
-            _ = allocator;
+        fn renderOverlayTurnContent(w: *std.Io.Writer, turn: dialog.Turn) !void {
             // Bound the per-field render so a 4096-byte command
             // doesn't wrap into 50+ rows and push the input row off
             // the alt-screen. Capped at 480 visible cols (~6 wraps
