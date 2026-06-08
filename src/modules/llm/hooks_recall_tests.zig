@@ -450,9 +450,12 @@ test "chat_recall: loaded assistant_exec envelope renders with the timeline-rail
     defer testing.allocator.free(dpz);
     const fd = std.c.open(dpz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
     try testing.expect(fd >= 0);
+    // Fenced reply — production protocol shape stored in NDJSON.
+    // The `\\n` sequences are the literal `\n` newlines the
+    // worker would have persisted.
     const payload =
         "{\"kind\":\"user\",\"content\":\"list files\"}\n" ++
-        "{\"kind\":\"assistant_exec\",\"content\":\"{\\\"action\\\":\\\"exec\\\",\\\"command\\\":\\\"ls -la /tmp\\\"}\"}\n";
+        "{\"kind\":\"assistant_exec\",\"content\":\"```exec\\nls -la /tmp\\n```\\n\"}\n";
     _ = std.c.write(fd, payload.ptr, payload.len);
     _ = std.c.close(fd);
     defer _ = std.c.rmdir(dz.ptr);
@@ -516,7 +519,7 @@ test "chat_recall: loaded assistant_exec envelope renders with the timeline-rail
     const overlay_out = (try L.provideTermBytes(&rt, &ctx)).?;
     try testing.expect(std.mem.indexOf(u8, overlay_out, "\u{256D} exec \u{2500}") != null);
     try testing.expect(std.mem.indexOf(u8, overlay_out, "ls -la /tmp") != null);
-    try testing.expect(std.mem.indexOf(u8, overlay_out, "\"action\":\"exec\"") == null);
+    try testing.expect(std.mem.indexOf(u8, overlay_out, "```exec") == null);
 }
 
 test "chat_recall picker: Esc cancels without loading" {

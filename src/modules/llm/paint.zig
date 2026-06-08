@@ -456,6 +456,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// The point is the user sees SOMETHING the model emitted
         /// rather than a blank turn — even if it's not pretty.
         fn renderOverlayTurnContent(w: *std.Io.Writer, allocator: std.mem.Allocator, turn: dialog.Turn) !void {
+            _ = allocator;
             // Bound the per-field render so a 4096-byte command
             // doesn't wrap into 50+ rows and push the input row off
             // the alt-screen. Capped at 480 visible cols (~6 wraps
@@ -464,27 +465,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // command in their shell if they want to see it all.
             const overlay_field_cap: usize = 480;
             const c = turn.content;
-            const looks_like_envelope = turn.kind == .assistant_exec and
-                c.len > 2 and
-                c[0] == '{' and
-                std.mem.indexOf(u8, c, "\"action\"") != null;
-            // Raw-fallback render: cap by VISIBLE columns, not bytes,
-            // so a multi-byte glyph (`•` U+2022, emoji, CJK) never gets
-            // sliced mid-sequence into an invalid prefix the terminal
-            // renders as `�`. 1024 cols is generous for "we couldn't
-            // parse the envelope, surface raw bytes" — content of
-            // pathological size hits the buffer/parse path first.
-            // Note: `truncateToCols` returns a byte slice that can be
-            // longer than 1024 bytes when the content carries many
-            // zero-width chars (combining marks, ZWJ); that's the
-            // intent — we cap by what the user SEES.
-            if (!looks_like_envelope) {
+            // Non-assistant turns render raw — fenced parsing is
+            // an assistant-only path. See renderTurnContentWithSkip
+            // for the matching gate + the parseFencedResponse
+            // rationale (previous JSON gate erased the box opener).
+            if (turn.kind != .assistant_exec) {
                 const slice = pw.truncateToCols(c, 1024);
-                // #311 — observation turns (command output) keep
-                // their SGR colors + newlines so cargo/git/grep
-                // output renders styled in the chat history. All
-                // other turn kinds (user prose, raw fallbacks)
-                // stay strict-sanitized.
                 if (turn.kind == .observation) {
                     try pw.writeSanitizedAllowSgr(w, slice);
                 } else {
@@ -493,26 +479,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
                 return;
             }
-            // Heap-arena off the runtime allocator so the stack
-            // frame stays small regardless of `cfg.max_response_bytes`
-            // (the `Response` struct alone is `2 * max_response_bytes`
-            // + change). One arena per call, deinit on return.
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
             const R = dialog.Response(cfg.max_response_bytes);
-            const parsed = arena.allocator().create(R) catch {
-                const slice = pw.truncateToCols(c, 1024);
-                try writeSanitized(w, slice);
-                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
-                return;
-            };
-            parsed.* = .{};
-            dialog.parseResponse(R, arena.allocator(), c, parsed) catch {
-                const slice = pw.truncateToCols(c, 1024);
-                try writeSanitized(w, slice);
-                if (slice.len < c.len) try w.writeAll(" \x1B[2m[\u{2026}truncated]\x1B[0m");
-                return;
-            };
+            var parsed_storage: R = .{};
+            const parsed = &parsed_storage;
+            dialog.parseFencedResponse(R, c, parsed);
 
             switch (parsed.action) {
                 .exec => {
@@ -645,31 +615,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///     in the same way as the `done` arm.
         fn renderTurnContentWithSkip(w: *std.Io.Writer, turn: dialog.Turn, max_visible: usize, skip_rows: usize, max_rows: usize) !usize {
             const c = turn.content;
-            const looks_like_envelope = turn.kind == .assistant_exec and
-                c.len > 2 and
-                c[0] == '{' and
-                std.mem.indexOf(u8, c, "\"action\"") != null;
-            if (!looks_like_envelope) {
+            // assistant_exec turns store the raw fenced LLM reply
+            // (hooks.parseDialogResponse → parseFencedResponse). The
+            // earlier JSON `looks_like_envelope` gate + `parseResponse`
+            // call never matched real content, silently falling back
+            // to the raw render path and erasing the `╭ exec ─` opener
+            // for every assistant turn. parseFencedResponse never errors
+            // (degrades to .done for pure prose), so the gate is now
+            // just "is this an assistant turn?".
+            if (turn.kind != .assistant_exec) {
                 return try renderWrappedRawWithSkip(w, c, max_visible, skip_rows, max_rows);
             }
             const R = dialog.Response(cfg.max_response_bytes);
             var parsed: R = .{};
-            // FixedBufferAllocator on a stack buffer avoids the
-            // mmap/munmap per paint that std.heap.page_allocator
-            // pays — for a tall scrollback this fires hundreds of
-            // times per frame. Size the buffer comptime from
-            // `cfg.max_response_bytes`: the JSON parser uses
-            // `.alloc_always` so every parsed string is copied
-            // out of the input, roughly doubling the byte budget;
-            // 2× plus 4 KiB of AST overhead covers the Parsed
-            // struct + per-choice slice nodes for envelopes at
-            // the configured max size without falling back to
-            // the raw-render path under valid input.
-            var parse_buf: [cfg.max_response_bytes * 2 + 4096]u8 = undefined;
-            var parse_fba = std.heap.FixedBufferAllocator.init(&parse_buf);
-            dialog.parseResponse(R, parse_fba.allocator(), c, &parsed) catch {
-                return try renderWrappedRawWithSkip(w, c, max_visible, skip_rows, max_rows);
-            };
+            dialog.parseFencedResponse(R, c, &parsed);
             switch (parsed.action) {
                 .exec => {
                     // Two-row box (Proposal G phase 2):
@@ -755,114 +714,20 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         ///
         /// Raw turns walk the wrap iterator counting chunks up to
         /// `max_rows`. Cheap — no allocations.
-        /// Whitespace-tolerant check for an envelope whose action
-        /// value is `"done"`. The full JSON parser at the render
-        /// path handles this fine; `countTurnRows` only needs a
-        /// cheap shape probe for the back-walk row-count estimate.
-        ///
-        /// Matches: `"action":"done"`, `"action": "done"`,
-        /// `"action" : "done"` (any ASCII whitespace around the
-        /// colon). Skips matches whose opening `"` is backslash-
-        /// escaped so an LLM emitting `\"action\":` literally
-        /// inside a reason string can't shadow the real top-level
-        /// `"action"` key further on in the envelope.
-        fn envelopeActionIsDone(c: []const u8) bool {
-            return envelopeActionIs(c, "done");
-        }
-
-        /// Whitespace-tolerant check for an envelope whose
-        /// `action` field equals `expected` (a JSON string literal
-        /// like `done` / `exec` / `question`). Same escape-quote
-        /// guard as the original done-specific check, factored
-        /// so other row-count probes can ask without duplicating
-        /// the walk.
-        fn envelopeActionIs(c: []const u8, expected: []const u8) bool {
-            const key_lit = "\"action\"";
-            var search_start: usize = 0;
-            while (search_start < c.len) {
-                const rel = std.mem.indexOf(u8, c[search_start..], key_lit) orelse return false;
-                const key_pos = search_start + rel;
-                // Skip a `"action"` whose opening quote is escaped
-                // (preceded by a backslash that isn't itself
-                // escaped). Common shape: `"reason":"... \"action\":
-                // \"done\" ..."` — the first `"action"` is inside
-                // a JSON string value, not the top-level key.
-                if (key_pos > 0 and c[key_pos - 1] == '\\') {
-                    // Could be `\"` (escape) or `\\"` (literal
-                    // backslash + opening quote). Walk back to
-                    // count consecutive backslashes; an odd count
-                    // means the quote is escaped.
-                    var bs: usize = 0;
-                    var k = key_pos;
-                    while (k > 0 and c[k - 1] == '\\') : (k -= 1) bs += 1;
-                    if (bs % 2 == 1) {
-                        search_start = key_pos + 1;
-                        continue;
-                    }
-                }
-                var i = key_pos + key_lit.len;
-                while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
-                if (i >= c.len or c[i] != ':') {
-                    search_start = key_pos + 1;
-                    continue;
-                }
-                i += 1;
-                while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
-                // Look for the value: an opening `"`, then
-                // `expected` bytes-equal, then a closing `"`. The
-                // closing-quote check is what blocks false-positives
-                // like `"action":"executing"` matching `exec`.
-                if (i >= c.len or c[i] != '"') return false;
-                i += 1;
-                if (i + expected.len + 1 > c.len) return false;
-                if (!std.mem.eql(u8, c[i..(i + expected.len)], expected)) return false;
-                return c[i + expected.len] == '"';
-            }
-            return false;
-        }
-
         fn countTurnRows(turn: dialog.Turn, cols: usize, max_rows: usize) usize {
             const c = turn.content;
-            const looks_like_envelope = turn.kind == .assistant_exec and
-                c.len > 2 and
-                c[0] == '{' and
-                std.mem.indexOf(u8, c, "\"action\"") != null;
-            if (looks_like_envelope) {
-                if (envelopeActionIsDone(c)) {
-                    // Parse the envelope so we count the rendered
-                    // reason via the SAME md_render row math the
-                    // paint path uses. The previous wrap-iter +
-                    // escapes_n heuristic was a safe upper bound for
-                    // the back-walk anchor but over-counted for the
-                    // per-row windowing (#213's offset clamp).
-                    const R = dialog.Response(cfg.max_response_bytes);
-                    var parsed: R = .{};
-                    // See renderTurnContentWithSkip for the FBA
-                    // sizing rationale — same paint-frame cost +
-                    // .alloc_always doubling concern.
-                    var parse_buf: [cfg.max_response_bytes * 2 + 4096]u8 = undefined;
-                    var parse_fba = std.heap.FixedBufferAllocator.init(&parse_buf);
-                    dialog.parseResponse(R, parse_fba.allocator(), c, &parsed) catch {
-                        // Parse failure falls through to raw render in
-                        // renderTurnContent — count that path too.
-                        const raw = md_render.countRows(c, cols);
-                        return @min(raw, max_rows);
-                    };
-                    if (parsed.action == .done) {
+            if (turn.kind == .assistant_exec) {
+                const R = dialog.Response(cfg.max_response_bytes);
+                var parsed: R = .{};
+                dialog.parseFencedResponse(R, c, &parsed);
+                switch (parsed.action) {
+                    .exec => return @min(@as(usize, 2), max_rows),
+                    .question => return @min(@as(usize, 1), max_rows),
+                    .done => {
                         const reason = parsed.reason();
                         const wrap_cols: usize = if (cols > 2) cols - 2 else cols;
                         return @min(md_render.countRows(reason, wrap_cols), max_rows);
-                    }
-                    // Parsed but not actually done (rare — envelope-
-                    // action mismatch): fall through.
-                }
-                // Exec envelopes now render as a 2-row box (Proposal
-                // G phase 2): `╭ exec ─` opener + command body.
-                // Question still renders as 1 compact row.
-                // Malformed envelopes fall through to
-                // renderWrappedRaw, which md_render.countRows mirrors.
-                if (envelopeActionIs(c, "exec")) {
-                    return @min(@as(usize, 2), max_rows);
+                    },
                 }
             }
             if (c.len == 0) return 1;

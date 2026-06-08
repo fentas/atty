@@ -105,21 +105,20 @@ test "overlay: assistant_exec turn renders as `╭ exec ─` box (Proposal G), n
     const helpers = dialog.Module(L.config, L.Runtime);
     defer helpers.freeTurns(&rt);
     try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "list zig files"));
-    const envelope = "{\"action\":\"exec\",\"description\":\"find Zig sources\",\"command\":\"find . -name '*.zig'\"}";
+    // Fenced reply — matches the production protocol
+    // (hooks.parseDialogResponse → parseFencedResponse).
+    const envelope = "find Zig sources\n\n```exec\nfind . -name '*.zig'\n```\n";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
 
     rt.chat_overlay_open = true;
     rt.chat_overlay_paint_pending = true;
     const bytes = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(bytes != null);
-    // Box opener present, command visible, description dropped
-    // (matches the inline panel's Phase 2 design).
+    // Box opener present, command visible, description dropped.
     try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{256D} exec \u{2500}") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "find . -name '*.zig'") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "find Zig sources") == null);
-    // The raw JSON envelope MUST NOT appear verbatim in the paint
-    // (no `"action":"exec"` substring).
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "\"action\":\"exec\"") == null);
+    // Raw fence markers must NOT leak into the paint.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "```exec") == null);
 }
 
 test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON)" {
@@ -151,7 +150,9 @@ test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON
 
     const helpers = dialog.Module(L.config, L.Runtime);
     defer helpers.freeTurns(&rt);
-    const envelope = "{\"action\":\"done\",\"reason\":\"task complete: 42 files\"}";
+    // Pure-prose reply — parseFencedResponse degrades to .done with
+    // reason = full prose. No fence needed.
+    const envelope = "task complete: 42 files";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
 
     rt.chat_overlay_open = true;
@@ -160,7 +161,6 @@ test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON
     try testing.expect(bytes != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{2713}") != null); // check glyph
     try testing.expect(std.mem.indexOf(u8, bytes.?, "task complete: 42 files") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "\"action\":\"done\"") == null);
 }
 
 test "overlay: malformed assistant envelope falls back to raw render so nothing vanishes" {
@@ -234,7 +234,7 @@ test "overlay: assistant_exec with action=question + choices renders italic prom
     const helpers = dialog.Module(L.config, L.Runtime);
     defer helpers.freeTurns(&rt);
     const envelope =
-        "{\"action\":\"question\",\"question\":\"Which directory?\",\"choices\":[\"src\",\"tests\",\"docs\"]}";
+        "```question\nWhich directory?\n- src\n- tests\n- docs\n```\n";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
 
     rt.chat_overlay_open = true;
@@ -250,8 +250,8 @@ test "overlay: assistant_exec with action=question + choices renders italic prom
     try testing.expect(std.mem.indexOf(u8, bytes.?, "src") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "tests") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "docs") != null);
-    // Raw JSON envelope must NOT leak.
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "\"choices\"") == null);
+    // Raw fence markers must NOT leak.
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "```question") == null);
 }
 
 test "overlay input: cursor-split rendering puts reverse-video on the cursor byte" {

@@ -590,10 +590,11 @@ test "inline scroll: per-row offset scrolls THROUGH a single tall turn" {
     const helpers = dialog.Module(L.config, L.Runtime);
     defer helpers.freeTurns(&rt);
 
-    // Single done envelope whose reason is several hard-break
-    // lines. Each line becomes one row; the panel budget (2
-    // rows after the input + divider) shows 2 at a time.
-    const envelope = "{\"reason\":\"P1-TOP\\nP2-MID-A\\nP3-MID-B\\nP4-BOTTOM\",\"action\":\"done\"}";
+    // Pure prose reply — parseFencedResponse with no fence
+    // degrades to .done with the whole content as the reason.
+    // Each `\n` becomes one row; the panel budget (2 rows after
+    // the input + divider) shows 2 at a time.
+    const envelope = "P1-TOP\nP2-MID-A\nP3-MID-B\nP4-BOTTOM";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
 
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
@@ -726,8 +727,8 @@ test "inline chat: exec envelope renders as 2-row box with `\u{256D} exec \u{250
     const helpers = dialog.Module(L.config, L.Runtime);
     defer helpers.freeTurns(&rt);
 
-    // Minimal valid exec envelope.
-    const envelope = "{\"action\":\"exec\",\"command\":\"ls -la /tmp\",\"description\":\"list files\"}";
+    // Fenced exec reply — production protocol shape.
+    const envelope = "list files\n\n```exec\nls -la /tmp\n```\n";
     try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
 
     rt.chat_inline_paint_pending = true;
@@ -738,8 +739,9 @@ test "inline chat: exec envelope renders as 2-row box with `\u{256D} exec \u{250
     try testing.expect(std.mem.indexOf(u8, out, "\u{256D} exec \u{2500}") != null);
     // The command body must appear too.
     try testing.expect(std.mem.indexOf(u8, out, "ls -la /tmp") != null);
-    // Description is intentionally dropped (Phase 2 design call).
+    // Description / fence markers are intentionally dropped.
     try testing.expect(std.mem.indexOf(u8, out, "list files") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "```exec") == null);
 }
 
 test "inline chat: compact OFF renders observation verbatim (#311)" {
