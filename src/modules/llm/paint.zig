@@ -186,7 +186,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14m\u{25C6}\x1B[0m  ",
                         .assistant_exec => "\x1B[22;38;5;141m\u{25C7}\x1B[0m  ",
-                        .observation => "\x1B[2m\u{251C}\u{2500}\u{2500}\x1B[0m ",
+                        .observation => "\x1B[2m\u{2570}\x1B[0m ",
                     };
                     w.writeAll(prefix) catch return false;
                     renderOverlayTurnContent(w, rt.allocator, turn) catch return false;
@@ -611,7 +611,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
             }
             if (saw_text) lines += 1;
-            try w.print("\x1B[2m[{d} line{s} \u{00B7} Alt+Shift+C to inspect]\x1B[0m", .{
+            // Proposal G phase 2: the ╰ corner glyph already lives
+            // in the per-turn prefix, so the body just has to say
+            // "N lines · ⌥⇧C" without redundant brackets.
+            try w.print("\x1B[2m{d} line{s} \u{00B7} \u{2325}\u{21E7}C\x1B[0m", .{
                 lines,
                 if (lines == 1) "" else "s",
             });
@@ -670,19 +673,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             };
             switch (parsed.action) {
                 .exec => {
-                    if (skip_rows >= 1 or max_rows == 0) return 0;
+                    // Two-row box (Proposal G phase 2):
+                    //   row 1: `╭ exec ─` opener (the ◇ assistant
+                    //          glyph is implicit — the box itself
+                    //          carries the "this is an assistant
+                    //          action" semantics).
+                    //   row 2: the command in cyan.
+                    // The matching `.observation` turn that follows
+                    // renders `╰ N lines · ⌥⇧C` as its compact form,
+                    // closing the box visually across the turn pair.
+                    // Description is intentionally dropped — the
+                    // command itself is usually self-describing.
+                    if (max_rows == 0) return 0;
+                    if (skip_rows >= 2) return 0;
                     const cmd = parsed.command();
-                    const desc = parsed.description();
-                    if (desc.len > 0) {
-                        try writeSanitized(w, pw.truncateToCols(desc, max_visible / 2));
-                        try w.writeAll(" \x1B[2m\u{2192}\x1B[0m ");
+                    var rows: usize = 0;
+                    if (skip_rows == 0) {
+                        try w.writeAll("\x1B[2;38;5;141m\u{256D} exec \u{2500}\x1B[0m");
+                        rows += 1;
+                        if (max_rows == 1) return rows;
+                        try w.writeAll("\r\n");
                     }
                     try w.writeAll("\x1B[22;38;5;14m");
-                    const cmd_room: usize = if (max_visible > 20) max_visible - 20 else max_visible;
+                    const cmd_room: usize = if (max_visible > 2) max_visible - 2 else max_visible;
                     const cslice = pw.truncateToCols(cmd, cmd_room);
                     try writeSanitized(w, cslice);
                     try w.writeAll("\x1B[0m");
                     if (cslice.len < cmd.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
+                    rows += 1;
+                    return rows;
                 },
                 .question => {
                     if (skip_rows >= 1 or max_rows == 0) return 0;
@@ -743,6 +762,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// inside a reason string can't shadow the real top-level
         /// `"action"` key further on in the envelope.
         fn envelopeActionIsDone(c: []const u8) bool {
+            return envelopeActionIs(c, "done");
+        }
+
+        /// Whitespace-tolerant check for an envelope whose
+        /// `action` field equals `expected` (a JSON string literal
+        /// like `done` / `exec` / `question`). Same escape-quote
+        /// guard as the original done-specific check, factored
+        /// so other row-count probes can ask without duplicating
+        /// the walk.
+        fn envelopeActionIs(c: []const u8, expected: []const u8) bool {
             const key_lit = "\"action\"";
             var search_start: usize = 0;
             while (search_start < c.len) {
@@ -774,9 +803,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
                 i += 1;
                 while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
-                const done_lit = "\"done\"";
-                if (i + done_lit.len > c.len) return false;
-                return std.mem.eql(u8, c[i..(i + done_lit.len)], done_lit);
+                // Build the quoted match target on the stack at
+                // comptime if `expected` is comptime-known, else
+                // walk the bytes directly. The two callers pass
+                // string literals so the common path is "look for
+                // a quote, then `expected`, then a quote."
+                if (i >= c.len or c[i] != '"') return false;
+                i += 1;
+                if (i + expected.len + 1 > c.len) return false;
+                if (!std.mem.eql(u8, c[i..(i + expected.len)], expected)) return false;
+                return c[i + expected.len] == '"';
             }
             return false;
         }
@@ -816,12 +852,14 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // Parsed but not actually done (rare — envelope-
                     // action mismatch): fall through.
                 }
-                // Envelope-shaped exec/question/malformed: real
-                // envelopes emit 1 compact row; malformed cases
-                // fall through to renderWrappedRaw and span N.
-                // md_render.countRows mirrors the wrap+newline
-                // path the renderer uses; safe upper bound for
-                // both valid (1) and malformed (N) cases.
+                // Exec envelopes now render as a 2-row box (Proposal
+                // G phase 2): `╭ exec ─` opener + command body.
+                // Question still renders as 1 compact row.
+                // Malformed envelopes fall through to
+                // renderWrappedRaw, which md_render.countRows mirrors.
+                if (envelopeActionIs(c, "exec")) {
+                    return @min(@as(usize, 2), max_rows);
+                }
             }
             if (c.len == 0) return 1;
             return @min(md_render.countRows(c, cols), max_rows);
@@ -1475,7 +1513,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const prefix: []const u8 = switch (turn.kind) {
                         .user => "\x1B[22;1;38;5;14m\u{25C6}\x1B[0m  ",
                         .assistant_exec => "\x1B[22;38;5;141m\u{25C7}\x1B[0m  ",
-                        .observation => "\x1B[2m\u{251C}\u{2500}\u{2500}\x1B[0m ",
+                        .observation => "\x1B[2m\u{2570}\x1B[0m ",
                     };
                     w.writeAll(prefix) catch return false;
                 }

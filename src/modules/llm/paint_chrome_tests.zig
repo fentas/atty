@@ -669,9 +669,12 @@ test "inline chat: observation collapses to line-count stub when compact (#311)"
     rt.chat_inline_paint_pending = true;
     const out = (try L.provideTermBytes(&rt, &ctx)).?;
 
-    // Compact stub shows the line count and inspect hint.
+    // Compact stub (Proposal G phase 2) shows the line count and
+    // the keybinding via the ⌥⇧C glyph cluster (Option/Alt + Shift
+    // + C). The old "Alt+Shift+C to inspect" text was dropped in
+    // favour of a compact icon.
     try testing.expect(std.mem.indexOf(u8, out, "3 lines") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Alt+Shift+C") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2325}\u{21E7}C") != null);
     // Verbatim content must NOT appear in the inline panel.
     try testing.expect(std.mem.indexOf(u8, out, "RUSTC_OUTPUT_LINE_1") == null);
     try testing.expect(std.mem.indexOf(u8, out, "RUSTC_OUTPUT_LINE_2") == null);
