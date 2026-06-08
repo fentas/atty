@@ -855,7 +855,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             // now-closed panel's buffer.
                             rt.chat_inline_open = false;
                             rt.chat_paste_active = false;
-                            rt.chat_inline_rows_override = null;
                             rt.chat_retry_pending = false;
                             rt.chat_inline_paint_pending = true;
                             return .swallow;
@@ -1015,7 +1014,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                                 rt.chat_inline_paint_pending = true;
                                 rt.chat_focus_in_panel = true;
                                 rt.chat_refocus_pending = false;
-                                rt.chat_inline_rows_override = null;
                                 rt.chat_retry_pending = false;
                                 rt.conclusion_pending = false;
                                 const loaded_any = rt.turns_len > 0 or rt.conclusion_formatted != null;
@@ -1543,7 +1541,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         if (rt.chat_inline_open) {
                             rt.chat_inline_open = false;
                             rt.chat_paste_active = false;
-                            rt.chat_inline_rows_override = null;
                             rt.chat_retry_pending = false;
                             rt.chat_inline_paint_pending = true;
                         }
@@ -1623,12 +1620,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // focus choice on the next `;D`.
                     rt.chat_refocus_pending = false;
                     if (!rt.chat_inline_open) {
-                        // Drop the live height override on close so
-                        // the next open starts at `cfg.inline_chat_rows`
-                        // again. The user opted into a bigger panel
-                        // for THIS session, not as a persistent
-                        // preference.
-                        rt.chat_inline_rows_override = null;
+                        // Live height override is intentionally
+                        // preserved across close — re-opening lands
+                        // at the user's last chosen height.
                         rt.chat_retry_pending = false;
                         // Also drop any in-flight bracketed paste —
                         // same rationale as the other close sites
@@ -1742,7 +1736,6 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         rt.chat_inline_open = false;
                         rt.chat_paste_active = false;
                         rt.chat_focus_in_panel = false;
-                        rt.chat_inline_rows_override = null;
                         rt.chat_retry_pending = false;
                         rt.chat_inline_paint_pending = true;
                     }
