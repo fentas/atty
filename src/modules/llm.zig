@@ -1096,8 +1096,18 @@ pub fn configure(comptime cfg: Config) type {
             /// at a huge value (which then makes the same number of
             /// PageDowns feel "stuck" — the offset would spend
             /// dozens of presses unwinding before content moves
-            /// visibly). 0 = no useful scroll (content fits in
-            /// panel) or no paint yet.
+            /// visibly). 0 has two interpretations:
+            ///   * No paint yet (panel just opened). Pressing scroll
+            ///     keys in this window is a no-op; that's correct
+            ///     behavior because there's no rendered content to
+            ///     scroll yet. The toggle action arms a paint, so
+            ///     the next provideTermBytes tick refreshes this
+            ///     before the user's next keystroke under normal
+            ///     event ordering.
+            ///   * Content fits in the panel — no scroll possible.
+            /// The two cases share semantics (PageUp/PageDown both
+            /// clamp at 0), so a dedicated sentinel isn't load-
+            /// bearing today.
             chat_inline_paint_max_offset: usize = 0,
             /// Live height override for the inline panel. `null` ⇒
             /// `cfg.inline_chat_rows`; Ctrl+Alt+Up bumps, Ctrl+Alt+Down

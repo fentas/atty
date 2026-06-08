@@ -1147,14 +1147,14 @@ test "chat overlay: free-text answer to a question clears chat_question_active" 
     try testing.expectEqual(@as(usize, 0), rt.chat_input_cursor);
 }
 
-test "chat scroll: Alt+PageUp / Alt+PageDown dispatch as one-row scroll" {
-    // Parser-level pin: the new bindings map to the legacy
-    // CSI-1 modified-PageUp/Down byte sequences (`\x1b[5;3~` /
-    // `\x1b[6;3~`), and the byte-level handler dispatches them as
-    // `chat_scroll_up` / `chat_scroll_down` — the same row-scroll
-    // semantics as Shift+Arrow. Added because users that don't
-    // reach for Shift+Arrow can use the Alt+PageUp/Down they
-    // already know from `less` / web browsers.
+test "chat scroll: Alt+PageUp / Alt+PageDown resolve to the expected legacy CSI-1 bytes" {
+    // The dispatcher matches bound `bytes` against incoming
+    // keystrokes; the binding in modules/llm.zig uses
+    // `keymap.key("Alt+PageUp")` / `keymap.key("Alt+PageDown")`,
+    // so the parser entries are the contract a terminal emits
+    // for these chords. A parser edit that re-routes the byte
+    // sequence would silently break the binding — this test
+    // pins the legacy form every common terminal falls back to.
     const keymap = @import("../../keymap.zig");
     try std.testing.expectEqualStrings("\x1b[5;3~", keymap.key("Alt+PageUp"));
     try std.testing.expectEqualStrings("\x1b[6;3~", keymap.key("Alt+PageDown"));
