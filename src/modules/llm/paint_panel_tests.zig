@@ -60,7 +60,8 @@ test "chat overlay (Alt+Shift+C): toggle emits alt-screen enter then exit" {
     try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[?1049h") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "\x1B[2J") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "atty chat") != null);
-    try testing.expect(std.mem.indexOf(u8, opened.?, "You:") != null);
+    // Pin the per-turn user glyph so a revert to text labels fails.
+    try testing.expect(std.mem.indexOf(u8, opened.?, "\u{25C6}") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "explain X") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "Alt+Shift+C close") != null);
     try testing.expect(std.mem.indexOf(u8, opened.?, "Enter send") != null);

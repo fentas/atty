@@ -554,7 +554,7 @@ test "inline scroll: per-row offset scrolls THROUGH a single tall turn" {
     // Per-#213: when a single turn is taller than the visible
     // panel, the per-row offset must walk it row-by-row. The
     // top of the turn becomes visible as offset grows; the
-    // kind-prefix ("atty:") suppresses when row 1 of the turn
+    // kind-prefix (the ◇ glyph) suppresses when row 1 of the turn
     // is above the cut.
     const L = configure(.{
         .provider = .{ .http = .{
@@ -669,13 +669,77 @@ test "inline chat: observation collapses to line-count stub when compact (#311)"
     rt.chat_inline_paint_pending = true;
     const out = (try L.provideTermBytes(&rt, &ctx)).?;
 
-    // Compact stub shows the line count and inspect hint.
+    // Compact stub (Proposal G phase 2) shows the line count and
+    // the keybinding via the ⌥⇧C glyph cluster (Option/Alt + Shift
+    // + C). The old "Alt+Shift+C to inspect" text was dropped in
+    // favour of a compact icon.
     try testing.expect(std.mem.indexOf(u8, out, "3 lines") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Alt+Shift+C") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2325}\u{21E7}C") != null);
+    // ╰ corner closes the exec box visually (see `╭ exec ─` opener
+    // pinned by the sibling test below). Without this assertion a
+    // revision that drops the corner glyph would silently regress
+    // the timeline-rail box closer.
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2570}") != null);
     // Verbatim content must NOT appear in the inline panel.
     try testing.expect(std.mem.indexOf(u8, out, "RUSTC_OUTPUT_LINE_1") == null);
     try testing.expect(std.mem.indexOf(u8, out, "RUSTC_OUTPUT_LINE_2") == null);
     try testing.expect(std.mem.indexOf(u8, out, "RUSTC_OUTPUT_LINE_3") == null);
+}
+
+test "inline chat: exec envelope renders as 2-row box with `\u{256D} exec \u{2500}` opener" {
+    // Proposal G phase 2 pins the opener glyph so a revision that
+    // changes the box style (or drops it altogether and reverts to
+    // the old `<desc> \u{2192} <cmd>` one-liner) fails loudly.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    // Minimal valid exec envelope.
+    const envelope = "{\"action\":\"exec\",\"command\":\"ls -la /tmp\",\"description\":\"list files\"}";
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, envelope));
+
+    rt.chat_inline_paint_pending = true;
+    const out = (try L.provideTermBytes(&rt, &ctx)).?;
+
+    // Opener: `\u{256D} exec \u{2500}` (rounded-corner top-left, the
+    // word "exec", a horizontal line).
+    try testing.expect(std.mem.indexOf(u8, out, "\u{256D} exec \u{2500}") != null);
+    // The command body must appear too.
+    try testing.expect(std.mem.indexOf(u8, out, "ls -la /tmp") != null);
+    // Description is intentionally dropped (Phase 2 design call).
+    try testing.expect(std.mem.indexOf(u8, out, "list files") == null);
 }
 
 test "inline chat: compact OFF renders observation verbatim (#311)" {
