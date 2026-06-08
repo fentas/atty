@@ -375,16 +375,30 @@ pub fn wrapForBracketedPaste(src: []const u8, dest: []u8) usize {
     }
     const open = "\x1B[200~";
     const close = "\x1B[201~";
-    const total = open.len + src.len + close.len;
-    if (total > dest.len) {
+    // Worst-case sizing assumes no CRLF stripping; actual output is
+    // smaller when CRLF→LF normalization fires.
+    const worst_case = open.len + src.len + close.len;
+    if (worst_case > dest.len) {
         const n = @min(src.len, dest.len);
         @memcpy(dest[0..n], src[0..n]);
         return n;
     }
     @memcpy(dest[0..open.len], open);
-    @memcpy(dest[open.len..(open.len + src.len)], src);
-    @memcpy(dest[(open.len + src.len)..total], close);
-    return total;
+    var out_len: usize = open.len;
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) {
+        // CRLF → LF: many bracketed-paste consumers (readline, vte-
+        // family terminals) treat both `\r` and `\n` as newline, so
+        // a `\r\n` pair lands as a blank line in the input buffer.
+        // Strip the `\r` to keep the wrapped body 1:1 with what
+        // readline sees on a manual paste.
+        if (src[i] == '\r' and i + 1 < src.len and src[i + 1] == '\n') continue;
+        dest[out_len] = src[i];
+        out_len += 1;
+    }
+    @memcpy(dest[out_len..(out_len + close.len)], close);
+    out_len += close.len;
+    return out_len;
 }
 
 /// Walk `raw` backward looking for the last ` ```<action> ... ``` `
@@ -1854,6 +1868,37 @@ test "wrapForBracketedPaste: inline `#` comment + multi-line stays intact" {
         "\x1B[200~echo a # tag\necho b\x1B[201~",
         buf[0..n],
     );
+}
+
+test "wrapForBracketedPaste: CRLF input normalizes to LF inside the wrap" {
+    var buf: [256]u8 = undefined;
+    // Many bracketed-paste consumers treat both `\r` and `\n` as
+    // newline, so a CRLF-emitting LLM would land each pair as a
+    // BLANK line in readline. Strip the `\r` before write.
+    const src = "echo a\r\necho b\r\necho c";
+    const n = wrapForBracketedPaste(src, &buf);
+    try testing.expectEqualStrings(
+        "\x1B[200~echo a\necho b\necho c\x1B[201~",
+        buf[0..n],
+    );
+    // Belt-and-braces — no stray `\r` survived.
+    try testing.expect(std.mem.indexOfScalar(u8, buf[0..n], '\r') == null);
+}
+
+test "wrapForBracketedPaste: a lone `\\r` (not followed by \\n) stays intact" {
+    var buf: [256]u8 = undefined;
+    // `\r` mid-content (e.g. `printf` argument) is NOT a line break;
+    // only the `\r\n` pair is normalized.
+    const src = "echo a\r\nprintf '\\rfoo'\n";
+    const n = wrapForBracketedPaste(src, &buf);
+    const got = buf[0..n];
+    try testing.expect(std.mem.startsWith(u8, got, "\x1B[200~"));
+    try testing.expect(std.mem.endsWith(u8, got, "\x1B[201~"));
+    // CRLF stripped...
+    try testing.expect(std.mem.indexOf(u8, got, "echo a\necho") == null); // not chained
+    try testing.expect(std.mem.indexOf(u8, got, "echo a\nprintf") != null);
+    // ...but the lone `\r` in printf's argument survives.
+    try testing.expect(std.mem.indexOf(u8, got, "'\\rfoo'") != null);
 }
 
 test "wrapForBracketedPaste: dest exactly src.len + 12 fits the wrap" {
