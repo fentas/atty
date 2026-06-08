@@ -776,8 +776,12 @@ test "inline chat: shrink — released top + bottom rows get cleared on the next
     ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
 
     // Stage a "prior paint" with a bigger panel: top_row=8, input_row=22.
+    // Cache must be marked valid — shrink-clears intentionally skip
+    // when the cache could carry partial-frame geometry from a
+    // failed paint (see recoverInlineChatPaintFailure).
     rt.chat_inline_paint_top_row = 8;
     rt.chat_inline_paint_input_row = 22;
+    rt.chat_inline_paint_cache_valid = true;
 
     rt.chat_inline_paint_pending = true;
     const out = (try L.provideTermBytes(&rt, &ctx)).?;
@@ -795,6 +799,58 @@ test "inline chat: shrink — released top + bottom rows get cleared on the next
     // Tight bounds against a widened shrink band:
     try testing.expect(std.mem.indexOf(u8, out, "\x1B[7;1H\x1B[2K") == null);
     try testing.expect(std.mem.indexOf(u8, out, "\x1B[23;1H\x1B[2K") == null);
+}
+
+test "inline chat: shrink-clear is GATED on chat_inline_paint_cache_valid" {
+    // recoverInlineChatPaintFailure invalidates the cache without
+    // zeroing the row fields. Without the gate, a follow-up open
+    // would shrink-clear arbitrary rows based on partial-frame
+    // geometry that doesn't match anything on screen.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // Same stale rows as the prior test, but cache is INVALID
+    // (mimicking the post-paint-failure state).
+    rt.chat_inline_paint_top_row = 8;
+    rt.chat_inline_paint_input_row = 22;
+    rt.chat_inline_paint_cache_valid = false;
+
+    rt.chat_inline_paint_pending = true;
+    const out = (try L.provideTermBytes(&rt, &ctx)).?;
+
+    // The stale rows MUST NOT be cleared — the cache is invalid.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[8;1H\x1B[2K") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1B[9;1H\x1B[2K") == null);
 }
 
 test "inline chat: close resets the paint-geometry cache so re-open doesn't shrink-clear with stale rows" {

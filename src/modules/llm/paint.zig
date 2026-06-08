@@ -1096,37 +1096,43 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     w.print("\x1B[{d};1H\x1B[2K", .{gr}) catch return false;
                 }
             }
-            // If the previous paint had a HIGHER top_row (smaller
-            // panel that just grew, or override flipped), the rows
-            // BELOW the old top divider are now the new panel —
-            // already handled by the divider + scrollback clears
-            // below. But if the previous paint had a LOWER top_row
-            // (bigger panel that just shrank), the rows between
-            // the new top_row and the old top_row are no longer
-            // ours; clear them so old divider / scrollback chrome
-            // doesn't linger.
-            if (rt.chat_inline_paint_top_row > 0 and rt.chat_inline_paint_top_row < top_row) {
-                var sr: u16 = rt.chat_inline_paint_top_row;
-                while (sr < top_row) : (sr += 1) {
-                    w.print("\x1B[{d};1H\x1B[2K", .{sr}) catch return false;
+            // Shrink-clears only run when the cache holds geometry
+            // from a SUCCESSFUL prior paint. `recoverInlineChatPaintFailure`
+            // invalidates the cache but doesn't zero the row values
+            // — without this gate, a re-open after a paint-buffer
+            // overflow could shrink-clear rows based on a partial-
+            // frame's geometry that doesn't match anything on screen.
+            if (rt.chat_inline_paint_cache_valid) {
+                // If the previous paint had a LOWER top_row (bigger
+                // panel that just shrank), the rows between the new
+                // top_row and the old top_row are no longer ours;
+                // clear them so old divider / scrollback chrome
+                // doesn't linger. A HIGHER previous top_row means
+                // the panel grew, which is already covered by the
+                // divider + scrollback clears below.
+                if (rt.chat_inline_paint_top_row > 0 and rt.chat_inline_paint_top_row < top_row) {
+                    var sr: u16 = rt.chat_inline_paint_top_row;
+                    while (sr < top_row) : (sr += 1) {
+                        w.print("\x1B[{d};1H\x1B[2K", .{sr}) catch return false;
+                    }
                 }
-            }
-            // Mirror for the bottom edge: if the previous panel's
-            // input row sat BELOW the new input row, the released
-            // rows between are now statusbar reservation — but the
-            // statusbar may not write to them on every tick, and
-            // any old panel chrome there would ghost. Belt-and-
-            // braces with applyReserveRows's own shrink clear.
-            // Cap at `total_rows - base_reserve` so we never clear
-            // INTO the statusbar's own paint band — the proxy
-            // repaints the bar on the next tick, but a sub-tick
-            // flash of cleared statusbar would be visible.
-            if (rt.chat_inline_paint_input_row > input_row) {
-                const bottom_cap: u16 = if (total_rows > base_reserve) total_rows - base_reserve else input_row;
-                const stop: u16 = @min(rt.chat_inline_paint_input_row, bottom_cap);
-                var br: u16 = input_row + 1;
-                while (br <= stop) : (br += 1) {
-                    w.print("\x1B[{d};1H\x1B[2K", .{br}) catch return false;
+                // Mirror for the bottom edge: if the previous panel's
+                // input row sat BELOW the new input row, the released
+                // rows between are now statusbar reservation — but the
+                // statusbar may not write to them on every tick, and
+                // any old panel chrome there would ghost. Belt-and-
+                // braces with applyReserveRows's own shrink clear.
+                // Cap at `total_rows - base_reserve` so we never clear
+                // INTO the statusbar's own paint band — the proxy
+                // repaints the bar on the next tick, but a sub-tick
+                // flash of cleared statusbar would be visible.
+                if (rt.chat_inline_paint_input_row > input_row) {
+                    const bottom_cap: u16 = if (total_rows > base_reserve) total_rows - base_reserve else input_row;
+                    const stop: u16 = @min(rt.chat_inline_paint_input_row, bottom_cap);
+                    var br: u16 = input_row + 1;
+                    while (br <= stop) : (br += 1) {
+                        w.print("\x1B[{d};1H\x1B[2K", .{br}) catch return false;
+                    }
                 }
             }
 

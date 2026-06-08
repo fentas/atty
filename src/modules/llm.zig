@@ -1004,11 +1004,15 @@ pub fn configure(comptime cfg: Config) type {
             chat_inline_paint_cache_valid: bool = false,
             chat_inline_paint_input_top_row: u16 = 0,
             chat_inline_paint_input_row: u16 = 0,
-            /// Top divider row from the previous paint — the next
-            /// paint clears [min(last,current), max(last,current))
-            /// so a SHRUNK panel doesn't leave its old top rows
-            /// painted with stale chrome / scrollback below the
-            /// new (smaller) panel top. 0 = no previous paint.
+            /// Top divider row from the previous paint. When the
+            /// new paint has a HIGHER top_row (panel shrank from
+            /// the top), the rows [previous, new) are cleared so
+            /// old divider / scrollback chrome doesn't linger.
+            /// A LOWER previous top_row means the panel grew on
+            /// top — handled by the normal divider + scrollback
+            /// clears in the new (larger) area. Only consulted
+            /// when `chat_inline_paint_cache_valid` is true.
+            /// 0 = no previous paint.
             chat_inline_paint_top_row: u16 = 0,
             /// Clamped input-line count from the previous full paint
             /// (`min(1 + newlines, panel_rows / 2)`). Compared
