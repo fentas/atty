@@ -21,11 +21,13 @@
 //!    `std.json.Stringify.encodeJsonString`, read via the standard
 //!    parser. Multi-line content round-trips cleanly.
 //!
-//! 3. **`rt.session_id` (provider-side) is intentionally NOT
-//!    persisted.** Provider CLIs garbage-collect ids between runs;
-//!    a stale id would error or resume state the user doesn't
-//!    remember. Restart begins a fresh provider session even when
-//!    the chat ring loads prior turns.
+//! 3. **`rt.session_id` (provider-side) IS persisted** as a
+//!    `kind:"session_id"` record so a recalled dialog can resume
+//!    the provider session via `--resume <id>` instead of starting
+//!    fresh. Provider CLIs garbage-collect ids over time; a stale
+//!    id will surface as a provider-side error on the next request
+//!    and the user can press Alt+r to retry (which the soft-reset
+//!    path treats like any other transient failure).
 
 const std = @import("std");
 
@@ -215,6 +217,15 @@ pub fn appendTurn(allocator: std.mem.Allocator, path: []const u8, kind: dialog.T
 pub fn appendConclusion(allocator: std.mem.Allocator, path: []const u8, text: []const u8) bool {
     if (path.len == 0) return false;
     return appendRecord(allocator, path, "conclusion", text);
+}
+
+/// Append a `kind:"session_id"` record so a later recall can
+/// re-issue `--resume <id>` instead of starting a fresh provider
+/// session. The last `session_id` record wins on load (the worker
+/// can produce a fresh id mid-dialog if the provider rotates).
+pub fn appendSessionId(allocator: std.mem.Allocator, path: []const u8, id: []const u8) bool {
+    if (path.len == 0 or id.len == 0) return false;
+    return appendRecord(allocator, path, "session_id", id);
 }
 
 fn appendRecord(allocator: std.mem.Allocator, path: []const u8, kind_str: []const u8, content: []const u8) bool {
@@ -460,11 +471,13 @@ pub fn parseLine(allocator: std.mem.Allocator, line: []const u8) !LoadedTurn {
 pub const LoadedRecord = union(enum) {
     turn: LoadedTurn,
     conclusion: []u8, // owned
+    session_id: []u8, // owned
 
     pub fn deinit(self: LoadedRecord, allocator: std.mem.Allocator) void {
         switch (self) {
             .turn => |t| allocator.free(t.content),
             .conclusion => |c| allocator.free(c),
+            .session_id => |s| allocator.free(s),
         }
     }
 };
@@ -487,6 +500,10 @@ pub fn parseRecord(allocator: std.mem.Allocator, line: []const u8) !LoadedRecord
     if (std.mem.eql(u8, parsed.value.kind, "conclusion")) {
         const content = try allocator.dupe(u8, parsed.value.content);
         return .{ .conclusion = content };
+    }
+    if (std.mem.eql(u8, parsed.value.kind, "session_id")) {
+        const content = try allocator.dupe(u8, parsed.value.content);
+        return .{ .session_id = content };
     }
     const k: dialog.TurnKind = if (std.mem.eql(u8, parsed.value.kind, "user"))
         .user
