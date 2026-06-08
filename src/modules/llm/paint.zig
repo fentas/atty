@@ -525,8 +525,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     }
                     // Always break to a new row before the command —
                     // otherwise an empty description would land the
-                    // `$ <cmd>` on the same row as the `atty:` prefix,
-                    // breaking the two-row layout invariant.
+                    // `$ <cmd>` on the same row as the `\u{25C7}`
+                    // (◇) assistant prefix, breaking the two-row
+                    // overlay layout invariant.
                     try w.writeAll("\r\n");
                     try w.writeAll("\x1B[2m      $ \x1B[0m\x1B[22;1;38;5;14m");
                     const cslice = pw.truncateToCols(cmd, overlay_field_cap);
@@ -689,6 +690,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     const cmd = parsed.command();
                     var rows: usize = 0;
                     if (skip_rows == 0) {
+                        // Box opener — paired with the `\u{2570}`
+                        // (╰) closer rendered by the `.observation`
+                        // turn at paint.zig:189 (overlay) and
+                        // paint.zig:1516 (inline). If either glyph
+                        // changes, change BOTH or the box looks
+                        // malformed in scrollback.
                         try w.writeAll("\x1B[2;38;5;141m\u{256D} exec \u{2500}\x1B[0m");
                         rows += 1;
                         if (max_rows == 1) return rows;
@@ -803,11 +810,10 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 }
                 i += 1;
                 while (i < c.len and (c[i] == ' ' or c[i] == '\t' or c[i] == '\n' or c[i] == '\r')) i += 1;
-                // Build the quoted match target on the stack at
-                // comptime if `expected` is comptime-known, else
-                // walk the bytes directly. The two callers pass
-                // string literals so the common path is "look for
-                // a quote, then `expected`, then a quote."
+                // Look for the value: an opening `"`, then
+                // `expected` bytes-equal, then a closing `"`. The
+                // closing-quote check is what blocks false-positives
+                // like `"action":"executing"` matching `exec`.
                 if (i >= c.len or c[i] != '"') return false;
                 i += 1;
                 if (i + expected.len + 1 > c.len) return false;
