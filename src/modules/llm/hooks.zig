@@ -220,6 +220,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                             if (rt.conclusion_formatted) |old| rt.allocator.free(old);
                             rt.conclusion_formatted = c;
                         },
+                        .session_id => |s| {
+                            // Resume the same provider session so the
+                            // next request continues from where the
+                            // recalled dialog left off. Stale ids
+                            // surface as a provider error → soft-reset
+                            // → user retries.
+                            if (rt.session_id.len > 0) rt.allocator.free(rt.session_id);
+                            rt.session_id = s;
+                        },
                     }
                 }
             }
@@ -2899,6 +2908,13 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const owned = rt.allocator.dupe(u8, rt.shared.response_session_id_buf[0..len]) catch return;
             if (rt.session_id.len > 0) rt.allocator.free(rt.session_id);
             rt.session_id = owned;
+            // Persist so a future Alt+R recall can resume the same
+            // provider session via `--resume <id>` instead of
+            // starting fresh. Best-effort: persistence failures are
+            // swallowed by appendSessionId (same as appendTurn).
+            if (rt.chat_persist_path.len > 0) {
+                _ = chat_persist.appendSessionId(rt.allocator, rt.chat_persist_path, owned);
+            }
         }
 
         fn latchOsc133Diag(rt: *Runtime) void {

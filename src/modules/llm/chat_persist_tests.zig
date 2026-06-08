@@ -444,7 +444,7 @@ test "parseRecord: turn line round-trips through the .turn arm" {
             try testing.expectEqual(dialog.TurnKind.user, t.kind);
             try testing.expectEqualStrings("hello", t.content);
         },
-        .conclusion => return error.UnexpectedRecord,
+        .conclusion, .session_id => return error.UnexpectedRecord,
     }
 }
 
@@ -453,8 +453,18 @@ test "parseRecord: conclusion line round-trips through the .conclusion arm" {
     const rec = try parseRecord(testing.allocator, line);
     defer rec.deinit(testing.allocator);
     switch (rec) {
-        .turn => return error.UnexpectedRecord,
+        .turn, .session_id => return error.UnexpectedRecord,
         .conclusion => |c| try testing.expect(std.mem.indexOf(u8, c, "listed 2 zig files") != null),
+    }
+}
+
+test "parseRecord: session_id line round-trips through the .session_id arm" {
+    const line = "{\"kind\":\"session_id\",\"content\":\"sess_abc123\"}";
+    const rec = try parseRecord(testing.allocator, line);
+    defer rec.deinit(testing.allocator);
+    switch (rec) {
+        .turn, .conclusion => return error.UnexpectedRecord,
+        .session_id => |s| try testing.expectEqualStrings("sess_abc123", s),
     }
 }
 
