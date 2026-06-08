@@ -163,7 +163,7 @@ test "overlay: assistant_exec with action=done renders ✓ + reason (no raw JSON
     try testing.expect(std.mem.indexOf(u8, bytes.?, "task complete: 42 files") != null);
 }
 
-test "overlay: malformed assistant envelope falls back to raw render so nothing vanishes" {
+test "overlay: malformed assistant content surfaces verbatim as .done reason" {
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",

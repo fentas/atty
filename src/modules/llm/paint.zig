@@ -480,6 +480,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 return;
             }
             const R = dialog.Response(cfg.max_response_bytes);
+            // Stack-allocated, matching renderTurnContentWithSkip's
+            // pre-existing pattern. parseFencedResponse takes no
+            // allocator (pure slice walk + bounded @memcpy) so the
+            // previous heap arena — there to satisfy parseResponse's
+            // JSON allocator — is gone with the JSON path.
             var parsed_storage: R = .{};
             const parsed = &parsed_storage;
             dialog.parseFencedResponse(R, c, parsed);
