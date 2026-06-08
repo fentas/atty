@@ -496,7 +496,7 @@ test "inline chat: shrink clamps at min height (3)" {
     try testing.expectEqual(@as(u16, 3), rt.chat_inline_rows_override.?);
 }
 
-test "inline chat: closing the panel clears the height override" {
+test "inline chat: closing the panel preserves the height override (memo)" {
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -529,10 +529,17 @@ test "inline chat: closing the panel clears the height override" {
 
     rt.chat_inline_open = true;
     rt.chat_inline_rows_override = 12;
-    // Alt+C closes the panel — handler should drop the override.
+    // Alt+C closes — the override now SURVIVES so re-open lands
+    // back at the user's last chosen height (cross-session disk
+    // persistence is a separate follow-up).
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
     try testing.expectEqual(false, rt.chat_inline_open);
-    try testing.expectEqual(@as(?u16, null), rt.chat_inline_rows_override);
+    try testing.expectEqual(@as(?u16, 12), rt.chat_inline_rows_override);
+
+    // Re-open lands back at 12 rows, not the cfg default.
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expectEqual(true, rt.chat_inline_open);
+    try testing.expectEqual(@as(?u16, 12), rt.chat_inline_rows_override);
 }
 
 test "inline chat: pasted UTF-8 (e.g. `•` = 0xE2 0x80 0xA2) lands in the buffer" {

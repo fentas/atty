@@ -1069,9 +1069,11 @@ pub fn configure(comptime cfg: Config) type {
             chat_inline_view_offset: usize = 0,
             /// Live height override for the inline panel. `null` ⇒
             /// `cfg.inline_chat_rows`; Ctrl+Alt+Up bumps, Ctrl+Alt+Down
-            /// trims, both clamped to `[3, ~]`. Resets to `null` on
-            /// panel close so the next open starts at the configured
-            /// default again.
+            /// trims, both clamped to `[3, ~]`. Persists across
+            /// panel close so a re-open lands at the user's last
+            /// chosen height — the resize is treated as a session
+            /// preference, not a per-open opt-in. (Cross-session
+            /// disk persistence is a separate follow-up.)
             chat_inline_rows_override: ?u16 = null,
         };
 
