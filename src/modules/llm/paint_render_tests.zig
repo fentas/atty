@@ -69,10 +69,13 @@ test "provideTermBytes emits OSC 12 on prefix-match edge, OSC 112 on un-match" {
     try testing.expect(!rt.cursor_signal_active);
 }
 
-test "overlay: assistant_exec turn renders structured (description + `$ command`) instead of raw JSON" {
+test "overlay: assistant_exec turn renders as `╭ exec ─` box (Proposal G), no raw JSON" {
     // Regression guard: the structured renderer must split the
-    // envelope into description + indented cyan command and never
-    // leak the raw `{"action":"exec",...}` JSON to the user.
+    // envelope into the timeline-rail box (`╭ exec ─` opener +
+    // command row) and never leak the raw `{"action":"exec",...}`
+    // JSON. Mirrors the inline panel's exec rendering — both
+    // surfaces share the same visual vocabulary so recall + view
+    // switching stays consistent.
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -109,11 +112,11 @@ test "overlay: assistant_exec turn renders structured (description + `$ command`
     rt.chat_overlay_paint_pending = true;
     const bytes = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(bytes != null);
-    // Description visible.
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "find Zig sources") != null);
-    // Command rendered as `$ <cmd>` on its own row.
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "$ ") != null);
+    // Box opener present, command visible, description dropped
+    // (matches the inline panel's Phase 2 design).
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{256D} exec \u{2500}") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "find . -name '*.zig'") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "find Zig sources") == null);
     // The raw JSON envelope MUST NOT appear verbatim in the paint
     // (no `"action":"exec"` substring).
     try testing.expect(std.mem.indexOf(u8, bytes.?, "\"action\":\"exec\"") == null);

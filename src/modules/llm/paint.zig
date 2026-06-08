@@ -516,20 +516,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
 
             switch (parsed.action) {
                 .exec => {
-                    const desc = parsed.description();
+                    // Mirror the inline panel's Proposal G Phase 2
+                    // box: `╭ exec ─` opener + command row. The
+                    // matching `.observation` turn closes the box
+                    // with the `╰` corner prefix the outer loop
+                    // already paints. Description is intentionally
+                    // dropped — the command is self-describing.
                     const cmd = parsed.command();
-                    if (desc.len > 0) {
-                        const dslice = pw.truncateToCols(desc, overlay_field_cap);
-                        try writeSanitized(w, dslice);
-                        if (dslice.len < desc.len) try w.writeAll(" \x1B[2m[\u{2026}]\x1B[0m");
-                    }
-                    // Always break to a new row before the command —
-                    // otherwise an empty description would land the
-                    // `$ <cmd>` on the same row as the `\u{25C7}`
-                    // (◇) assistant prefix, breaking the two-row
-                    // overlay layout invariant.
-                    try w.writeAll("\r\n");
-                    try w.writeAll("\x1B[2m      $ \x1B[0m\x1B[22;1;38;5;14m");
+                    try w.writeAll("\x1B[2;38;5;141m\u{256D} exec \u{2500}\x1B[0m\r\n");
+                    try w.writeAll("\x1B[2m      \x1B[0m\x1B[22;1;38;5;14m");
                     const cslice = pw.truncateToCols(cmd, overlay_field_cap);
                     try writeSanitized(w, cslice);
                     try w.writeAll("\x1B[0m");
