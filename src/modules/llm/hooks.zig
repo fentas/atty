@@ -1787,17 +1787,18 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     if (rt.turns_len == 0) return true;
 
                     // The inline panel uses ROW-based offsets (per
-                    // #213) — the paint computes total_rows and
-                    // clamps the offset to the row-budget cap, so
-                    // the action handler doesn't need to recompute
-                    // it here. Overlay still uses turn-based offset
-                    // (single-screen view; no per-turn scroll
-                    // navigation needed). The clamp difference is
-                    // why max_offset diverges.
+                    // #213). Use the previous paint's recorded
+                    // max — without this clamp, holding PageUp
+                    // past the oldest row parks the offset at a
+                    // huge value, and the same number of PageDowns
+                    // unwinds the over-scroll before the panel
+                    // visibly moves ("scroll feels stuck").
+                    // Overlay still uses turn-based offset
+                    // (single-screen view).
                     const max_offset: usize = if (target_overlay)
                         (if (rt.turns_len > 0) rt.turns_len - 1 else 0)
                     else
-                        std.math.maxInt(usize);
+                        rt.chat_inline_paint_max_offset;
                     const offset_ptr: *usize = if (target_overlay) &rt.chat_view_offset else &rt.chat_inline_view_offset;
                     // Page size mirrors the visible scrollback. The
                     // overlay shows ~all turns up to 24 rows so use

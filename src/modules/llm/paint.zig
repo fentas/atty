@@ -996,6 +996,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 rt.chat_inline_paint_top_row = 0;
                 rt.chat_inline_paint_input_row = 0;
                 rt.chat_inline_paint_input_top_row = 0;
+                // Reset the scroll clamp too — a re-open with new
+                // turn content shouldn't inherit the previous
+                // session's max for the window between toggle and
+                // first paint.
+                rt.chat_inline_paint_max_offset = 0;
                 return true;
             }
 
@@ -1387,15 +1392,40 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // Header row reserved when scrolled back. Decrement
             // scrollback budget by 1 IF offset > 0.
             //
-            // Cap offset at `total_rows - 1` so the user can scroll
-            // up to the very first row even when the panel budget
-            // > total content (each step still navigates one row).
-            // The full-content-fits clamp is enforced naturally:
-            // the visible window calculation below clamps
-            // visible_start_row to 0 when offset has consumed all
-            // the content.
-            const max_inline_offset: usize = if (content_total_rows > 1) content_total_rows - 1 else 0;
+            // Cap offset where the OLDEST content row first becomes
+            // visible — beyond that, scrolling further would just
+            // shrink the visible window without exposing new
+            // content. Without this clamp the user could PageUp
+            // dozens of times past the top, then PageDown would
+            // spend the same number of presses unwinding the
+            // over-scroll before the panel content moved at all
+            // ("scroll feels stuck").
+            //
+            // visible_end = content - offset; visible_start =
+            // max(0, end - budget). The header costs one row when
+            // offset > 0 AND scrollback_rows > 1; the header gate
+            // (`if (inline_offset > 0 and scrollback_budget > 1)`)
+            // ensures no header is drawn when scrollback_rows <= 1,
+            // so effective budget stays at scrollback_rows there.
+            // max_offset = content - effective_budget.
+            const effective_budget: usize = if (scrollback_rows <= 1) scrollback_rows else scrollback_rows - 1;
+            // scrollback_rows == 0 means the panel can't render
+            // ANY content row (terminal too small after divider +
+            // input). Scrolling is meaningless — pin at 0 instead
+            // of letting the formula yield `content_total_rows`
+            // which would let a single PageUp jump to a nonsense
+            // offset just to be reclamped on the next paint.
+            const max_inline_offset: usize = if (scrollback_rows == 0)
+                0
+            else if (content_total_rows > effective_budget)
+                content_total_rows - effective_budget
+            else
+                0;
             const inline_offset: usize = @min(rt.chat_inline_view_offset, max_inline_offset);
+            // Write back the clamped offset + record the max for
+            // the action handler's clamp.
+            rt.chat_inline_view_offset = inline_offset;
+            rt.chat_inline_paint_max_offset = max_inline_offset;
             var scrollback_budget: u16 = scrollback_rows;
             if (inline_offset > 0 and scrollback_budget > 1) {
                 var sb: [80]u8 = undefined;
