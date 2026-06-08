@@ -374,6 +374,10 @@ test "chat scroll: inline panel scrolls only when focus is in the panel" {
     try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
 
     rt.chat_focus_in_panel = true;
+    // Seed the paint cache so the dispatch clamp doesn't pin us
+    // at 0. Production code does this on the first paint after a
+    // surface opens.
+    rt.chat_inline_paint_max_offset = 7;
     try testing.expect(try L.onAction(&rt, &ctx, .chat_scroll_page_up));
     try testing.expect(rt.chat_inline_view_offset > 0);
     try testing.expect(rt.chat_inline_paint_pending);
@@ -1141,4 +1145,271 @@ test "chat overlay: free-text answer to a question clears chat_question_active" 
     try testing.expect(!rt.chat_question_active);
     try testing.expectEqual(@as(usize, 0), rt.chat_input_len);
     try testing.expectEqual(@as(usize, 0), rt.chat_input_cursor);
+}
+
+test "chat scroll: Alt+PageUp / Alt+PageDown dispatch as one-row scroll" {
+    // Parser-level pin: the new bindings map to the legacy
+    // CSI-1 modified-PageUp/Down byte sequences (`\x1b[5;3~` /
+    // `\x1b[6;3~`), and the byte-level handler dispatches them as
+    // `chat_scroll_up` / `chat_scroll_down` — the same row-scroll
+    // semantics as Shift+Arrow. Added because users that don't
+    // reach for Shift+Arrow can use the Alt+PageUp/Down they
+    // already know from `less` / web browsers.
+    const keymap = @import("../../keymap.zig");
+    try std.testing.expectEqualStrings("\x1b[5;3~", keymap.key("Alt+PageUp"));
+    try std.testing.expectEqualStrings("\x1b[6;3~", keymap.key("Alt+PageDown"));
+}
+
+test "chat scroll: lots of content — at max offset the oldest rows are fully visible" {
+    // Long conversation, default panel size. The old clamp parked
+    // max_offset at content - 1, so PageUp-to-top left only one
+    // row visible and PageDown had to spend many presses unwinding
+    // the over-scroll before content moved. The new clamp stops
+    // exactly when the oldest row becomes visible, so the panel
+    // always paints a full-height window of content.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .inline_chat_rows = 8,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 40,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    // 8 turns labelled with row-index so we can pin which one
+    // anchors the top after max-scroll.
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        const body = try std.fmt.allocPrint(testing.allocator, "TURN-{d:0>2}", .{i});
+        try helpers.pushTurn(&rt, .user, body);
+    }
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    try testing.expect(rt.chat_inline_open);
+    rt.chat_focus_in_panel = true;
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+
+    // First paint seeds the cache.
+    rt.chat_inline_paint_pending = true;
+    _ = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(rt.chat_inline_paint_max_offset > 0);
+
+    // Spam PageUp far past max. The dispatch clamp should hold at
+    // the recorded max_offset; the offset MUST NOT balloon.
+    var j: usize = 0;
+    while (j < 100) : (j += 1) _ = try L.onAction(&rt, &ctx, .chat_scroll_page_up);
+    try testing.expectEqual(rt.chat_inline_paint_max_offset, rt.chat_inline_view_offset);
+
+    // Repaint — TURN-00 must be visible at the top.
+    rt.chat_inline_paint_pending = true;
+    const top = (try L.provideTermBytes(&rt, &ctx)).?;
+    try testing.expect(std.mem.indexOf(u8, top, "TURN-00") != null);
+
+    // One PageDown brings TURN-00 out of view (or at least pushes
+    // the window down by `page` rows). Single PageDown should not
+    // require many presses to start moving content.
+    const before = rt.chat_inline_view_offset;
+    _ = try L.onAction(&rt, &ctx, .chat_scroll_page_down);
+    try testing.expect(rt.chat_inline_view_offset < before);
+}
+
+test "chat scroll: small panel height (inline_chat_rows = 3) — scroll still functions" {
+    // Stress the minimum panel size — only ~1 scrollback row.
+    // Common bug shape with small budgets: max_offset clamp
+    // formula underflows or rounds wrong.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .inline_chat_rows = 3,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "SMALL-OLDEST"));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "SMALL-MIDDLE"));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "SMALL-NEWEST"));
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    rt.chat_focus_in_panel = true;
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    rt.chat_inline_paint_pending = true;
+    _ = try L.provideTermBytes(&rt, &ctx);
+
+    // PageUp until clamped.
+    var n: usize = 0;
+    while (n < 10) : (n += 1) _ = try L.onAction(&rt, &ctx, .chat_scroll_page_up);
+    rt.chat_inline_paint_pending = true;
+    const top = (try L.provideTermBytes(&rt, &ctx)).?;
+    // SMALL-OLDEST must reach the panel at some scroll position
+    // (the test would have failed before the clamp fix because the
+    // visible window shrank to 0 useful rows).
+    try testing.expect(std.mem.indexOf(u8, top, "SMALL-OLDEST") != null);
+}
+
+test "chat scroll: large panel height (inline_chat_rows = 20) — content fits, max_offset = 0" {
+    // With a tall panel and short content, the new clamp pins
+    // max_offset at 0 — nothing to scroll. PageUp must not arm
+    // a repaint for no reason.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .inline_chat_rows = 20,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 40,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    // 3 short turns → 3 rows total, well under the 17-row scrollback
+    // budget (20 panel rows - 2 for divider + input - top_gap).
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "first"));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "second"));
+    try helpers.pushTurn(&rt, .user, try testing.allocator.dupe(u8, "third"));
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    rt.chat_focus_in_panel = true;
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    rt.chat_inline_paint_pending = true;
+    _ = try L.provideTermBytes(&rt, &ctx);
+
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_paint_max_offset);
+
+    // PageUp consumed but offset clamped at 0.
+    try testing.expect(try L.onAction(&rt, &ctx, .chat_scroll_page_up));
+    try testing.expectEqual(@as(usize, 0), rt.chat_inline_view_offset);
+}
+
+test "chat scroll: tall turn (5-row done reason) — per-row scroll walks through it" {
+    // A single LLM done-action reason can render 5+ rows. Per-row
+    // scrolling must walk THROUGH the tall turn, not skip it as
+    // one chunk. Pin that PageDown from middle-of-turn moves the
+    // window by one page; offset moves monotonically.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .inline_chat_rows = 5,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_base_reserve = 3,
+        .statusbar_reserve = 3,
+        .terminal_rows = 24,
+        .terminal_cols = 80,
+    };
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+    // Pure-prose fenced reply with 5 hard breaks → 6 rows of
+    // content via md_render.
+    const long = "TALL-1\nTALL-2\nTALL-3\nTALL-4\nTALL-5\nTALL-6";
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, long));
+
+    _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
+    rt.chat_focus_in_panel = true;
+    ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
+    rt.chat_inline_paint_pending = true;
+    _ = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(rt.chat_inline_paint_max_offset > 0);
+
+    // Single line-scroll moves offset by exactly 1.
+    const before = rt.chat_inline_view_offset;
+    _ = try L.onAction(&rt, &ctx, .chat_scroll_up);
+    try testing.expectEqual(before + 1, rt.chat_inline_view_offset);
+
+    // PageUp moves by `inline_chat_rows - 2 = 3` rows (clamped).
+    const page_before = rt.chat_inline_view_offset;
+    _ = try L.onAction(&rt, &ctx, .chat_scroll_page_up);
+    const page_after = rt.chat_inline_view_offset;
+    try testing.expect(page_after > page_before);
 }

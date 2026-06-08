@@ -111,6 +111,8 @@ pub fn key(comptime name: []const u8) []const u8 {
     if (comptime std.mem.eql(u8, name, "Alt+Down")) return "\x1b[1;3B";
     if (comptime std.mem.eql(u8, name, "Alt+Home")) return "\x1b[1;3H";
     if (comptime std.mem.eql(u8, name, "Alt+End")) return "\x1b[1;3F";
+    if (comptime std.mem.eql(u8, name, "Alt+PageUp")) return "\x1b[5;3~";
+    if (comptime std.mem.eql(u8, name, "Alt+PageDown")) return "\x1b[6;3~";
 
     if (comptime std.mem.eql(u8, name, "Ctrl+Right")) return "\x1b[1;5C";
     if (comptime std.mem.eql(u8, name, "Ctrl+Left")) return "\x1b[1;5D";

@@ -487,17 +487,28 @@ test "inline scroll: nonzero inline offset windows the visible turns + emits ind
     _ = try L.onAction(&rt, &ctx, .llm_inline_chat_toggle);
     try testing.expect(rt.chat_inline_open);
     ctx.statusbar_reserve = 3 + L.extraReserveRows(&rt);
-    // Scroll back by 2 turns: only INL-OLDEST should remain.
+    // Try to scroll back by 2 turns. The paint clamps the offset
+    // at the point where the OLDEST row first becomes visible —
+    // with content=3 and scrollback_rows=3 (5 panel rows minus
+    // divider + input), the new clamp is content+1-scrollback_rows = 1.
+    // At offset 1: scrollback_budget = 3 - 1 (header) = 2, so the
+    // two oldest rows (INL-OLDEST + INL-MIDDLE) render. INL-NEWEST
+    // is hidden. Old behavior allowed offset = content - 1 = 2
+    // which left only INL-OLDEST visible — UX trap because more
+    // PageUp presses kept "consuming" without exposing more
+    // content; same number of PageDowns then unwound silently.
     rt.chat_inline_view_offset = 2;
     rt.chat_inline_paint_pending = true;
 
     const bytes = try L.provideTermBytes(&rt, &ctx);
     try testing.expect(bytes != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "INL-OLDEST") != null);
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "INL-MIDDLE") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "INL-MIDDLE") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "INL-NEWEST") == null);
-    try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{2191} 2 below") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes.?, "\u{2191} 1 below") != null);
     try testing.expect(std.mem.indexOf(u8, bytes.?, "Ctrl+End") != null);
+    // Offset got clamped to 1.
+    try testing.expectEqual(@as(usize, 1), rt.chat_inline_view_offset);
 
     // Re-pin to 0 → all three visible, header gone.
     rt.chat_inline_view_offset = 0;

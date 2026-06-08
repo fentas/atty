@@ -379,6 +379,12 @@ pub fn configure(comptime cfg: Config) type {
             // arrows — same rationale as Ctrl+Up/Down above).
             .{ .bytes = keymap.key("Shift+Up"), .action = .chat_scroll_up, .label = "Shift+Up", .description = "chat: scroll back one row (when chat surface is open)" },
             .{ .bytes = keymap.key("Shift+Down"), .action = .chat_scroll_down, .label = "Shift+Down", .description = "chat: scroll forward one row (when chat surface is open)" },
+            // Alt+PageUp / Alt+PageDown — line-scroll alias for
+            // users who don't reach for Shift+Arrow. PageUp/PageDown
+            // already do page-scroll above; the Alt modifier flips
+            // the same key to single-row granularity.
+            .{ .bytes = keymap.key("Alt+PageUp"), .action = .chat_scroll_up, .label = "Alt+PageUp", .description = "chat: scroll back one row (when chat surface is open)" },
+            .{ .bytes = keymap.key("Alt+PageDown"), .action = .chat_scroll_down, .label = "Alt+PageDown", .description = "chat: scroll forward one row (when chat surface is open)" },
             // Jump-to-tail. Reverses PageUp scrolling without a
             // matching number of PageDowns. `Ctrl+End` instead of
             // bare `End` because the latter is already claimed by
@@ -1083,6 +1089,16 @@ pub fn configure(comptime cfg: Config) type {
             /// never exceeds `turns_len - 1` (one turn stays visible).
             chat_view_offset: usize = 0,
             chat_inline_view_offset: usize = 0,
+            /// Maximum useful view-offset recorded by the previous
+            /// inline paint. The chat-scroll action handler clamps
+            /// `chat_inline_view_offset` against this so holding
+            /// PageUp past the oldest row doesn't park the offset
+            /// at a huge value (which then makes the same number of
+            /// PageDowns feel "stuck" — the offset would spend
+            /// dozens of presses unwinding before content moves
+            /// visibly). 0 = no useful scroll (content fits in
+            /// panel) or no paint yet.
+            chat_inline_paint_max_offset: usize = 0,
             /// Live height override for the inline panel. `null` ⇒
             /// `cfg.inline_chat_rows`; Ctrl+Alt+Up bumps, Ctrl+Alt+Down
             /// trims, both clamped to `[3, ~]`. Persists across
