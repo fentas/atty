@@ -843,7 +843,7 @@ fn handle_classify(
     // packages that landed on OSV's advisory list AFTER
     // atty-guard's last bundled-data update.
     //
-    // Walks every parsed package token (not just the first)
+    // Walks the parsed package tokens (not just the first)
     // to defeat the prepend-a-benign-pkg attacker bypass,
     // and keeps the strictest verdict via
     // `verdict_strictly_worse` so a Malicious (Block) pkg
@@ -851,9 +851,39 @@ fn handle_classify(
     // first-non-Safe exit. Short-circuit only on Block —
     // the strictest possible outcome; further OSV calls
     // can't escalate further.
+    //
+    // Each lookup is a sequential blocking HTTP call (250 ms
+    // budget — osv.rs). `OSV_MAX_PKGS_PER_CMD` caps the fan-out
+    // so `npm install p1 … p500` can't turn one classify into
+    // hundreds of outbound requests on this handler thread (a
+    // resource + outbound-flood amplifier). Excess packages are
+    // skipped (logged at -v); 8 covers every realistic multi-pkg
+    // install.
+    //
+    // Reachability caveat (the synchronous-path tradeoff): even a
+    // single uncached lookup (~250 ms) exceeds the atty proxy's
+    // 50 ms classify read timeout (uds_client.zig), so the FIRST
+    // classify of an unknown package times out proxy-side and
+    // falls back to local Tier-1. That fallback is fail-SAFE —
+    // OSV only ever upgrades Safe (it runs solely in the Safe
+    // branch), so a missed verdict can never downgrade a real
+    // threat. The daemon still runs the lookup to completion and
+    // caches the verdict (cache_ttl 1 h), so subsequent classifies
+    // of the same package return the OSV verdict within the
+    // proxy's budget. OSV on this path is therefore best-effort +
+    // eventually-consistent, not a hard real-time signal — moving
+    // it fully off the synchronous classify path is tracked
+    // separately.
     if matches!(result.verdict, Verdict::Safe) {
         if let Some(osv) = &state.osv {
-            for pkg in crate::npm_parser::extract_npm_install_pkgs(&command) {
+            let (pkgs, total) = osv_probe_pkgs(&command);
+            if total > pkgs.len() && state.verbosity >= 1 {
+                eprintln!(
+                    "atty-guard: OSV package cap — probing {} of {total} packages in one classify",
+                    pkgs.len()
+                );
+            }
+            for pkg in pkgs {
                 match osv.lookup_npm(pkg) {
                     Ok(verdict) => {
                         if let Some(r) = crate::osv::osv_verdict_to_result(verdict, pkg) {
@@ -885,22 +915,36 @@ fn handle_classify(
     // gated on `result.verdict == Safe` and silently lost
     // Critical→Block escalation when ANY upstream signal
     // had already nudged Safe to Warn.
+    //
+    // Cross-UID gate: only consult `context.pid`'s threat level when
+    // the caller owns that PID (or is root). Without this, a non-root
+    // client could pass another user's PID and learn — from whether
+    // its own verdict got upgraded to Warn/Block — that the victim's
+    // process tree is marked High/Critical. That's the same cross-
+    // tenant info leak GetThreatLevel/SetThreatLevel gate; mirror it
+    // here. `caller_owns_pid` fails closed (cross-UID, dead PID, or a
+    // /proc read error all skip the upgrade), which only ever loses an
+    // escalation for a non-owned PID — never weakens a verdict the
+    // other signals already produced.
     if let ClassifyContext { pid: Some(pid), .. } = context {
-        let level = state.threat.get(pid);
-        if matches!(level, ThreatLevel::High | ThreatLevel::Critical) {
-            let candidate = ClassifyResult {
-                verdict: if matches!(level, ThreatLevel::Critical) {
-                    Verdict::Block
-                } else {
-                    Verdict::Warn
-                },
-                category: Category::PidHighThreat,
-                confidence: 1.0,
-                reason: "this PID's process tree was marked high-risk by an earlier command".into(),
-                matched: command.clone(),
-            };
-            if verdict_strictly_worse(&result.verdict, &candidate.verdict) {
-                result = candidate;
+        if caller_owns_pid(&peer, pid) {
+            let level = state.threat.get(pid);
+            if matches!(level, ThreatLevel::High | ThreatLevel::Critical) {
+                let candidate = ClassifyResult {
+                    verdict: if matches!(level, ThreatLevel::Critical) {
+                        Verdict::Block
+                    } else {
+                        Verdict::Warn
+                    },
+                    category: Category::PidHighThreat,
+                    confidence: 1.0,
+                    reason: "this PID's process tree was marked high-risk by an earlier command"
+                        .into(),
+                    matched: command.clone(),
+                };
+                if verdict_strictly_worse(&result.verdict, &candidate.verdict) {
+                    result = candidate;
+                }
             }
         }
     }
@@ -920,6 +964,43 @@ fn handle_classify(
 /// single classify response well under the client's read buffer
 /// regardless of command length or hit count.
 const MAX_FIELD_BYTES: usize = 256;
+
+/// Max npm packages probed against OSV per classify. Bounds the
+/// blocking-HTTP fan-out (each lookup ~250 ms) so one
+/// `npm install p1 … pN` can't amplify into hundreds of sequential
+/// outbound requests on a handler thread. 8 covers every realistic
+/// multi-package install.
+const OSV_MAX_PKGS_PER_CMD: usize = 8;
+
+/// Parse npm-install package tokens from `command` and cap the probe
+/// set to `OSV_MAX_PKGS_PER_CMD`. Returns the (possibly truncated) list
+/// plus the pre-cap total so the caller can log when packages were
+/// dropped. The cap keeps the first N in source order: a command with
+/// >8 packages could hide a malicious token past the cap, but OSV only
+/// ever UPGRADES a Safe verdict, so the worst case is falling back to
+/// the bundled/Tier-1 detection — the same outcome as OSV disabled. The
+/// DoS bound is the priority on the synchronous classify path.
+fn osv_probe_pkgs(command: &str) -> (Vec<&str>, usize) {
+    let mut pkgs = crate::npm_parser::extract_npm_install_pkgs(command);
+    let total = pkgs.len();
+    if pkgs.len() > OSV_MAX_PKGS_PER_CMD {
+        pkgs.truncate(OSV_MAX_PKGS_PER_CMD);
+    }
+    (pkgs, total)
+}
+
+/// True when `peer` may consult `pid`'s threat level: root sees every
+/// PID, a non-root caller only PIDs it owns. Fails CLOSED — a cross-UID
+/// PID, an already-dead PID (NotFound), or a /proc read error all
+/// return false. Used to gate classify's threat-map upgrade so a
+/// non-root client can't probe another user's High/Critical mark by
+/// observing whether its own verdict escalates.
+fn caller_owns_pid(peer: &PeerCred, pid: u32) -> bool {
+    if peer.is_root {
+        return true;
+    }
+    matches!(pid_owner_uid(pid), OwnerLookup::Owner(u) if u == peer.uid)
+}
 
 /// Truncate `s` in place to at most `max` bytes, backing up to a UTF-8
 /// char boundary so the result is valid (advisory/command text can be
@@ -2201,6 +2282,78 @@ mod tests {
         let lv: serde_json::Value = serde_json::from_str(&level_reply).unwrap();
         assert_eq!(lv["level"], "low");
         let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn caller_owns_pid_gates_cross_uid() {
+        // The classify threat-map upgrade consults this gate so a
+        // non-root client can't probe another user's High/Critical
+        // mark via verdict escalation. Root sees every PID; non-root
+        // sees only its own; cross-UID and dead PIDs fail closed.
+        let root = PeerCred {
+            uid: 0,
+            is_root: true,
+        };
+        let own_uid = unsafe {
+            extern "C" {
+                fn geteuid() -> u32;
+            }
+            geteuid()
+        };
+        let nonroot = PeerCred {
+            uid: own_uid,
+            is_root: false,
+        };
+        let own_pid = std::process::id();
+
+        // Root bypasses the gate for any PID (even the kernel-only 0).
+        assert!(caller_owns_pid(&root, own_pid));
+        assert!(caller_owns_pid(&root, 0));
+        // Non-root owns its own live process.
+        assert!(caller_owns_pid(&nonroot, own_pid));
+        // Dead/nonexistent PID (no /proc/0) fails closed for non-root.
+        assert!(!caller_owns_pid(&nonroot, 0));
+        // A PID owned by a different UID fails closed. Skip when the
+        // environment has no cross-UID PID (single-UID container,
+        // hidepid) or when the test itself runs as root.
+        if !running_as_root() {
+            if let Some(other_pid) = find_pid_owned_by_other_uid() {
+                assert!(
+                    !caller_owns_pid(&nonroot, other_pid),
+                    "non-root must not own a cross-UID pid"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn osv_probe_pkgs_caps_package_count() {
+        // The amplifier defense: an `npm install p0 … p499` must not
+        // fan out to one blocking OSV lookup per token. The parser
+        // already pre-caps at `MAX_PKGS_PER_COMMAND` (64); this OSV
+        // path tightens that to `OSV_MAX_PKGS_PER_CMD` because each
+        // probe is a ~250 ms network round-trip, not a local scan.
+        let names: Vec<String> = (0..500).map(|i| format!("p{i}")).collect();
+        let cmd = format!("npm install {}", names.join(" "));
+        let (pkgs, total) = osv_probe_pkgs(&cmd);
+        assert_eq!(
+            total,
+            crate::npm_parser::MAX_PKGS_PER_COMMAND,
+            "pre-cap total reflects the parser's bounded package list"
+        );
+        assert!(
+            total > OSV_MAX_PKGS_PER_CMD,
+            "test input must exceed the OSV cap to exercise truncation"
+        );
+        assert_eq!(pkgs.len(), OSV_MAX_PKGS_PER_CMD, "probe set is capped");
+        // Order-preserving cap keeps the first N.
+        assert_eq!(pkgs[0], "p0");
+        assert_eq!(pkgs[OSV_MAX_PKGS_PER_CMD - 1], "p7");
+
+        // Under the cap, every package is probed and total == len.
+        let (small, small_total) = osv_probe_pkgs("npm install left-pad react");
+        assert_eq!(small_total, 2);
+        assert_eq!(small.len(), 2);
     }
 
     #[test]
