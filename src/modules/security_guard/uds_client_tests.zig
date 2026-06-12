@@ -199,6 +199,60 @@ test "parseMutationResponse — error envelope with embedded `\"type\":\"ok\"` t
     try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf, 1));
 }
 
+const trust_cache_mod = @import("trust_cache.zig");
+
+test "parseTrustListBody — extracts hashes into the cache" {
+    var cache: trust_cache_mod.TrustCache = .{};
+    defer cache.deinit(testing.allocator);
+    const a = "a" ** 64;
+    const b = "b" ** 64;
+    const buf = "{\"id\":5,\"type\":\"trust_list\",\"trust\":[\"" ++ a ++ "\",\"" ++ b ++ "\"]}";
+    try mod.Client.parseTrustListBody(buf, 5, testing.allocator, &cache);
+    try testing.expect(cache.contains(a));
+    try testing.expect(cache.contains(b));
+}
+
+test "parseTrustListBody — empty array seeds nothing" {
+    var cache: trust_cache_mod.TrustCache = .{};
+    defer cache.deinit(testing.allocator);
+    try mod.Client.parseTrustListBody(
+        \\{"id":6,"type":"trust_list","trust":[]}
+    , 6, testing.allocator, &cache);
+    try testing.expect(!cache.contains("c" ** 64));
+}
+
+test "parseTrustListBody — error envelope → DaemonError" {
+    var cache: trust_cache_mod.TrustCache = .{};
+    defer cache.deinit(testing.allocator);
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseTrustListBody(
+        \\{"id":7,"type":"error","message":"not allowed"}
+    , 7, testing.allocator, &cache));
+}
+
+test "parseTrustListBody — id mismatch → DaemonError" {
+    var cache: trust_cache_mod.TrustCache = .{};
+    defer cache.deinit(testing.allocator);
+    const a = "a" ** 64;
+    const buf = "{\"id\":5,\"type\":\"trust_list\",\"trust\":[\"" ++ a ++ "\"]}";
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseTrustListBody(buf, 9, testing.allocator, &cache));
+}
+
+test "parseClassifyResponse — unquoted scalar value rejected" {
+    // `{"type":ok}` — a bare identifier where a string belongs must be
+    // rejected as malformed, not silently accepted as a scalar token.
+    const buf =
+        \\{"id":11,"type":ok}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.parseClassifyResponse(buf, 11));
+}
+
+test "parseClassifyResponse — duplicate top-level key rejected" {
+    const buf =
+        \\{"id":12,"type":"classify","verdict":"safe","verdict":"block","category":"none","confidence":0,"reason":"","matched":""}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.parseClassifyResponse(buf, 12));
+}
+
 test "Client.init constructs without connecting" {
     var c = mod.Client.init("/nonexistent.sock");
     defer c.deinit();

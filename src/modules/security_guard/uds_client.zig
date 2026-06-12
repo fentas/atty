@@ -187,7 +187,13 @@ pub const Client = struct {
             },
         };
 
-        return parseClassifyResponse(self.read_buf[0..line_len], id);
+        // Close on parse failure (malformed / wrong type / id mismatch):
+        // these signal a possible stream desync, so the next call must
+        // reconnect rather than risk reading a misaligned reply.
+        return parseClassifyResponse(self.read_buf[0..line_len], id) catch |e| {
+            self.close();
+            return e;
+        };
     }
 
     pub fn setThreatLevel(self: *Client, pid: u32, level: ThreatLevel) Error!void {
@@ -225,7 +231,13 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        return parseMutationResponse(self.read_buf[0..line_len], expected_id);
+        // Close on parse failure for the same desync reason as the
+        // classify path — a malformed reply or id mismatch means the
+        // next call should start from a clean reconnect.
+        parseMutationResponse(self.read_buf[0..line_len], expected_id) catch |e| {
+            self.close();
+            return e;
+        };
     }
 
     /// Pure-function variant of `readMutationResponse`'s parse —
@@ -341,15 +353,29 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        const body = self.read_buf[0..line_len];
-        // Structural parse + id validation, same as the classify path —
-        // pre-this-PR trustList substring-scanned for `"type":"error"`
-        // and `"trust":[`, which (a) silently ignored a desynced reply
-        // and (b) could be confused by those literals inside another
-        // field. Surface auth / sandbox rejections; ignore a malformed
-        // line (caller treats trustList errors as non-fatal).
-        const obj = scanObject(body) catch return Error.DaemonError;
-        try checkId(&obj, id);
+        // Close on any parse/desync failure so the next daemon call
+        // reconnects from a clean stream (same rationale as the classify
+        // + mutation paths).
+        parseTrustListBody(self.read_buf[0..line_len], id, allocator, target) catch |e| {
+            self.close();
+            return e;
+        };
+    }
+
+    /// Pure-function body of `trustList` — split out so tests can drive
+    /// the envelope + hash-extraction logic without a socket. Structural
+    /// parse + id validation, same as the classify path: pre-this-PR
+    /// trustList substring-scanned for `"type":"error"` and `"trust":[`,
+    /// which (a) silently ignored a desynced reply and (b) could be
+    /// confused by those literals inside another field.
+    pub fn parseTrustListBody(
+        body: []const u8,
+        expected_id: u64,
+        allocator: std.mem.Allocator,
+        target: *trust_cache_mod.TrustCache,
+    ) Error!void {
+        const obj = try scanObject(body);
+        try checkId(&obj, expected_id);
         const type_s = obj.get("type") orelse return Error.DaemonError;
         if (!std.mem.eql(u8, type_s, "trust_list")) return Error.DaemonError;
         // `trust` is the raw `["..",".."]` span; extract each 64-char hex
@@ -614,6 +640,20 @@ fn balancedEnd(buf: []const u8, open: usize) ?usize {
     return null;
 }
 
+/// True when `s` is a JSON literal that may appear unquoted as a value:
+/// `true` / `false` / `null`, or a number. Rejects bare identifiers
+/// (`ok`), leading `+`, and `inf`/`nan` (which `parseFloat` would
+/// otherwise accept) by requiring the first byte to be `-` or a digit.
+fn validScalar(s: []const u8) bool {
+    if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "null")) {
+        return true;
+    }
+    if (s.len == 0) return false;
+    if (!(s[0] == '-' or (s[0] >= '0' and s[0] <= '9'))) return false;
+    _ = std.fmt.parseFloat(f64, s) catch return false;
+    return true;
+}
+
 /// True when everything after the closing `}` at `close` is whitespace.
 /// A second object or junk appended to the line (`{...} {...}`) is a
 /// desync / protocol violation, not a valid single-object response.
@@ -663,9 +703,18 @@ fn scanObject(buf: []const u8) Error!ParsedObject {
                 {}
                 if (i == start) return Error.DaemonError;
                 value = buf[start..i];
+                // A bare (unquoted) value must be a JSON literal — a
+                // number (our `id`/`confidence`) or true/false/null.
+                // Reject anything else (e.g. `{"type":ok}`) so malformed
+                // input can't slip an unquoted token past the parser.
+                if (!validScalar(value)) return Error.DaemonError;
             },
         }
         if (obj.len >= max_object_members) return Error.DaemonError;
+        // Reject duplicate top-level keys: a security-sensitive message
+        // with two `verdict`s (or `id`s) is ambiguous, so refuse it
+        // rather than silently picking one.
+        if (obj.get(key) != null) return Error.DaemonError;
         obj.members[obj.len] = .{ .key = key, .value = value };
         obj.len += 1;
         i = skipWs(buf, i);
