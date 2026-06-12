@@ -117,6 +117,24 @@ test "parseClassifyResponse — escaped key text in values is inert" {
     try testing.expect(r.verdict == .safe);
 }
 
+test "parseClassifyResponse — trailing second object rejected" {
+    // A desynced line carrying two objects must not be accepted as the
+    // first object only — that would silently hide a protocol violation.
+    const buf =
+        \\{"id":9,"type":"classify","verdict":"safe","category":"none","confidence":0,"reason":"","matched":""} {"id":999,"type":"classify","verdict":"block"}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.parseClassifyResponse(buf, 9));
+}
+
+test "parseClassifyResponse — mismatched bracket in value rejected" {
+    // `trust`-style array value with a mismatched closer (`[ ... }`)
+    // must fail the structural reader rather than be treated as balanced.
+    const buf =
+        \\{"id":10,"type":"classify","verdict":"safe","category":"none","confidence":0,"reason":"","matched":"","extra":[1,2}}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.parseClassifyResponse(buf, 10));
+}
+
 test "parseClassifyResponse — field order independence" {
     // Reordering ClassifyResult in protocol.rs (reason before verdict)
     // must not change the parse — the structural reader keys by name.

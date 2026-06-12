@@ -588,15 +588,23 @@ fn stringEnd(buf: []const u8, open: usize) ?usize {
 
 /// Index of the closing bracket matching the `{`/`[` at `open`. Skips
 /// nested strings (and their escapes) so brackets inside string values
-/// don't unbalance the depth count. null on an unbalanced span.
+/// don't unbalance the count, and requires each closer to match its
+/// opener's type — `{]` / `[}` are rejected (`null`), not treated as
+/// balanced. null on any unbalanced / mismatched / over-deep span.
 fn balancedEnd(buf: []const u8, open: usize) ?usize {
+    var stack: [16]u8 = undefined;
     var depth: usize = 0;
     var i = open;
     while (i < buf.len) : (i += 1) {
         switch (buf[i]) {
             '"' => i = stringEnd(buf, i) orelse return null,
-            '{', '[' => depth += 1,
+            '{', '[' => {
+                if (depth >= stack.len) return null;
+                stack[depth] = if (buf[i] == '{') '}' else ']';
+                depth += 1;
+            },
             '}', ']' => {
+                if (depth == 0 or stack[depth - 1] != buf[i]) return null;
                 depth -= 1;
                 if (depth == 0) return i;
             },
@@ -606,9 +614,17 @@ fn balancedEnd(buf: []const u8, open: usize) ?usize {
     return null;
 }
 
+/// True when everything after the closing `}` at `close` is whitespace.
+/// A second object or junk appended to the line (`{...} {...}`) is a
+/// desync / protocol violation, not a valid single-object response.
+fn onlyTrailingWs(buf: []const u8, close: usize) bool {
+    return skipWs(buf, close + 1) == buf.len;
+}
+
 /// Read a single top-level JSON object's members structurally.
-/// `Error.DaemonError` on anything that isn't a well-formed object or
-/// that carries more than `max_object_members` fields.
+/// `Error.DaemonError` on anything that isn't a well-formed object, that
+/// carries more than `max_object_members` fields, or that has trailing
+/// non-whitespace bytes after the top-level `}`.
 fn scanObject(buf: []const u8) Error!ParsedObject {
     var obj: ParsedObject = .{};
     var i = skipWs(buf, 0);
@@ -617,7 +633,10 @@ fn scanObject(buf: []const u8) Error!ParsedObject {
     while (true) {
         i = skipWs(buf, i);
         if (i >= buf.len) return Error.DaemonError;
-        if (buf[i] == '}') return obj;
+        if (buf[i] == '}') {
+            if (!onlyTrailingWs(buf, i)) return Error.DaemonError;
+            return obj;
+        }
         if (buf[i] != '"') return Error.DaemonError;
         const key_end = stringEnd(buf, i) orelse return Error.DaemonError;
         const key = buf[i + 1 .. key_end];
@@ -655,13 +674,12 @@ fn scanObject(buf: []const u8) Error!ParsedObject {
             i += 1;
             continue;
         }
-        if (buf[i] == '}') return obj;
+        if (buf[i] == '}') {
+            if (!onlyTrailingWs(buf, i)) return Error.DaemonError;
+            return obj;
+        }
         return Error.DaemonError;
     }
-    // Bytes after the top-level `}` are intentionally ignored: the wire
-    // is line-framed (one object per `\n`), so `readLine` already scoped
-    // `buf` to a single response, and trailing junk can't alter the
-    // depth-1 fields we read.
 }
 
 /// Reject a reply whose echoed `id` doesn't match the request's. A
