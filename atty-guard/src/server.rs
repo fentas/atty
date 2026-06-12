@@ -694,7 +694,13 @@ fn stream_warn_events(
     let reg_id = state
         .warn_broadcast
         .register(crate::warn_consumer::Subscriber::new(pid_tree_root, tx));
-    write_response(writer, id, ResponseBody::Subscribed)?;
+    // Deregister on a failed ack too: a bare `?` here would return
+    // before the deregister at the end, leaking the just-registered
+    // entry in the broadcast list (the leak this change closes).
+    if let Err(e) = write_response(writer, id, ResponseBody::Subscribed) {
+        state.warn_broadcast.deregister(reg_id);
+        return Err(e);
+    }
     if state.verbosity >= 1 {
         eprintln!("atty-guard: subscriber attached (pid_tree_root={pid_tree_root})");
     }
@@ -1599,6 +1605,33 @@ mod tests {
             "non-root must not subscribe to a PID owned by another uid"
         );
         assert!(denied.unwrap().contains("owned by uid"));
+    }
+
+    #[test]
+    fn peer_disconnected_detects_eof_and_unexpected_data_not_idle() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        // Idle live peer → still connected (recv returns EAGAIN).
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert!(
+            !peer_disconnected(a.as_raw_fd()),
+            "an idle, open peer must not be reported disconnected"
+        );
+        // Unexpected inbound byte → close (subscribers send nothing
+        // after subscribe; a squat byte must not hold the slot).
+        let (c, d) = UnixStream::pair().unwrap();
+        (&d).write_all(b"x").unwrap();
+        assert!(
+            peer_disconnected(c.as_raw_fd()),
+            "unexpected inbound data must close the stream"
+        );
+        // Peer closed its end → EOF → close.
+        let (e, f) = UnixStream::pair().unwrap();
+        drop(f);
+        assert!(
+            peer_disconnected(e.as_raw_fd()),
+            "peer EOF must close the stream"
+        );
     }
 
     #[test]
