@@ -191,3 +191,13 @@ test "RawMode.enter on a non-TTY fd surfaces NotATty" {
     }
     try std.testing.expectError(error.NotATty, RawMode.enter(pipe_fds[0]));
 }
+
+test "ghost.list_count ships off (0) by default — matches docs" {
+    // Regression pin for audit #426: the shipped default drifted to 2
+    // while the field's own doc comment, config.def.zig, and
+    // docs/architecture.md all document 0 (pick-list off). Assert the
+    // TYPE default (not the resolved value, which a user's config.zig
+    // may override) so the canonical default can't silently drift again.
+    // `atty.Ghost` re-exports `defaults.Ghost` through the config module.
+    try std.testing.expectEqual(@as(u8, 0), (atty.Ghost{}).list_count);
+}
