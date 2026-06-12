@@ -50,7 +50,7 @@ pub const Ghost = struct {
     /// 0 disables the feature (default). Capped at 9 — the default
     /// bindings are Ctrl+1..Ctrl+9 / Esc+1..Esc+9, and most
     /// terminals can't address more than that without chord keys.
-    list_count: u8 = 2,
+    list_count: u8 = 0,
 
     /// Style of the rendered list entries — applied to both the
     /// 1-based index prefix (`1: `, `2: `, …) and the entry text.
