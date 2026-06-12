@@ -14,10 +14,12 @@ use crate::protocol::{
     Verdict,
 };
 use crate::threat_map::ThreatMap;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// Hard cap on a single request line. Anything longer is treated
@@ -78,6 +80,7 @@ pub fn serve(
         trust_store,
         osv,
         warn_broadcast,
+        subscribers: Arc::new(SubscriberSlots::new()),
     });
 
     // Bounded-resources gate: shared atomic counter ticks up on
@@ -91,15 +94,15 @@ pub fn serve(
     // the daemon). Print a stderr warning so the misconfig is
     // discoverable rather than invisible.
     let max_conn = if server_cfg.max_concurrent_connections == 0 {
-        eprintln!(
-            "atty-guard: max_concurrent_connections=0 is a misconfig — clamping to 1"
-        );
+        eprintln!("atty-guard: max_concurrent_connections=0 is a misconfig — clamping to 1");
         1
     } else {
         server_cfg.max_concurrent_connections
     };
     let read_timeout = if server_cfg.idle_read_timeout_secs > 0 {
-        Some(std::time::Duration::from_secs(server_cfg.idle_read_timeout_secs))
+        Some(std::time::Duration::from_secs(
+            server_cfg.idle_read_timeout_secs,
+        ))
     } else {
         None
     };
@@ -147,12 +150,11 @@ pub fn serve(
         let state = state.clone();
         let in_flight = in_flight.clone();
         thread::spawn(move || {
-            // ConnGuard decrements on drop so the slot is freed
-            // whether the handler returns Ok, Err, or panics.
-            let _guard = ConnGuard {
-                counter: in_flight,
-            };
-            if let Err(e) = handle(stream, state) {
+            // The ConnGuard is created inside `handle` so it can be
+            // released early when the connection upgrades to a
+            // long-lived warn-event subscription (which moves to a
+            // separate subscriber cap).
+            if let Err(e) = handle(stream, state, in_flight) {
                 eprintln!("atty-guard: connection error: {e}");
             }
         });
@@ -160,16 +162,29 @@ pub fn serve(
     Ok(())
 }
 
-/// RAII slot release for the in-flight counter. Drop runs even
-/// on panic (handler thread cleanup), guaranteeing the slot
-/// frees up so a panicked connection doesn't leak capacity.
+/// RAII slot release for the in-flight request-connection counter.
+/// Drop runs even on panic (handler thread cleanup), guaranteeing
+/// the slot frees up so a panicked connection doesn't leak
+/// capacity. `release_now` hands the slot back early (and disarms
+/// the Drop) when a connection upgrades to a warn-event subscriber
+/// tracked under the separate subscriber cap.
 struct ConnGuard {
-    counter: Arc<std::sync::atomic::AtomicUsize>,
+    counter: Arc<AtomicUsize>,
+    armed: bool,
+}
+impl ConnGuard {
+    fn release_now(&mut self) {
+        if self.armed {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+            self.armed = false;
+        }
+    }
 }
 impl Drop for ConnGuard {
     fn drop(&mut self) {
-        self.counter
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if self.armed {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -194,6 +209,81 @@ struct State {
     /// will drive `broadcast()` calls; SubscribeWarnEvents
     /// handler registers new subscribers.
     warn_broadcast: Arc<crate::warn_consumer::Broadcast>,
+    /// Separate slot accounting for long-lived warn-event
+    /// subscribers, exempt from the request connection cap so a
+    /// flood of subscribers can't starve classify (and vice versa).
+    subscribers: Arc<SubscriberSlots>,
+}
+
+/// Caps for `SubscribeWarnEvents` connections. Kept separate from
+/// `max_concurrent_connections` (which guards short-lived
+/// request/response RPCs): a subscriber holds its connection for
+/// its whole lifetime, so counting subscribers against the request
+/// cap let a handful of idle subscribers brick classify for every
+/// user (the original DoS). The per-UID cap stops one local user
+/// from grabbing every subscriber slot.
+const MAX_WARN_SUBSCRIBERS_TOTAL: usize = 16;
+const MAX_WARN_SUBSCRIBERS_PER_UID: usize = 4;
+
+/// Bounded per-UID + total subscriber accounting. `try_acquire`
+/// returns an RAII `SubscriberSlot` that releases on drop (handler
+/// thread exit), so a panicked or disconnected subscriber always
+/// frees its slot.
+struct SubscriberSlots {
+    inner: Mutex<SubscriberCounts>,
+}
+
+#[derive(Default)]
+struct SubscriberCounts {
+    total: usize,
+    per_uid: HashMap<u32, usize>,
+}
+
+impl SubscriberSlots {
+    fn new() -> Self {
+        SubscriberSlots {
+            inner: Mutex::new(SubscriberCounts::default()),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>, uid: u32) -> Option<SubscriberSlot> {
+        let mut c = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if c.total >= MAX_WARN_SUBSCRIBERS_TOTAL {
+            return None;
+        }
+        let n = c.per_uid.entry(uid).or_insert(0);
+        if *n >= MAX_WARN_SUBSCRIBERS_PER_UID {
+            return None;
+        }
+        *n += 1;
+        c.total += 1;
+        Some(SubscriberSlot {
+            slots: self.clone(),
+            uid,
+        })
+    }
+
+    fn release(&self, uid: u32) {
+        let mut c = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        c.total = c.total.saturating_sub(1);
+        if let Some(n) = c.per_uid.get_mut(&uid) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                c.per_uid.remove(&uid);
+            }
+        }
+    }
+}
+
+struct SubscriberSlot {
+    slots: Arc<SubscriberSlots>,
+    uid: u32,
+}
+
+impl Drop for SubscriberSlot {
+    fn drop(&mut self) {
+        self.slots.release(self.uid);
+    }
 }
 
 /// Peer credentials read from the UDS via SO_PEERCRED at accept
@@ -289,7 +379,17 @@ impl PeerCred {
     }
 }
 
-fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
+fn handle(
+    stream: UnixStream,
+    state: Arc<State>,
+    in_flight: Arc<AtomicUsize>,
+) -> std::io::Result<()> {
+    // RAII release of the request-connection slot; freed on return
+    // (Ok/Err/panic) unless the connection upgrades to a subscriber.
+    let mut conn_guard = ConnGuard {
+        counter: in_flight,
+        armed: true,
+    };
     let peer = PeerCred::from_stream(&stream)?;
     if state.verbosity >= 2 {
         eprintln!("atty-guard: peer uid={} root={}", peer.uid, peer.is_root);
@@ -375,7 +475,38 @@ fn handle(stream: UnixStream, state: Arc<State>) -> std::io::Result<()> {
         // connection is closed; bail out of the request loop.
         if let Request::SubscribeWarnEvents { parent_pid_tree } = &request {
             let root = *parent_pid_tree;
-            return stream_warn_events(state.clone(), &mut writer, id, root);
+            // --- authorization ---
+            // parent_pid_tree == 0 is the unfiltered "all PIDs"
+            // firehose (operator debug) — root only, or any
+            // unprivileged group member could read every user's
+            // warn-mode execve events (pid/comm/argv0). A non-zero
+            // root must be a PID the caller owns; otherwise a
+            // same-group client could watch another user's process
+            // tree. Mirrors the SetThreatLevel / GetThreatLevel UID
+            // gates.
+            if let Some(msg) = warn_subscribe_denied(&peer, root) {
+                write_response(&mut writer, id, ResponseBody::Error { message: msg })?;
+                continue;
+            }
+            // --- bounded subscriber slot (separate from the request
+            // connection cap) ---
+            let slot = match state.subscribers.try_acquire(peer.uid) {
+                Some(s) => s,
+                None => {
+                    write_response(
+                        &mut writer,
+                        id,
+                        ResponseBody::Error {
+                            message: "warn-event subscriber limit reached".into(),
+                        },
+                    )?;
+                    continue;
+                }
+            };
+            // Hand the request-connection slot back now: a subscriber
+            // lives under the subscriber cap, not the classify cap.
+            conn_guard.release_now();
+            return stream_warn_events(state.clone(), &mut writer, id, root, slot);
         }
 
         let response = dispatch(&state, request, peer);
@@ -444,49 +575,175 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
 /// recompiles → execve flurry) without dropping during the
 /// reader's normal scheduling latency. Aging-out at the broadcast
 /// level (vs per-message timeout) keeps the hot path lock-free.
-///
-/// Caveat (#347 PR 2a follow-up): each subscriber holds a
-/// connection-thread + a `ConnGuard` slot for its lifetime. With
-/// `max_concurrent_connections` defaulting to 64 (server.rs),
-/// 64 long-lived subscribers brick every other RPC. Future PR
-/// should exempt `SubscribeWarnEvents` from the cap or use a
-/// separate counter — out of scope here.
 const SUBSCRIBER_INBOX: usize = 256;
+
+/// How often a quiet subscriber stream probes the socket for peer
+/// disconnect. The broadcast only reaps a dead subscriber on its
+/// next `try_send`, which may never come if no warn events fire —
+/// so without this poll a disconnected subscriber would hold its
+/// slot forever. 5 s trades a small reap latency for negligible
+/// idle wakeups.
+const SUBSCRIBER_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Authorization gate for a `SubscribeWarnEvents` request. Returns
+/// `Some(error_message)` when the caller may not subscribe to
+/// `pid_tree_root`, `None` when allowed.
+///
+/// PID-reuse defense: read `/proc/<pid>/stat` starttime before AND
+/// after the ownership check and reject if it changed — otherwise a
+/// non-root caller could race a short-lived owned PID so it recycles
+/// to a different user's process between the ownership read and the
+/// subscription, watching that user's tree. Mirrors the
+/// SetThreatLevel TOCTOU sandwich. (This closes the during-check
+/// window; over the subscription's lifetime the broadcast filters by
+/// PID number alone, an inherent limitation tracked separately.)
+fn warn_subscribe_denied(peer: &PeerCred, pid_tree_root: u32) -> Option<String> {
+    use crate::threat_map::{pid_starttime, ProcRead};
+    if peer.is_root {
+        return None;
+    }
+    if pid_tree_root == 0 {
+        return Some(
+            "warn-event subscription with parent_pid_tree=0 (all PIDs) requires root".into(),
+        );
+    }
+    let start1 = match pid_starttime(pid_tree_root) {
+        ProcRead::Found(t) => t,
+        ProcRead::NotFound => {
+            return Some(format!(
+                "pid {pid_tree_root} no longer exists — cannot subscribe"
+            ))
+        }
+        ProcRead::Error(msg) => return Some(msg),
+    };
+    match pid_owner_uid(pid_tree_root) {
+        OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+            return Some(format!(
+                "non-root caller (uid {}) cannot subscribe to pid {pid_tree_root} (owned by uid {owner_uid})",
+                peer.uid
+            ))
+        }
+        OwnerLookup::NotFound => {
+            return Some(format!("pid {pid_tree_root} no longer exists — cannot subscribe"))
+        }
+        OwnerLookup::Error(msg) => return Some(msg),
+        OwnerLookup::Owner(_) => {}
+    }
+    match pid_starttime(pid_tree_root) {
+        ProcRead::Found(t) if t == start1 => None,
+        ProcRead::Found(_) => Some(format!(
+            "pid {pid_tree_root} was recycled mid-request — refusing to subscribe"
+        )),
+        ProcRead::NotFound => Some(format!(
+            "pid {pid_tree_root} disappeared mid-request — cannot subscribe"
+        )),
+        ProcRead::Error(msg) => Some(msg),
+    }
+}
+
+/// True if the subscriber stream should be closed. A MSG_PEEK |
+/// MSG_DONTWAIT recv inspects the socket without consuming bytes:
+///   0  = peer sent EOF → closed.
+///   <0 with EAGAIN/EWOULDBLOCK = still connected, nothing queued.
+///   <0 with any other errno = broken connection → close.
+///   >0 = unexpected inbound bytes. Subscribers send nothing after
+///        the subscribe request, so any inbound data is a protocol
+///        violation → close. Returning "connected" here would let a
+///        client send one byte and squat the slot forever (MSG_PEEK
+///        never consumes it), re-creating the bounded-slot DoS this
+///        change closes.
+fn peer_disconnected(fd: i32) -> bool {
+    const MSG_PEEK: i32 = 0x2;
+    const MSG_DONTWAIT: i32 = 0x40;
+    const EAGAIN: i32 = 11; // == EWOULDBLOCK on Linux
+    const EINTR: i32 = 4;
+    extern "C" {
+        fn recv(fd: i32, buf: *mut std::ffi::c_void, len: usize, flags: i32) -> isize;
+    }
+    let mut b = [0u8; 1];
+    let n = unsafe {
+        recv(
+            fd,
+            b.as_mut_ptr() as *mut std::ffi::c_void,
+            1,
+            MSG_PEEK | MSG_DONTWAIT,
+        )
+    };
+    if n < 0 {
+        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        // EAGAIN/EWOULDBLOCK = connected, nothing queued. EINTR = a
+        // signal interrupted the peek (SIGCHLD/SIGHUP/etc.) — the peer
+        // is still there; treating it as a disconnect would spuriously
+        // close the stream. Any other errno = broken connection.
+        return err != EAGAIN && err != EINTR;
+    }
+    // n == 0 (EOF) or n > 0 (unexpected data) → close.
+    true
+}
 
 fn stream_warn_events(
     state: Arc<State>,
     writer: &mut UnixStream,
     id: u64,
     pid_tree_root: u32,
+    // Held for the subscriber's lifetime; releases its slot on drop
+    // (return/panic) so the separate subscriber cap stays accurate.
+    _slot: SubscriberSlot,
 ) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
     // Register FIRST, ack SECOND. This way the ack provably
     // implies the subscriber is in the broadcast list — a
     // publisher that fires the moment the ack hits the wire
     // can't lose its first event to a register-not-yet-run race.
     let (tx, rx) = std::sync::mpsc::sync_channel::<ResponseBody>(SUBSCRIBER_INBOX);
-    state
+    let reg_id = state
         .warn_broadcast
         .register(crate::warn_consumer::Subscriber::new(pid_tree_root, tx));
-    write_response(writer, id, ResponseBody::Subscribed)?;
-    if state.verbosity >= 1 {
-        eprintln!(
-            "atty-guard: subscriber attached (pid_tree_root={pid_tree_root})"
-        );
+    // Deregister on a failed ack too: a bare `?` here would return
+    // before the deregister at the end, leaking the just-registered
+    // entry in the broadcast list (the leak this change closes).
+    if let Err(e) = write_response(writer, id, ResponseBody::Subscribed) {
+        state.warn_broadcast.deregister(reg_id);
+        return Err(e);
     }
-    // Block on the channel until either an event arrives or the
-    // sender side disappears (daemon shutdown). Each event is
-    // written with `id=0` — the protocol envelope's id field
-    // pairs requests with replies; server-pushed events aren't
-    // replies and don't have one to echo. Subscribers parse on
-    // `type` discriminator.
-    while let Ok(body) = rx.recv() {
-        if let Err(e) = write_response(writer, 0, body) {
-            if state.verbosity >= 1 {
-                eprintln!("atty-guard: subscriber write failed: {e} — closing");
+    if state.verbosity >= 1 {
+        eprintln!("atty-guard: subscriber attached (pid_tree_root={pid_tree_root})");
+    }
+    let fd = writer.as_raw_fd();
+    // Wait for events, but wake periodically to detect peer
+    // disconnect even when no events are flowing — otherwise a
+    // subscriber that quietly went away would hold its slot until
+    // the next broadcast tried (and failed) to write to it, which
+    // may be never. Each event is written with `id=0`: the envelope
+    // id pairs requests with replies, and server-pushed events
+    // aren't replies. Subscribers parse on the `type` discriminator.
+    loop {
+        match rx.recv_timeout(SUBSCRIBER_POLL) {
+            Ok(body) => {
+                if let Err(e) = write_response(writer, 0, body) {
+                    if state.verbosity >= 1 {
+                        eprintln!("atty-guard: subscriber write failed: {e} — closing");
+                    }
+                    break;
+                }
             }
-            break;
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if peer_disconnected(fd) {
+                    if state.verbosity >= 1 {
+                        eprintln!("atty-guard: subscriber disconnected (idle) — closing");
+                    }
+                    break;
+                }
+            }
+            // Broadcast sender dropped — daemon shutting down.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    // Explicitly deregister so a quiet disconnect (no events flowing,
+    // so broadcast's lazy reap never runs) doesn't leave a dead entry
+    // accumulating in the broadcast list across connect/disconnect
+    // cycles.
+    state.warn_broadcast.deregister(reg_id);
     Ok(())
 }
 
@@ -532,14 +789,12 @@ fn handle_classify(
         let _ = state.trust_store.ensure_loaded(peer.uid);
         state.trust_store.ensure_system_fetched_loaded();
         let system_fetched = state.trust_store.list_system_fetched();
-        let overlay_persistent = state.trust_store.list_atoms(
-            peer.uid,
-            crate::trust_store::ListScope::Persistent,
-        );
-        let overlay_session = state.trust_store.list_atoms(
-            peer.uid,
-            crate::trust_store::ListScope::Session,
-        );
+        let overlay_persistent = state
+            .trust_store
+            .list_atoms(peer.uid, crate::trust_store::ListScope::Persistent);
+        let overlay_session = state
+            .trust_store
+            .list_atoms(peer.uid, crate::trust_store::ListScope::Session);
         // Scan order: system-fetched (shared, daemon-managed)
         // → user persistent (per-UID, sudo-mediated) → user
         // session (per-UID, banner-driven). First-match-wins;
@@ -639,9 +894,7 @@ fn handle_classify(
                 },
                 category: Category::PidHighThreat,
                 confidence: 1.0,
-                reason:
-                    "this PID's process tree was marked high-risk by an earlier command"
-                        .into(),
+                reason: "this PID's process tree was marked high-risk by an earlier command".into(),
                 matched: command.clone(),
             };
             if verdict_strictly_worse(&result.verdict, &candidate.verdict) {
@@ -1134,7 +1387,11 @@ fn handle_session_write(state: &State, peer: PeerCred, target_uid: Option<u32>) 
                     sections.push(format!(
                         "kept {} invalid entr{} in session for review:\n{}",
                         report.invalid.len(),
-                        if report.invalid.len() == 1 { "y" } else { "ies" },
+                        if report.invalid.len() == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        },
                         lines.join("\n"),
                     ));
                 }
@@ -1148,7 +1405,11 @@ fn handle_session_write(state: &State, peer: PeerCred, target_uid: Option<u32>) 
                         "kept {} valid entr{} in session for retry (resolve the \
                          cause, then re-run `session write`):\n{}",
                         report.not_persisted.len(),
-                        if report.not_persisted.len() == 1 { "y" } else { "ies" },
+                        if report.not_persisted.len() == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        },
                         lines.join("\n"),
                     ));
                 }
@@ -1280,6 +1541,141 @@ mod tests {
             fn geteuid() -> u32;
         }
         unsafe { geteuid() == 0 }
+    }
+
+    fn current_uid() -> u32 {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        unsafe { geteuid() }
+    }
+
+    #[test]
+    fn warn_subscribe_root_may_use_pid_zero_firehose() {
+        let peer = PeerCred {
+            uid: 0,
+            is_root: true,
+        };
+        assert!(warn_subscribe_denied(&peer, 0).is_none());
+        assert!(warn_subscribe_denied(&peer, 999_999).is_none());
+    }
+
+    #[test]
+    fn warn_subscribe_nonroot_denied_pid_zero_firehose() {
+        let peer = PeerCred {
+            uid: 1000,
+            is_root: false,
+        };
+        let denied = warn_subscribe_denied(&peer, 0);
+        assert!(
+            denied.is_some(),
+            "non-root must not get the all-PIDs firehose"
+        );
+        assert!(denied.unwrap().contains("requires root"));
+    }
+
+    #[test]
+    fn warn_subscribe_nonroot_allowed_for_owned_pid() {
+        if running_as_root() {
+            return; // gate is bypassed for root; nothing to assert
+        }
+        // The test process is owned by the test's own UID.
+        let peer = PeerCred {
+            uid: current_uid(),
+            is_root: false,
+        };
+        let own_pid = std::process::id();
+        assert!(
+            warn_subscribe_denied(&peer, own_pid).is_none(),
+            "a non-root caller may subscribe to a PID it owns"
+        );
+    }
+
+    #[test]
+    fn warn_subscribe_nonroot_denied_for_other_uid_pid() {
+        // Fabricate a non-root peer whose UID is NOT the owner of the
+        // target PID. Using our OWN pid (owned by current_uid) with a
+        // peer uid of current_uid+1 makes the cross-UID denial
+        // deterministic regardless of container / PID-namespace quirks
+        // (no reliance on PID 1's owner).
+        let not_owner = current_uid().wrapping_add(1);
+        let peer = PeerCred {
+            uid: not_owner,
+            is_root: false,
+        };
+        let own_pid = std::process::id();
+        let denied = warn_subscribe_denied(&peer, own_pid);
+        assert!(
+            denied.is_some(),
+            "non-root must not subscribe to a PID owned by another uid"
+        );
+        assert!(denied.unwrap().contains("owned by uid"));
+    }
+
+    #[test]
+    fn peer_disconnected_detects_eof_and_unexpected_data_not_idle() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        // Idle live peer → still connected (recv returns EAGAIN).
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert!(
+            !peer_disconnected(a.as_raw_fd()),
+            "an idle, open peer must not be reported disconnected"
+        );
+        // Unexpected inbound byte → close (subscribers send nothing
+        // after subscribe; a squat byte must not hold the slot).
+        let (c, d) = UnixStream::pair().unwrap();
+        (&d).write_all(b"x").unwrap();
+        assert!(
+            peer_disconnected(c.as_raw_fd()),
+            "unexpected inbound data must close the stream"
+        );
+        // Peer closed its end → EOF → close.
+        let (e, f) = UnixStream::pair().unwrap();
+        drop(f);
+        assert!(
+            peer_disconnected(e.as_raw_fd()),
+            "peer EOF must close the stream"
+        );
+    }
+
+    #[test]
+    fn subscriber_slots_enforce_total_and_per_uid_caps() {
+        let slots = Arc::new(SubscriberSlots::new());
+        // Per-UID cap: one UID can hold at most PER_UID slots.
+        let mut held = Vec::new();
+        for _ in 0..MAX_WARN_SUBSCRIBERS_PER_UID {
+            held.push(slots.try_acquire(1000).expect("under per-uid cap"));
+        }
+        assert!(
+            slots.try_acquire(1000).is_none(),
+            "per-uid cap should reject the next slot"
+        );
+        // A different UID still gets its own slots.
+        assert!(slots.try_acquire(1001).is_some());
+        // Releasing (drop) frees a slot for that UID again.
+        held.pop();
+        assert!(
+            slots.try_acquire(1000).is_some(),
+            "dropping a slot must free it for re-acquire"
+        );
+    }
+
+    #[test]
+    fn subscriber_slots_enforce_global_total_cap() {
+        let slots = Arc::new(SubscriberSlots::new());
+        let mut held = Vec::new();
+        // Spread across distinct UIDs so the per-UID cap never bites
+        // before the global total cap does.
+        let mut uid = 2000u32;
+        while held.len() < MAX_WARN_SUBSCRIBERS_TOTAL {
+            held.push(slots.try_acquire(uid).expect("under total cap"));
+            uid += 1;
+        }
+        assert!(
+            slots.try_acquire(uid).is_none(),
+            "global total cap should reject beyond MAX_WARN_SUBSCRIBERS_TOTAL"
+        );
     }
 
     fn unique_socket() -> std::path::PathBuf {
@@ -1453,10 +1849,18 @@ mod tests {
         let (socket, _h, bcast) =
             spawn_server_with_cfg_and_broadcast(crate::config::ServerConfig::default());
         let mut stream = UnixStream::connect(&socket).expect("connect");
-        // Send subscribe with pid_tree_root=0 (unfiltered) so the
-        // test doesn't need to inject a fake /proc walk closure.
+        // Subscribe to our OWN pid tree: the auth gate now reserves
+        // parent_pid_tree=0 (the all-PIDs firehose) for root, but any
+        // caller may watch a PID it owns. The broadcast filter below
+        // matches unconditionally, so delivery is unaffected.
+        let own_pid = std::process::id();
         stream
-            .write_all(br#"{"id":7,"method":"subscribe_warn_events","parent_pid_tree":0}"#)
+            .write_all(
+                format!(
+                    r#"{{"id":7,"method":"subscribe_warn_events","parent_pid_tree":{own_pid}}}"#
+                )
+                .as_bytes(),
+            )
             .unwrap();
         stream.write_all(b"\n").unwrap();
         stream
@@ -1615,9 +2019,7 @@ mod tests {
         // Mark the PID Critical, then re-classify the same line.
         let _ = round_trip(
             &mut stream,
-            &format!(
-                r#"{{"id":2,"method":"set_threat_level","pid":{pid},"level":"critical"}}"#
-            ),
+            &format!(r#"{{"id":2,"method":"set_threat_level","pid":{pid},"level":"critical"}}"#),
         );
         let reply = round_trip(
             &mut stream,
@@ -1846,8 +2248,7 @@ mod tests {
             "fetched-only-marker-001\nfetched-only-marker-002\n",
         )
         .unwrap();
-        let trust_store =
-            Arc::new(crate::trust_store::TrustStore::new(users_dir));
+        let trust_store = Arc::new(crate::trust_store::TrustStore::new(users_dir));
         let (socket, _h) = spawn_server_with_trust_store(trust_store);
 
         let mut s = UnixStream::connect(&socket).expect("connect");
@@ -1916,10 +2317,7 @@ mod tests {
     fn session_list_empty_initially() {
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
-        let reply = round_trip(
-            &mut stream,
-            r#"{"id":1,"method":"session_list"}"#,
-        );
+        let reply = round_trip(&mut stream, r#"{"id":1,"method":"session_list"}"#);
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "session_list");
         assert!(v["atoms"].as_array().unwrap().is_empty());
@@ -1991,10 +2389,7 @@ mod tests {
     fn session_clear_no_sudo_required() {
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
-        let reply = round_trip(
-            &mut stream,
-            r#"{"id":1,"method":"session_clear"}"#,
-        );
+        let reply = round_trip(&mut stream, r#"{"id":1,"method":"session_clear"}"#);
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "ok");
         let _ = std::fs::remove_file(socket);
@@ -2004,10 +2399,7 @@ mod tests {
     fn session_write_requires_root() {
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
-        let reply = round_trip(
-            &mut stream,
-            r#"{"id":1,"method":"session_write"}"#,
-        );
+        let reply = round_trip(&mut stream, r#"{"id":1,"method":"session_write"}"#);
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
         assert!(v["message"].as_str().unwrap().contains("requires root"));
@@ -2018,10 +2410,7 @@ mod tests {
     fn urls_list_initially_empty() {
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
-        let reply = round_trip(
-            &mut stream,
-            r#"{"id":1,"method":"urls_list"}"#,
-        );
+        let reply = round_trip(&mut stream, r#"{"id":1,"method":"urls_list"}"#);
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "urls_list");
         assert!(v["entries"].as_array().unwrap().is_empty());
@@ -2152,12 +2541,18 @@ mod tests {
 
     #[test]
     fn extract_npm_install_pkg_pnpm_add() {
-        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("pnpm add react"), Some("react"));
+        assert_eq!(
+            crate::npm_parser::extract_npm_install_first_pkg("pnpm add react"),
+            Some("react")
+        );
     }
 
     #[test]
     fn extract_npm_install_pkg_yarn_add() {
-        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("yarn add vue"), Some("vue"));
+        assert_eq!(
+            crate::npm_parser::extract_npm_install_first_pkg("yarn add vue"),
+            Some("vue")
+        );
     }
 
     #[test]
@@ -2170,9 +2565,18 @@ mod tests {
 
     #[test]
     fn extract_npm_install_pkg_not_install_shape() {
-        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("ls -la"), None);
-        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("npm test"), None);
-        assert_eq!(crate::npm_parser::extract_npm_install_first_pkg("npm run build"), None);
+        assert_eq!(
+            crate::npm_parser::extract_npm_install_first_pkg("ls -la"),
+            None
+        );
+        assert_eq!(
+            crate::npm_parser::extract_npm_install_first_pkg("npm test"),
+            None
+        );
+        assert_eq!(
+            crate::npm_parser::extract_npm_install_first_pkg("npm run build"),
+            None
+        );
     }
 
     #[test]
@@ -2274,9 +2678,7 @@ mod tests {
         match stream.read(&mut buf) {
             Ok(0) => {} // server closed — what we want
             Ok(n) => panic!("expected EOF, got {n} bytes"),
-            Err(e) => panic!(
-                "expected EOF after server timeout, got {e} (timeout not enforced?)"
-            ),
+            Err(e) => panic!("expected EOF after server timeout, got {e} (timeout not enforced?)"),
         }
         let _ = std::fs::remove_file(socket);
     }

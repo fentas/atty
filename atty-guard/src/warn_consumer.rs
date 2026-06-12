@@ -35,17 +35,19 @@ pub struct Subscriber {
     pub pid_tree_root: u32,
     pub tx: std::sync::mpsc::SyncSender<ResponseBody>,
     pub dropped_since_notice: std::cell::Cell<u32>,
+    /// Unique registration id, assigned by `register`. Lets a
+    /// subscriber deregister explicitly on disconnect instead of
+    /// waiting for the next `broadcast()` to reap its dead sender.
+    id: u64,
 }
 
 impl Subscriber {
-    pub fn new(
-        pid_tree_root: u32,
-        tx: std::sync::mpsc::SyncSender<ResponseBody>,
-    ) -> Self {
+    pub fn new(pid_tree_root: u32, tx: std::sync::mpsc::SyncSender<ResponseBody>) -> Self {
         Self {
             pid_tree_root,
             tx,
             dropped_since_notice: std::cell::Cell::new(0),
+            id: 0,
         }
     }
 }
@@ -57,6 +59,7 @@ impl Subscriber {
 #[derive(Default)]
 pub struct Broadcast {
     subs: std::sync::Mutex<Vec<Subscriber>>,
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl Broadcast {
@@ -64,8 +67,28 @@ impl Broadcast {
         Self::default()
     }
 
-    pub fn register(&self, sub: Subscriber) {
+    /// Append a subscriber and return its registration id. Pass the
+    /// id to `deregister` on disconnect so a quiet subscriber (no
+    /// events flowing, so `broadcast`'s lazy reap never runs) doesn't
+    /// linger in the list and grow it unbounded across
+    /// connect/subscribe/disconnect cycles.
+    pub fn register(&self, mut sub: Subscriber) -> u64 {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        sub.id = id;
         self.subs.lock().expect("broadcast poisoned").push(sub);
+        id
+    }
+
+    /// Remove the subscriber with `id` if still present (it may have
+    /// already been reaped by a `broadcast` that found its receiver
+    /// gone). Idempotent.
+    pub fn deregister(&self, id: u64) {
+        self.subs
+            .lock()
+            .expect("broadcast poisoned")
+            .retain(|s| s.id != id);
     }
 
     /// Fan a single ResponseBody out to all matching subscribers.
@@ -281,7 +304,13 @@ mod tests {
         assert_eq!(e.ppid, 5678);
         let wire = e.to_warn_event(42);
         match wire {
-            ResponseBody::WarnEvent { pid, ppid, comm, argv0, timestamp_ms } => {
+            ResponseBody::WarnEvent {
+                pid,
+                ppid,
+                comm,
+                argv0,
+                timestamp_ms,
+            } => {
                 assert_eq!(pid, 1234);
                 assert_eq!(ppid, 5678);
                 assert_eq!(comm, "bash");
@@ -301,7 +330,30 @@ mod tests {
         assert!(!e.is_warn(), "tracepoint events shouldn't be forwarded");
         buf[1] = VERDICT_BLOCK;
         let e = ExecveEvent::from_bytes(&buf).expect("parse");
-        assert!(!e.is_warn(), "block events go to the banner path, not subscribers");
+        assert!(
+            !e.is_warn(),
+            "block events go to the banner path, not subscribers"
+        );
+    }
+
+    #[test]
+    fn deregister_removes_by_token_without_a_broadcast() {
+        let bcast = Broadcast::new();
+        let (tx_a, _rx_a) = mpsc::sync_channel(16);
+        let (tx_b, _rx_b) = mpsc::sync_channel(16);
+        let id_a = bcast.register(Subscriber::new(0, tx_a));
+        let id_b = bcast.register(Subscriber::new(0, tx_b));
+        assert_eq!(bcast.len(), 2);
+        assert_ne!(id_a, id_b, "registration ids must be unique");
+        // Quiet disconnect of A: deregister WITHOUT any broadcast()
+        // (the lazy reap never runs when no events flow).
+        bcast.deregister(id_a);
+        assert_eq!(bcast.len(), 1, "deregister must remove the dead entry");
+        // Idempotent — deregistering an already-removed id is a no-op.
+        bcast.deregister(id_a);
+        assert_eq!(bcast.len(), 1);
+        bcast.deregister(id_b);
+        assert_eq!(bcast.len(), 0);
     }
 
     #[test]
@@ -348,8 +400,14 @@ mod tests {
             },
             |_evt_pid, root| root == 888,
         );
-        assert!(rx_alice.try_recv().is_err(), "alice shouldn't see bob's tree event");
-        assert!(rx_bob.try_recv().is_ok(), "bob should see his own tree event");
+        assert!(
+            rx_alice.try_recv().is_err(),
+            "alice shouldn't see bob's tree event"
+        );
+        assert!(
+            rx_bob.try_recv().is_ok(),
+            "bob should see his own tree event"
+        );
     }
 
     #[test]
