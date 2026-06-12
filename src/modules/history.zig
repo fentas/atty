@@ -233,32 +233,40 @@ pub fn configure(comptime cfg: Config) type {
             // recent ones the user actually wants.
             const max = 1 << 20;
             const size = lseek(fd, 0, SEEK_END);
+            if (size < 0) return;
             var start_off: i64 = 0;
             if (size > max) start_off = size - max;
-            // Rewind to start_off — note the SEEK_END probe above left
-            // the cursor at EOF, so this is required even when
-            // start_off == 0 (small files read from the beginning).
-            if (lseek(fd, start_off, SEEK_SET) < 0) {
-                if (start_off == 0 or lseek(fd, 0, SEEK_SET) < 0) return;
-                start_off = 0;
-            }
+            // When seeking into the middle, read from one byte BEFORE the
+            // window so we can tell whether it begins exactly at a line
+            // boundary (keep the first line whole) vs mid-line (drop the
+            // partial first line). Mirrors llm/chat_persist's tail read.
+            // The SEEK_END probe above left the cursor at EOF, so the
+            // rewind is required even for start_off == 0. On seek failure
+            // refuse rather than fall back to the head (which would
+            // re-seed the ring with the OLDEST entries — the bug fixed
+            // here).
+            const read_off = if (start_off > 0) start_off - 1 else 0;
+            if (lseek(fd, read_off, SEEK_SET) < 0) return;
 
-            const data = try allocator.alloc(u8, max);
+            const data = try allocator.alloc(u8, max + 1);
             defer allocator.free(data);
 
             var total: usize = 0;
-            while (total < max) {
-                const rc = std.c.read(fd, data[total..].ptr, max - total);
-                if (rc <= 0) break;
+            while (total < data.len) {
+                const rc = std.c.read(fd, data[total..].ptr, data.len - total);
+                if (rc < 0) return; // read error — don't seed a partial ring
+                if (rc == 0) break;
                 total += @intCast(rc);
             }
             var slice = data[0..total];
 
-            // When we seeked into the middle of the file the first line
-            // is almost certainly a partial command — drop everything up
-            // to and including the first newline.
             if (start_off > 0) {
-                if (std.mem.indexOfScalar(u8, slice, '\n')) |nl| {
+                // slice[0] is the byte preceding the window: '\n' means
+                // the window starts on a fresh line (keep from index 1),
+                // otherwise drop the partial first line.
+                if (slice.len > 0 and slice[0] == '\n') {
+                    slice = slice[1..];
+                } else if (std.mem.indexOfScalar(u8, slice, '\n')) |nl| {
                     slice = slice[nl + 1 ..];
                 } else {
                     slice = slice[0..0];
@@ -376,6 +384,14 @@ pub fn configure(comptime cfg: Config) type {
         /// both. Files larger than `max_file` are left untouched (the
         /// ring is still filtered) — a best-effort cap that never
         /// corrupts, unlike the previous ring-dump.
+        ///
+        /// The read→filter→rename window is not locked against a
+        /// concurrent `writeLine` (O_APPEND) from another atty session,
+        /// so a command recorded after the read but before the rename can
+        /// be clobbered. Accepted: delete is a deliberate, rare action
+        /// and the contract is best-effort; the original is only ever
+        /// replaced by a fully-written temp (rename is the sole
+        /// mutation), so truncation/corruption is impossible.
         fn filterFileRemoving(rt: *Runtime, line: []const u8) !void {
             if (rt.path.len == 0) return;
             const path_z = try rt.allocator.dupeZ(u8, rt.path);
@@ -392,12 +408,20 @@ pub fn configure(comptime cfg: Config) type {
             const data = try rt.allocator.alloc(u8, @intCast(size));
             defer rt.allocator.free(data);
             var total: usize = 0;
+            var read_ok = true;
             while (total < data.len) {
                 const rc = std.c.read(rfd, data[total..].ptr, data.len - total);
-                if (rc <= 0) break;
+                if (rc < 0) {
+                    // Read error before EOF — abort WITHOUT rewriting, or
+                    // we'd replace the history with a truncated copy.
+                    read_ok = false;
+                    break;
+                }
+                if (rc == 0) break; // EOF (file shrank concurrently)
                 total += @intCast(rc);
             }
             _ = close(rfd);
+            if (!read_ok) return;
             const content = data[0..total];
 
             var out_buf: std.ArrayList(u8) = .empty;
@@ -427,6 +451,10 @@ pub fn configure(comptime cfg: Config) type {
             const wfd = open(tmp_z.ptr, O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE);
             if (wfd < 0) return error.WriteFailed;
             defer _ = close(wfd);
+            // Clean up the temp on any failure before the rename so a
+            // partial write doesn't litter a `.atty-tmp` next to the
+            // history file. The original is untouched until the rename.
+            errdefer _ = std.c.unlink(tmp_z.ptr);
             var written: usize = 0;
             while (written < out_buf.items.len) {
                 const rc = std.c.write(wfd, out_buf.items[written..].ptr, out_buf.items.len - written);
