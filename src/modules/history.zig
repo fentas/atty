@@ -368,13 +368,14 @@ pub fn configure(comptime cfg: Config) type {
                 }
                 i += 1;
             }
-            // Filter the real file, line by line.
+            // Filter the real on-disk file.
             filterFileRemoving(rt, line) catch {};
         }
 
-        /// Stream-filter the on-disk history file: drop every line whose
-        /// parsed payload equals `line`, keep every other line VERBATIM,
-        /// then atomically replace the original via temp + rename.
+        /// Filter the on-disk history file: read it in full (capped at
+        /// `max_file`), drop every line whose parsed payload equals
+        /// `line`, keep every other line VERBATIM, then atomically
+        /// replace the original via temp + rename.
         ///
         /// Keeping raw lines (rather than re-serialising the in-memory
         /// ring) is load-bearing: the ring holds at most `capacity`
