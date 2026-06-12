@@ -234,10 +234,10 @@ if [[ $WITH_EBPF -eq 1 ]]; then
         echo "       --with-ebpf to run in V2-A (in-memory) mode." >&2
         exit 1
     fi
-    for _tool in clang bpftool; do
+    for _tool in make clang bpftool; do
         if ! command -v "$_tool" >/dev/null 2>&1; then
             echo "error: --with-ebpf needs '$_tool' on PATH to compile atty_guard.bpf.o." >&2
-            echo "       Debian/Ubuntu: apt-get install clang libbpf-dev linux-tools-common" >&2
+            echo "       Debian/Ubuntu: apt-get install make clang libbpf-dev linux-tools-common" >&2
             exit 1
         fi
     done
