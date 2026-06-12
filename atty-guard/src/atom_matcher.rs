@@ -57,14 +57,9 @@ pub struct AtomMatcher {
 pub struct AtomHit {
     pub atom: &'static str,
     pub byte_offset: usize,
-    /// `byte_offset + atom.len()` — kept for the V2-H sliding-context-
-    /// window code that slices `command[offset..end]` to feed the SLM
-    /// a localized snippet. Current call sites read `byte_offset`
-    /// only and derive the end inline from `atom.len()`; this field
-    /// is dead at the call site today. Keeping it in the struct
-    /// avoids a wider refactor when the SLM slicer learns to span
-    /// multiple atom hits.
-    #[allow(dead_code)]
+    /// `byte_offset + atom.len()` — the match's exclusive end. Used by
+    /// the classifier's distinct-signal span dedup, and reserved for
+    /// the V2-H sliding-context-window slicer.
     pub byte_end: usize,
 }
 
@@ -255,9 +250,7 @@ mod tests {
         assert!(m
             .find_first("strace -e trace=af_alg_setkey ./exploit")
             .is_some());
-        assert!(m
-            .find_first("modprobe algif_aead && ./poc")
-            .is_some());
+        assert!(m.find_first("modprobe algif_aead && ./poc").is_some());
     }
 
     #[test]
@@ -297,9 +290,7 @@ mod tests {
         assert!(m
             .find_first("systemctl --user enable evil.service")
             .is_some());
-        assert!(m
-            .find_first("systemctl --user daemon-reload")
-            .is_some());
+        assert!(m.find_first("systemctl --user daemon-reload").is_some());
         assert!(m.find_first("loginctl enable-linger alice").is_some());
     }
 

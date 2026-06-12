@@ -641,9 +641,11 @@ impl Tier1 {
         // 2-5 atoms — N atoms at 0.6 combine to `1 - 0.4^N`, which
         // crosses the Block threshold at N=3 (0.936).
         for hit in self.atom_matcher.find_all(line) {
-            let offset = hit.byte_offset;
-            let end = offset + hit.atom.len();
-            hits.push((self.atom_matcher.hit_to_result(&hit, line), offset, end));
+            hits.push((
+                self.atom_matcher.hit_to_result(&hit, line),
+                hit.byte_offset,
+                hit.byte_end,
+            ));
         }
 
         hits
