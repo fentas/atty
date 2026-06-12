@@ -341,14 +341,6 @@ fn combined_confidence(hits: &[(ClassifyResult, usize, usize)]) -> f32 {
         .fold(1.0f32, |acc, (h, _, _)| acc * (1.0 - h.confidence))
 }
 
-/// Map an accumulated hit list to a single `ClassifyResult`.
-/// Returns None when the combined confidence is below the Warn
-/// threshold — callers default to Safe in that case.
-///
-/// The output's `category` + `matched` come from the highest-
-/// confidence hit (the "primary" signal); `reason` concatenates
-/// every hit's reason so the banner UI can show "3 signals fired"
-/// detail without losing the per-hit attribution.
 /// Count *distinct* signals among Tier-1 hits by merging those whose
 /// matched byte spans overlap. Two detectors firing on the same text
 /// — e.g. the `curl … | sh` regex (1.0) AND the `curl -fsSL` atom
@@ -382,6 +374,16 @@ fn distinct_span_groups(hits: &[(ClassifyResult, usize, usize)]) -> usize {
     groups
 }
 
+/// Map an accumulated hit list to a single `ClassifyResult`. Returns
+/// None when the combined confidence is below the Warn threshold —
+/// callers default to Safe in that case.
+///
+/// The output's `category` + `matched` come from the highest-
+/// confidence ("primary") hit. `reason` is the primary's reason when
+/// there is a single distinct signal; with two or more, it is
+/// `"<distinct_signals> signals fired: <r1>; <r2>; …"` — the count
+/// reflects the DISTINCT signals that drive the verdict, while the
+/// parts list keeps per-hit attribution for the banner / logs.
 fn combine_hits(
     hits: &[(ClassifyResult, usize, usize)],
     block_threshold: Option<f32>,
