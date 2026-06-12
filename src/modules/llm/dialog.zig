@@ -219,9 +219,11 @@ pub fn parseResponse(
     out.* = .{ .action = action_enum };
 
     if (parsed.value.command) |c| {
-        const n = @min(c.len, out.command_buf.len);
-        @memcpy(out.command_buf[0..n], c[0..n]);
-        out.command_len = n;
+        // Strip control bytes (keep `\n` for multi-line) so a `\r`
+        // or ESC in the model's command can't fire Enter / inject an
+        // escape sequence when it reaches readline. See
+        // `parseFencedResponse` exec arm for the sibling path.
+        out.command_len = parse.stripControlBytesKeepNewlines(c, &out.command_buf);
     }
     if (parsed.value.description) |d| {
         const n = @min(d.len, out.description_buf.len);
@@ -275,7 +277,10 @@ pub fn parseFencedResponse(comptime ResponseT: type, raw: []const u8, out: *Resp
     switch (fence.action) {
         .exec => {
             out.action = .exec;
-            copyInto(&out.command_buf, &out.command_len, body);
+            // Keep `\n` (bracketed paste makes it literal) but drop
+            // `\r`/ESC/other controls that would fire Enter or inject
+            // an escape sequence at the prompt.
+            out.command_len = parse.stripControlBytesKeepNewlines(body, &out.command_buf);
             if (prose.len > 0) {
                 copyInto(&out.description_buf, &out.description_len, prose);
             }
@@ -356,33 +361,36 @@ pub fn hasActionFence(raw: []const u8) bool {
 ///
 /// Returns the count of bytes written into `dest`. `dest` must
 /// hold at least `src.len + 12` bytes (the open + close marker).
-/// Buffer overflow falls back to verbatim copy — better to send
-/// the unwrapped newlines (the prior bug) than a half-wrapped
-/// paste the terminal would mis-parse as a runaway paste.
+/// Buffer overflow stages NOTHING (returns 0) — a half-wrapped or
+/// truncated paste would leave the terminal mid-`?2004` paste or
+/// drop the closing marker, so it's safer to inject nothing than a
+/// runaway paste. Callers must check for a 0 return (no command
+/// staged). Note `dest` is sized `max_response_bytes + 12` and `src`
+/// can be at most `max_response_bytes`, so overflow is a defensive
+/// guard, not an expected path.
 ///
 /// Adversarial input: a literal `\x1B[201~` byte sequence inside
 /// `src` will terminate the paste early on the receiving terminal
 /// — the bytes after that point land at the next prompt as a
 /// separate command. Not defended against here (rare in real LLM
 /// output + would be ambiguous to escape); same trade-off as the
-/// chat-panel paste path documented in llm.zig.
+/// chat-panel paste path documented in llm.zig. Control bytes other
+/// than `\n` are stripped upstream at parse time
+/// (`stripControlBytesKeepNewlines`), so a raw `\r`/ESC never
+/// reaches this function.
 pub fn wrapForBracketedPaste(src: []const u8, dest: []u8) usize {
     if (src.len == 0) return 0;
     if (std.mem.indexOfScalar(u8, src, '\n') == null) {
-        const n = @min(src.len, dest.len);
-        @memcpy(dest[0..n], src[0..n]);
-        return n;
+        if (src.len > dest.len) return 0;
+        @memcpy(dest[0..src.len], src);
+        return src.len;
     }
     const open = "\x1B[200~";
     const close = "\x1B[201~";
     // Worst-case sizing assumes no CRLF stripping; actual output is
     // smaller when CRLF→LF normalization fires.
     const worst_case = open.len + src.len + close.len;
-    if (worst_case > dest.len) {
-        const n = @min(src.len, dest.len);
-        @memcpy(dest[0..n], src[0..n]);
-        return n;
-    }
+    if (worst_case > dest.len) return 0;
     @memcpy(dest[0..open.len], open);
     var out_len: usize = open.len;
     var i: usize = 0;
@@ -751,6 +759,43 @@ test "parseResponse: oversized command field gets truncated to buffer size" {
     try testing.expectEqualStrings("abcdefgh", r.command());
 }
 
+test "parseResponse: exec command strips CR/ESC, keeps LF (injection defense)" {
+    const R = Response(4096);
+    var r: R = .{};
+    // \r would fire Enter at the prompt; \x1b injects an escape
+    // sequence; \n must survive (bracketed paste makes it literal).
+    try parseResponse(R, testing.allocator, "{\"action\":\"exec\",\"command\":\"echo a\\rrm -rf /\\nls\\u001b[31m\"}", &r);
+    try testing.expectEqual(Action.exec, r.action);
+    try testing.expectEqualStrings("echo arm -rf /\nls[31m", r.command());
+}
+
+test "parseFencedResponse: exec command strips CR/ESC, keeps LF (injection defense)" {
+    const R = Response(4096);
+    var r: R = .{};
+    const raw = "```exec\nline1\rmalicious\nline2\x1b]0;evil\x07\n```";
+    parseFencedResponse(R, raw, &r);
+    try testing.expectEqual(Action.exec, r.action);
+    // \r and the OSC escape bytes (\x1b, \x07) are gone; the two
+    // legitimate newlines survive for the multi-line paste.
+    try testing.expectEqualStrings("line1malicious\nline2]0;evil", r.command());
+}
+
+test "wrapForBracketedPaste: overflow stages nothing (no runaway paste)" {
+    var dest: [10]u8 = undefined;
+    // Multi-line src that can't fit with markers → return 0.
+    try testing.expectEqual(@as(usize, 0), wrapForBracketedPaste("a\nbbbbbbbbbb", &dest));
+    // Single-line src larger than dest → return 0 (no truncation).
+    try testing.expectEqual(@as(usize, 0), wrapForBracketedPaste("0123456789abc", &dest));
+}
+
+test "wrapForBracketedPaste: multi-line wraps with markers, single-line bare" {
+    var dest: [64]u8 = undefined;
+    const single = wrapForBracketedPaste("ls -la", &dest);
+    try testing.expectEqualStrings("ls -la", dest[0..single]);
+    const multi = wrapForBracketedPaste("a\nb", &dest);
+    try testing.expectEqualStrings("\x1b[200~a\nb\x1b[201~", dest[0..multi]);
+}
+
 test "buildRequestBody: minimal — model + system + one user turn" {
     var content_buf = [_]u8{ 'h', 'e', 'l', 'l', 'o' };
     const turns = [_]Turn{.{ .kind = .user, .content = &content_buf }};
@@ -822,6 +867,7 @@ test "buildRequestBody: assistant_exec turn uses assistant role" {
 
 const types = @import("types.zig");
 const paint_width = @import("paint_width.zig");
+const parse = @import("parse.zig");
 
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {

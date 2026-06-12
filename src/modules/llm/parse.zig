@@ -213,12 +213,29 @@ pub fn sanitizeExplanation(raw: []const u8, out: []u8) usize {
 /// `sanitizeExplanation` (terminal-bound bytes) — both destinations
 /// honour C1 controls, so both need the strip.
 pub fn stripControlBytes(s: []const u8, out: []u8) usize {
+    return stripControlBytesImpl(s, out, false);
+}
+
+/// Like `stripControlBytes` but preserves bare `\n` (0x0A) while
+/// still dropping `\r` (0x0D), ESC, BEL/BS, every other C0, DEL, and
+/// C1 controls. Used for the dialog-mode `exec` command body, which
+/// is wrapped in bracketed paste so embedded newlines stay literal
+/// in readline instead of firing Enter — but a raw `\r` or ESC would
+/// still fire Enter / inject an escape sequence at the prompt. The
+/// single-line worker path uses `sanitizeCommand` (which truncates to
+/// the first line); this is the multi-line-preserving sibling.
+pub fn stripControlBytesKeepNewlines(s: []const u8, out: []u8) usize {
+    return stripControlBytesImpl(s, out, true);
+}
+
+fn stripControlBytesImpl(s: []const u8, out: []u8, comptime keep_lf: bool) usize {
     var n: usize = 0;
     var i: usize = 0;
     while (i < s.len) {
         const b = s[i];
         if (b < 0x80) {
-            if (b < 0x20 or b == 0x7F) {
+            const is_control = (b < 0x20 and !(keep_lf and b == '\n')) or b == 0x7F;
+            if (is_control) {
                 i += 1;
                 continue;
             }
