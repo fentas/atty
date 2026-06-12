@@ -26,9 +26,8 @@ const std = @import("std");
 
 pub const max_line = 4096;
 
-/// Max bytes of a partial CSI carried across `applyInput` calls. A
-/// well-formed CSI (`ESC [ params… final`) is short; anything longer
-/// without a final byte is treated as malformed and dropped.
+/// Cap on a carried partial CSI so malformed/never-terminated input
+/// can't grow the carry unbounded.
 const csi_carry_max = 32;
 
 /// Who typed the line that's about to be committed?
@@ -86,17 +85,10 @@ pub const LineState = struct {
     /// against a remembered generation to skip duplicate work.
     generation: u64 = 0,
 
-    /// Partial CSI sequence carried across `applyInput` calls. A
-    /// terminal can deliver a CSI (`ESC [ … final`) split over two
-    /// reads — e.g. `ESC [` in one read and `C` in the next on a slow
-    /// link or tiny pipe buffer. Without carrying the partial sequence,
-    /// the next call would treat the continuation bytes (`C`, `1;5D`,
-    /// …) as printable and inject them into the buffer. Holds the bytes
-    /// from `ESC` up to (not including) the missing final byte; empty
-    /// (`csi_carry_len == 0`) when not mid-sequence. Cleared on
-    /// `reset()`, and self-aborts the moment a control byte (Enter,
-    /// Ctrl-C, …) arrives mid-carry. Bounded — an over-long run with no
-    /// final byte is treated as malformed (uncertain + dropped).
+    /// A CSI (`ESC [ … final`) can split across reads; without holding
+    /// the partial bytes here the next call would inject the
+    /// continuation (`C`, `1;5D`, …) into the buffer as printable text.
+    /// `csi_carry_len == 0` when not mid-sequence.
     csi_carry: [csi_carry_max]u8 = undefined,
     csi_carry_len: usize = 0,
 
@@ -383,7 +375,7 @@ pub const LineState = struct {
         // resume at, or null when the sequence is still incomplete
         // (carry extended; nothing else to process this call).
         if (self.csi_carry_len > 0) {
-            // On an still-incomplete carry, return with the SAME
+            // On a still-incomplete carry, return with the SAME
             // contract as the normal exit (generation changed OR
             // uncertain) — an over-long carry drop sets `uncertain`,
             // which callers must still observe.
