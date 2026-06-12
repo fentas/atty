@@ -20,6 +20,19 @@ const pty_mod = @import("../../pty.zig");
 const Pty = pty_mod.Pty;
 const chat_persist = @import("chat_persist.zig");
 
+/// First visible index for a question pick-list windowed to `visible`
+/// rows: slides so `sel` stays in view. Shared by the overlay and
+/// inline pick-lists so their scroll behavior can't drift. `visible >=
+/// total` means everything fits — no window. `sel` may be `total` (the
+/// free-text row); the max-start clamp keeps the result in range.
+pub fn questionWindowStart(sel: u8, visible: u8, total: u8) u8 {
+    if (visible >= total) return 0;
+    var start: u8 = if (sel >= visible) sel - (visible - 1) else 0;
+    const max_start: u8 = total - visible;
+    if (start > max_start) start = max_start;
+    return start;
+}
+
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {
         // `latchErr` is part of the dialog Module helpers — same
@@ -241,11 +254,8 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // When the terminal is too short to show every choice
                 // (cc < total), slide a `cc`-row window so the selected
                 // choice stays visible — otherwise Enter could submit an
-                // off-screen, un-highlighted choice. Mirrors the inline
-                // pick-list's windowing.
-                var win_start: u8 = 0;
-                if (sel >= cc) win_start = sel - cc + 1;
-                if (@as(u16, win_start) + cc > total) win_start = total - cc;
+                // off-screen, un-highlighted choice.
+                const win_start = questionWindowStart(sel, cc, total);
                 const first_choice_row: u16 = rows - 1 - cc;
                 var i: u8 = 0;
                 while (i < cc) : (i += 1) {
@@ -1329,20 +1339,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // arrow-key feedback would go silent again — the
                 // same UX failure mode the rest of #308 fixed.
                 const total: u8 = rt.chat_question_choice_count;
-                var start: u8 = 0;
-                if (question_rows < total) {
-                    const window: u8 = @intCast(question_rows);
-                    if (sel >= window) {
-                        // Selected fell off the bottom — scroll the
-                        // window so `sel` lands at the last visible
-                        // row.
-                        start = sel - (window - 1);
-                    }
-                    // Cap so we never overscroll past the last
-                    // choice (e.g. sel at the very end).
-                    const max_start: u8 = total - window;
-                    if (start > max_start) start = max_start;
-                }
+                const start = questionWindowStart(sel, @intCast(question_rows), total);
                 // Choice text is column-budgeted: `▶ ` + `<n>. ` is
                 // a 5-col prefix; truncate the remainder to the
                 // total panel width so a long choice can't wrap +
