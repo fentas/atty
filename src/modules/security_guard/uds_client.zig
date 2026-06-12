@@ -658,6 +658,10 @@ fn scanObject(buf: []const u8) Error!ParsedObject {
         if (buf[i] == '}') return obj;
         return Error.DaemonError;
     }
+    // Bytes after the top-level `}` are intentionally ignored: the wire
+    // is line-framed (one object per `\n`), so `readLine` already scoped
+    // `buf` to a single response, and trailing junk can't alter the
+    // depth-1 fields we read.
 }
 
 /// Reject a reply whose echoed `id` doesn't match the request's. A

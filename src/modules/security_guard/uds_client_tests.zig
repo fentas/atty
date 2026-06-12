@@ -102,14 +102,16 @@ test "parseClassifyResponse — id mismatch → DaemonError" {
     try testing.expectError(mod.Error.DaemonError, mod.parseClassifyResponse(buf, 3));
 }
 
-test "parseClassifyResponse — reason cannot hijack verdict (structural parse)" {
-    // A malicious command echoes back into `reason` / `matched`. The
-    // escaped `\"verdict\":\"block\"` text inside those fields MUST NOT
-    // be read as the top-level verdict — the real verdict here is safe.
-    // A first-substring parser keyed off the FIRST `verdict` (or one
-    // that ignored escaping) could be fooled into reporting block.
+test "parseClassifyResponse — escaped key text in values is inert" {
+    // A malicious command echoes back into `reason` / `matched` carrying
+    // `\"verdict\":\"block\"`. Place those fields BEFORE the real
+    // verdict so a positional reader is maximally tempted: the structural
+    // reader still keys on the depth-1 `verdict` and reports safe. (Valid
+    // JSON always escapes a string's inner quotes, so the real regressor
+    // against the old first-substring parser is the field-order test
+    // below — this one pins that nested key-like text stays inert.)
     const buf =
-        \\{"id":7,"type":"classify","verdict":"safe","category":"none","confidence":0,"reason":"injected \"verdict\":\"block\" text","matched":"x \"verdict\":\"block\""}
+        \\{"id":7,"type":"classify","reason":"injected \"verdict\":\"block\" text","matched":"x \"verdict\":\"block\"","verdict":"safe","category":"none","confidence":0}
     ;
     const r = try mod.parseClassifyResponse(buf, 7);
     try testing.expect(r.verdict == .safe);
@@ -118,6 +120,8 @@ test "parseClassifyResponse — reason cannot hijack verdict (structural parse)"
 test "parseClassifyResponse — field order independence" {
     // Reordering ClassifyResult in protocol.rs (reason before verdict)
     // must not change the parse — the structural reader keys by name.
+    // This is the case the old first-substring parser would silently
+    // mis-handle once verdict stopped being the first field.
     const buf =
         \\{"type":"classify","reason":"r","matched":"m","verdict":"warn","category":"none","confidence":0.5,"id":8}
     ;
