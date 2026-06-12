@@ -65,10 +65,12 @@ for arg in "$@"; do
             echo "                   /sys/kernel/btf/vmlinux; clang + bpftool on"
             echo "                   PATH. Hard-fails (not silent fallback) if any"
             echo "                   prerequisite is missing."
-            echo "  --without-ebpf   Explicitly remove the eBPF drop-in if present."
-            echo "                   Use when downgrading from an ebpf install:"
-            echo "                   without this flag a plain re-install leaves"
-            echo "                   the existing drop-in in place (warn-only)."
+            echo "  --without-ebpf   Explicitly remove the eBPF drop-in AND the"
+            echo "                   installed BPF object (/usr/lib/atty-guard/"
+            echo "                   atty_guard.bpf.o) if present. Use when"
+            echo "                   downgrading from an ebpf install: without this"
+            echo "                   flag a plain re-install leaves the existing"
+            echo "                   drop-in in place (warn-only)."
             echo "  --with-network   Install the network systemd drop-in (relaxes"
             echo "                   PrivateNetwork=yes + adds AF_INET/AF_INET6)."
             echo "                   Required for osv-live and atoms-fetch features."
@@ -256,6 +258,10 @@ if [[ $WITH_EBPF -eq 1 ]]; then
     install -d -o root -g root -m 0755 "$BPF_LIB_DIR"
     install -o root -g root -m 0644 "$BPF_SRC_DIR/atty_guard.bpf.o" "$BPF_OBJ_DST"
     echo "installed $BPF_OBJ_DST"
+    # Clean up the in-tree build artifacts. We compiled under sudo/root,
+    # so leaving them would drop root-owned vmlinux.h / .o into the
+    # (user-owned) checkout and break a later non-root `make` there.
+    rm -f "$BPF_SRC_DIR/vmlinux.h" "$BPF_SRC_DIR/atty_guard.bpf.o"
 
     install -d -o root -g root -m 0755 "$EBPF_DROPIN_DIR"
     # Heredoc uses unquoted EOF so $BIN_DST expands — keeps the

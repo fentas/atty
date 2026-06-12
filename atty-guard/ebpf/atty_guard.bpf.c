@@ -127,7 +127,8 @@ struct execve_event {
 // future work; a verifier-safe loop here needs care and a kernel to
 // test against. Until then the userspace warn-subscriber's PPid-chain
 // walk (warn_consumer.rs::pid_in_tree_root) provides the deeper-tree
-// view for warn-mode telemetry; the kernel BLOCK is one level.
+// view for warn-mode telemetry (atty-guard/src/warn_consumer.rs,
+// `pid_in_tree_root`); the kernel BLOCK is one level.
 //
 // Comm note: at bprm_check_security time the kernel hasn't yet
 // updated the new binary's comm — `bpf_get_current_comm` returns

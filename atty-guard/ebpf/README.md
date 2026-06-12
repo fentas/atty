@@ -47,7 +47,7 @@ The PTY proxy sees commands the user types into atty. It does NOT see:
 
 The eBPF LSM hook closes that gap: it fires on _every_ execve and checks the execve'ing task's **direct parent** against the threat map. atty marks `npm`'s PID as `High`, the hook gates `npm`'s immediate children, and a postinstall reverse-shell that `npm` spawns directly to run `nc -e /bin/sh` gets `-EPERM` from the kernel BEFORE the binary loads.
 
-**Scope — one level:** the BLOCK check is keyed on the *direct* parent's PID, so it gates a marked PID's immediate children only, not deeper descendants. A grandchild (`npm` → `node` → `sh`) or a double-forked / reparented process (now a child of PID 1) escapes the kernel block. Warn-mode telemetry walks the full PPid chain in userspace (`warn_consumer.rs::pid_in_tree_root`) and so sees deeper trees; a verifier-safe bounded ancestry walk (or fork-time mark propagation) for the BLOCK path is future work. See the comment above `check_execve` in `atty_guard.bpf.c`.
+**Scope — one level:** the BLOCK check is keyed on the *direct* parent's PID, so it gates a marked PID's immediate children only, not deeper descendants. A grandchild (`npm` → `node` → `sh`) or a double-forked / reparented process (now a child of PID 1) escapes the kernel block. Warn-mode telemetry walks the full PPid chain in userspace (`atty-guard/src/warn_consumer.rs`, `pid_in_tree_root`) and so sees deeper trees; a verifier-safe bounded ancestry walk (or fork-time mark propagation) for the BLOCK path is future work. See the comment above `check_execve` in `atty_guard.bpf.c`.
 
 ## Prerequisites
 
