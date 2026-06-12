@@ -12,7 +12,9 @@
 //! `defaults.zig`. Existing user configs pick it up via Zig's
 //! per-field struct defaults — no resolver change needed. When adding
 //! a whole new subsystem, add a struct + instance to `defaults.zig`
-//! plus one resolver entry + type re-export here.
+//! plus one resolver entry + type re-export here AND its name to
+//! `known_config_decls` below — otherwise the unknown-decl guard will
+//! reject the new (valid) override in a user's config.zig.
 
 const std = @import("std");
 const user = @import("user_config");
