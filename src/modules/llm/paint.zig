@@ -223,9 +223,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // reverse-video block-cursor styling on the input row
             // below — already handled by the existing input-paint
             // code.
-            if (rt.chat_question_active and rt.chat_question_choice_count > 0) {
+            // Clamp the rendered choice count to the rows available
+            // ABOVE the free-text row (`rows - 1`): `rows` floors at 4,
+            // so an unclamped `rows - 1 - cc` underflows u16 on a short
+            // terminal (→ CUP to row ~65528, garbage paint). Drop the
+            // overflowing choices instead.
+            const avail_choice_rows: u16 = if (rows >= 2) rows - 2 else 0;
+            const cc: u8 = @intCast(@min(@as(u16, rt.chat_question_choice_count), avail_choice_rows));
+            if (rt.chat_question_active and cc > 0) {
                 const sel = rt.chat_question_selected_idx;
-                const cc: u8 = rt.chat_question_choice_count;
                 const first_choice_row: u16 = rows - 1 - cc;
                 var i: u8 = 0;
                 while (i < cc) : (i += 1) {
