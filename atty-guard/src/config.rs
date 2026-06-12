@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub tier2: Tier2Config,
@@ -29,6 +30,7 @@ pub struct Config {
 /// these caps a buggy / hostile local process could exhaust
 /// daemon resources by opening many idle connections.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Maximum concurrent connections accepted at one time.
     /// Reached → new connections are accepted-then-closed
@@ -69,6 +71,7 @@ impl Default for ServerConfig {
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccumulatorConfig {
     /// V2-J Phase 2: auto-`Block` threshold. When the combined
     /// confidence of multiple Tier-1 + Tier-2 signals reaches
@@ -106,6 +109,7 @@ pub struct AccumulatorConfig {
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tier2Config {
     /// `stub` / `heuristic` / `onnx`. CLI `--tier2` wins when set;
     /// otherwise this field is honored; otherwise the default is
@@ -128,6 +132,7 @@ pub struct Tier2Config {
 // parsed in every build so config validation is consistent across
 // feature flavors.
 #[cfg_attr(not(feature = "tier2-onnx"), allow(dead_code))]
+#[serde(deny_unknown_fields)]
 pub struct OnnxConfig {
     /// Model selector — defaults to `securebert2` because it's
     /// the smaller, faster option for the same Tier-2 verdict
@@ -377,6 +382,41 @@ block_threshold = 0.88
         assert_eq!(cfg.tier2.onnx.model, "securebert2");
         assert_eq!(cfg.tier2.onnx.max_tokens, 2048);
         assert!((cfg.tier2.onnx.block_threshold - 0.88).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_rejects_unknown_top_level_key() {
+        // A typo'd top-level table/key must fail closed rather than
+        // silently no-op into compiled-in defaults (audit #427). Mirrors
+        // atoms.pins.toml's deny_unknown_fields posture.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"[serverz]\nmax_concurrent_connections = 8\n")
+            .unwrap();
+        let err = load(tmp.path()).expect_err("unknown table must fail");
+        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_rejects_unknown_key_in_known_table() {
+        // A typo'd field inside a recognized table (e.g.
+        // `max_concurrent_connection` missing the trailing `s`) must
+        // also fail rather than silently use the default.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"[server]\nmax_concurrent_connection = 8\n")
+            .unwrap();
+        let err = load(tmp.path()).expect_err("unknown field must fail");
+        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_rejects_unknown_key_in_onnx_subtable() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"[tier2.onnx]\nmax_token = 2048\n").unwrap();
+        let err = load(tmp.path()).expect_err("unknown onnx field must fail");
+        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
     }
 
     #[test]

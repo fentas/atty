@@ -492,7 +492,9 @@ tuple and can't be a struct field. Type names follow `atty.Style` /
 
 1. Add a new struct type + instance to `defaults.zig`.
 2. Re-export the type + add the value resolver line in
-   `config_resolver.zig`.
+   `config_resolver.zig`, and add the subsystem name to that file's
+   `known_config_decls` (else the unknown-decl guard rejects the new
+   override in a user's `config.zig`).
 3. Add a top-level alias in `root.zig`.
 4. Update `config.def.zig` + the docs.
 

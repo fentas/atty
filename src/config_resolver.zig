@@ -12,10 +12,54 @@
 //! `defaults.zig`. Existing user configs pick it up via Zig's
 //! per-field struct defaults — no resolver change needed. When adding
 //! a whole new subsystem, add a struct + instance to `defaults.zig`
-//! plus one resolver entry + type re-export here.
+//! plus one resolver entry + type re-export here AND its name to
+//! `known_config_decls` below — otherwise the unknown-decl guard will
+//! reject the new (valid) override in a user's config.zig.
 
+const std = @import("std");
 const user = @import("user_config");
 const defaults = @import("defaults.zig");
+
+// Reject typo'd / stale top-level overrides in src/config.zig at compile
+// time. Without this a `pub const statusbars = …` (or a renamed-away
+// knob) compiles clean and the default silently wins — the exact
+// "silent config typo" the keyed-config philosophy is meant to prevent.
+// Only PUBLIC decls are inspected (Zig surfaces just those in typeInfo),
+// so private helpers like `const atty = @import("atty")` are ignored.
+const known_config_decls = [_][]const u8{
+    "modules",   "proxy",      "ghost",
+    "terminal",  "mouse",      "keymap",
+    "statusbar", "subprocess",
+};
+
+/// Comma-joined `known_config_decls` for the diagnostic — derived from
+/// the array so the message can't drift out of sync with the set the
+/// guard actually accepts.
+const known_config_decls_list = blk: {
+    var s: []const u8 = "";
+    for (known_config_decls, 0..) |name, i| {
+        s = s ++ (if (i == 0) "" else ", ") ++ name;
+    }
+    break :blk s;
+};
+
+comptime {
+    for (@typeInfo(user).@"struct".decls) |decl| {
+        var known = false;
+        for (known_config_decls) |name| {
+            if (std.mem.eql(u8, decl.name, name)) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            @compileError("unknown declaration `" ++ decl.name ++
+                "` in src/config.zig — typo or stale knob? " ++
+                "Recognized overrides: " ++ known_config_decls_list ++
+                ". (Make private helpers non-`pub`.)");
+        }
+    }
+}
 
 // ───── Type re-exports ─────────────────────────────────────────────────
 // Consumers annotate their overrides with these:
