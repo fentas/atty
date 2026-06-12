@@ -242,26 +242,31 @@ if [[ $WITH_EBPF -eq 1 ]]; then
         fi
     done
     echo "building atty_guard.bpf.o (clang BPF target + BTF CO-RE)…"
+    # Clean up the in-tree build artifacts on EVERY exit from here on
+    # (success or failure): we compile under sudo/root, so leaving a
+    # root-owned vmlinux.h / .o in the (user-owned) checkout would break
+    # a later non-root `make`. Must cover the make-failure path too, not
+    # just success.
+    _bpf_build_clean() { rm -f "$BPF_SRC_DIR/vmlinux.h" "$BPF_SRC_DIR/atty_guard.bpf.o"; }
     # Force-regenerate vmlinux.h from THIS kernel's BTF: the Makefile's
     # `vmlinux.h` target has no prerequisites, so an existing (possibly
-    # stale, old-kernel) header would otherwise be reused as-is. Remove
-    # it first so the dump always reflects the running kernel.
-    rm -f "$BPF_SRC_DIR/vmlinux.h"
+    # stale, old-kernel) header would otherwise be reused as-is. Clean
+    # any prior copy first so the dump always reflects the running kernel.
+    _bpf_build_clean
     if ! make -C "$BPF_SRC_DIR" vmlinux.h all; then
+        _bpf_build_clean
         echo "error: failed to compile atty_guard.bpf.o (see make output above)." >&2
         exit 1
     fi
     if [[ ! -f "$BPF_SRC_DIR/atty_guard.bpf.o" ]]; then
+        _bpf_build_clean
         echo "error: make reported success but $BPF_SRC_DIR/atty_guard.bpf.o is missing." >&2
         exit 1
     fi
     install -d -o root -g root -m 0755 "$BPF_LIB_DIR"
     install -o root -g root -m 0644 "$BPF_SRC_DIR/atty_guard.bpf.o" "$BPF_OBJ_DST"
     echo "installed $BPF_OBJ_DST"
-    # Clean up the in-tree build artifacts. We compiled under sudo/root,
-    # so leaving them would drop root-owned vmlinux.h / .o into the
-    # (user-owned) checkout and break a later non-root `make` there.
-    rm -f "$BPF_SRC_DIR/vmlinux.h" "$BPF_SRC_DIR/atty_guard.bpf.o"
+    _bpf_build_clean
 
     install -d -o root -g root -m 0755 "$EBPF_DROPIN_DIR"
     # Heredoc uses unquoted EOF so $BIN_DST expands — keeps the
