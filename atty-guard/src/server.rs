@@ -588,7 +588,17 @@ const SUBSCRIBER_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 /// Authorization gate for a `SubscribeWarnEvents` request. Returns
 /// `Some(error_message)` when the caller may not subscribe to
 /// `pid_tree_root`, `None` when allowed.
+///
+/// PID-reuse defense: read `/proc/<pid>/stat` starttime before AND
+/// after the ownership check and reject if it changed — otherwise a
+/// non-root caller could race a short-lived owned PID so it recycles
+/// to a different user's process between the ownership read and the
+/// subscription, watching that user's tree. Mirrors the
+/// SetThreatLevel TOCTOU sandwich. (This closes the during-check
+/// window; over the subscription's lifetime the broadcast filters by
+/// PID number alone, an inherent limitation tracked separately.)
 fn warn_subscribe_denied(peer: &PeerCred, pid_tree_root: u32) -> Option<String> {
+    use crate::threat_map::{pid_starttime, ProcRead};
     if peer.is_root {
         return None;
     }
@@ -597,26 +607,51 @@ fn warn_subscribe_denied(peer: &PeerCred, pid_tree_root: u32) -> Option<String> 
             "warn-event subscription with parent_pid_tree=0 (all PIDs) requires root".into(),
         );
     }
-    match pid_owner_uid(pid_tree_root) {
-        OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => Some(format!(
-            "non-root caller (uid {}) cannot subscribe to pid {pid_tree_root} (owned by uid {owner_uid})",
-            peer.uid
-        )),
-        OwnerLookup::NotFound => {
-            Some(format!("pid {pid_tree_root} no longer exists — cannot subscribe"))
+    let start1 = match pid_starttime(pid_tree_root) {
+        ProcRead::Found(t) => t,
+        ProcRead::NotFound => {
+            return Some(format!(
+                "pid {pid_tree_root} no longer exists — cannot subscribe"
+            ))
         }
-        OwnerLookup::Error(msg) => Some(msg),
-        OwnerLookup::Owner(_) => None,
+        ProcRead::Error(msg) => return Some(msg),
+    };
+    match pid_owner_uid(pid_tree_root) {
+        OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+            return Some(format!(
+                "non-root caller (uid {}) cannot subscribe to pid {pid_tree_root} (owned by uid {owner_uid})",
+                peer.uid
+            ))
+        }
+        OwnerLookup::NotFound => {
+            return Some(format!("pid {pid_tree_root} no longer exists — cannot subscribe"))
+        }
+        OwnerLookup::Error(msg) => return Some(msg),
+        OwnerLookup::Owner(_) => {}
+    }
+    match pid_starttime(pid_tree_root) {
+        ProcRead::Found(t) if t == start1 => None,
+        ProcRead::Found(_) => Some(format!(
+            "pid {pid_tree_root} was recycled mid-request — refusing to subscribe"
+        )),
+        ProcRead::NotFound => Some(format!(
+            "pid {pid_tree_root} disappeared mid-request — cannot subscribe"
+        )),
+        ProcRead::Error(msg) => Some(msg),
     }
 }
 
-/// True if the peer has closed its end of the socket (orderly EOF
-/// or a hard error other than "no data yet"). A MSG_PEEK |
+/// True if the subscriber stream should be closed. A MSG_PEEK |
 /// MSG_DONTWAIT recv inspects the socket without consuming bytes:
-/// 0 = peer sent EOF; <0 with EAGAIN/EWOULDBLOCK = still connected,
-/// nothing queued; <0 with any other errno = broken connection;
-/// >0 = unexpected inbound bytes (subscribers don't send) but the
-/// peer is still there.
+///   0  = peer sent EOF → closed.
+///   <0 with EAGAIN/EWOULDBLOCK = still connected, nothing queued.
+///   <0 with any other errno = broken connection → close.
+///   >0 = unexpected inbound bytes. Subscribers send nothing after
+///        the subscribe request, so any inbound data is a protocol
+///        violation → close. Returning "connected" here would let a
+///        client send one byte and squat the slot forever (MSG_PEEK
+///        never consumes it), re-creating the bounded-slot DoS this
+///        change closes.
 fn peer_disconnected(fd: i32) -> bool {
     const MSG_PEEK: i32 = 0x2;
     const MSG_DONTWAIT: i32 = 0x40;
@@ -633,14 +668,12 @@ fn peer_disconnected(fd: i32) -> bool {
             MSG_PEEK | MSG_DONTWAIT,
         )
     };
-    if n == 0 {
-        return true;
-    }
     if n < 0 {
         let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         return err != EAGAIN;
     }
-    false
+    // n == 0 (EOF) or n > 0 (unexpected data) → close.
+    true
 }
 
 fn stream_warn_events(
@@ -658,7 +691,7 @@ fn stream_warn_events(
     // publisher that fires the moment the ack hits the wire
     // can't lose its first event to a register-not-yet-run race.
     let (tx, rx) = std::sync::mpsc::sync_channel::<ResponseBody>(SUBSCRIBER_INBOX);
-    state
+    let reg_id = state
         .warn_broadcast
         .register(crate::warn_consumer::Subscriber::new(pid_tree_root, tx));
     write_response(writer, id, ResponseBody::Subscribed)?;
@@ -695,6 +728,11 @@ fn stream_warn_events(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    // Explicitly deregister so a quiet disconnect (no events flowing,
+    // so broadcast's lazy reap never runs) doesn't leave a dead entry
+    // accumulating in the broadcast list across connect/disconnect
+    // cycles.
+    state.warn_broadcast.deregister(reg_id);
     Ok(())
 }
 
@@ -1544,21 +1582,23 @@ mod tests {
 
     #[test]
     fn warn_subscribe_nonroot_denied_for_other_uid_pid() {
-        if running_as_root() {
-            return; // root may target any PID
-        }
-        // PID 1 (init/systemd) is owned by uid 0, never the test's
-        // non-root UID — so a non-root caller must be denied.
+        // Fabricate a non-root peer whose UID is NOT the owner of the
+        // target PID. Using our OWN pid (owned by current_uid) with a
+        // peer uid of current_uid+1 makes the cross-UID denial
+        // deterministic regardless of container / PID-namespace quirks
+        // (no reliance on PID 1's owner).
+        let not_owner = current_uid().wrapping_add(1);
         let peer = PeerCred {
-            uid: current_uid(),
+            uid: not_owner,
             is_root: false,
         };
-        let denied = warn_subscribe_denied(&peer, 1);
-        // Allow NotFound only in the impossible case PID 1 is gone.
+        let own_pid = std::process::id();
+        let denied = warn_subscribe_denied(&peer, own_pid);
         assert!(
             denied.is_some(),
             "non-root must not subscribe to a PID owned by another uid"
         );
+        assert!(denied.unwrap().contains("owned by uid"));
     }
 
     #[test]
