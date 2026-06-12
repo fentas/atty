@@ -32,6 +32,17 @@ const known_config_decls = [_][]const u8{
     "statusbar", "subprocess",
 };
 
+/// Comma-joined `known_config_decls` for the diagnostic — derived from
+/// the array so the message can't drift out of sync with the set the
+/// guard actually accepts.
+const known_config_decls_list = blk: {
+    var s: []const u8 = "";
+    for (known_config_decls, 0..) |name, i| {
+        s = s ++ (if (i == 0) "" else ", ") ++ name;
+    }
+    break :blk s;
+};
+
 comptime {
     for (@typeInfo(user).@"struct".decls) |decl| {
         var known = false;
@@ -44,9 +55,8 @@ comptime {
         if (!known) {
             @compileError("unknown declaration `" ++ decl.name ++
                 "` in src/config.zig — typo or stale knob? " ++
-                "Recognized overrides: modules, proxy, ghost, terminal, " ++
-                "mouse, keymap, statusbar, subprocess. " ++
-                "(Make private helpers non-`pub`.)");
+                "Recognized overrides: " ++ known_config_decls_list ++
+                ". (Make private helpers non-`pub`.)");
         }
     }
 }
