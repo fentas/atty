@@ -237,21 +237,31 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             const cc: u8 = @intCast(question_rows);
             if (rt.chat_question_active and cc > 0) {
                 const sel = rt.chat_question_selected_idx;
+                const total = rt.chat_question_choice_count;
+                // When the terminal is too short to show every choice
+                // (cc < total), slide a `cc`-row window so the selected
+                // choice stays visible — otherwise Enter could submit an
+                // off-screen, un-highlighted choice. Mirrors the inline
+                // pick-list's windowing.
+                var win_start: u8 = 0;
+                if (sel >= cc) win_start = sel - cc + 1;
+                if (@as(u16, win_start) + cc > total) win_start = total - cc;
                 const first_choice_row: u16 = rows - 1 - cc;
                 var i: u8 = 0;
                 while (i < cc) : (i += 1) {
+                    const idx = win_start + i; // actual choice index
                     const row_y: u16 = first_choice_row + i;
                     w.print("\x1B[{d};1H\x1B[2K", .{row_y}) catch return false;
-                    const is_sel = (sel == i);
+                    const is_sel = (sel == idx);
                     if (is_sel) {
                         w.writeAll("\x1B[22;38;5;141m\u{25B6}\x1B[0m ") catch return false; // ▶ mauve
                     } else {
                         w.writeAll("  ") catch return false;
                     }
-                    const choice_slice = rt.question_choices_storage[i][0..rt.question_choices_lens[i]];
+                    const choice_slice = rt.question_choices_storage[idx][0..rt.question_choices_lens[idx]];
                     if (is_sel) w.writeAll("\x1B[1m") catch return false; // bold selected
                     var num_buf: [8]u8 = undefined;
-                    const num_str = std.fmt.bufPrint(&num_buf, "{d}. ", .{i + 1}) catch unreachable;
+                    const num_str = std.fmt.bufPrint(&num_buf, "{d}. ", .{idx + 1}) catch unreachable;
                     w.writeAll("\x1B[22;1;38;5;14m") catch return false;
                     w.writeAll(num_str) catch return false;
                     w.writeAll("\x1B[0m") catch return false;
