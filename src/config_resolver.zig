@@ -14,8 +14,40 @@
 //! a whole new subsystem, add a struct + instance to `defaults.zig`
 //! plus one resolver entry + type re-export here.
 
+const std = @import("std");
 const user = @import("user_config");
 const defaults = @import("defaults.zig");
+
+// Reject typo'd / stale top-level overrides in src/config.zig at compile
+// time. Without this a `pub const statusbars = …` (or a renamed-away
+// knob) compiles clean and the default silently wins — the exact
+// "silent config typo" the keyed-config philosophy is meant to prevent.
+// Only PUBLIC decls are inspected (Zig surfaces just those in typeInfo),
+// so private helpers like `const atty = @import("atty")` are ignored.
+const known_config_decls = [_][]const u8{
+    "modules",   "proxy",      "ghost",
+    "terminal",  "mouse",      "keymap",
+    "statusbar", "subprocess",
+};
+
+comptime {
+    for (@typeInfo(user).@"struct".decls) |decl| {
+        var known = false;
+        for (known_config_decls) |name| {
+            if (std.mem.eql(u8, decl.name, name)) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            @compileError("unknown declaration `" ++ decl.name ++
+                "` in src/config.zig — typo or stale knob? " ++
+                "Recognized overrides: modules, proxy, ghost, terminal, " ++
+                "mouse, keymap, statusbar, subprocess. " ++
+                "(Make private helpers non-`pub`.)");
+        }
+    }
+}
 
 // ───── Type re-exports ─────────────────────────────────────────────────
 // Consumers annotate their overrides with these:
