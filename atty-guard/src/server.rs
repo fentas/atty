@@ -837,43 +837,22 @@ fn handle_classify(
         }
     }
 
-    // V2-F live OSV lookup. Runs only when Tier-1 said Safe
-    // AND the command is an `npm install <pkg>` shape AND
-    // the daemon was started with --enable-osv. Catches
-    // packages that landed on OSV's advisory list AFTER
-    // atty-guard's last bundled-data update.
+    // Walk all parsed package tokens (not just the first) and keep
+    // the strictest verdict via `verdict_strictly_worse` so a
+    // prepended benign package can't shadow a later malicious one.
     //
-    // Walks the parsed package tokens (not just the first)
-    // to defeat the prepend-a-benign-pkg attacker bypass,
-    // and keeps the strictest verdict via
-    // `verdict_strictly_worse` so a Malicious (Block) pkg
-    // after a Vulnerable (Warn) pkg isn't lost to an early
-    // first-non-Safe exit. Short-circuit only on Block —
-    // the strictest possible outcome; further OSV calls
-    // can't escalate further.
+    // Each lookup is a sequential ~250 ms blocking HTTP call, so the
+    // fan-out is capped (`osv_probe_pkgs`) — otherwise a single
+    // `npm install p1 … pN` becomes an outbound-request amplifier on
+    // this handler thread.
     //
-    // Each lookup is a sequential blocking HTTP call (250 ms
-    // budget — osv.rs). `OSV_MAX_PKGS_PER_CMD` caps the fan-out
-    // so `npm install p1 … p500` can't turn one classify into
-    // hundreds of outbound requests on this handler thread (a
-    // resource + outbound-flood amplifier). Excess packages are
-    // skipped (logged at -v); 8 covers every realistic multi-pkg
-    // install.
-    //
-    // Reachability caveat (the synchronous-path tradeoff): even a
-    // single uncached lookup (~250 ms) exceeds the atty proxy's
-    // 50 ms classify read timeout (uds_client.zig), so the FIRST
-    // classify of an unknown package times out proxy-side and
-    // falls back to local Tier-1. That fallback is fail-SAFE —
-    // OSV only ever upgrades Safe (it runs solely in the Safe
-    // branch), so a missed verdict can never downgrade a real
-    // threat. The daemon still runs the lookup to completion and
-    // caches the verdict (cache_ttl 1 h), so subsequent classifies
-    // of the same package return the OSV verdict within the
-    // proxy's budget. OSV on this path is therefore best-effort +
-    // eventually-consistent, not a hard real-time signal — moving
-    // it fully off the synchronous classify path is tracked
-    // separately.
+    // OSV is best-effort here: one uncached lookup already exceeds the
+    // proxy's 50 ms classify timeout, so the first probe of an unknown
+    // package times out proxy-side and falls back to local Tier-1. That
+    // is safe because OSV runs only in the Safe branch and can only
+    // upgrade — a miss never downgrades a real threat — and the daemon
+    // still caches the result so a repeat classify resolves within
+    // budget.
     if matches!(result.verdict, Verdict::Safe) {
         if let Some(osv) = &state.osv {
             let (pkgs, total) = osv_probe_pkgs(&command);
@@ -2301,14 +2280,8 @@ mod tests {
             uid: 0,
             is_root: true,
         };
-        let own_uid = unsafe {
-            extern "C" {
-                fn geteuid() -> u32;
-            }
-            geteuid()
-        };
         let nonroot = PeerCred {
-            uid: own_uid,
+            uid: current_uid(),
             is_root: false,
         };
         let own_pid = std::process::id();
