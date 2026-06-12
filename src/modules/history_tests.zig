@@ -450,6 +450,7 @@ test "deleteHistoryMatch preserves original zsh timestamps of kept lines" {
     defer _ = std.c.close(rd_fd);
     var rbuf: [256]u8 = undefined;
     const rn = std.c.read(rd_fd, &rbuf, rbuf.len);
+    try testing.expect(rn > 0);
     const disk = rbuf[0..@as(usize, @intCast(rn))];
     // Verbatim copy: original timestamps survive, deleted line gone.
     try testing.expect(std.mem.indexOf(u8, disk, ": 1700000000:0;keep one") != null);
@@ -497,6 +498,7 @@ test "deleteHistoryMatch removes an on-disk entry that aged out of the ring" {
     defer _ = std.c.close(rd_fd);
     var rbuf: [256]u8 = undefined;
     const rn = std.c.read(rd_fd, &rbuf, rbuf.len);
+    try testing.expect(rn > 0);
     const disk = rbuf[0..@as(usize, @intCast(rn))];
     try testing.expect(std.mem.indexOf(u8, disk, "old-secret") == null);
     try testing.expect(std.mem.indexOf(u8, disk, "b\n") != null);

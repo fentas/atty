@@ -400,29 +400,20 @@ pub fn configure(comptime cfg: Config) type {
 
             const rfd = open(path_z.ptr, O_RDONLY);
             if (rfd < 0) return; // nothing on disk to filter
+            defer _ = close(rfd);
             const max_file = 64 << 20;
             const size = lseek(rfd, 0, SEEK_END);
-            if (size < 0 or size > max_file or lseek(rfd, 0, SEEK_SET) < 0) {
-                _ = close(rfd);
-                return;
-            }
+            if (size < 0 or size > max_file or lseek(rfd, 0, SEEK_SET) < 0) return;
             const data = try rt.allocator.alloc(u8, @intCast(size));
             defer rt.allocator.free(data);
             var total: usize = 0;
-            var read_ok = true;
             while (total < data.len) {
                 const rc = std.c.read(rfd, data[total..].ptr, data.len - total);
-                if (rc < 0) {
-                    // Read error before EOF — abort WITHOUT rewriting, or
-                    // we'd replace the history with a truncated copy.
-                    read_ok = false;
-                    break;
-                }
+                if (rc < 0) return; // read error before EOF — abort WITHOUT
+                // rewriting, or we'd replace the history with a truncated copy
                 if (rc == 0) break; // EOF (file shrank concurrently)
                 total += @intCast(rc);
             }
-            _ = close(rfd);
-            if (!read_ok) return;
             const content = data[0..total];
 
             var out_buf: std.ArrayList(u8) = .empty;
