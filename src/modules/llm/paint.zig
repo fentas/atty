@@ -123,11 +123,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 pty_mod.WinSize{ .rows = 24, .cols = 80, .xpixel = 0, .ypixel = 0 };
             const rows: u16 = if (size.rows > 4) size.rows else 4;
             // Chat-mode question pick-list (#214) — when active,
-            // reserve `choice_count` rows above the input row for
-            // the choice list. The scroll region shrinks
-            // accordingly so turn content can't scroll into the
-            // choice list area.
-            const question_rows: u16 = if (rt.chat_question_active) @intCast(rt.chat_question_choice_count) else 0;
+            // reserve a row above the input row per rendered choice.
+            // The scroll region shrinks accordingly so turn content
+            // can't scroll into the choice list area. Clamp to the rows
+            // available above the free-text row (same clamp the
+            // pick-list paint applies below) so the reserved region
+            // matches what's actually drawn on a short terminal.
+            const avail_choice_rows: u16 = if (rows >= 2) rows - 2 else 0;
+            const question_rows: u16 = if (rt.chat_question_active)
+                @min(@as(u16, rt.chat_question_choice_count), avail_choice_rows)
+            else
+                0;
             const content_bottom: u16 = if (rows > 2 + question_rows) rows - 2 - question_rows else 1;
             // `size.cols` available but unused — wrap calculations
             // are a future follow-up (codepoint-level turn rendering
@@ -223,13 +229,12 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // reverse-video block-cursor styling on the input row
             // below — already handled by the existing input-paint
             // code.
-            // Clamp the rendered choice count to the rows available
-            // ABOVE the free-text row (`rows - 1`): `rows` floors at 4,
-            // so an unclamped `rows - 1 - cc` underflows u16 on a short
-            // terminal (→ CUP to row ~65528, garbage paint). Drop the
-            // overflowing choices instead.
-            const avail_choice_rows: u16 = if (rows >= 2) rows - 2 else 0;
-            const cc: u8 = @intCast(@min(@as(u16, rt.chat_question_choice_count), avail_choice_rows));
+            // `question_rows` is already the choice count clamped to the
+            // rows available above the free-text row (see top of fn):
+            // without the clamp `rows - 1 - cc` underflows u16 on a
+            // short terminal (`rows` floors at 4) → CUP to row ~65528,
+            // garbage paint. Overflowing choices are dropped.
+            const cc: u8 = @intCast(question_rows);
             if (rt.chat_question_active and cc > 0) {
                 const sel = rt.chat_question_selected_idx;
                 const first_choice_row: u16 = rows - 1 - cc;
