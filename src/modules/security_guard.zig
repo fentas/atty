@@ -44,9 +44,10 @@ pub const TrustCache = trust_mod.TrustCache;
 pub const UdsClient = uds_client_mod.Client;
 pub const WarnSubscriber = warn_subscriber_mod.Subscriber;
 
-/// How many Enters to skip the daemon after it latches `daemon_disabled`
-/// before re-probing it. Bounds the recovery delay (a restarting daemon
-/// is picked back up within ~this many commands) against re-paying the
+/// Interval, in Enters, between daemon re-probes once `daemon_disabled`
+/// has latched: after N Enters the daemon is retried (the Nth Enter
+/// itself runs the query). Bounds the recovery delay — a restarting
+/// daemon is picked back up within ~N commands — against re-paying the
 /// connect-failure latency on every Enter while it's genuinely down.
 /// `pub` so the sibling test can pin the re-probe cadence.
 pub const daemon_reprobe_interval: u32 = 20;
@@ -145,19 +146,23 @@ pub fn configure(comptime cfg: Config) type {
             /// pay the connect cost on every session start. Re-
             /// opened by the client itself on any I/O error.
             daemon: ?UdsClient = null,
-            /// Set when the daemon proves unreachable so the next few
-            /// Enters skip the connect-failure path (a ~ms `connect()`
-            /// the user feels as paper-cut latency an absent sidecar
-            /// shouldn't introduce). NOT permanently sticky: a daemon
-            /// that's merely restarting (systemctl restart mid-session)
-            /// would otherwise downgrade the whole session to in-proc
-            /// Tier-1 — a strict subset of the daemon's coverage (no
-            /// Tier-2 SLM, no OSV, no auto-Block) — with no recovery.
-            /// `onInput` re-probes every `daemon_reprobe_interval`
-            /// Enters (see `daemon_disabled_skips`).
+            /// Set when the daemon proves unreachable, so the next few
+            /// Enters skip the connect-failure path — a ~ms `connect()`
+            /// the user would otherwise feel as paper-cut latency that
+            /// an absent sidecar shouldn't introduce. NOT permanently
+            /// sticky: a daemon that's merely restarting (e.g.
+            /// `systemctl restart` mid-session) would otherwise
+            /// downgrade the whole session to in-proc Tier-1 — a strict
+            /// subset of the daemon's coverage (no Tier-2 SLM, no OSV,
+            /// no auto-Block) — with no recovery. `onInput` re-probes
+            /// every `daemon_reprobe_interval` Enters (see
+            /// `daemon_disabled_skips`).
             daemon_disabled: bool = false,
-            /// Enters skipped since `daemon_disabled` latched; when it
-            /// reaches `daemon_reprobe_interval` the daemon is retried.
+            /// Enters seen since `daemon_disabled` latched. Incremented
+            /// on each Enter while disabled; when it reaches
+            /// `daemon_reprobe_interval` it resets to 0 and that Enter
+            /// re-probes the daemon (so the counting Enter is also the
+            /// retry, not a skipped one).
             daemon_disabled_skips: u32 = 0,
             /// True once we've fetched the daemon's persistent
             /// trust list and seeded `rt.trust` from it. Flipped
