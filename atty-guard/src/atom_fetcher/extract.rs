@@ -681,9 +681,11 @@ detection:
             enc.finish().unwrap();
         }
         let res = walk_tarball_atoms(&gz, accept_all, flood_extract);
+        // Specifically the in-loop atom-count cap (ParseError), not the
+        // byte cap (5 bytes ≪ 64 MiB) or a tar/gz parse error.
         assert!(
-            res.is_err(),
-            "expected the atom-count cap to bail, got {res:?}"
+            matches!(res, Err(FetchError::ParseError(_))),
+            "expected the atom-count cap (ParseError) to bail, got {res:?}"
         );
     }
 }
