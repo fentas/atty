@@ -31,11 +31,15 @@ const Allocator = std.mem.Allocator;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
+extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 
 const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;
 const O_CREAT: c_int = 0o100;
 const O_APPEND: c_int = 0o2000;
+const O_TRUNC: c_int = 0o1000;
+const SEEK_SET: c_int = 0;
+const SEEK_END: c_int = 2;
 const FILE_MODE: c_int = 0o600;
 
 pub const Match = enum { prefix, substring };
@@ -221,8 +225,24 @@ pub fn configure(comptime cfg: Config) type {
             if (fd < 0) return;
             defer _ = close(fd);
 
-            // 1 MiB cap; older entries beyond that are ignored.
+            // 1 MiB cap; older entries beyond that are ignored. Seek to
+            // the TAIL of the file (the file's tail is the *newest*
+            // history) — reading from offset 0 would seed the ring with
+            // the oldest commands on any history larger than the cap, so
+            // ghost suggestions would surface stale entries and never the
+            // recent ones the user actually wants.
             const max = 1 << 20;
+            const size = lseek(fd, 0, SEEK_END);
+            var start_off: i64 = 0;
+            if (size > max) start_off = size - max;
+            // Rewind to start_off — note the SEEK_END probe above left
+            // the cursor at EOF, so this is required even when
+            // start_off == 0 (small files read from the beginning).
+            if (lseek(fd, start_off, SEEK_SET) < 0) {
+                if (start_off == 0 or lseek(fd, 0, SEEK_SET) < 0) return;
+                start_off = 0;
+            }
+
             const data = try allocator.alloc(u8, max);
             defer allocator.free(data);
 
@@ -232,7 +252,18 @@ pub fn configure(comptime cfg: Config) type {
                 if (rc <= 0) break;
                 total += @intCast(rc);
             }
-            const slice = data[0..total];
+            var slice = data[0..total];
+
+            // When we seeked into the middle of the file the first line
+            // is almost certainly a partial command — drop everything up
+            // to and including the first newline.
+            if (start_off > 0) {
+                if (std.mem.indexOfScalar(u8, slice, '\n')) |nl| {
+                    slice = slice[nl + 1 ..];
+                } else {
+                    slice = slice[0..0];
+                }
+            }
 
             var it = std.mem.splitScalar(u8, slice, '\n');
             while (it.next()) |raw_line| {
@@ -312,10 +343,10 @@ pub fn configure(comptime cfg: Config) type {
             pushEntry(rt, line) catch {};
         }
 
-        /// Remove every ring entry whose payload equals `line`, then
-        /// rewrite the file with what's left. Atomic via the
-        /// write-temp + rename trick so a crash leaves the original
-        /// in place. Best-effort: a file-write failure leaves the
+        /// Remove every entry whose payload equals `line` from both the
+        /// in-memory ring and the on-disk file. Atomic via the
+        /// write-temp + rename trick so a crash leaves the original in
+        /// place. Best-effort: a file-write failure leaves the
         /// in-memory ring filtered but the on-disk file untouched.
         pub fn deleteHistoryMatch(rt: *Runtime, _: *m.Context, line: []const u8) m.Error!void {
             if (line.len == 0) return;
@@ -329,30 +360,78 @@ pub fn configure(comptime cfg: Config) type {
                 }
                 i += 1;
             }
-            // Rewrite the file atomically.
-            rewriteFile(rt) catch {};
+            // Filter the real file, line by line.
+            filterFileRemoving(rt, line) catch {};
         }
 
-        /// Write the current ring to disk via a temp + rename so a
-        /// crash or write failure can't corrupt the user's history.
-        fn rewriteFile(rt: *Runtime) !void {
+        /// Stream-filter the on-disk history file: drop every line whose
+        /// parsed payload equals `line`, keep every other line VERBATIM,
+        /// then atomically replace the original via temp + rename.
+        ///
+        /// Keeping raw lines (rather than re-serialising the in-memory
+        /// ring) is load-bearing: the ring holds at most `capacity`
+        /// entries seeded from only the file's 1 MiB tail, so dumping it
+        /// back would truncate every older entry AND rewrite zsh
+        /// extended-history timestamps to "now". Verbatim copy preserves
+        /// both. Files larger than `max_file` are left untouched (the
+        /// ring is still filtered) — a best-effort cap that never
+        /// corrupts, unlike the previous ring-dump.
+        fn filterFileRemoving(rt: *Runtime, line: []const u8) !void {
             if (rt.path.len == 0) return;
+            const path_z = try rt.allocator.dupeZ(u8, rt.path);
+            defer rt.allocator.free(path_z);
+
+            const rfd = open(path_z.ptr, O_RDONLY);
+            if (rfd < 0) return; // nothing on disk to filter
+            const max_file = 64 << 20;
+            const size = lseek(rfd, 0, SEEK_END);
+            if (size < 0 or size > max_file or lseek(rfd, 0, SEEK_SET) < 0) {
+                _ = close(rfd);
+                return;
+            }
+            const data = try rt.allocator.alloc(u8, @intCast(size));
+            defer rt.allocator.free(data);
+            var total: usize = 0;
+            while (total < data.len) {
+                const rc = std.c.read(rfd, data[total..].ptr, data.len - total);
+                if (rc <= 0) break;
+                total += @intCast(rc);
+            }
+            _ = close(rfd);
+            const content = data[0..total];
+
+            var out_buf: std.ArrayList(u8) = .empty;
+            defer out_buf.deinit(rt.allocator);
+            var removed_any = false;
+            var start: usize = 0;
+            while (start < content.len) {
+                const nl = std.mem.indexOfScalarPos(u8, content, start, '\n');
+                const end = nl orelse content.len;
+                const raw = content[start..end];
+                if (std.mem.eql(u8, parseHistoryLine(raw), line)) {
+                    removed_any = true;
+                } else {
+                    try out_buf.appendSlice(rt.allocator, raw);
+                    if (nl != null) try out_buf.append(rt.allocator, '\n');
+                }
+                start = if (nl) |p| p + 1 else content.len;
+            }
+            // Nothing on disk matched — don't churn the file.
+            if (!removed_any) return;
 
             const tmp_path = try std.fmt.allocPrint(rt.allocator, "{s}.atty-tmp", .{rt.path});
             defer rt.allocator.free(tmp_path);
             const tmp_z = try rt.allocator.dupeZ(u8, tmp_path);
             defer rt.allocator.free(tmp_z);
-            const path_z = try rt.allocator.dupeZ(u8, rt.path);
-            defer rt.allocator.free(path_z);
 
-            const fd = open(tmp_z.ptr, O_WRONLY | O_CREAT | 0o1000, FILE_MODE); // 0o1000 = O_TRUNC
-            if (fd < 0) return error.WriteFailed;
-            defer _ = close(fd);
-
-            var buf: [cfg.max_line + 64]u8 = undefined;
-            for (rt.entries.items) |entry| {
-                const out = formatHistoryLine(&buf, entry, rt.format, unixTs()) orelse continue;
-                _ = std.c.write(fd, out.ptr, out.len);
+            const wfd = open(tmp_z.ptr, O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE);
+            if (wfd < 0) return error.WriteFailed;
+            defer _ = close(wfd);
+            var written: usize = 0;
+            while (written < out_buf.items.len) {
+                const rc = std.c.write(wfd, out_buf.items[written..].ptr, out_buf.items.len - written);
+                if (rc <= 0) return error.WriteFailed;
+                written += @intCast(rc);
             }
 
             // rename(tmp, path) — atomic replacement on POSIX.

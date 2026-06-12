@@ -376,6 +376,133 @@ test "deleteHistoryMatch rewrites the on-disk file atomically" {
     try testing.expect(std.mem.indexOf(u8, disk, "keep two") != null);
 }
 
+test "loadRecent seeds from the tail on a file larger than the 1 MiB cap" {
+    const path = "/tmp/atty-unit-history-tail.txt";
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    _ = std.c.unlink(path_z.ptr);
+    const fd = std.c.open(
+        path_z.ptr,
+        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
+        @as(std.c.mode_t, 0o600),
+    );
+    try testing.expect(fd >= 0);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    // ~120k lines × ~14 bytes ≈ 1.7 MiB — comfortably over the 1 MiB
+    // cap so the head is dropped and only the tail is read.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var n: usize = 0;
+    while (n < 120_000) : (n += 1) {
+        var lb: [16]u8 = undefined;
+        const s = std.fmt.bufPrint(&lb, "cmd{d:0>9}\n", .{n}) catch unreachable;
+        try buf.appendSlice(testing.allocator, s);
+    }
+    _ = std.c.write(fd, buf.items.ptr, buf.items.len);
+    _ = std.c.close(fd);
+
+    const H = configure(.{ .path = path, .format = .plain });
+    var rt = try H.attach(testing.allocator, std.Io.failing);
+    defer H.detach(&rt, std.Io.failing);
+
+    // Ring filled to capacity with the NEWEST lines: last line present,
+    // first line (oldest) absent — the regression was the reverse.
+    try testing.expect(rt.entries.items.len == 5_000);
+    try testing.expectEqualStrings("cmd000119999", rt.entries.items[rt.entries.items.len - 1]);
+    for (rt.entries.items) |e| try testing.expect(!std.mem.eql(u8, e, "cmd000000000"));
+}
+
+test "deleteHistoryMatch preserves original zsh timestamps of kept lines" {
+    const path = "/tmp/atty-unit-history-ts.txt";
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    _ = std.c.unlink(path_z.ptr);
+    const fd = std.c.open(
+        path_z.ptr,
+        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
+        @as(std.c.mode_t, 0o600),
+    );
+    try testing.expect(fd >= 0);
+    const payload = ": 1700000000:0;keep one\n: 1700000001:0;DELETE-ME\n: 1700000002:0;keep two\n";
+    _ = std.c.write(fd, payload.ptr, payload.len);
+    _ = std.c.close(fd);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    const H = configure(.{ .path = path, .format = .zsh_extended });
+    var rt = try H.attach(testing.allocator, std.Io.failing);
+    defer H.detach(&rt, std.Io.failing);
+
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var line: @import("../line_state.zig").LineState = .{};
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    try H.deleteHistoryMatch(&rt, &ctx, "DELETE-ME");
+
+    const rd_fd = std.c.open(path_z.ptr, @bitCast(std.c.O{ .ACCMODE = .RDONLY }), @as(std.c.mode_t, 0));
+    try testing.expect(rd_fd >= 0);
+    defer _ = std.c.close(rd_fd);
+    var rbuf: [256]u8 = undefined;
+    const rn = std.c.read(rd_fd, &rbuf, rbuf.len);
+    const disk = rbuf[0..@as(usize, @intCast(rn))];
+    // Verbatim copy: original timestamps survive, deleted line gone.
+    try testing.expect(std.mem.indexOf(u8, disk, ": 1700000000:0;keep one") != null);
+    try testing.expect(std.mem.indexOf(u8, disk, ": 1700000002:0;keep two") != null);
+    try testing.expect(std.mem.indexOf(u8, disk, "DELETE-ME") == null);
+}
+
+test "deleteHistoryMatch removes an on-disk entry that aged out of the ring" {
+    const path = "/tmp/atty-unit-history-beyond-ring.txt";
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    _ = std.c.unlink(path_z.ptr);
+    const fd = std.c.open(
+        path_z.ptr,
+        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
+        @as(std.c.mode_t, 0o600),
+    );
+    try testing.expect(fd >= 0);
+    const payload = "old-secret\nb\nc\nd\n";
+    _ = std.c.write(fd, payload.ptr, payload.len);
+    _ = std.c.close(fd);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    // capacity 2 → ring holds only the 2 newest (c, d); "old-secret"
+    // aged out of the ring but is still on disk.
+    const H = configure(.{ .path = path, .format = .plain, .capacity = 2 });
+    var rt = try H.attach(testing.allocator, std.Io.failing);
+    defer H.detach(&rt, std.Io.failing);
+    try testing.expect(rt.entries.items.len == 2);
+
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var line: @import("../line_state.zig").LineState = .{};
+    var ctx = m.Context{
+        .allocator = testing.allocator,
+        .io = std.Io.failing,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    try H.deleteHistoryMatch(&rt, &ctx, "old-secret");
+
+    const rd_fd = std.c.open(path_z.ptr, @bitCast(std.c.O{ .ACCMODE = .RDONLY }), @as(std.c.mode_t, 0));
+    try testing.expect(rd_fd >= 0);
+    defer _ = std.c.close(rd_fd);
+    var rbuf: [256]u8 = undefined;
+    const rn = std.c.read(rd_fd, &rbuf, rbuf.len);
+    const disk = rbuf[0..@as(usize, @intCast(rn))];
+    try testing.expect(std.mem.indexOf(u8, disk, "old-secret") == null);
+    try testing.expect(std.mem.indexOf(u8, disk, "b\n") != null);
+    try testing.expect(std.mem.indexOf(u8, disk, "d\n") != null);
+}
+
 test "loadRecent strips zsh extended-history prefixes on load" {
     const path = "/tmp/atty-unit-history-zsh.txt";
     const path_z = try testing.allocator.dupeZ(u8, path);
