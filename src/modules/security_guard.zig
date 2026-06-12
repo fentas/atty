@@ -44,6 +44,14 @@ pub const TrustCache = trust_mod.TrustCache;
 pub const UdsClient = uds_client_mod.Client;
 pub const WarnSubscriber = warn_subscriber_mod.Subscriber;
 
+/// Interval, in Enters, between daemon re-probes once `daemon_disabled`
+/// has latched: after N Enters the daemon is retried (the Nth Enter
+/// itself runs the query). Bounds the recovery delay — a restarting
+/// daemon is picked back up within ~N commands — against re-paying the
+/// connect-failure latency on every Enter while it's genuinely down.
+/// `pub` so the sibling test can pin the re-probe cadence.
+pub const daemon_reprobe_interval: u32 = 20;
+
 pub const Config = struct {
     /// Master switch. Off by default — opt-in only. When disabled
     /// the module is statically eliminated from the input path
@@ -138,21 +146,33 @@ pub fn configure(comptime cfg: Config) type {
             /// pay the connect cost on every session start. Re-
             /// opened by the client itself on any I/O error.
             daemon: ?UdsClient = null,
-            /// Sticky flag — once the daemon proves unreachable
-            /// we stop trying on subsequent Enters this session.
-            /// Without this, every Enter would re-pay the connect
-            /// failure path (a ~ms `connect()` syscall) and the
-            /// user feels a paper-cut latency that an absent
-            /// sidecar shouldn't introduce.
+            /// Set when the daemon proves unreachable, so the next few
+            /// Enters skip the connect-failure path — a ~ms `connect()`
+            /// the user would otherwise feel as a paper-cut latency that
+            /// an absent sidecar shouldn't introduce. NOT permanently
+            /// sticky: a daemon that's merely restarting (e.g.
+            /// `systemctl restart` mid-session) would otherwise
+            /// downgrade the whole session to in-proc Tier-1 — a strict
+            /// subset of the daemon's coverage (no Tier-2 SLM, no OSV,
+            /// no auto-Block) — with no recovery. `onInput` re-probes
+            /// every `daemon_reprobe_interval` Enters (see
+            /// `daemon_disabled_skips`).
             daemon_disabled: bool = false,
+            /// Enters seen since `daemon_disabled` latched. Incremented
+            /// on each Enter while disabled; when it reaches
+            /// `daemon_reprobe_interval` it resets to 0 and that Enter
+            /// re-probes the daemon (so the counting Enter is also the
+            /// retry, not a skipped one).
+            daemon_disabled_skips: u32 = 0,
             /// True once we've fetched the daemon's persistent
             /// trust list and seeded `rt.trust` from it. Flipped
             /// inside `queryDaemon` on first successful classify
             /// (lazy seed — avoids paying the connect cost at
             /// attach time for sessions that never type a flagged
-            /// command). Sticky for the runtime's lifetime; daemon
-            /// reconnects (after `daemon_disabled` resets) re-seed
-            /// since the flag stays false until a successful seed.
+            /// command). Stays false until a trustList fetch actually
+            /// SUCCEEDS, so a transient failure (or a daemon that came
+            /// back after a `daemon_disabled` re-probe) re-seeds on a
+            /// later Enter rather than being silently skipped forever.
             daemon_trust_seeded: bool = false,
             /// Set when the LAST armed banner came from the daemon
             /// instead of an in-proc pattern. The category may not
@@ -395,20 +415,41 @@ pub fn configure(comptime cfg: Config) type {
             // superset of our in-proc patterns) AND Tier-2 (encoder
             // SLM, V2-C). Falls through to in-proc on any sidecar
             // error so security degrades gracefully.
-            if (cfg.daemon_socket_path.len > 0 and !rt.daemon_disabled) {
-                if (queryDaemon(rt, line, ctx)) |daemon_verdict| {
-                    if (daemon_verdict.refused) return .{ .replace = "\x15" };
-                    if (daemon_verdict.armed) return .swallow;
-                    // Daemon said safe — skip in-proc pattern walk
-                    // entirely. The daemon's Tier-1 is a strict
-                    // superset of ours, so re-running locally is
-                    // wasted work.
-                    return .forward;
-                } else |_| {
-                    // Sidecar unreachable / timed out / parse error.
-                    // Latch the disable so subsequent Enters don't
-                    // re-pay the connect failure.
-                    rt.daemon_disabled = true;
+            if (cfg.daemon_socket_path.len > 0) {
+                // Re-probe a previously-disabled daemon every
+                // `daemon_reprobe_interval` Enters so a restarting
+                // sidecar is picked back up instead of downgrading the
+                // session to in-proc Tier-1 for good.
+                if (rt.daemon_disabled) {
+                    rt.daemon_disabled_skips += 1;
+                    if (rt.daemon_disabled_skips >= daemon_reprobe_interval) {
+                        rt.daemon_disabled = false;
+                        rt.daemon_disabled_skips = 0;
+                    }
+                }
+                if (!rt.daemon_disabled) {
+                    if (queryDaemon(rt, line, ctx)) |daemon_verdict| {
+                        if (daemon_verdict.refused) return .{ .replace = "\x15" };
+                        if (daemon_verdict.armed) return .swallow;
+                        // Daemon said safe — skip in-proc pattern walk
+                        // entirely. The daemon's Tier-1 is a strict
+                        // superset of ours, so re-running locally is
+                        // wasted work.
+                        return .forward;
+                    } else |_| {
+                        // Sidecar unreachable / timed out / parse error.
+                        // Latch the disable so the next few Enters don't
+                        // re-pay the connect failure; we re-probe later.
+                        // Surface the downgrade once per episode (this
+                        // branch only runs on the false→true transition,
+                        // since we just queried with disabled == false).
+                        std.log.warn(
+                            "atty security_guard: daemon unreachable — degraded to in-proc Tier-1 (re-probing every {d} commands)",
+                            .{daemon_reprobe_interval},
+                        );
+                        rt.daemon_disabled = true;
+                        rt.daemon_disabled_skips = 0;
+                    }
                 }
             }
 
@@ -523,9 +564,14 @@ pub fn configure(comptime cfg: Config) type {
             // session works regardless of the daemon mirror outcome.
             if (!rt.daemon_trust_seeded) {
                 if (rt.allocator) |a| {
-                    rt.daemon.?.trustList(a, &rt.trust) catch {};
+                    // Only mark seeded when the fetch actually succeeds,
+                    // so a transient failure re-seeds on a later Enter
+                    // instead of leaving cross-shell trust unavailable
+                    // for the whole session.
+                    if (rt.daemon.?.trustList(a, &rt.trust)) |_| {
+                        rt.daemon_trust_seeded = true;
+                    } else |_| {}
                 }
-                rt.daemon_trust_seeded = true;
             }
             if (result.verdict == .safe) return .{ .armed = false, .refused = false };
 
