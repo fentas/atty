@@ -383,7 +383,12 @@ pub const LineState = struct {
         // resume at, or null when the sequence is still incomplete
         // (carry extended; nothing else to process this call).
         if (self.csi_carry_len > 0) {
-            i = self.completeCsiCarry(input) orelse return self.generation != start_gen;
+            // On an still-incomplete carry, return with the SAME
+            // contract as the normal exit (generation changed OR
+            // uncertain) — an over-long carry drop sets `uncertain`,
+            // which callers must still observe.
+            i = self.completeCsiCarry(input) orelse
+                return self.generation != start_gen or self.uncertain;
         }
         while (i < input.len) {
             // Fast path: bulk-append printable runs. A paste of a
@@ -613,11 +618,12 @@ pub const LineState = struct {
                 self.csi_carry_len = 0;
                 return k + 1;
             }
-            if (c < 0x20) {
-                // A control byte aborts the CSI (e.g. a fresh ESC). Drop
-                // the partial sequence and resume at this byte so it's
-                // processed normally; the dropped param bytes (0..k) are
-                // escape junk, not buffer content.
+            if (c < 0x20 or c == 0x7F) {
+                // A control byte (C0, or DEL/backspace 0x7F — none are
+                // valid in a CSI) aborts the sequence. Drop the partial
+                // CSI and resume at this byte so it's processed normally;
+                // the dropped param bytes (0..k) are escape junk, not
+                // buffer content.
                 self.markUncertain();
                 self.csi_carry_len = 0;
                 return k;

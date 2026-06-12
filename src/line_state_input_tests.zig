@@ -114,6 +114,32 @@ test "carried CSI self-aborts on a control byte, which is then processed" {
     try std.testing.expectEqual(@as(usize, 0), l.len); // kill-line ran
 }
 
+test "carried CSI aborts on backspace (0x7F), which then deletes a char" {
+    // DEL/backspace isn't valid in a CSI, so a partial CSI must abort
+    // on it (not absorb it as a param), and the backspace must run.
+    var l = LineState{};
+    _ = l.applyInput("abc");
+    _ = l.applyInput("\x1B["); // partial CSI carried
+    try std.testing.expect(l.csi_carry_len == 2);
+    _ = l.applyInput("\x7F"); // backspace — aborts carry, deletes 'c'
+    try std.testing.expect(l.csi_carry_len == 0);
+    try std.testing.expectEqualSlices(u8, "ab", l.buffer[0..l.len]);
+}
+
+test "carried CSI abort leaves `uncertain` set (control byte that doesn't clear it)" {
+    // The abort path markUncertain()s; a control byte that doesn't
+    // itself clear uncertain (NUL) must leave it set, and the early
+    // return / normal return must reflect it.
+    var l = LineState{};
+    _ = l.applyInput("x");
+    _ = l.applyInput("\x1B["); // partial CSI carried
+    const changed = l.applyInput("\x00"); // NUL aborts; markUncertain stays
+    try std.testing.expect(l.csi_carry_len == 0);
+    try std.testing.expect(l.uncertain);
+    try std.testing.expect(changed); // return reflects uncertain
+    try std.testing.expectEqualSlices(u8, "x", l.buffer[0..l.len]); // no injection
+}
+
 test "over-long carried CSI is dropped as malformed (uncertain)" {
     var l = LineState{};
     _ = l.applyInput("\x1B["); // start a CSI
