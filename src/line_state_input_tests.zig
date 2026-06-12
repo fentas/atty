@@ -55,6 +55,103 @@ test "CSI escape marks uncertain" {
     try std.testing.expect(l.uncertain);
 }
 
+test "split CSI across reads doesn't inject the continuation byte" {
+    // `ESC [` in one read, `D` (Left) in the next. The continuation
+    // must NOT be appended as a literal 'D'; the cursor must move.
+    var l = LineState{};
+    _ = l.applyInput("ab");
+    try std.testing.expectEqual(@as(usize, 2), l.cursor_pos);
+    _ = l.applyInput("\x1B["); // partial CSI — carried, nothing injected
+    try std.testing.expectEqual(@as(usize, 2), l.len); // buffer unchanged
+    try std.testing.expect(l.csi_carry_len == 2);
+    _ = l.applyInput("D"); // completes Left
+    try std.testing.expectEqual(@as(usize, 2), l.len); // still "ab", no 'D'
+    try std.testing.expectEqualSlices(u8, "ab", l.buffer[0..l.len]);
+    try std.testing.expectEqual(@as(usize, 1), l.cursor_pos); // moved Left
+    try std.testing.expect(!l.uncertain); // Left is cursor-motion, not uncertain
+    try std.testing.expect(l.csi_carry_len == 0);
+}
+
+test "split CSI: ESC[ then printable-shaped final C (Right) not injected" {
+    var l = LineState{};
+    _ = l.applyInput("hi");
+    _ = l.applyInput("\x1B[D"); // Left → cursor 1
+    try std.testing.expectEqual(@as(usize, 1), l.cursor_pos);
+    _ = l.applyInput("\x1B["); // partial
+    _ = l.applyInput("C"); // Right (final byte that's also a printable letter)
+    try std.testing.expectEqualSlices(u8, "hi", l.buffer[0..l.len]); // no 'C'
+    try std.testing.expectEqual(@as(usize, 2), l.cursor_pos); // moved Right to EOL
+}
+
+test "split modified-arrow (ESC[1;5 then D) is cursor-motion, not injected/uncertain" {
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[1;5"); // partial modified-arrow — carried
+    try std.testing.expectEqual(@as(usize, 5), l.len);
+    _ = l.applyInput("D"); // Ctrl+Left (modifier params, D final)
+    try std.testing.expectEqualSlices(u8, "hello", l.buffer[0..l.len]); // nothing injected
+    try std.testing.expect(!l.uncertain); // D final → cursor-motion regardless of params
+}
+
+test "whole modified-arrow ESC[1;5D does not mark uncertain" {
+    var l = LineState{};
+    _ = l.applyInput("hello");
+    _ = l.applyInput("\x1B[1;5D"); // Ctrl+Left in one read
+    try std.testing.expect(!l.uncertain);
+    try std.testing.expectEqualSlices(u8, "hello", l.buffer[0..l.len]);
+}
+
+test "carried CSI self-aborts on a control byte, which is then processed" {
+    // ESC[ split, then a control byte (Ctrl-U kill-line) instead of a
+    // CSI final: the partial CSI is dropped and the control byte takes
+    // effect normally.
+    var l = LineState{};
+    _ = l.applyInput("abc");
+    _ = l.applyInput("\x1B["); // partial CSI carried
+    try std.testing.expect(l.csi_carry_len == 2);
+    _ = l.applyInput("\x15"); // Ctrl-U (kill line) — aborts the carry
+    try std.testing.expect(l.csi_carry_len == 0);
+    try std.testing.expectEqual(@as(usize, 0), l.len); // kill-line ran
+}
+
+test "carried CSI aborts on backspace (0x7F), which then deletes a char" {
+    // DEL/backspace isn't valid in a CSI, so a partial CSI must abort
+    // on it (not absorb it as a param), and the backspace must run.
+    var l = LineState{};
+    _ = l.applyInput("abc");
+    _ = l.applyInput("\x1B["); // partial CSI carried
+    try std.testing.expect(l.csi_carry_len == 2);
+    _ = l.applyInput("\x7F"); // backspace — aborts carry, deletes 'c'
+    try std.testing.expect(l.csi_carry_len == 0);
+    try std.testing.expectEqualSlices(u8, "ab", l.buffer[0..l.len]);
+}
+
+test "carried CSI abort leaves `uncertain` set (control byte that doesn't clear it)" {
+    // The abort path markUncertain()s; a control byte that doesn't
+    // itself clear uncertain (NUL) must leave it set, and the early
+    // return / normal return must reflect it.
+    var l = LineState{};
+    _ = l.applyInput("x");
+    _ = l.applyInput("\x1B["); // partial CSI carried
+    const changed = l.applyInput("\x00"); // NUL aborts; markUncertain stays
+    try std.testing.expect(l.csi_carry_len == 0);
+    try std.testing.expect(l.uncertain);
+    try std.testing.expect(changed); // return reflects uncertain
+    try std.testing.expectEqualSlices(u8, "x", l.buffer[0..l.len]); // no injection
+}
+
+test "over-long carried CSI is dropped as malformed (uncertain)" {
+    var l = LineState{};
+    _ = l.applyInput("\x1B["); // start a CSI
+    // Feed a long run of param bytes with no final → exceeds the cap.
+    var buf: [64]u8 = undefined;
+    @memset(&buf, '1');
+    _ = l.applyInput(&buf);
+    try std.testing.expect(l.csi_carry_len == 0); // dropped
+    try std.testing.expect(l.uncertain);
+    try std.testing.expectEqual(@as(usize, 0), l.len); // no '1's injected
+}
+
 test "Left/Right/Home set cursor_moved; End clears it (lands provably at EOL)" {
     // Cursor-motion CSIs maintain `cursor_pos`; `cursor_moved` is
     // derived as `(cursor_pos != len)`. Left mid-buffer flips it

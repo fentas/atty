@@ -26,6 +26,10 @@ const std = @import("std");
 
 pub const max_line = 4096;
 
+/// Cap on a carried partial CSI so malformed/never-terminated input
+/// can't grow the carry unbounded.
+const csi_carry_max = 32;
+
 /// Who typed the line that's about to be committed?
 ///
 /// Author state lives on `LineState` rather than a per-dispatch
@@ -80,6 +84,13 @@ pub const LineState = struct {
     /// Incremented every time the buffer changes. Providers can compare
     /// against a remembered generation to skip duplicate work.
     generation: u64 = 0,
+
+    /// A CSI (`ESC [ … final`) can split across reads; without holding
+    /// the partial bytes here the next call would inject the
+    /// continuation (`C`, `1;5D`, …) into the buffer as printable text.
+    /// `csi_carry_len == 0` when not mid-sequence.
+    csi_carry: [csi_carry_max]u8 = undefined,
+    csi_carry_len: usize = 0,
 
     /// Snapshot of the line that was just committed (Enter pressed), held
     /// here for one dispatch pass so the proxy can fire onLineCommit
@@ -200,6 +211,7 @@ pub const LineState = struct {
         self.cursor_pos = 0;
         self.uncertain = false;
         self.cursor_moved = false;
+        self.csi_carry_len = 0;
         self.generation +%= 1;
         // reset() handles the explicit abort signals (Ctrl-C, Ctrl-D,
         // Ctrl-G) — drop the staged author too because the user is
@@ -358,6 +370,18 @@ pub const LineState = struct {
     pub fn applyInput(self: *LineState, input: []const u8) bool {
         const start_gen = self.generation;
         var i: usize = 0;
+        // Complete a CSI carried over from a previous (split) read
+        // before the main scan. Returns the index into `input` to
+        // resume at, or null when the sequence is still incomplete
+        // (carry extended; nothing else to process this call).
+        if (self.csi_carry_len > 0) {
+            // On a still-incomplete carry, return with the SAME
+            // contract as the normal exit (generation changed OR
+            // uncertain) — an over-long carry drop sets `uncertain`,
+            // which callers must still observe.
+            i = self.completeCsiCarry(input) orelse
+                return self.generation != start_gen or self.uncertain;
+        }
         while (i < input.len) {
             // Fast path: bulk-append printable runs. A paste of a
             // 4 KiB multi-line script lands here as one long chunk;
@@ -410,88 +434,16 @@ pub const LineState = struct {
                     const c = input[j];
                     if (c >= 0x40 and c <= 0x7E) break;
                 }
-                // Classify the CSI before deciding whether to set
-                // `uncertain`. Cursor-motion CSIs (Left/Right/Home/End
-                // and their VT-style siblings) only move the cursor —
-                // they DON'T change buffer content. Marking them
-                // uncertain forces the proxy's syncFromCapture
-                // recovery path to fire, which can clobber the
-                // keystroke buffer when the OSC 133 input region is
-                // stale (mid-typing PS1 redraw, bash's history recall
-                // not echoed into the capture region, ...). Set
-                // `cursor_moved` for ghost suppression instead and
-                // leave `uncertain` alone. All other CSIs (Arrow
-                // Up/Down history recall, Delete, F-keys, ...) may
-                // change buffer content — markUncertain so the proxy
-                // can resync.
-                //
-                // Final-byte taxonomy:
-                //   D = Left, C = Right (xterm cursor-style)
-                //   H = Home, F = End (xterm cursor-style)
-                //   ~ = VT-style — the parameter distinguishes
-                //       1/7=Home, 4/8=End, 5/6=PageUp/Down (all
-                //       cursor-motion), 2=Insert, 3=Delete (both
-                //       edit buffer).
-                //   A/B = Arrow Up/Down (history recall — buffer
-                //       changes)
-                //   Other = unknown, conservative markUncertain.
-                var content_changing = true;
-                if (j < input.len) {
-                    switch (input[j]) {
-                        'D', 'C', 'H', 'F' => content_changing = false,
-                        '~' => {
-                            const param = input[i + 2 .. j];
-                            if (std.mem.eql(u8, param, "4") or std.mem.eql(u8, param, "8") or // End
-                                std.mem.eql(u8, param, "1") or std.mem.eql(u8, param, "7") or // Home
-                                std.mem.eql(u8, param, "5") or std.mem.eql(u8, param, "6")) // PgUp/PgDn
-                            {
-                                content_changing = false;
-                            }
-                            // 2~ / 3~ (Insert / Delete) and the F-keys
-                            // (>= 15) edit the buffer — content_changing
-                            // stays true.
-                        },
-                        else => {},
-                    }
+                if (j == input.len) {
+                    // No final byte before end-of-input: the CSI is
+                    // split across reads. Carry the partial sequence so
+                    // the next call completes it instead of injecting
+                    // the continuation bytes as printable text.
+                    self.stashCsiCarry(input[i..]);
+                    break;
                 }
-                if (content_changing) {
-                    // CSI we don't model — drop `pending_author` too:
-                    // a CSI like Arrow-Up could replace the buffer
-                    // with content we haven't seen, and a staged
-                    // `.llm` author on that line would be wrong.
-                    self.markUncertain();
-                }
-                // Update cursor_pos for the modeled cursor-motion CSIs.
-                // Right (`C`) explicitly increments instead of jumping
-                // to EOL — N consecutive Rights land at min(cursor + N,
-                // len), so a sequence of Rights after Ctrl-A reaches
-                // EOL exactly when N == len. That's what re-engages
-                // ghost after the user steps back to EOL without
-                // pressing End. Skip the update on empty buffer:
-                // cursor is already at col 1 == EOL == BOL.
-                if (j < input.len and self.len > 0) {
-                    switch (input[j]) {
-                        'D' => if (self.cursor_pos > 0) {
-                            self.cursor_pos -= 1; // Left
-                        },
-                        'C' => if (self.cursor_pos < self.len) {
-                            self.cursor_pos += 1; // Right
-                        },
-                        'H' => self.cursor_pos = 0, // Home
-                        'F' => self.cursor_pos = self.len, // End
-                        '~' => {
-                            const param = input[i + 2 .. j];
-                            if (std.mem.eql(u8, param, "4") or std.mem.eql(u8, param, "8")) {
-                                self.cursor_pos = self.len; // End
-                            } else if (std.mem.eql(u8, param, "1") or std.mem.eql(u8, param, "7")) {
-                                self.cursor_pos = 0; // Home
-                            }
-                            // 5~/6~ (PgUp/PgDn): no col change.
-                        },
-                        else => {},
-                    }
-                    self.syncCursorMoved();
-                }
+                // params = bytes between `[` and the final byte.
+                self.applyCsi(input[i + 2 .. j], input[j]);
                 i = j + 1;
                 continue;
             }
@@ -543,6 +495,142 @@ pub const LineState = struct {
             i += 1;
         }
         return self.generation != start_gen or self.uncertain;
+    }
+
+    /// Classify a complete CSI (`params` = bytes between `[` and the
+    /// final byte; `final` = the 0x40..0x7E final byte) and update
+    /// state. Cursor-motion CSIs (Left/Right/Home/End + their VT-style
+    /// siblings) only move the cursor — they DON'T change buffer
+    /// content. Marking them `uncertain` would force the proxy's
+    /// syncFromCapture recovery path to fire and can clobber the
+    /// keystroke buffer when the OSC 133 input region is stale
+    /// (mid-typing PS1 redraw, history recall not echoed, …). Set
+    /// `cursor_moved` for ghost suppression instead and leave
+    /// `uncertain` alone. All other CSIs (Arrow Up/Down history recall,
+    /// Delete, F-keys, …) may change buffer content — markUncertain so
+    /// the proxy can resync.
+    ///
+    /// Final-byte taxonomy:
+    ///   D = Left, C = Right (xterm cursor-style)
+    ///   H = Home, F = End (xterm cursor-style)
+    ///   ~ = VT-style — the parameter distinguishes 1/7=Home, 4/8=End,
+    ///       5/6=PageUp/Down (cursor-motion), 2=Insert, 3=Delete (edit).
+    ///   A/B = Arrow Up/Down (history recall — buffer changes)
+    ///   Other = unknown, conservative markUncertain.
+    ///
+    /// Modified cursor keys (`ESC [ 1;5 D` = Ctrl+Left, etc.) key off
+    /// the same final byte, so they're correctly classified as
+    /// cursor-motion regardless of the modifier params.
+    fn applyCsi(self: *LineState, params: []const u8, final: u8) void {
+        var content_changing = true;
+        switch (final) {
+            'D', 'C', 'H', 'F' => content_changing = false,
+            '~' => {
+                if (std.mem.eql(u8, params, "4") or std.mem.eql(u8, params, "8") or // End
+                    std.mem.eql(u8, params, "1") or std.mem.eql(u8, params, "7") or // Home
+                    std.mem.eql(u8, params, "5") or std.mem.eql(u8, params, "6")) // PgUp/PgDn
+                {
+                    content_changing = false;
+                }
+                // 2~ / 3~ (Insert / Delete) and F-keys (>= 15) edit the
+                // buffer — content_changing stays true.
+            },
+            else => {},
+        }
+        if (content_changing) {
+            // CSI we don't model — drop `pending_author` too: a CSI
+            // like Arrow-Up could replace the buffer with content we
+            // haven't seen, and a staged `.llm` author would be wrong.
+            self.markUncertain();
+        }
+        // Update cursor_pos for the modeled cursor-motion CSIs. Right
+        // (`C`) increments instead of jumping to EOL — N consecutive
+        // Rights land at min(cursor + N, len), so a run after Ctrl-A
+        // reaches EOL exactly when N == len, re-engaging ghost. Skip on
+        // an empty buffer: cursor is already at col 1 == EOL == BOL.
+        if (self.len > 0) {
+            switch (final) {
+                'D' => if (self.cursor_pos > 0) {
+                    self.cursor_pos -= 1; // Left
+                },
+                'C' => if (self.cursor_pos < self.len) {
+                    self.cursor_pos += 1; // Right
+                },
+                'H' => self.cursor_pos = 0, // Home
+                'F' => self.cursor_pos = self.len, // End
+                '~' => {
+                    if (std.mem.eql(u8, params, "4") or std.mem.eql(u8, params, "8")) {
+                        self.cursor_pos = self.len; // End
+                    } else if (std.mem.eql(u8, params, "1") or std.mem.eql(u8, params, "7")) {
+                        self.cursor_pos = 0; // Home
+                    }
+                    // 5~/6~ (PgUp/PgDn): no col change.
+                },
+                else => {},
+            }
+            self.syncCursorMoved();
+        }
+    }
+
+    /// Stash a partial CSI (`bytes` starts at `ESC [`) for completion
+    /// on the next `applyInput`. Over-long runs are malformed → drop +
+    /// uncertain.
+    fn stashCsiCarry(self: *LineState, bytes: []const u8) void {
+        if (bytes.len > csi_carry_max) {
+            self.markUncertain();
+            self.csi_carry_len = 0;
+            return;
+        }
+        @memcpy(self.csi_carry[0..bytes.len], bytes);
+        self.csi_carry_len = bytes.len;
+    }
+
+    /// Complete a carried partial CSI using the head of `input`.
+    /// Returns the index in `input` to resume the main scan at, or
+    /// null when the sequence is still incomplete (carry extended;
+    /// caller should stop processing this call). The carry always
+    /// begins with `ESC [` (only stashed from that shape).
+    fn completeCsiCarry(self: *LineState, input: []const u8) ?usize {
+        var k: usize = 0;
+        while (k < input.len) : (k += 1) {
+            const c = input[k];
+            if (c >= 0x40 and c <= 0x7E) {
+                // Final byte found. params = carry[2..] ++ input[0..k].
+                var pbuf: [csi_carry_max]u8 = undefined;
+                const carry_params = self.csi_carry[2..self.csi_carry_len];
+                if (carry_params.len + k > pbuf.len) {
+                    // Combined CSI too long → malformed; drop it.
+                    self.markUncertain();
+                    self.csi_carry_len = 0;
+                    return k + 1;
+                }
+                @memcpy(pbuf[0..carry_params.len], carry_params);
+                @memcpy(pbuf[carry_params.len .. carry_params.len + k], input[0..k]);
+                self.applyCsi(pbuf[0 .. carry_params.len + k], c);
+                self.csi_carry_len = 0;
+                return k + 1;
+            }
+            if (c < 0x20 or c == 0x7F) {
+                // A control byte (C0, or DEL/backspace 0x7F — none are
+                // valid in a CSI) aborts the sequence. Drop the partial
+                // CSI and resume at this byte so it's processed normally;
+                // the dropped param bytes (0..k) are escape junk, not
+                // buffer content.
+                self.markUncertain();
+                self.csi_carry_len = 0;
+                return k;
+            }
+        }
+        // No final byte and no abort: extend the carry (bounded).
+        if (self.csi_carry_len + input.len > csi_carry_max) {
+            // Over-long with no terminator → malformed; drop everything.
+            self.markUncertain();
+            self.csi_carry_len = 0;
+            return input.len;
+        }
+        @memcpy(self.csi_carry[self.csi_carry_len .. self.csi_carry_len + input.len], input);
+        self.csi_carry_len += input.len;
+        return null;
     }
 
     /// Set `uncertain = true` AND drop any staged `pending_author`.
@@ -692,6 +780,7 @@ pub const LineState = struct {
         self.cursor_pos = 0;
         self.uncertain = false;
         self.cursor_moved = false;
+        self.csi_carry_len = 0;
         self.pending_author = .user;
         self.pending_intent_len = 0;
         self.generation +%= 1;
