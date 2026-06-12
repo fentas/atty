@@ -16,6 +16,13 @@ const std = @import("std");
 const patterns = @import("patterns.zig");
 const trust_cache_mod = @import("trust_cache.zig");
 
+/// Max trust hashes to request from the daemon in one `trust_list`
+/// reply. Bounds the response to the fixed `read_buf` (16 KiB): each
+/// hash is ~67 bytes on the wire, so 200 ≈ 13 KiB leaves envelope
+/// margin. Over-limit trusted commands re-prompt once this session and
+/// re-mirror, so no trust is lost — only the cross-shell pre-seed.
+const trust_list_limit = 200;
+
 pub const Verdict = enum {
     safe,
     warn,
@@ -321,7 +328,15 @@ pub const Client = struct {
         var w: std.Io.Writer = .fixed(&self.write_buf);
         const id = self.next_id;
         self.next_id +%= 1;
-        (w.print("{{\"id\":{d},\"method\":\"trust_list\"}}\n", .{id})) catch return Error.OutOfMemory;
+        // Cap the reply to what our fixed `read_buf` (16 KiB) can hold:
+        // each hash is ~67 bytes on the wire, so request at most
+        // `trust_list_limit` entries (~13 KiB) to avoid LineTooLong on a
+        // user with a large persistent trust set. The operator CLI omits
+        // the limit and gets the full list.
+        (w.print(
+            "{{\"id\":{d},\"method\":\"trust_list\",\"limit\":{d}}}\n",
+            .{ id, trust_list_limit },
+        )) catch return Error.OutOfMemory;
         self.writeAll(self.write_buf[0..w.end]) catch {
             self.close();
             return Error.Unavailable;

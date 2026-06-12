@@ -205,6 +205,13 @@ pub enum Request {
     TrustList {
         #[serde(default)]
         target_uid: Option<u32>,
+        /// Max entries to return. The atty proxy sets this to bound the
+        /// reply to its fixed read buffer (a full PERSISTENT_TRUST_CAP
+        /// list would overflow it → LineTooLong → seeding silently
+        /// fails). The operator CLI omits it (`None`) to get the full
+        /// snapshot.
+        #[serde(default)]
+        limit: Option<u32>,
     },
 
     /// Subscribe to a stream of `VERDICT_WARN` execve events. Unlike
@@ -320,7 +327,10 @@ pub struct ClassifyResult {
     /// Bounded to 256 bytes — anything longer gets truncated.
     pub reason: String,
     /// The substring that matched (for atty's trust cache hash).
-    /// Empty when no match.
+    /// Empty when no match. Bounded to 256 bytes — the atty-side
+    /// trust-cache key already caps `matched` at 256, so truncating
+    /// here keeps the daemon-path hash in parity and bounds the reply
+    /// size for the client's read buffer.
     pub matched: String,
 }
 
