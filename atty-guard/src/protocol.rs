@@ -211,7 +211,7 @@ pub enum Request {
         /// fails). The operator CLI omits it (`None`) to get the full
         /// snapshot.
         #[serde(default)]
-        limit: Option<usize>,
+        limit: Option<u32>,
     },
 
     /// Subscribe to a stream of `VERDICT_WARN` execve events. Unlike

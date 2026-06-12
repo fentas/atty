@@ -1367,7 +1367,7 @@ fn handle_trust_list(
     state: &State,
     peer: PeerCred,
     target_uid: Option<u32>,
-    limit: Option<usize>,
+    limit: Option<u32>,
 ) -> ResponseBody {
     let uid = match resolve_target_uid(peer, target_uid) {
         Ok(u) => u,
@@ -1383,6 +1383,7 @@ fn handle_trust_list(
     // in-session (and re-mirror), so no trust is lost.
     let mut trust = state.trust_store.list_persistent_trust(uid);
     if let Some(n) = limit {
+        let n = n as usize;
         if trust.len() > n {
             trust.truncate(n);
         }
