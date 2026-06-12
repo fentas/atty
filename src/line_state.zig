@@ -782,6 +782,7 @@ pub const LineState = struct {
         self.cursor_pos = 0;
         self.uncertain = false;
         self.cursor_moved = false;
+        self.csi_carry_len = 0;
         self.pending_author = .user;
         self.pending_intent_len = 0;
         self.generation +%= 1;
