@@ -16,6 +16,28 @@ const shutdownAndFree = @import("test_helpers.zig").shutdownAndFree;
 
 const test_io: std.Io = std.Io.failing;
 
+test "questionWindowStart keeps the selected choice visible (overlay + inline share it)" {
+    const f = @import("paint.zig").questionWindowStart;
+    // Everything fits → no window, start at 0.
+    try testing.expectEqual(@as(u8, 0), f(0, 5, 3)); // visible >= total
+    try testing.expectEqual(@as(u8, 0), f(2, 3, 3)); // visible == total
+    // Windowed (visible < total): selection slides into view.
+    try testing.expectEqual(@as(u8, 0), f(0, 3, 9)); // first → top
+    try testing.expectEqual(@as(u8, 0), f(2, 3, 9)); // still within first window
+    try testing.expectEqual(@as(u8, 1), f(3, 3, 9)); // sel just past window → scroll 1
+    try testing.expectEqual(@as(u8, 6), f(8, 3, 9)); // last real choice → start = total-visible
+    // sel == total is the free-text row; the max-start clamp keeps it
+    // in range (no overscroll past the last choice).
+    try testing.expectEqual(@as(u8, 6), f(9, 3, 9));
+    // Every REAL selected choice (0..total) is within [start,
+    // start+visible). The free-text row (sel == total) is rendered
+    // separately, so it's excluded.
+    inline for (.{ @as(u8, 0), 1, 4, 8 }) |s| {
+        const st = f(s, 3, 9);
+        try testing.expect(s >= st and s < st + 3);
+    }
+}
+
 test "chat overlay (Alt+Shift+C): toggle emits alt-screen enter then exit" {
     const L = configure(.{
         .provider = .{ .http = .{

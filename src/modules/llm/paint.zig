@@ -20,6 +20,19 @@ const pty_mod = @import("../../pty.zig");
 const Pty = pty_mod.Pty;
 const chat_persist = @import("chat_persist.zig");
 
+/// First visible index for a question pick-list windowed to `visible`
+/// rows: slides so `sel` stays in view. Shared by the overlay and
+/// inline pick-lists so their scroll behavior can't drift. `visible >=
+/// total` means everything fits — no window. `sel` may be `total` (the
+/// free-text row); the max-start clamp keeps the result in range.
+pub fn questionWindowStart(sel: u8, visible: u8, total: u8) u8 {
+    if (visible >= total) return 0;
+    var start: u8 = if (sel >= visible) sel - (visible - 1) else 0;
+    const max_start: u8 = total - visible;
+    if (start > max_start) start = max_start;
+    return start;
+}
+
 pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
     return struct {
         // `latchErr` is part of the dialog Module helpers — same
@@ -123,11 +136,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 pty_mod.WinSize{ .rows = 24, .cols = 80, .xpixel = 0, .ypixel = 0 };
             const rows: u16 = if (size.rows > 4) size.rows else 4;
             // Chat-mode question pick-list (#214) — when active,
-            // reserve `choice_count` rows above the input row for
-            // the choice list. The scroll region shrinks
-            // accordingly so turn content can't scroll into the
-            // choice list area.
-            const question_rows: u16 = if (rt.chat_question_active) @intCast(rt.chat_question_choice_count) else 0;
+            // reserve a row above the input row per rendered choice.
+            // The scroll region shrinks accordingly so turn content
+            // can't scroll into the choice list area. Clamp to the rows
+            // available above the free-text row (same clamp the
+            // pick-list paint applies below) so the reserved region
+            // matches what's actually drawn on a short terminal.
+            const avail_choice_rows: u16 = if (rows >= 2) rows - 2 else 0;
+            const question_rows: u16 = if (rt.chat_question_active)
+                @min(@as(u16, rt.chat_question_choice_count), avail_choice_rows)
+            else
+                0;
             const content_bottom: u16 = if (rows > 2 + question_rows) rows - 2 - question_rows else 1;
             // `size.cols` available but unused — wrap calculations
             // are a future follow-up (codepoint-level turn rendering
@@ -223,24 +242,36 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // reverse-video block-cursor styling on the input row
             // below — already handled by the existing input-paint
             // code.
-            if (rt.chat_question_active and rt.chat_question_choice_count > 0) {
+            // `question_rows` is already the choice count clamped to the
+            // rows available above the free-text row (see top of fn):
+            // without the clamp `rows - 1 - cc` underflows u16 on a
+            // short terminal (`rows` floors at 4) → CUP to row ~65528,
+            // garbage paint. Overflowing choices are dropped.
+            const cc: u8 = @intCast(question_rows);
+            if (rt.chat_question_active and cc > 0) {
                 const sel = rt.chat_question_selected_idx;
-                const cc: u8 = rt.chat_question_choice_count;
+                const total = rt.chat_question_choice_count;
+                // When the terminal is too short to show every choice
+                // (cc < total), slide a `cc`-row window so the selected
+                // choice stays visible — otherwise Enter could submit an
+                // off-screen, un-highlighted choice.
+                const win_start = questionWindowStart(sel, cc, total);
                 const first_choice_row: u16 = rows - 1 - cc;
                 var i: u8 = 0;
                 while (i < cc) : (i += 1) {
+                    const idx = win_start + i; // actual choice index
                     const row_y: u16 = first_choice_row + i;
                     w.print("\x1B[{d};1H\x1B[2K", .{row_y}) catch return false;
-                    const is_sel = (sel == i);
+                    const is_sel = (sel == idx);
                     if (is_sel) {
                         w.writeAll("\x1B[22;38;5;141m\u{25B6}\x1B[0m ") catch return false; // ▶ mauve
                     } else {
                         w.writeAll("  ") catch return false;
                     }
-                    const choice_slice = rt.question_choices_storage[i][0..rt.question_choices_lens[i]];
+                    const choice_slice = rt.question_choices_storage[idx][0..rt.question_choices_lens[idx]];
                     if (is_sel) w.writeAll("\x1B[1m") catch return false; // bold selected
                     var num_buf: [8]u8 = undefined;
-                    const num_str = std.fmt.bufPrint(&num_buf, "{d}. ", .{i + 1}) catch unreachable;
+                    const num_str = std.fmt.bufPrint(&num_buf, "{d}. ", .{idx + 1}) catch unreachable;
                     w.writeAll("\x1B[22;1;38;5;14m") catch return false;
                     w.writeAll(num_str) catch return false;
                     w.writeAll("\x1B[0m") catch return false;
@@ -1308,20 +1339,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // arrow-key feedback would go silent again — the
                 // same UX failure mode the rest of #308 fixed.
                 const total: u8 = rt.chat_question_choice_count;
-                var start: u8 = 0;
-                if (question_rows < total) {
-                    const window: u8 = @intCast(question_rows);
-                    if (sel >= window) {
-                        // Selected fell off the bottom — scroll the
-                        // window so `sel` lands at the last visible
-                        // row.
-                        start = sel - (window - 1);
-                    }
-                    // Cap so we never overscroll past the last
-                    // choice (e.g. sel at the very end).
-                    const max_start: u8 = total - window;
-                    if (start > max_start) start = max_start;
-                }
+                const start = questionWindowStart(sel, @intCast(question_rows), total);
                 // Choice text is column-budgeted: `▶ ` + `<n>. ` is
                 // a 5-col prefix; truncate the remainder to the
                 // total panel width so a long choice can't wrap +

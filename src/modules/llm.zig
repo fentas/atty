@@ -1179,10 +1179,20 @@ pub fn configure(comptime cfg: Config) type {
                 .http => api_base.len > 0,
                 .subprocess => true,
             };
+            // The worker thread stack-allocates several
+            // `[cfg.max_response_bytes]u8` decode scratch buffers (see
+            // worker.zig). At the default these fit the default thread
+            // stack, but a large `max_response_bytes` could overflow it
+            // — size the stack to scale with the config so it can't.
+            // Stays at the 16 MiB default for normal configs.
+            const worker_stack: usize = @max(
+                16 << 20,
+                (4 << 20) + 6 * @as(usize, cfg.max_response_bytes),
+            );
             const thread: ?std.Thread = if (!should_spawn)
                 null
             else
-                try std.Thread.spawn(.{}, worker, .{ shared, io, allocator, shell_name, context_blob });
+                try std.Thread.spawn(.{ .stack_size = worker_stack }, worker, .{ shared, io, allocator, shell_name, context_blob });
 
             var rt: Runtime = .{
                 .allocator = allocator,

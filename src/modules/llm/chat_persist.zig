@@ -41,7 +41,6 @@ extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
-extern "c" fn fstat(fd: c_int, statbuf: *Stat) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn getpid() c_int;
 extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
@@ -55,18 +54,6 @@ const O_CREAT: c_int = 0o100;
 const O_APPEND: c_int = 0o2000;
 const FILE_MODE: c_int = 0o600;
 const DIR_MODE: c_uint = 0o700;
-
-// glibc x86_64 `struct stat` — we only need `size` for
-// `loadLastTurns`'s tail seek. The 48-byte pad matches the
-// offset of `st_size` in this libc/arch combo. Dir validation
-// uses `open(O_RDONLY|O_DIRECTORY)` instead of stat to dodge
-// the per-arch layout drift entirely (mode lives at a
-// different offset on aarch64 vs x86_64).
-const Stat = extern struct {
-    _pad: [48]u8,
-    size: i64,
-    _pad2: [80]u8,
-};
 
 /// Resolve the dialogs directory. Returns owned memory; creates
 /// the directory tree on disk (mode 0700) so later opens succeed.
@@ -317,46 +304,42 @@ pub fn loadLastTurns(
     if (fd < 0) return result; // missing / unreadable → no history
     defer _ = close(fd);
 
-    // For files larger than the cap, seek to size - max_bytes
-    // so we read the TAIL — the most recent turns. The previous
-    // implementation read from offset 0, which for >max_bytes
-    // files restored the oldest turns from the first chunk
-    // instead of the newest. `fstat` returns size; lseek + skip
-    // the partial first line gives a clean window onto the tail.
+    // For files larger than the cap, seek to size - max_bytes so we
+    // read the TAIL — the most recent turns. The previous
+    // implementation read from offset 0, which for >max_bytes files
+    // restored the oldest turns from the first chunk instead of the
+    // newest. lseek gives the size + the tail window.
     //
-    // On fstat/lseek failure for a known-oversized file, RETURN
-    // EMPTY rather than falling through to the head-read path.
-    // The head-read is exactly the bug we're fixing; silently
-    // re-introducing it on a syscall failure would be a worse
-    // failure mode than "no history loaded".
-    var st_info: Stat = undefined;
+    // On lseek failure for a known-oversized file, RETURN EMPTY rather
+    // than falling through to the head-read path. The head-read is
+    // exactly the bug we're fixing; silently re-introducing it on a
+    // syscall failure would be a worse failure mode than "no history".
+    // Probe the size with `lseek(SEEK_END)` instead of a hand-rolled
+    // `fstat`+`struct stat`: the latter's `st_size` offset is
+    // libc/arch-specific (glibc-x86_64 vs musl/aarch64), which CI's
+    // musl builds would misread. `lseek` takes a plain i64 offset — no
+    // per-arch layout to get wrong. The probe moves the cursor to EOF,
+    // so we MUST seek back to the read offset below.
+    const SEEK_SET: c_int = 0;
+    const SEEK_END: c_int = 2;
     var skip_partial_line = false;
-    if (fstat(fd, &st_info) == 0) {
-        const size: u64 = if (st_info.size > 0) @intCast(st_info.size) else 0;
-        if (size > max_bytes) {
-            const off: i64 = @intCast(size - max_bytes);
-            // Peek the byte at `off - 1` to detect whether the
-            // seek landed exactly at a line boundary. If the
-            // previous byte is `\n`, the read window starts at
-            // a complete line — dropping the "partial" first
-            // line would actually drop a VALID turn. Only set
-            // skip when we definitely landed mid-line.
-            var prev_byte: [1]u8 = undefined;
-            const peek_off: i64 = off - 1;
-            const peeked = pread(fd, &prev_byte, 1, peek_off);
-            const lands_on_boundary = peeked == 1 and prev_byte[0] == '\n';
-            if (lseek(fd, off, 0) >= 0) {
-                skip_partial_line = !lands_on_boundary;
-            } else {
-                // fstat said the file is too big but lseek failed
-                // — refuse the head-read fallback.
-                return result;
-            }
-        }
+    var read_off: i64 = 0;
+    const size_i = lseek(fd, 0, SEEK_END);
+    if (size_i > 0 and @as(u64, @intCast(size_i)) > max_bytes) {
+        read_off = @intCast(@as(u64, @intCast(size_i)) - max_bytes);
+        // Peek the byte at `read_off - 1` to detect whether the window
+        // starts exactly at a line boundary. If the previous byte is
+        // `\n`, the first line is complete — dropping it as "partial"
+        // would drop a VALID turn. Only skip when we landed mid-line.
+        var prev_byte: [1]u8 = undefined;
+        const peeked = pread(fd, &prev_byte, 1, read_off - 1);
+        skip_partial_line = !(peeked == 1 and prev_byte[0] == '\n');
     }
-    // Note: fstat itself failing is treated as "unknown size,
-    // probably small" — keep reading from offset 0 like the
-    // original behavior. Small files don't exhibit the bug.
+    // Seek to the read offset (0 for small files — the SEEK_END probe
+    // left the cursor at EOF, so the rewind is required even there).
+    // Refuse on seek failure rather than re-introducing the head-read
+    // bug this tail-seek exists to fix.
+    if (lseek(fd, read_off, SEEK_SET) < 0) return result;
 
     // Read in chunks until EOF or cap. Conservative because the
     // file may have grown unboundedly.
