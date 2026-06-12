@@ -38,30 +38,42 @@ pub(super) fn walk_tarball_atoms(
             Err(_) => continue,
         };
         let etype = entry.header().entry_type();
+        // 4 MiB is generous for any rule manifest (real GTFOBins /
+        // Sigma files are ~10-50 KiB) but bounds the per-file OOM
+        // vector; the outer download cap is on COMPRESSED bytes, so a
+        // single entry can still decompress to gigabytes.
+        const PER_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
+        // Accumulate the DECLARED (header) size of EVERY entry —
+        // including ones `pred` skips — toward the cumulative cap.
+        // Counting `content.len()` (the 4 MiB read prefix) instead
+        // would undercount: the tar reader still streams past an
+        // oversized/skipped entry's unread remainder to reach the next
+        // header, so a tarball of giant non-matching entries could blow
+        // past the intended budget while total_bytes stayed tiny.
+        let declared = entry.header().size().unwrap_or(0);
+        total_bytes = total_bytes.saturating_add(declared);
+        if total_bytes > TOTAL_DECOMPRESSED_MAX {
+            return Err(FetchError::DecompressError(format!(
+                "tarball declared decompressed size exceeds {TOTAL_DECOMPRESSED_MAX} bytes — refusing"
+            )));
+        }
         if !pred(&path, etype) {
             continue;
         }
-        // Per-entry decompressed cap: the outer 32 MiB cap is
-        // on compressed bytes, so a compromised upstream could
-        // ship one entry that decompresses to gigabytes.
-        // 4 MiB is generous for any rule manifest (real GTFOBins
-        // / Sigma files are ~10-50 KiB) but bounds the OOM
-        // vector. take(N).read_to_string truncates on overflow
-        // — accept the truncated content (extract still parses
-        // valid rules from the prefix) and continue.
-        const PER_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
+        // Fail closed on a matched entry that declares more than the
+        // per-entry cap rather than silently parsing a truncated prefix
+        // — a >4 MiB rule file is anomalous for this corpus.
+        if declared > PER_ENTRY_MAX_BYTES {
+            return Err(FetchError::DecompressError(format!(
+                "tarball entry declares {declared} bytes > per-entry cap {PER_ENTRY_MAX_BYTES} — refusing"
+            )));
+        }
         let mut content = String::new();
         if std::io::Read::take(&mut entry, PER_ENTRY_MAX_BYTES)
             .read_to_string(&mut content)
             .is_err()
         {
             continue;
-        }
-        total_bytes += content.len() as u64;
-        if total_bytes > TOTAL_DECOMPRESSED_MAX {
-            return Err(FetchError::DecompressError(format!(
-                "tarball decompressed content exceeds {TOTAL_DECOMPRESSED_MAX} bytes — refusing"
-            )));
         }
         extract(&content, &mut atoms);
         if atoms.len() > super::fetch::MAX_ATOMS_TOTAL {
