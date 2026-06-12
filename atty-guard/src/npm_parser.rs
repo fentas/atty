@@ -81,7 +81,12 @@ pub fn extract_npm_install_pkgs(line: &str) -> Vec<&str> {
             // end-of-line (the latter being a `npm install` with no
             // args — returns empty Vec).
             let verb_end = verb_start + verb.len();
-            if verb_end > line.len() || !line[verb_start..verb_end].eq(verb) {
+            // Byte-compare the candidate span: `line[verb_start..verb_end]`
+            // would panic if `verb_end` lands inside a multi-byte UTF-8
+            // char (e.g. `npm 日本語…`). `get(..)` returns None when the
+            // range is out of bounds, so this also subsumes the prior
+            // `verb_end > line.len()` guard.
+            if line.as_bytes().get(verb_start..verb_end) != Some(verb.as_bytes()) {
                 continue;
             }
             let args_start = match line.as_bytes().get(verb_end).copied() {
@@ -315,6 +320,21 @@ mod tests {
         }
         let out = extract_npm_install_pkgs(&cmd);
         assert_eq!(out.len(), MAX_PKGS_PER_COMMAND);
+    }
+
+    #[test]
+    fn multibyte_after_tool_does_not_panic() {
+        // The verb span check used `line[verb_start..verb_end]`, which
+        // panicked when verb_end landed inside a multi-byte char. These
+        // must parse cleanly (no match → empty), not panic.
+        assert!(extract_npm_install_pkgs("npm 日本語パッケージ").is_empty());
+        assert!(extract_npm_install_pkgs("npm i日").is_empty());
+        assert!(extract_npm_install_pkgs("yarn 安裝").is_empty());
+        // A real install with a unicode package name still works.
+        assert_eq!(
+            extract_npm_install_pkgs("npm install 日本語-pkg"),
+            vec!["日本語-pkg"],
+        );
     }
 
     #[test]
