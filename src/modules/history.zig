@@ -31,11 +31,15 @@ const Allocator = std.mem.Allocator;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
+extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 
 const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;
 const O_CREAT: c_int = 0o100;
 const O_APPEND: c_int = 0o2000;
+const O_TRUNC: c_int = 0o1000;
+const SEEK_SET: c_int = 0;
+const SEEK_END: c_int = 2;
 const FILE_MODE: c_int = 0o600;
 
 pub const Match = enum { prefix, substring };
@@ -221,18 +225,53 @@ pub fn configure(comptime cfg: Config) type {
             if (fd < 0) return;
             defer _ = close(fd);
 
-            // 1 MiB cap; older entries beyond that are ignored.
+            // 1 MiB cap; older entries beyond that are ignored. Seek to
+            // the TAIL of the file (the file's tail is the *newest*
+            // history) — reading from offset 0 would seed the ring with
+            // the oldest commands on any history larger than the cap, so
+            // ghost suggestions would surface stale entries and never the
+            // recent ones the user actually wants.
             const max = 1 << 20;
-            const data = try allocator.alloc(u8, max);
+            const size = lseek(fd, 0, SEEK_END);
+            if (size < 0) return;
+            var start_off: i64 = 0;
+            if (size > max) start_off = size - max;
+            // When seeking into the middle, read from one byte BEFORE the
+            // window so we can tell whether it begins exactly at a line
+            // boundary (keep the first line whole) vs mid-line (drop the
+            // partial first line). Mirrors llm/chat_persist's tail read.
+            // The SEEK_END probe above left the cursor at EOF, so the
+            // rewind is required even for start_off == 0. On seek failure
+            // refuse rather than fall back to the head (which would
+            // re-seed the ring with the OLDEST entries — the bug fixed
+            // here).
+            const read_off = if (start_off > 0) start_off - 1 else 0;
+            if (lseek(fd, read_off, SEEK_SET) < 0) return;
+
+            const data = try allocator.alloc(u8, max + 1);
             defer allocator.free(data);
 
             var total: usize = 0;
-            while (total < max) {
-                const rc = std.c.read(fd, data[total..].ptr, max - total);
-                if (rc <= 0) break;
+            while (total < data.len) {
+                const rc = std.c.read(fd, data[total..].ptr, data.len - total);
+                if (rc < 0) return; // read error — don't seed a partial ring
+                if (rc == 0) break;
                 total += @intCast(rc);
             }
-            const slice = data[0..total];
+            var slice = data[0..total];
+
+            if (start_off > 0) {
+                // slice[0] is the byte preceding the window: '\n' means
+                // the window starts on a fresh line (keep from index 1),
+                // otherwise drop the partial first line.
+                if (slice.len > 0 and slice[0] == '\n') {
+                    slice = slice[1..];
+                } else if (std.mem.indexOfScalar(u8, slice, '\n')) |nl| {
+                    slice = slice[nl + 1 ..];
+                } else {
+                    slice = slice[0..0];
+                }
+            }
 
             var it = std.mem.splitScalar(u8, slice, '\n');
             while (it.next()) |raw_line| {
@@ -312,10 +351,10 @@ pub fn configure(comptime cfg: Config) type {
             pushEntry(rt, line) catch {};
         }
 
-        /// Remove every ring entry whose payload equals `line`, then
-        /// rewrite the file with what's left. Atomic via the
-        /// write-temp + rename trick so a crash leaves the original
-        /// in place. Best-effort: a file-write failure leaves the
+        /// Remove every entry whose payload equals `line` from both the
+        /// in-memory ring and the on-disk file. Atomic via the
+        /// write-temp + rename trick so a crash leaves the original in
+        /// place. Best-effort: a file-write failure leaves the
         /// in-memory ring filtered but the on-disk file untouched.
         pub fn deleteHistoryMatch(rt: *Runtime, _: *m.Context, line: []const u8) m.Error!void {
             if (line.len == 0) return;
@@ -329,30 +368,90 @@ pub fn configure(comptime cfg: Config) type {
                 }
                 i += 1;
             }
-            // Rewrite the file atomically.
-            rewriteFile(rt) catch {};
+            // Filter the real on-disk file.
+            filterFileRemoving(rt, line) catch {};
         }
 
-        /// Write the current ring to disk via a temp + rename so a
-        /// crash or write failure can't corrupt the user's history.
-        fn rewriteFile(rt: *Runtime) !void {
+        /// Filter the on-disk history file: read it in full (capped at
+        /// `max_file`), drop every line whose parsed payload equals
+        /// `line`, keep every other line VERBATIM, then atomically
+        /// replace the original via temp + rename.
+        ///
+        /// Keeping raw lines (rather than re-serialising the in-memory
+        /// ring) is load-bearing: the ring holds at most `capacity`
+        /// entries seeded from only the file's 1 MiB tail, so dumping it
+        /// back would truncate every older entry AND rewrite zsh
+        /// extended-history timestamps to "now". Verbatim copy preserves
+        /// both. Files larger than `max_file` are left untouched (the
+        /// ring is still filtered) — a best-effort cap that never
+        /// corrupts, unlike the previous ring-dump.
+        ///
+        /// The read→filter→rename window is not locked against a
+        /// concurrent `writeLine` (O_APPEND) from another atty session,
+        /// so a command recorded after the read but before the rename can
+        /// be clobbered. Accepted: delete is a deliberate, rare action
+        /// and the contract is best-effort; the original is only ever
+        /// replaced by a fully-written temp (rename is the sole
+        /// mutation), so truncation/corruption is impossible.
+        fn filterFileRemoving(rt: *Runtime, line: []const u8) !void {
             if (rt.path.len == 0) return;
+            const path_z = try rt.allocator.dupeZ(u8, rt.path);
+            defer rt.allocator.free(path_z);
+
+            const rfd = open(path_z.ptr, O_RDONLY);
+            if (rfd < 0) return; // nothing on disk to filter
+            defer _ = close(rfd);
+            const max_file = 64 << 20;
+            const size = lseek(rfd, 0, SEEK_END);
+            if (size < 0 or size > max_file or lseek(rfd, 0, SEEK_SET) < 0) return;
+            const data = try rt.allocator.alloc(u8, @intCast(size));
+            defer rt.allocator.free(data);
+            var total: usize = 0;
+            while (total < data.len) {
+                const rc = std.c.read(rfd, data[total..].ptr, data.len - total);
+                if (rc < 0) return; // read error before EOF — abort WITHOUT
+                // rewriting, or we'd replace the history with a truncated copy
+                if (rc == 0) break; // EOF (file shrank concurrently)
+                total += @intCast(rc);
+            }
+            const content = data[0..total];
+
+            var out_buf: std.ArrayList(u8) = .empty;
+            defer out_buf.deinit(rt.allocator);
+            var removed_any = false;
+            var start: usize = 0;
+            while (start < content.len) {
+                const nl = std.mem.indexOfScalarPos(u8, content, start, '\n');
+                const end = nl orelse content.len;
+                const raw = content[start..end];
+                if (std.mem.eql(u8, parseHistoryLine(raw), line)) {
+                    removed_any = true;
+                } else {
+                    try out_buf.appendSlice(rt.allocator, raw);
+                    if (nl != null) try out_buf.append(rt.allocator, '\n');
+                }
+                start = if (nl) |p| p + 1 else content.len;
+            }
+            // Nothing on disk matched — don't churn the file.
+            if (!removed_any) return;
 
             const tmp_path = try std.fmt.allocPrint(rt.allocator, "{s}.atty-tmp", .{rt.path});
             defer rt.allocator.free(tmp_path);
             const tmp_z = try rt.allocator.dupeZ(u8, tmp_path);
             defer rt.allocator.free(tmp_z);
-            const path_z = try rt.allocator.dupeZ(u8, rt.path);
-            defer rt.allocator.free(path_z);
 
-            const fd = open(tmp_z.ptr, O_WRONLY | O_CREAT | 0o1000, FILE_MODE); // 0o1000 = O_TRUNC
-            if (fd < 0) return error.WriteFailed;
-            defer _ = close(fd);
-
-            var buf: [cfg.max_line + 64]u8 = undefined;
-            for (rt.entries.items) |entry| {
-                const out = formatHistoryLine(&buf, entry, rt.format, unixTs()) orelse continue;
-                _ = std.c.write(fd, out.ptr, out.len);
+            const wfd = open(tmp_z.ptr, O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE);
+            if (wfd < 0) return error.WriteFailed;
+            defer _ = close(wfd);
+            // Clean up the temp on any failure before the rename so a
+            // partial write doesn't litter a `.atty-tmp` next to the
+            // history file. The original is untouched until the rename.
+            errdefer _ = std.c.unlink(tmp_z.ptr);
+            var written: usize = 0;
+            while (written < out_buf.items.len) {
+                const rc = std.c.write(wfd, out_buf.items[written..].ptr, out_buf.items.len - written);
+                if (rc <= 0) return error.WriteFailed;
+                written += @intCast(rc);
             }
 
             // rename(tmp, path) — atomic replacement on POSIX.
