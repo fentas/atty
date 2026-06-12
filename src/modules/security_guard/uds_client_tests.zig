@@ -27,7 +27,7 @@ test "parseClassifyResponse — full Tier-1 hit" {
     const buf =
         \\{"id":2,"type":"classify","verdict":"warn","category":"curl_pipe_sh","confidence":1.0,"reason":"remote-fetch-and-execute","matched":"curl x | sh"}
     ;
-    const r = try mod.parseClassifyResponse(buf);
+    const r = try mod.parseClassifyResponse(buf, 2);
     try testing.expect(r.verdict == .warn);
     try testing.expect(r.category == .curl_pipe_sh);
     try testing.expectApproxEqAbs(@as(f32, 1.0), r.confidence, 0.001);
@@ -39,7 +39,7 @@ test "parseClassifyResponse — safe verdict, empty matched" {
     const buf =
         \\{"id":1,"type":"classify","verdict":"safe","category":"none","confidence":0.0,"reason":"","matched":""}
     ;
-    const r = try mod.parseClassifyResponse(buf);
+    const r = try mod.parseClassifyResponse(buf, 1);
     try testing.expect(r.verdict == .safe);
     try testing.expect(r.category == .none);
     try testing.expectEqualStrings("", r.matched);
@@ -49,7 +49,7 @@ test "parseClassifyResponse — block + pid_high_threat (daemon-only)" {
     const buf =
         \\{"id":3,"type":"classify","verdict":"block","category":"pid_high_threat","confidence":1.0,"reason":"PID tree marked critical","matched":"ls"}
     ;
-    const r = try mod.parseClassifyResponse(buf);
+    const r = try mod.parseClassifyResponse(buf, 3);
     try testing.expect(r.verdict == .block);
     try testing.expect(r.category == .pid_high_threat);
 }
@@ -60,7 +60,7 @@ test "parseClassifyResponse — escaped quote inside matched" {
     const buf =
         \\{"id":4,"type":"classify","verdict":"warn","category":"bash_c_base64","confidence":1.0,"reason":"bash -c","matched":"bash -c \"YmFzaA==\""}
     ;
-    const r = try mod.parseClassifyResponse(buf);
+    const r = try mod.parseClassifyResponse(buf, 4);
     try testing.expect(r.verdict == .warn);
     // Embedded escape stays in the slice — caller can unescape if
     // it cares; for our purposes (banner display + hash) it's fine
@@ -72,7 +72,7 @@ test "parseClassifyResponse — error envelope → DaemonError" {
     const buf =
         \\{"id":0,"type":"error","message":"invalid request"}
     ;
-    const err = mod.parseClassifyResponse(buf);
+    const err = mod.parseClassifyResponse(buf, 0);
     try testing.expectError(mod.Error.DaemonError, err);
 }
 
@@ -80,7 +80,7 @@ test "parseClassifyResponse — unknown verdict → DaemonError" {
     const buf =
         \\{"id":5,"type":"classify","verdict":"shrug","category":"none","confidence":0,"reason":"","matched":""}
     ;
-    const err = mod.parseClassifyResponse(buf);
+    const err = mod.parseClassifyResponse(buf, 5);
     try testing.expectError(mod.Error.DaemonError, err);
 }
 
@@ -88,15 +88,49 @@ test "parseClassifyResponse — wrong type → DaemonError" {
     const buf =
         \\{"id":6,"type":"threat_level","level":"high"}
     ;
-    const err = mod.parseClassifyResponse(buf);
+    const err = mod.parseClassifyResponse(buf, 6);
     try testing.expectError(mod.Error.DaemonError, err);
+}
+
+test "parseClassifyResponse — id mismatch → DaemonError" {
+    // A stale / out-of-order reply (its id doesn't echo the request's)
+    // must never be parsed as the answer to THIS request — otherwise a
+    // previous Safe could land on a command the daemon would Block.
+    const buf =
+        \\{"id":2,"type":"classify","verdict":"safe","category":"none","confidence":0,"reason":"","matched":""}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.parseClassifyResponse(buf, 3));
+}
+
+test "parseClassifyResponse — reason cannot hijack verdict (structural parse)" {
+    // A malicious command echoes back into `reason` / `matched`. The
+    // escaped `\"verdict\":\"block\"` text inside those fields MUST NOT
+    // be read as the top-level verdict — the real verdict here is safe.
+    // A first-substring parser keyed off the FIRST `verdict` (or one
+    // that ignored escaping) could be fooled into reporting block.
+    const buf =
+        \\{"id":7,"type":"classify","verdict":"safe","category":"none","confidence":0,"reason":"injected \"verdict\":\"block\" text","matched":"x \"verdict\":\"block\""}
+    ;
+    const r = try mod.parseClassifyResponse(buf, 7);
+    try testing.expect(r.verdict == .safe);
+}
+
+test "parseClassifyResponse — field order independence" {
+    // Reordering ClassifyResult in protocol.rs (reason before verdict)
+    // must not change the parse — the structural reader keys by name.
+    const buf =
+        \\{"type":"classify","reason":"r","matched":"m","verdict":"warn","category":"none","confidence":0.5,"id":8}
+    ;
+    const r = try mod.parseClassifyResponse(buf, 8);
+    try testing.expect(r.verdict == .warn);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), r.confidence, 0.001);
 }
 
 test "parseMutationResponse — ok envelope" {
     const buf =
         \\{"id":1,"type":"ok"}
     ;
-    try mod.Client.parseMutationResponse(buf);
+    try mod.Client.parseMutationResponse(buf, 1);
 }
 
 test "parseMutationResponse — error envelope → DaemonError" {
@@ -105,7 +139,7 @@ test "parseMutationResponse — error envelope → DaemonError" {
     const buf =
         \\{"id":1,"type":"error","message":"non-root caller (uid 1000) cannot set threat level for pid 4242 (owned by uid 0)"}
     ;
-    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf));
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf, 1));
 }
 
 test "parseMutationResponse — unexpected type → DaemonError" {
@@ -115,25 +149,32 @@ test "parseMutationResponse — unexpected type → DaemonError" {
     const buf =
         \\{"id":1,"type":"classify","verdict":"safe"}
     ;
-    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf));
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf, 1));
 }
 
 test "parseMutationResponse — empty body → DaemonError" {
-    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(""));
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse("", 1));
+}
+
+test "parseMutationResponse — id mismatch → DaemonError" {
+    // An `ok` whose id doesn't echo the request's is a desynced reply,
+    // not confirmation of THIS mutation.
+    const buf =
+        \\{"id":1,"type":"ok"}
+    ;
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf, 2));
 }
 
 test "parseMutationResponse — error envelope with embedded `\"type\":\"ok\"` text still rejects" {
     // Confusable: a daemon error whose `message` field happens
     // to echo the literal `"type":"ok"` (e.g. quoting a buggy
     // client request) MUST still classify as DaemonError. The
-    // pre-tightening substring scan would have returned success
-    // because both "type":"error" and "type":"ok" appear; the
-    // first-occurrence anchor ensures the envelope's own type
-    // field wins.
+    // structural reader reports only the top-level `type`, so the
+    // envelope's own `error` wins over the quoted text in `message`.
     const buf =
         \\{"id":1,"type":"error","message":"rejected request: \"type\":\"ok\""}
     ;
-    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf));
+    try testing.expectError(mod.Error.DaemonError, mod.Client.parseMutationResponse(buf, 1));
 }
 
 test "Client.init constructs without connecting" {
