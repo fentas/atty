@@ -240,7 +240,11 @@ if [[ $WITH_EBPF -eq 1 ]]; then
         fi
     done
     echo "building atty_guard.bpf.o (clang BPF target + BTF CO-RE)…"
-    # Regenerate vmlinux.h from THIS kernel's BTF, then compile.
+    # Force-regenerate vmlinux.h from THIS kernel's BTF: the Makefile's
+    # `vmlinux.h` target has no prerequisites, so an existing (possibly
+    # stale, old-kernel) header would otherwise be reused as-is. Remove
+    # it first so the dump always reflects the running kernel.
+    rm -f "$BPF_SRC_DIR/vmlinux.h"
     if ! make -C "$BPF_SRC_DIR" vmlinux.h all; then
         echo "error: failed to compile atty_guard.bpf.o (see make output above)." >&2
         exit 1
