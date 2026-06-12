@@ -656,6 +656,7 @@ fn peer_disconnected(fd: i32) -> bool {
     const MSG_PEEK: i32 = 0x2;
     const MSG_DONTWAIT: i32 = 0x40;
     const EAGAIN: i32 = 11; // == EWOULDBLOCK on Linux
+    const EINTR: i32 = 4;
     extern "C" {
         fn recv(fd: i32, buf: *mut std::ffi::c_void, len: usize, flags: i32) -> isize;
     }
@@ -670,7 +671,11 @@ fn peer_disconnected(fd: i32) -> bool {
     };
     if n < 0 {
         let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        return err != EAGAIN;
+        // EAGAIN/EWOULDBLOCK = connected, nothing queued. EINTR = a
+        // signal interrupted the peek (SIGCHLD/SIGHUP/etc.) — the peer
+        // is still there; treating it as a disconnect would spuriously
+        // close the stream. Any other errno = broken connection.
+        return err != EAGAIN && err != EINTR;
     }
     // n == 0 (EOF) or n > 0 (unexpected data) → close.
     true
