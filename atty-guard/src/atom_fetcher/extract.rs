@@ -19,6 +19,14 @@ pub(super) fn walk_tarball_atoms(
     let gz = flate2::read::GzDecoder::new(gz_bytes);
     let mut ar = tar::Archive::new(gz);
     let mut atoms: BTreeSet<String> = BTreeSet::new();
+    // Cap accumulation DURING the walk, not just after: the outer
+    // download cap is on compressed bytes, and the per-entry cap is
+    // per-file, so a compromised upstream could ship many entries (or
+    // many distinct short atom lines) that balloon the in-memory set to
+    // GBs before the post-walk count cap is consulted. Bail early on
+    // either cumulative decompressed bytes or the atom count.
+    const TOTAL_DECOMPRESSED_MAX: u64 = 64 * 1024 * 1024;
+    let mut total_bytes: u64 = 0;
 
     for entry in ar
         .entries()
@@ -49,7 +57,19 @@ pub(super) fn walk_tarball_atoms(
         {
             continue;
         }
+        total_bytes += content.len() as u64;
+        if total_bytes > TOTAL_DECOMPRESSED_MAX {
+            return Err(FetchError::DecompressError(format!(
+                "tarball decompressed content exceeds {TOTAL_DECOMPRESSED_MAX} bytes — refusing"
+            )));
+        }
         extract(&content, &mut atoms);
+        if atoms.len() > super::fetch::MAX_ATOMS_TOTAL {
+            return Err(FetchError::ParseError(format!(
+                "atom count exceeded cap {} during extraction — refusing",
+                super::fetch::MAX_ATOMS_TOTAL
+            )));
+        }
     }
     Ok(atoms.into_iter().collect())
 }
@@ -231,7 +251,17 @@ pub(super) fn atom_from_code(code: &str) -> Option<String> {
         if clean.len() < ATOM_MIN_LEN || clean.len() > ATOM_MAX_LEN {
             return None;
         }
+        // A leading `#` would be silently dropped by the loader's
+        // whole-line-comment stripper (trust_store reads the written
+        // file), so an extracted `#…` atom vanishes — reject at
+        // extraction instead of writing a dead line.
+        if clean.starts_with('#') {
+            return None;
+        }
         if is_placeholder_atom(clean) {
+            return None;
+        }
+        if is_low_value_atom(clean) {
             return None;
         }
         return Some(clean.to_owned());
@@ -255,6 +285,38 @@ pub(super) fn atom_from_code(code: &str) -> Option<String> {
 /// detection capability because the placeholder never fired
 /// anyway — the other two literal atoms carry the signal via
 /// V2-J multi-hit accumulation.
+/// Reject over-broad fetched atoms that would Warn-flood. A
+/// substring atom is matched literally against every command, so a
+/// bare common command name (`ls`, `cd`, `git`, …) or a tiny
+/// structureless token would flag nearly everything the user types —
+/// usability-DoS that also trains users to dismiss the banner. Only
+/// the FETCHED corpus passes through here; the bundled
+/// `flagged_atoms.txt` is curated and loaded directly. Multi-token
+/// atoms (`curl -fsSL`, `nc -e /bin/sh`) keep their signal and pass.
+fn is_low_value_atom(atom: &str) -> bool {
+    // Multi-token atoms carry context — keep them.
+    if atom.contains(char::is_whitespace) {
+        return false;
+    }
+    const COMMON_COMMANDS: &[&str] = &[
+        "ls", "cd", "cp", "mv", "rm", "cat", "echo", "pwd", "env", "set", "git", "ssh", "scp",
+        "top", "ps", "df", "du", "man", "vi", "vim", "nano", "npm", "pip", "cargo", "make", "sudo",
+        "sh", "bash", "zsh", "tar", "gzip", "curl", "wget", "grep", "sed", "awk", "find", "kill",
+        "chmod", "chown", "export", "source", "which", "whoami", "ln", "touch", "mkdir",
+    ];
+    let lower = atom.to_ascii_lowercase();
+    if COMMON_COMMANDS.contains(&lower.as_str()) {
+        return true;
+    }
+    // A short single token with no shell structure (no path/flag/
+    // operator char) is unlikely to be a useful IOC and risks broad
+    // matches.
+    let has_structure = atom
+        .chars()
+        .any(|c| matches!(c, '/' | '-' | '|' | '=' | '.' | ':' | '$' | '(' | ';'));
+    atom.len() < 6 && !has_structure
+}
+
 fn is_placeholder_atom(atom: &str) -> bool {
     // Delegate to the always-available top-level fn so the
     // predicate is shared between the atom-fetcher's extract
@@ -271,7 +333,15 @@ pub(super) fn write_atoms(path: &Path, atoms: &BTreeSet<String>) -> Result<(), F
         std::fs::create_dir_all(parent)
             .map_err(|e| FetchError::WriteError(format!("mkdir -p {parent:?}: {e}")))?;
     }
-    let tmp = path.with_extension("txt.tmp");
+    // PID-suffixed tmp name + create_new so we don't follow a
+    // pre-planted symlink at a predictable tmp path and two daemon
+    // instances don't race the same slot. Mirrors atom_drift's
+    // write_snapshot / trust_store's write_atomic.
+    let pid = std::process::id();
+    let tmp = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => path.with_file_name(format!("{n}.tmp.{pid}")),
+        None => path.with_file_name(format!("atoms.system.txt.tmp.{pid}")),
+    };
     let header = "# atty-guard auto-fetched atom set (atoms.system.txt).\n# Generated by `atty-guard --update-atoms-now` (or the daemon's\n# `--atoms-update-interval` cron mode). Do NOT hand-edit —\n# changes get overwritten on next refresh. The bundled\n# `flagged_atoms.txt` (in the atty repo, compile-time embedded)\n# stays the always-on baseline; this file is the daemon's\n# runtime overlay loaded with a permission gate (must be atty-\n# owned, no group/world-write). Lives at $STATE_DIRECTORY/, i.e.\n# /var/lib/atty-guard/atoms.system.txt on the system daemon.\n";
     let mut content = String::with_capacity(header.len() + atoms.len() * 32);
     content.push_str(header);
@@ -279,8 +349,25 @@ pub(super) fn write_atoms(path: &Path, atoms: &BTreeSet<String>) -> Result<(), F
         content.push_str(a);
         content.push('\n');
     }
-    std::fs::write(&tmp, content)
-        .map_err(|e| FetchError::WriteError(format!("write {tmp:?}: {e}")))?;
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| FetchError::WriteError(format!("create {tmp:?}: {e}")))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| FetchError::WriteError(format!("write {tmp:?}: {e}")))?;
+        // The loader gate requires atty:atty 0640 (owner-write, group-
+        // read, no world access). Set it on the tmp before rename so
+        // the published file never has a wider window.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640))
+                .map_err(|e| FetchError::WriteError(format!("chmod 0640 {tmp:?}: {e}")))?;
+        }
+    }
     std::fs::rename(&tmp, path)
         .map_err(|e| FetchError::WriteError(format!("rename → {path:?}: {e}")))?;
     Ok(())
@@ -490,8 +577,7 @@ detection:
 
     #[test]
     fn write_atoms_roundtrips_via_tmp_rename() {
-        let dir =
-            std::env::temp_dir().join(format!("atty-guard-fetcher-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("atty-guard-fetcher-{}", std::process::id()));
         let path = dir.join("atoms.system.txt");
         let mut s = BTreeSet::new();
         s.insert("nc -e /bin/sh".to_owned());
@@ -501,5 +587,48 @@ detection:
         assert!(read.contains("nc -e"));
         assert!(read.contains("/dev/tcp/"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_atoms_sets_0640_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("atty-guard-perms-{}", std::process::id()));
+        let path = dir.join("atoms.system.txt");
+        let mut s = BTreeSet::new();
+        s.insert("nc -e /bin/sh".to_owned());
+        write_atoms(&path, &s).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "atoms.system.txt must be 0640, got {mode:o}");
+        // No leftover tmp.
+        let tmp = path.with_file_name(format!("atoms.system.txt.tmp.{}", std::process::id()));
+        assert!(!tmp.exists(), "tmp file should be renamed away");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atom_from_code_rejects_hash_leading() {
+        // A `#`-leading atom would be silently dropped by the loader's
+        // whole-line-comment stripper, so reject it at extraction.
+        assert_eq!(atom_from_code("#!/bin/sh -c evil"), None);
+        assert_eq!(atom_from_code("# a comment-shaped line"), None);
+    }
+
+    #[test]
+    fn atom_from_code_rejects_low_value_bare_commands() {
+        // Bare common command names + tiny structureless tokens would
+        // Warn-flood; only multi-token / structured atoms survive.
+        assert_eq!(atom_from_code("ls"), None);
+        assert_eq!(atom_from_code("cd"), None);
+        assert_eq!(atom_from_code("git"), None);
+        assert_eq!(atom_from_code("curl"), None);
+        assert_eq!(atom_from_code("abc"), None); // short, no structure
+                                                 // Structured / multi-token atoms still pass.
+        assert_eq!(
+            atom_from_code("nc -e /bin/sh"),
+            Some("nc -e /bin/sh".to_owned())
+        );
+        assert_eq!(atom_from_code("/dev/tcp/"), Some("/dev/tcp/".to_owned()));
+        assert_eq!(atom_from_code("curl -fsSL"), Some("curl -fsSL".to_owned()));
     }
 }
