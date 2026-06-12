@@ -272,9 +272,14 @@ impl Classifier {
         // tiers, and the verdict still surfaces from the primary
         // (highest-confidence) hit.
         if tier1_combined < SLM_CONFIRM_THRESHOLD {
-            let hint = hits.iter().map(|(_, off)| *off).min();
+            let hint = hits.iter().map(|(_, off, _)| *off).min();
             if let Some(slm) = self.tier2.classify(command, hint) {
-                hits.push((slm, hint.unwrap_or(0)));
+                // Zero-width span at the hint offset — the SLM is a
+                // whole-command judgment, not a span hit; it never
+                // participates in span-merge (distinct_span_groups runs
+                // on Tier-1 hits above) and is counted distinct here.
+                let off = hint.unwrap_or(0);
+                hits.push((slm, off, off));
                 distinct_signals += 1;
             }
         }
@@ -327,13 +332,13 @@ const SLM_CONFIRM_THRESHOLD: f32 = 0.9;
 /// independent "this command is harmful" indicator. Saturates
 /// toward 1.0 as more hits accumulate; a single hit returns its
 /// own confidence unchanged.
-fn combined_confidence(hits: &[(ClassifyResult, usize)]) -> f32 {
+fn combined_confidence(hits: &[(ClassifyResult, usize, usize)]) -> f32 {
     if hits.is_empty() {
         return 0.0;
     }
     1.0 - hits
         .iter()
-        .fold(1.0f32, |acc, (h, _)| acc * (1.0 - h.confidence))
+        .fold(1.0f32, |acc, (h, _, _)| acc * (1.0 - h.confidence))
 }
 
 /// Map an accumulated hit list to a single `ClassifyResult`.
@@ -351,22 +356,18 @@ fn combined_confidence(hits: &[(ClassifyResult, usize)]) -> f32 {
 /// two independent signals, so they collapse to a single span group.
 /// Their confidences still both feed `combined_confidence`; only the
 /// auto-Block ">= 2 distinct signals" guard uses this count. Spans
-/// are `[start, start + matched.len())`. `matched` is the raw match
-/// for most detectors, but a few store a transformed string (curl /
-/// atom hits `.trim()` → shorter; the npm hit appends the rest of the
-/// line → longer). Either way any inexactness only *over*-merges,
-/// which is the safe direction here: fewer distinct signals → LESS
-/// likely to auto-Block. A correlated command that drops below 2
-/// distinct still surfaces as Warn (combined confidence is unchanged)
-/// — auto-Block is an opt-in escalation, never the only protection.
-fn distinct_span_groups(hits: &[(ClassifyResult, usize)]) -> usize {
+/// are the EXACT `[start, end)` match ranges carried by each hit (from
+/// the matcher, not derived from the possibly-trimmed/transformed
+/// `matched` string), so overlap detection is precise. A correlated
+/// command that drops below 2 distinct still surfaces as Warn
+/// (combined confidence is unchanged) — auto-Block is an opt-in
+/// escalation, never the only protection.
+fn distinct_span_groups(hits: &[(ClassifyResult, usize, usize)]) -> usize {
     if hits.is_empty() {
         return 0;
     }
-    let mut spans: Vec<(usize, usize)> = hits
-        .iter()
-        .map(|(h, start)| (*start, start + h.matched.len()))
-        .collect();
+    let mut spans: Vec<(usize, usize)> =
+        hits.iter().map(|(_, start, end)| (*start, *end)).collect();
     spans.sort_by_key(|&(s, _)| s);
     let mut groups = 1;
     let mut cur_end = spans[0].1;
@@ -382,7 +383,7 @@ fn distinct_span_groups(hits: &[(ClassifyResult, usize)]) -> usize {
 }
 
 fn combine_hits(
-    hits: &[(ClassifyResult, usize)],
+    hits: &[(ClassifyResult, usize, usize)],
     block_threshold: Option<f32>,
     distinct_signals: usize,
 ) -> Option<ClassifyResult> {
@@ -403,7 +404,7 @@ fn combine_hits(
                 .partial_cmp(&b.0.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .map(|(h, _)| h)
+        .map(|(h, _, _)| h)
         .expect("hits.is_empty() guarded above");
 
     // V2-J Phase 2: auto-Block escalation. Two guards:
@@ -421,13 +422,18 @@ fn combine_hits(
         _ => primary.verdict.clone(),
     };
 
-    let reason = if hits.len() == 1 {
+    let reason = if distinct_signals <= 1 {
+        // One distinct signal (possibly several correlated raw hits) —
+        // the primary reason is the whole story; listing redundant
+        // detectors would misrepresent the escalation count.
         primary.reason.clone()
     } else {
-        // "N signals fired: <reason1>; <reason2>; ..." — gives the
-        // banner UI per-hit attribution without losing the count.
-        let parts: Vec<String> = hits.iter().map(|(h, _)| h.reason.clone()).collect();
-        format!("{} signals fired: {}", hits.len(), parts.join("; "))
+        // "N signals fired: <reason1>; <reason2>; ..." — N is the
+        // DISTINCT count that drives the verdict (matches the
+        // escalation semantics); the parts list keeps per-hit
+        // attribution for the banner / operator logs.
+        let parts: Vec<String> = hits.iter().map(|(h, _, _)| h.reason.clone()).collect();
+        format!("{} signals fired: {}", distinct_signals, parts.join("; "))
     };
     Some(ClassifyResult {
         verdict,
@@ -523,8 +529,12 @@ impl Tier1 {
     /// which contributes one entry per non-overlapping AC hit.
     /// The accumulator in `Classifier::classify` combines these
     /// into a single verdict via independent-probability math.
-    fn classify_all(&self, line: &str) -> Vec<(ClassifyResult, usize)> {
-        let mut hits: Vec<(ClassifyResult, usize)> = Vec::new();
+    // Each hit carries its EXACT match byte range `(start, end)` from
+    // the matcher (not derived from the possibly-trimmed/transformed
+    // `matched` string) so `distinct_span_groups` dedupes overlaps
+    // precisely.
+    fn classify_all(&self, line: &str) -> Vec<(ClassifyResult, usize, usize)> {
+        let mut hits: Vec<(ClassifyResult, usize, usize)> = Vec::new();
 
         if let Some(m) = self.curl_pipe_sh.find(line) {
             hits.push((
@@ -536,6 +546,7 @@ impl Tier1 {
                     matched: m.as_str().trim().to_owned(),
                 },
                 m.start(),
+                m.end(),
             ));
         }
 
@@ -561,6 +572,7 @@ impl Tier1 {
                         matched: line[at..end].to_owned(),
                     },
                     at,
+                    end,
                 ));
             }
         }
@@ -590,6 +602,11 @@ impl Tier1 {
                                 .to_owned(),
                         },
                         m.start(),
+                        // Span = the `npm install` match itself (the
+                        // `matched` string is intentionally longer for
+                        // the banner; the regex match is the signal's
+                        // real extent).
+                        m.end(),
                     ));
                     break;
                 }
@@ -614,6 +631,7 @@ impl Tier1 {
                         matched: m.as_str().trim().to_owned(),
                     },
                     m.start(),
+                    m.end(),
                 ));
             }
         }
@@ -624,7 +642,8 @@ impl Tier1 {
         // crosses the Block threshold at N=3 (0.936).
         for hit in self.atom_matcher.find_all(line) {
             let offset = hit.byte_offset;
-            hits.push((self.atom_matcher.hit_to_result(&hit, line), offset));
+            let end = offset + hit.atom.len();
+            hits.push((self.atom_matcher.hit_to_result(&hit, line), offset, end));
         }
 
         hits
@@ -1342,6 +1361,7 @@ mod tests {
                     matched: matched.to_owned(),
                 },
                 start,
+                start + matched.len(),
             )
         };
         // Two disjoint atoms → 2 groups.
