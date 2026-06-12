@@ -480,8 +480,9 @@ test "daemon_disabled is re-probed (not permanently sticky) after the interval" 
         // increment path, not just the latched flag).
         try testing.expectEqual(i + 1, rt.daemon_disabled_skips);
     }
-    // The interval-th skip re-probes: the query runs (and fails again,
-    // since the socket is still missing), re-latching with skips=0.
+    // The interval-th Enter re-probes (the counter hits the interval,
+    // resets, and THIS Enter runs the query) — it fails again (socket
+    // still missing), re-latching with skips=0.
     var last: LineState = .{};
     last.setCommitted("ls -la");
     var clx = makeCtx(&last, &scratch);

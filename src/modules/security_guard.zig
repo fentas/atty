@@ -148,7 +148,7 @@ pub fn configure(comptime cfg: Config) type {
             daemon: ?UdsClient = null,
             /// Set when the daemon proves unreachable, so the next few
             /// Enters skip the connect-failure path — a ~ms `connect()`
-            /// the user would otherwise feel as paper-cut latency that
+            /// the user would otherwise feel as a paper-cut latency that
             /// an absent sidecar shouldn't introduce. NOT permanently
             /// sticky: a daemon that's merely restarting (e.g.
             /// `systemctl restart` mid-session) would otherwise
