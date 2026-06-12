@@ -91,7 +91,15 @@ pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
 }
 
 fn handle_trust_list(socket: &Path, target_uid: Option<u32>) -> std::io::Result<()> {
-    let response = send_request(socket, Request::TrustList { target_uid })?;
+    // No `limit` — the operator CLI wants the FULL snapshot; it reads
+    // into an unbounded buffer, unlike the atty proxy's fixed read_buf.
+    let response = send_request(
+        socket,
+        Request::TrustList {
+            target_uid,
+            limit: None,
+        },
+    )?;
     match response {
         ResponseBody::TrustList { trust } => {
             for hash in trust {

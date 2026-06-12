@@ -550,7 +550,9 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
             handle_session_add_url_block(state, peer, host, target_uid)
         }
         Request::TrustAdd { hash, target_uid } => handle_trust_add(state, peer, hash, target_uid),
-        Request::TrustList { target_uid } => handle_trust_list(state, peer, target_uid),
+        Request::TrustList { target_uid, limit } => {
+            handle_trust_list(state, peer, target_uid, limit)
+        }
         Request::SessionWrite { target_uid } => handle_session_write(state, peer, target_uid),
         Request::SubscribeWarnEvents { .. } => {
             // Bypass-checked in the request loop above. Dispatch
@@ -1361,31 +1363,32 @@ fn handle_trust_add(
     }
 }
 
-fn handle_trust_list(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
+fn handle_trust_list(
+    state: &State,
+    peer: PeerCred,
+    target_uid: Option<u32>,
+    limit: Option<usize>,
+) -> ResponseBody {
     let uid = match resolve_target_uid(peer, target_uid) {
         Ok(u) => u,
         Err(msg) => return ResponseBody::Error { message: msg },
     };
     let _ = state.trust_store.ensure_loaded(uid);
-    // Bound the response so it can't exceed the Zig client's 16 KiB
-    // read buffer: each hash is ~67 bytes on the wire (64 hex + quotes
-    // + comma), so the full PERSISTENT_TRUST_CAP (16384) would be
-    // ~1.1 MB → LineTooLong → cross-shell trust seeding silently dies.
-    // Cap at MAX_TRUST_LIST_ENTRIES (~13 KiB, leaving envelope margin).
-    // The client seeds rt.trust from this on first Enter; beyond the
-    // cap, those commands re-prompt once and get re-trusted in-session
-    // (and re-mirrored), so no trust is lost — only the cross-shell
-    // pre-seed is bounded.
+    // Honor the caller's `limit`: the atty proxy sets it to bound the
+    // reply to its fixed 16 KiB read buffer (each hash is ~67 bytes on
+    // the wire, so the full PERSISTENT_TRUST_CAP would be ~1.1 MB →
+    // LineTooLong → cross-shell trust seeding silently dies). The
+    // operator CLI omits it and gets the full snapshot. When the proxy
+    // caps, the over-limit commands re-prompt once and re-trust
+    // in-session (and re-mirror), so no trust is lost.
     let mut trust = state.trust_store.list_persistent_trust(uid);
-    if trust.len() > MAX_TRUST_LIST_ENTRIES {
-        trust.truncate(MAX_TRUST_LIST_ENTRIES);
+    if let Some(n) = limit {
+        if trust.len() > n {
+            trust.truncate(n);
+        }
     }
     ResponseBody::TrustList { trust }
 }
-
-/// Max persistent-trust hashes returned in one `trust_list` reply —
-/// keeps it under the client's 16 KiB read buffer (~67 bytes/hash).
-const MAX_TRUST_LIST_ENTRIES: usize = 200;
 
 fn handle_session_write(state: &State, peer: PeerCred, target_uid: Option<u32>) -> ResponseBody {
     if !peer.is_root {
@@ -2519,29 +2522,40 @@ mod tests {
     }
 
     #[test]
-    fn trust_list_capped_to_fit_client_buffer() {
+    fn trust_list_limit_caps_but_none_returns_full() {
         extern "C" {
             fn geteuid() -> u32;
         }
         let uid = unsafe { geteuid() };
         let dir = std::env::temp_dir().join(format!("atty-guard-trustcap-{}", std::process::id()));
         let store = Arc::new(crate::trust_store::TrustStore::new(dir.clone()));
-        for i in 0..(MAX_TRUST_LIST_ENTRIES + 50) {
+        let total = 250usize;
+        for i in 0..total {
             store
                 .persistent_add_trust(uid, &format!("{i:064x}"))
                 .unwrap();
         }
         let (socket, _h) = spawn_server_with_trust_store(store);
-        let mut stream = UnixStream::connect(&socket).expect("connect");
-        let list = round_trip(&mut stream, r#"{"id":1,"method":"trust_list"}"#);
-        let v: serde_json::Value = serde_json::from_str(&list).unwrap();
+
+        // Proxy-style request WITH a limit → bounded reply that fits the
+        // proxy's 16 KiB read buffer.
+        let mut s1 = UnixStream::connect(&socket).expect("connect");
+        let capped = round_trip(&mut s1, r#"{"id":1,"method":"trust_list","limit":200}"#);
+        let v: serde_json::Value = serde_json::from_str(&capped).unwrap();
         assert_eq!(v["type"], "trust_list");
-        assert_eq!(v["trust"].as_array().unwrap().len(), MAX_TRUST_LIST_ENTRIES);
+        assert_eq!(v["trust"].as_array().unwrap().len(), 200);
         assert!(
-            list.len() < 16384,
-            "trust_list reply {} bytes must fit the 16 KiB client buffer",
-            list.len()
+            capped.len() < 16384,
+            "capped reply must fit the 16 KiB buffer: {}",
+            capped.len()
         );
+
+        // Operator-CLI-style request with NO limit → full snapshot.
+        let mut s2 = UnixStream::connect(&socket).expect("connect");
+        let full = round_trip(&mut s2, r#"{"id":2,"method":"trust_list"}"#);
+        let v2: serde_json::Value = serde_json::from_str(&full).unwrap();
+        assert_eq!(v2["trust"].as_array().unwrap().len(), total);
+
         let _ = std::fs::remove_file(socket);
         std::fs::remove_dir_all(&dir).ok();
     }

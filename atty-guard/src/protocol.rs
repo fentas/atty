@@ -205,6 +205,13 @@ pub enum Request {
     TrustList {
         #[serde(default)]
         target_uid: Option<u32>,
+        /// Max entries to return. The atty proxy sets this to bound the
+        /// reply to its fixed read buffer (a full PERSISTENT_TRUST_CAP
+        /// list would overflow it → LineTooLong → seeding silently
+        /// fails). The operator CLI omits it (`None`) to get the full
+        /// snapshot.
+        #[serde(default)]
+        limit: Option<usize>,
     },
 
     /// Subscribe to a stream of `VERDICT_WARN` execve events. Unlike
