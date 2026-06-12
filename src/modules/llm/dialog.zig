@@ -374,10 +374,11 @@ pub fn hasActionFence(raw: []const u8) bool {
 /// — the bytes after that point land at the next prompt as a
 /// separate command. Not defended against here (rare in real LLM
 /// output + would be ambiguous to escape); same trade-off as the
-/// chat-panel paste path documented in llm.zig. Control bytes other
-/// than `\n` are stripped upstream at parse time
-/// (`stripControlBytesKeepNewlines`), so a raw `\r`/ESC never
-/// reaches this function.
+/// chat-panel paste path documented in llm.zig. This function itself
+/// only normalizes CRLF→LF; it does NOT strip other control bytes,
+/// so callers must sanitize first. On the dialog exec injection path
+/// that happens at parse time via `stripControlBytesKeepNewlines`, so
+/// a raw `\r`/ESC never reaches it there.
 pub fn wrapForBracketedPaste(src: []const u8, dest: []u8) usize {
     if (src.len == 0) return 0;
     if (std.mem.indexOfScalar(u8, src, '\n') == null) {
