@@ -187,7 +187,13 @@ pub const Client = struct {
             },
         };
 
-        return parseClassifyResponse(self.read_buf[0..line_len]);
+        // Close on parse failure (malformed / wrong type / id mismatch):
+        // these signal a possible stream desync, so the next call must
+        // reconnect rather than risk reading a misaligned reply.
+        return parseClassifyResponse(self.read_buf[0..line_len], id) catch |e| {
+            self.close();
+            return e;
+        };
     }
 
     pub fn setThreatLevel(self: *Client, pid: u32, level: ThreatLevel) Error!void {
@@ -208,7 +214,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        try self.readMutationResponse();
+        try self.readMutationResponse(id);
     }
 
     /// Parse the daemon's `{"type":"ok"}` vs
@@ -220,39 +226,41 @@ pub const Client = struct {
     /// (rate limit, auth, malformed input, sandbox /proc blocked)
     /// all landed atty-side as "success". `classifyOrErr` always
     /// parsed; the mutation paths now match.
-    fn readMutationResponse(self: *Client) Error!void {
+    fn readMutationResponse(self: *Client, expected_id: u64) Error!void {
         const line_len = self.readLine() catch {
             self.close();
             return Error.Unavailable;
         };
-        return parseMutationResponse(self.read_buf[0..line_len]);
+        // Close on parse failure for the same desync reason as the
+        // classify path — a malformed reply or id mismatch means the
+        // next call should start from a clean reconnect.
+        parseMutationResponse(self.read_buf[0..line_len], expected_id) catch |e| {
+            self.close();
+            return e;
+        };
     }
 
     /// Pure-function variant of `readMutationResponse`'s parse —
     /// split out so tests can exercise the envelope handling
     /// without spinning up a real socket.
     ///
-    /// Strategy: find the FIRST `"type":` substring and look at
-    /// what follows. Anchoring on the first occurrence (rather
-    /// than `indexOf` over the whole body) avoids confusables
-    /// where a `message` field embeds the literal text
-    /// `"type":"ok"` — substring match would otherwise return
-    /// success on a daemon error envelope whose message
-    /// happened to quote that shape.
+    /// Reads the response structurally (`scanObject`) so a `message`
+    /// field that embeds the literal text `"type":"ok"` can never be
+    /// mistaken for the envelope's own type, and validates the echoed
+    /// `id` so a stale/desynced reply isn't accepted as this request's
+    /// answer.
     ///
+    ///   - `id` mismatch    → `Error.DaemonError`
     ///   - `"type":"ok"`    → success (no-op return)
-    ///   - `"type":"error"` → `Error.DaemonError`
-    ///   - other shapes     → `Error.DaemonError` (daemon should
-    ///                        emit one of those two; anything
-    ///                        else is a protocol violation).
-    pub fn parseMutationResponse(body: []const u8) Error!void {
-        const type_at = std.mem.indexOf(u8, body, "\"type\":\"") orelse
-            return Error.DaemonError;
-        const value_start = type_at + "\"type\":\"".len;
-        if (value_start >= body.len) return Error.DaemonError;
-        const remaining = body[value_start..];
-        if (std.mem.startsWith(u8, remaining, "ok\"")) return;
-        if (std.mem.startsWith(u8, remaining, "error\"")) return Error.DaemonError;
+    ///   - anything else    → `Error.DaemonError` (the daemon should
+    ///                        emit `ok` for a successful mutation;
+    ///                        `error` and every other shape are
+    ///                        rejections / protocol violations).
+    pub fn parseMutationResponse(body: []const u8, expected_id: u64) Error!void {
+        const obj = try scanObject(body);
+        try checkId(&obj, expected_id);
+        const type_s = obj.get("type") orelse return Error.DaemonError;
+        if (std.mem.eql(u8, type_s, "ok")) return;
         return Error.DaemonError;
     }
 
@@ -277,7 +285,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        try self.readMutationResponse();
+        try self.readMutationResponse(id);
     }
 
     /// Canonical persistence path for `[t]rust permanently`.
@@ -307,7 +315,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        try self.readMutationResponse();
+        try self.readMutationResponse(id);
     }
 
     /// Fetch the caller's persistent trust hashes from the daemon
@@ -345,30 +353,44 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        const body = self.read_buf[0..line_len];
-        // Envelope check first — pre-this-PR trustList silently
-        // ignored daemon error envelopes (no `trust` array → no
-        // hashes added → looks like "empty trust list, no
-        // problem"). Surface auth / sandbox rejections instead.
-        if (std.mem.indexOf(u8, body, "\"type\":\"error\"") != null) {
-            return Error.DaemonError;
-        }
-        // Parse minimal: scan for "trust":[...] array, extract each
-        // 64-char hex needle, add to target. Avoids pulling in a
-        // full JSON parser for what is a known-shape response.
-        const trust_at = std.mem.indexOf(u8, body, "\"trust\":[") orelse return;
-        const arr_start = trust_at + "\"trust\":[".len;
-        var cursor: usize = arr_start;
-        while (cursor < body.len) {
-            const open_quote = std.mem.indexOfScalarPos(u8, body, cursor, '"') orelse break;
-            if (open_quote + 1 + trust_cache_mod.hex_len > body.len) break;
+        // Close on any parse/desync failure so the next daemon call
+        // reconnects from a clean stream (same rationale as the classify
+        // + mutation paths).
+        parseTrustListBody(self.read_buf[0..line_len], id, allocator, target) catch |e| {
+            self.close();
+            return e;
+        };
+    }
+
+    /// Pure-function body of `trustList` — split out so tests can drive
+    /// the envelope + hash-extraction logic without a socket. Structural
+    /// parse + id validation, same as the classify path: pre-this-PR
+    /// trustList substring-scanned for `"type":"error"` and `"trust":[`,
+    /// which (a) silently ignored a desynced reply and (b) could be
+    /// confused by those literals inside another field.
+    pub fn parseTrustListBody(
+        body: []const u8,
+        expected_id: u64,
+        allocator: std.mem.Allocator,
+        target: *trust_cache_mod.TrustCache,
+    ) Error!void {
+        const obj = try scanObject(body);
+        try checkId(&obj, expected_id);
+        const type_s = obj.get("type") orelse return Error.DaemonError;
+        if (!std.mem.eql(u8, type_s, "trust_list")) return Error.DaemonError;
+        // `trust` is the raw `["..",".."]` span; extract each 64-char hex
+        // needle from WITHIN it so a hash-shaped string elsewhere can't
+        // leak in. Absent array → nothing to seed.
+        const arr = obj.get("trust") orelse return;
+        var cursor: usize = 0;
+        while (cursor < arr.len) {
+            const open_quote = std.mem.indexOfScalarPos(u8, arr, cursor, '"') orelse break;
+            if (open_quote + 1 + trust_cache_mod.hex_len > arr.len) break;
             const close_quote = open_quote + 1 + trust_cache_mod.hex_len;
-            if (body[close_quote] != '"') break;
-            const hex_slice = body[open_quote + 1 .. close_quote];
+            if (arr[close_quote] != '"') break;
+            const hex_slice = arr[open_quote + 1 .. close_quote];
             _ = target.add(allocator, hex_slice) catch {};
             cursor = close_quote + 1;
-            // Stop at closing `]`.
-            if (cursor < body.len and body[cursor] == ']') break;
         }
     }
 
@@ -396,7 +418,7 @@ pub const Client = struct {
             self.close();
             return Error.Unavailable;
         };
-        try self.readMutationResponse();
+        try self.readMutationResponse(id);
     }
 
     /// RFC 8259 minimal JSON-string escaper: `"`, `\`, control
@@ -539,30 +561,204 @@ fn writeEscaped(w: *std.Io.Writer, s: []const u8) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Bare-minimum JSON pull parser scoped to the daemon's response
-// shape. Robust enough to extract the fields we care about; not
-// a general parser. Falls back to `error.DaemonError` on anything
-// it doesn't recognise.
+// Minimal STRUCTURAL JSON object reader, scoped to the daemon's
+// one-object-per-line responses. We only need a handful of top-level
+// fields, but extracting them by first-substring (`indexOf("\"verdict\":\"")`)
+// is safe only by accident of serde's field order plus quote-escaping:
+// `reason` / `matched` carry attacker-influenced command text, and
+// reordering `ClassifyResult` in protocol.rs would silently let that text
+// hijack the verdict. This reader walks the object so only depth-1 keys
+// are reported (a key name nested inside a string value or sub-object is
+// never confused for the real field), and the parse validates the echoed
+// `id` so a stale/desynced reply can't be read as this request's answer.
+
+const max_object_members = 16;
+
+const ObjectMember = struct { key: []const u8, value: []const u8 };
+
+/// Top-level members of one JSON object. String values are returned as
+/// the raw inner bytes (escapes intact — callers display/hash them as-is,
+/// matching the prior parser); object/array values are the whole bracketed
+/// span; scalars are the verbatim token.
+const ParsedObject = struct {
+    members: [max_object_members]ObjectMember = undefined,
+    len: usize = 0,
+
+    fn get(self: *const ParsedObject, key: []const u8) ?[]const u8 {
+        for (self.members[0..self.len]) |m| {
+            if (std.mem.eql(u8, m.key, key)) return m.value;
+        }
+        return null;
+    }
+};
+
+fn skipWs(buf: []const u8, i: usize) usize {
+    var j = i;
+    while (j < buf.len and (buf[j] == ' ' or buf[j] == '\t' or buf[j] == '\n' or buf[j] == '\r')) : (j += 1) {}
+    return j;
+}
+
+/// Index of the closing quote of a JSON string whose opening quote is at
+/// `open`. Honors `\` escapes. null on an unterminated string.
+fn stringEnd(buf: []const u8, open: usize) ?usize {
+    var i = open + 1;
+    while (i < buf.len) : (i += 1) {
+        if (buf[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (buf[i] == '"') return i;
+    }
+    return null;
+}
+
+/// Index of the closing bracket matching the `{`/`[` at `open`. Skips
+/// nested strings (and their escapes) so brackets inside string values
+/// don't unbalance the count, and requires each closer to match its
+/// opener's type — `{]` / `[}` are rejected (`null`), not treated as
+/// balanced. null on any unbalanced / mismatched / over-deep span.
+fn balancedEnd(buf: []const u8, open: usize) ?usize {
+    var stack: [16]u8 = undefined;
+    var depth: usize = 0;
+    var i = open;
+    while (i < buf.len) : (i += 1) {
+        switch (buf[i]) {
+            '"' => i = stringEnd(buf, i) orelse return null,
+            '{', '[' => {
+                if (depth >= stack.len) return null;
+                stack[depth] = if (buf[i] == '{') '}' else ']';
+                depth += 1;
+            },
+            '}', ']' => {
+                if (depth == 0 or stack[depth - 1] != buf[i]) return null;
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// True when `s` is a JSON literal that may appear unquoted as a value:
+/// `true` / `false` / `null`, or a number. Rejects bare identifiers
+/// (`ok`), leading `+`, and `inf`/`nan` (which `parseFloat` would
+/// otherwise accept) by requiring the first byte to be `-` or a digit.
+fn validScalar(s: []const u8) bool {
+    if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "null")) {
+        return true;
+    }
+    if (s.len == 0) return false;
+    if (!(s[0] == '-' or (s[0] >= '0' and s[0] <= '9'))) return false;
+    _ = std.fmt.parseFloat(f64, s) catch return false;
+    return true;
+}
+
+/// True when everything after the closing `}` at `close` is whitespace.
+/// A second object or junk appended to the line (`{...} {...}`) is a
+/// desync / protocol violation, not a valid single-object response.
+fn onlyTrailingWs(buf: []const u8, close: usize) bool {
+    return skipWs(buf, close + 1) == buf.len;
+}
+
+/// Read a single top-level JSON object's members structurally.
+/// `Error.DaemonError` on anything that isn't a well-formed object, that
+/// carries more than `max_object_members` fields, or that has trailing
+/// non-whitespace bytes after the top-level `}`.
+fn scanObject(buf: []const u8) Error!ParsedObject {
+    var obj: ParsedObject = .{};
+    var i = skipWs(buf, 0);
+    if (i >= buf.len or buf[i] != '{') return Error.DaemonError;
+    i += 1;
+    while (true) {
+        i = skipWs(buf, i);
+        if (i >= buf.len) return Error.DaemonError;
+        if (buf[i] == '}') {
+            if (!onlyTrailingWs(buf, i)) return Error.DaemonError;
+            return obj;
+        }
+        if (buf[i] != '"') return Error.DaemonError;
+        const key_end = stringEnd(buf, i) orelse return Error.DaemonError;
+        const key = buf[i + 1 .. key_end];
+        i = skipWs(buf, key_end + 1);
+        if (i >= buf.len or buf[i] != ':') return Error.DaemonError;
+        i = skipWs(buf, i + 1);
+        if (i >= buf.len) return Error.DaemonError;
+        var value: []const u8 = undefined;
+        switch (buf[i]) {
+            '"' => {
+                const ve = stringEnd(buf, i) orelse return Error.DaemonError;
+                value = buf[i + 1 .. ve];
+                i = ve + 1;
+            },
+            '{', '[' => {
+                const ve = balancedEnd(buf, i) orelse return Error.DaemonError;
+                value = buf[i .. ve + 1];
+                i = ve + 1;
+            },
+            else => {
+                const start = i;
+                while (i < buf.len and buf[i] != ',' and buf[i] != '}' and
+                    buf[i] != ' ' and buf[i] != '\t' and buf[i] != '\n' and buf[i] != '\r') : (i += 1)
+                {}
+                if (i == start) return Error.DaemonError;
+                value = buf[start..i];
+                // A bare (unquoted) value must be a JSON literal — a
+                // number (our `id`/`confidence`) or true/false/null.
+                // Reject anything else (e.g. `{"type":ok}`) so malformed
+                // input can't slip an unquoted token past the parser.
+                if (!validScalar(value)) return Error.DaemonError;
+            },
+        }
+        if (obj.len >= max_object_members) return Error.DaemonError;
+        // Reject duplicate top-level keys: a security-sensitive message
+        // with two `verdict`s (or `id`s) is ambiguous, so refuse it
+        // rather than silently picking one.
+        if (obj.get(key) != null) return Error.DaemonError;
+        obj.members[obj.len] = .{ .key = key, .value = value };
+        obj.len += 1;
+        i = skipWs(buf, i);
+        if (i >= buf.len) return Error.DaemonError;
+        if (buf[i] == ',') {
+            i += 1;
+            continue;
+        }
+        if (buf[i] == '}') {
+            if (!onlyTrailingWs(buf, i)) return Error.DaemonError;
+            return obj;
+        }
+        return Error.DaemonError;
+    }
+}
+
+/// Reject a reply whose echoed `id` doesn't match the request's. A
+/// mismatch means a stale or out-of-order response — never the answer to
+/// THIS call, so parsing it would risk a verdict mismatch.
+fn checkId(obj: *const ParsedObject, expected_id: u64) Error!void {
+    const id_s = obj.get("id") orelse return Error.DaemonError;
+    const id = std.fmt.parseInt(u64, id_s, 10) catch return Error.DaemonError;
+    if (id != expected_id) return Error.DaemonError;
+}
 
 /// Pulled out (and `pub`'d) so tests can round-trip without
 /// standing up a daemon. Returns the parsed result OR a typed
 /// error; the callers up the chain map the errors back into
 /// fallback / arming decisions.
-pub fn parseClassifyResponse(buf: []const u8) Error!ClassifyResult {
-    // Look for "type":"classify" first to reject other envelope shapes.
-    if (std.mem.indexOf(u8, buf, "\"type\":\"classify\"") == null) {
-        if (std.mem.indexOf(u8, buf, "\"type\":\"error\"") != null) {
-            return Error.DaemonError;
-        }
-        return Error.DaemonError;
-    }
-    const verdict_s = extractString(buf, "\"verdict\":\"") orelse return Error.DaemonError;
+pub fn parseClassifyResponse(buf: []const u8, expected_id: u64) Error!ClassifyResult {
+    const obj = try scanObject(buf);
+    try checkId(&obj, expected_id);
+    const type_s = obj.get("type") orelse return Error.DaemonError;
+    if (!std.mem.eql(u8, type_s, "classify")) return Error.DaemonError;
+    const verdict_s = obj.get("verdict") orelse return Error.DaemonError;
     const verdict = Verdict.fromString(verdict_s) orelse return Error.DaemonError;
-    const cat_s = extractString(buf, "\"category\":\"") orelse "none";
+    const cat_s = obj.get("category") orelse "none";
     const category = Category.fromString(cat_s) orelse .none;
-    const reason = extractString(buf, "\"reason\":\"") orelse "";
-    const matched = extractString(buf, "\"matched\":\"") orelse "";
-    const confidence = extractFloat(buf, "\"confidence\":") orelse 0.0;
+    const reason = obj.get("reason") orelse "";
+    const matched = obj.get("matched") orelse "";
+    const confidence = blk: {
+        const c = obj.get("confidence") orelse break :blk @as(f32, 0.0);
+        break :blk std.fmt.parseFloat(f32, c) catch 0.0;
+    };
     return .{
         .verdict = verdict,
         .category = category,
@@ -570,32 +766,6 @@ pub fn parseClassifyResponse(buf: []const u8) Error!ClassifyResult {
         .reason = reason,
         .matched = matched,
     };
-}
-
-fn extractString(buf: []const u8, prefix: []const u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, buf, prefix) orelse return null;
-    const start = at + prefix.len;
-    // Find unescaped closing quote.
-    var i = start;
-    while (i < buf.len) : (i += 1) {
-        if (buf[i] == '\\') {
-            i += 1;
-            continue;
-        }
-        if (buf[i] == '"') return buf[start..i];
-    }
-    return null;
-}
-
-fn extractFloat(buf: []const u8, prefix: []const u8) ?f32 {
-    const at = std.mem.indexOf(u8, buf, prefix) orelse return null;
-    var i = at + prefix.len;
-    const start = i;
-    while (i < buf.len) : (i += 1) {
-        const c = buf[i];
-        if (!(c == '-' or c == '+' or c == '.' or (c >= '0' and c <= '9') or c == 'e' or c == 'E')) break;
-    }
-    return std.fmt.parseFloat(f32, buf[start..i]) catch null;
 }
 
 test {
