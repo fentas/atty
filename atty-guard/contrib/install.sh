@@ -56,15 +56,21 @@ for arg in "$@"; do
             sed -n '2,32p' "$0" | sed 's/^# \?//'
             echo
             echo "Flags:"
-            echo "  --with-ebpf      Install the eBPF systemd drop-in (CAP_BPF +"
-            echo "                   SystemCallFilter widening + --enable-ebpf on"
-            echo "                   ExecStart). Requires the binary to be built"
-            echo "                   with --features ebpf (verified via"
-            echo "                   --print-features post-install)."
-            echo "  --without-ebpf   Explicitly remove the eBPF drop-in if present."
-            echo "                   Use when downgrading from an ebpf install:"
-            echo "                   without this flag a plain re-install leaves"
-            echo "                   the existing drop-in in place (warn-only)."
+            echo "  --with-ebpf      Compile + install the kernel BPF object to"
+            echo "                   /usr/lib/atty-guard and install the systemd"
+            echo "                   drop-in (CAP_BPF + CAP_PERFMON + CAP_MAC_ADMIN,"
+            echo "                   SystemCallFilter widening, --enable-ebpf on"
+            echo "                   ExecStart). Requires: the binary built with"
+            echo "                   --features ebpf; kernel BTF at"
+            echo "                   /sys/kernel/btf/vmlinux; clang + bpftool on"
+            echo "                   PATH. Hard-fails (not silent fallback) if any"
+            echo "                   prerequisite is missing."
+            echo "  --without-ebpf   Explicitly remove the eBPF drop-in AND the"
+            echo "                   installed BPF object (/usr/lib/atty-guard/"
+            echo "                   atty_guard.bpf.o) if present. Use when"
+            echo "                   downgrading from an ebpf install: without this"
+            echo "                   flag a plain re-install leaves the existing"
+            echo "                   drop-in in place (warn-only)."
             echo "  --with-network   Install the network systemd drop-in (relaxes"
             echo "                   PrivateNetwork=yes + adds AF_INET/AF_INET6)."
             echo "                   Required for osv-live and atoms-fetch features."
@@ -209,6 +215,59 @@ if [[ $WITH_EBPF -eq 1 ]]; then
         echo "       (or via the Makefile: make build-guard GUARD_FEATURES=...,ebpf)" >&2
         exit 1
     fi
+
+    # Build + install the kernel-side BPF object. The daemon's loader
+    # (src/ebpf.rs::locate_bpf_object) searches the binary's dir, the
+    # build tree, and /usr/lib/atty-guard — NONE of which the installer
+    # populated before. Without the .o, `--enable-ebpf` finds nothing,
+    # logs ObjectMissing, and falls back to the in-memory V2-A map: an
+    # operator who asked for --with-ebpf gets ZERO kernel enforcement
+    # with only a journal line. Hard-fail here instead so the gap is
+    # loud, not silent.
+    BPF_SRC_DIR="$REPO_ROOT/ebpf"
+    BPF_LIB_DIR="/usr/lib/atty-guard"
+    BPF_OBJ_DST="$BPF_LIB_DIR/atty_guard.bpf.o"
+    if [[ ! -r /sys/kernel/btf/vmlinux ]]; then
+        echo "error: --with-ebpf requires kernel BTF at /sys/kernel/btf/vmlinux" >&2
+        echo "       (CONFIG_DEBUG_INFO_BTF=y). This kernel lacks it — the CO-RE" >&2
+        echo "       BPF object can't be compiled. Use a BTF-enabled kernel or omit" >&2
+        echo "       --with-ebpf to run in V2-A (in-memory) mode." >&2
+        exit 1
+    fi
+    for _tool in make clang bpftool; do
+        if ! command -v "$_tool" >/dev/null 2>&1; then
+            echo "error: --with-ebpf needs '$_tool' on PATH to compile atty_guard.bpf.o." >&2
+            echo "       Debian/Ubuntu: apt-get install make clang libbpf-dev linux-tools-common" >&2
+            exit 1
+        fi
+    done
+    echo "building atty_guard.bpf.o (clang BPF target + BTF CO-RE)…"
+    # Clean up the in-tree build artifacts on EVERY exit from here on
+    # (success or failure): we compile under sudo/root, so leaving a
+    # root-owned vmlinux.h / .o in the (user-owned) checkout would break
+    # a later non-root `make`. Must cover the make-failure path too, not
+    # just success.
+    _bpf_build_clean() { rm -f "$BPF_SRC_DIR/vmlinux.h" "$BPF_SRC_DIR/atty_guard.bpf.o"; }
+    # Force-regenerate vmlinux.h from THIS kernel's BTF: the Makefile's
+    # `vmlinux.h` target has no prerequisites, so an existing (possibly
+    # stale, old-kernel) header would otherwise be reused as-is. Clean
+    # any prior copy first so the dump always reflects the running kernel.
+    _bpf_build_clean
+    if ! make -C "$BPF_SRC_DIR" vmlinux.h all; then
+        _bpf_build_clean
+        echo "error: failed to compile atty_guard.bpf.o (see make output above)." >&2
+        exit 1
+    fi
+    if [[ ! -f "$BPF_SRC_DIR/atty_guard.bpf.o" ]]; then
+        _bpf_build_clean
+        echo "error: make reported success but $BPF_SRC_DIR/atty_guard.bpf.o is missing." >&2
+        exit 1
+    fi
+    install -d -o root -g root -m 0755 "$BPF_LIB_DIR"
+    install -o root -g root -m 0644 "$BPF_SRC_DIR/atty_guard.bpf.o" "$BPF_OBJ_DST"
+    echo "installed $BPF_OBJ_DST"
+    _bpf_build_clean
+
     install -d -o root -g root -m 0755 "$EBPF_DROPIN_DIR"
     # Heredoc uses unquoted EOF so $BIN_DST expands — keeps the
     # ExecStart path in sync with the actual install location (the
@@ -225,10 +284,13 @@ if [[ $WITH_EBPF -eq 1 ]]; then
 # to the no-eBPF V2-A behaviour (in-memory threat map only).
 [Service]
 # CAP_BPF gates BPF_PROG_LOAD + BPF_MAP_CREATE; CAP_PERFMON gates
-# perf_event_open used by tracepoint attach. Linux ≥ 5.8 split
-# these out of CAP_SYS_ADMIN so daemons don't need the everything-
-# capability for a narrow BPF need.
-AmbientCapabilities=CAP_BPF CAP_PERFMON
+# perf_event_open used by tracepoint attach. CAP_MAC_ADMIN is
+# REQUIRED to load a BPF_PROG_TYPE_LSM program (the bprm_check_security
+# hook) — without it the LSM attach returns EPERM, the whole load
+# errors, and the daemon falls back to no kernel enforcement. Linux
+# ≥ 5.8 split these out of CAP_SYS_ADMIN so daemons don't need the
+# everything-capability for a narrow BPF need.
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_MAC_ADMIN
 
 # The baseline \`SystemCallFilter=@system-service\` excludes bpf()
 # and perf_event_open() (both live in @privileged); widening the
@@ -263,6 +325,13 @@ elif [[ $WITHOUT_EBPF -eq 1 ]]; then
         rmdir "$EBPF_DROPIN_DIR" 2>/dev/null || true
     else
         echo "note: no eBPF drop-in at $EBPF_DROPIN_FILE — nothing to remove."
+    fi
+    # Drop the installed BPF object too so a later plain `--enable-ebpf`
+    # can't load a stale object compiled against an old kernel's BTF.
+    if [[ -f /usr/lib/atty-guard/atty_guard.bpf.o ]]; then
+        rm -f /usr/lib/atty-guard/atty_guard.bpf.o
+        echo "removed /usr/lib/atty-guard/atty_guard.bpf.o (--without-ebpf)"
+        rmdir /usr/lib/atty-guard 2>/dev/null || true
     fi
 elif [[ -f "$EBPF_DROPIN_FILE" ]]; then
     # Operator previously ran --with-ebpf, now re-running plain.

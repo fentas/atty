@@ -298,10 +298,14 @@ fmt-guard:
 # sudo) so the systemd policy stays in one place.
 #
 # When GUARD_FEATURES contains `ebpf`, also passes --with-ebpf so the
-# installer drops in /etc/systemd/system/atty-guard.service.d/ebpf.conf
-# with CAP_BPF + SystemCallFilter widening + --enable-ebpf on
-# ExecStart. The installer verifies the binary actually supports the
-# feature via --print-features before writing the drop-in.
+# installer compiles + installs the kernel BPF object to
+# /usr/lib/atty-guard/atty_guard.bpf.o and drops in
+# /etc/systemd/system/atty-guard.service.d/ebpf.conf with
+# CAP_BPF + CAP_PERFMON + CAP_MAC_ADMIN + SystemCallFilter widening +
+# --enable-ebpf on ExecStart. The installer verifies the binary
+# supports the feature (--print-features) AND that the host has the
+# build prerequisites (kernel BTF at /sys/kernel/btf/vmlinux, clang,
+# bpftool); it hard-fails — no silent fallback — if any are missing.
 install-guard: build-guard
 	@printf "→ %s will install + enable atty-guard.service (system daemon — requires sudo)\n" "$@"
 	@if echo "$(GUARD_FEATURES)" | tr ',' '\n' | grep -qx ebpf; then \

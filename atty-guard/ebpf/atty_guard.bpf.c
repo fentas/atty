@@ -115,8 +115,20 @@ struct execve_event {
 // Threat-map pivot: lookup by the PARENT PID, not the current one.
 // `bpf_get_current_pid_tgid()` returns the execve'ing task (the
 // child-to-be); the threat model marks the parent (e.g. `npm`,
-// `sudo`) so every descendant's execve is gated. We walk
-// `task->real_parent->tgid` via BPF CO-RE reads.
+// `sudo`) so its DIRECT children's execve is gated. We read
+// `task->real_parent->tgid` via BPF CO-RE.
+//
+// LIMITATION — one level only: this gates a marked PID's direct
+// children, NOT deeper descendants. `npm`(marked) → `node`(gated) →
+// `sh`(NOT gated: its real_parent is `node`, which isn't in the map),
+// and any double-fork / `nohup … &` / daemonize reparents the
+// descendant to PID 1 and drops the mark entirely. Deepening this to
+// a bounded ancestry walk (or propagating the mark on fork) is
+// future work; a verifier-safe loop here needs care and a kernel to
+// test against. Until then the userspace warn-subscriber's PPid-chain
+// walk (warn_consumer.rs::pid_in_tree_root) provides the deeper-tree
+// view for warn-mode telemetry (atty-guard/src/warn_consumer.rs,
+// `pid_in_tree_root`); the kernel BLOCK is one level.
 //
 // Comm note: at bprm_check_security time the kernel hasn't yet
 // updated the new binary's comm — `bpf_get_current_comm` returns
