@@ -435,9 +435,56 @@ test "daemon path set but socket missing → falls back to in-proc patterns" {
     const action = try L.onInput(&rt, &ctx, "\r");
     try testing.expect(action == .swallow);
     try testing.expect(rt.armed);
-    try testing.expect(rt.daemon_disabled); // sticky disable
+    try testing.expect(rt.daemon_disabled);
     // Banner still shows — fallback worked.
     try testing.expect(std.mem.indexOf(u8, sink.buf.items, "security_guard") != null);
+}
+
+test "daemon_disabled is re-probed (not permanently sticky) after the interval" {
+    // A missing socket latches daemon_disabled, but the module must
+    // retry every `daemon_reprobe_interval` Enters so a restarting
+    // sidecar is picked back up rather than downgrading the whole
+    // session to in-proc Tier-1 forever.
+    const L = mod.configure(.{
+        .enabled = true,
+        .daemon_socket_path = "/tmp/atty-guard-nonexistent-reprobe.sock",
+    });
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+
+    // First Enter on a CLEAN line: daemon query fails → latch disabled,
+    // skips reset to 0. Clean line so no banner/arm state lingers.
+    var clean: LineState = .{};
+    clean.setCommitted("ls -la");
+    var ctx0 = makeCtx(&clean, &scratch);
+    _ = try L.onInput(&rt, &ctx0, "\r");
+    try testing.expect(rt.daemon_disabled);
+    try testing.expectEqual(@as(u32, 0), rt.daemon_disabled_skips);
+
+    // Each subsequent clean Enter skips the daemon and bumps the
+    // counter — until it hits the interval, where it resets to retry.
+    var i: u32 = 0;
+    while (i < mod.daemon_reprobe_interval - 1) : (i += 1) {
+        var c: LineState = .{};
+        c.setCommitted("ls -la");
+        var cx = makeCtx(&c, &scratch);
+        _ = try L.onInput(&rt, &cx, "\r");
+        try testing.expect(rt.daemon_disabled);
+    }
+    // The interval-th skip re-probes: the query runs (and fails again,
+    // since the socket is still missing), re-latching with skips=0.
+    var last: LineState = .{};
+    last.setCommitted("ls -la");
+    var clx = makeCtx(&last, &scratch);
+    _ = try L.onInput(&rt, &clx, "\r");
+    try testing.expect(rt.daemon_disabled); // re-latched after retry
+    try testing.expectEqual(@as(u32, 0), rt.daemon_disabled_skips);
 }
 
 test "y accept on curl|sh sets active_threat=high" {
