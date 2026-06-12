@@ -373,7 +373,14 @@ pub fn parse_osv_response(json: &serde_json::Value) -> OsvVerdict {
 
     let joined = summaries.join("; ");
     let truncated = if joined.len() > 200 {
-        format!("{}…", &joined[..200])
+        // Walk back to a UTF-8 char boundary so `&joined[..end]` can't
+        // panic when byte 200 lands inside a multi-byte char (advisory
+        // text is network-supplied).
+        let mut end = 200;
+        while !joined.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &joined[..end])
     } else {
         joined
     };
@@ -395,6 +402,25 @@ mod tests {
         assert!(matches!(parse_osv_response(&json), OsvVerdict::None));
         let json = serde_json::json!({ "vulns": [] });
         assert!(matches!(parse_osv_response(&json), OsvVerdict::None));
+    }
+
+    #[test]
+    fn long_unicode_summary_truncates_on_char_boundary_no_panic() {
+        // A >200-byte summary with a multi-byte char straddling byte
+        // 200 used to panic on `&joined[..200]`. It must truncate on a
+        // char boundary instead.
+        let big = format!("{}界", "a".repeat(199)); // 199 + 3 bytes = 202
+        let json = serde_json::json!({
+            "vulns": [{ "id": "GHSA-x", "summary": big }]
+        });
+        match parse_osv_response(&json) {
+            OsvVerdict::Vulnerable(s) => {
+                assert!(s.ends_with('…'), "expected ellipsis truncation: {s}");
+                assert!(s.len() < 205);
+                // Reaching here without a panic is the assertion.
+            }
+            other => panic!("expected Vulnerable, got {other:?}"),
+        }
     }
 
     #[test]
