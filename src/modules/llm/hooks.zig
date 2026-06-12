@@ -2591,6 +2591,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     // as pasting a script from clipboard.
                     const cmd = parsed.command();
                     rt.pending_command_len = dialog.wrapForBracketedPaste(cmd, &rt.pending_command);
+                    // wrapForBracketedPaste returns 0 when the wrapped
+                    // command can't fit `pending_command` (defensive —
+                    // unreachable while the buffer is sized
+                    // `max_response_bytes + 12`). Don't transition to
+                    // `.suggesting` (and possibly auto-submit a blank
+                    // Enter) with a non-empty command that staged
+                    // nothing; abort the dialog instead.
+                    if (cmd.len > 0 and rt.pending_command_len == 0) {
+                        abortDialog(rt, ctx.io, "command too large to stage");
+                        return null;
+                    }
 
                     if (parsed.description_len > 0) {
                         const desc = parsed.description();
