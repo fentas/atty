@@ -476,6 +476,9 @@ test "daemon_disabled is re-probed (not permanently sticky) after the interval" 
         var cx = makeCtx(&c, &scratch);
         _ = try L.onInput(&rt, &cx, "\r");
         try testing.expect(rt.daemon_disabled);
+        // Each skipped Enter bumps the counter (directly pins the
+        // increment path, not just the latched flag).
+        try testing.expectEqual(i + 1, rt.daemon_disabled_skips);
     }
     // The interval-th skip re-probes: the query runs (and fails again,
     // since the socket is still missing), re-latching with skips=0.
