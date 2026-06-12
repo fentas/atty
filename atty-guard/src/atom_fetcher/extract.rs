@@ -308,13 +308,15 @@ fn is_low_value_atom(atom: &str) -> bool {
     if COMMON_COMMANDS.contains(&lower.as_str()) {
         return true;
     }
-    // A short single token with no shell structure (no path/flag/
+    // A very short single token with no shell structure (no path/flag/
     // operator char) is unlikely to be a useful IOC and risks broad
-    // matches.
+    // matches. Floor at < 5 (not < 6) so 5-char malware binary names
+    // like `xmrig` still pass — the goal is to drop generic 3-4 char
+    // noise, not real short IOC tokens.
     let has_structure = atom
         .chars()
         .any(|c| matches!(c, '/' | '-' | '|' | '=' | '.' | ':' | '$' | '(' | ';'));
-    atom.len() < 6 && !has_structure
+    atom.len() < 5 && !has_structure
 }
 
 fn is_placeholder_atom(atom: &str) -> bool {
@@ -358,9 +360,13 @@ pub(super) fn write_atoms(path: &Path, atoms: &BTreeSet<String>) -> Result<(), F
             .map_err(|e| FetchError::WriteError(format!("create {tmp:?}: {e}")))?;
         f.write_all(content.as_bytes())
             .map_err(|e| FetchError::WriteError(format!("write {tmp:?}: {e}")))?;
-        // The loader gate requires atty:atty 0640 (owner-write, group-
-        // read, no world access). Set it on the tmp before rename so
-        // the published file never has a wider window.
+        // Set 0640 (owner-write, group-read, no world access) on the
+        // tmp before rename so the published file never has a wider
+        // window. Unlike atom_drift::write_snapshot (telemetry, which
+        // only WARNS on a chmod failure), this is a security-loaded
+        // corpus, so a chmod failure fails the whole fetch closed —
+        // better to keep the last-good file than publish one with
+        // unknown perms. Do NOT "make them consistent" with a warn.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -630,5 +636,44 @@ detection:
         );
         assert_eq!(atom_from_code("/dev/tcp/"), Some("/dev/tcp/".to_owned()));
         assert_eq!(atom_from_code("curl -fsSL"), Some("curl -fsSL".to_owned()));
+    }
+
+    fn accept_all(_p: &std::path::Path, _t: tar::EntryType) -> bool {
+        true
+    }
+
+    fn flood_extract(_content: &str, atoms: &mut BTreeSet<String>) {
+        for i in 0..(super::super::fetch::MAX_ATOMS_TOTAL + 50) {
+            atoms.insert(format!("flood-atom-{i}"));
+        }
+    }
+
+    #[test]
+    fn walk_bails_when_atom_count_exceeds_cap() {
+        // Build a 1-entry gz tarball; the flood extractor pushes the set
+        // past MAX_ATOMS_TOTAL on that entry, so the in-loop cap must
+        // bail (instead of accumulating unbounded then capping after).
+        let mut tar_buf = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar_buf);
+            let data = b"hello";
+            let mut hdr = tar::Header::new_gnu();
+            hdr.set_size(data.len() as u64);
+            hdr.set_cksum();
+            b.append_data(&mut hdr, "x", &data[..]).unwrap();
+            b.finish().unwrap();
+        }
+        let mut gz = Vec::new();
+        {
+            use std::io::Write;
+            let mut enc = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+            enc.write_all(&tar_buf).unwrap();
+            enc.finish().unwrap();
+        }
+        let res = walk_tarball_atoms(&gz, accept_all, flood_extract);
+        assert!(
+            res.is_err(),
+            "expected the atom-count cap to bail, got {res:?}"
+        );
     }
 }
