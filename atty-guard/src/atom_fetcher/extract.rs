@@ -295,7 +295,7 @@ pub(super) fn atom_from_code(code: &str) -> Option<String> {
 /// atoms (`curl -fsSL`, `nc -e /bin/sh`) keep their signal and pass.
 fn is_low_value_atom(atom: &str) -> bool {
     // Multi-token atoms carry context — keep them.
-    if atom.contains(char::is_whitespace) {
+    if atom.chars().any(char::is_whitespace) {
         return false;
     }
     const COMMON_COMMANDS: &[&str] = &[
@@ -353,20 +353,30 @@ pub(super) fn write_atoms(path: &Path, atoms: &BTreeSet<String>) -> Result<(), F
     }
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // Create the tmp already at 0640 (subject to umask, which can
+        // only restrict) so there's no window where it's world-readable
+        // before the chmod below — closes the gap on a world-readable
+        // parent dir.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o640);
+        }
+        let mut f = opts
             .open(&tmp)
             .map_err(|e| FetchError::WriteError(format!("create {tmp:?}: {e}")))?;
         f.write_all(content.as_bytes())
             .map_err(|e| FetchError::WriteError(format!("write {tmp:?}: {e}")))?;
-        // Set 0640 (owner-write, group-read, no world access) on the
-        // tmp before rename so the published file never has a wider
-        // window. Unlike atom_drift::write_snapshot (telemetry, which
-        // only WARNS on a chmod failure), this is a security-loaded
-        // corpus, so a chmod failure fails the whole fetch closed —
-        // better to keep the last-good file than publish one with
-        // unknown perms. Do NOT "make them consistent" with a warn.
+        // Re-assert exactly 0640 (owner-write, group-read, no world
+        // access) before rename — a restrictive umask could have
+        // narrowed the create mode; this brings it to the loader's
+        // required posture. Unlike atom_drift::write_snapshot
+        // (telemetry, which only WARNS on a chmod failure), this is a
+        // security-loaded corpus, so a chmod failure fails the whole
+        // fetch closed — keep the last-good file rather than publish one
+        // with unknown perms. Do NOT "make them consistent" with a warn.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
