@@ -995,6 +995,13 @@ fn osv_probe_pkgs(command: &str) -> (Vec<&str>, usize) {
 /// return false. Used to gate classify's threat-map upgrade so a
 /// non-root client can't probe another user's High/Critical mark by
 /// observing whether its own verdict escalates.
+///
+/// Deliberately STRICTER than `handle_get_threat_level`'s gate, which
+/// ALLOWS NotFound (a dead PID's in-memory level is harmless to read).
+/// Here NotFound skips the upgrade instead — classify's upgrade is a
+/// convenience signal, and dropping an escalation for a vanished PID is
+/// strictly safe (it can never downgrade a verdict the other signals
+/// produced). Don't "unify" the two by relaxing this to match get.
 fn caller_owns_pid(peer: &PeerCred, pid: u32) -> bool {
     if peer.is_root {
         return true;
