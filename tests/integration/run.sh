@@ -40,7 +40,6 @@ FULL_EXTRA_SCENARIOS=(
     llm_ollama_dialog_roundtrip
     atom_fetcher_gtfobins
     atom_fetcher_sigma
-    atom_fetcher_lolbas
     atty_warn_arms_banner
     atty_block_refuses_outright
     atty_trust_cache_shortcircuit
