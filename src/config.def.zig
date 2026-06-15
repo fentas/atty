@@ -308,19 +308,30 @@ const atty = @import("atty");
 
 // ───── Terminal protocol ────────────────────────────────────────────────
 //
-// Off by default. See defaults.zig — opt in only if you know what you
-// want from the kitty keyboard protocol; some binding combinations
-// (Ctrl+Shift+I) need it but it can break Ctrl+D/Ctrl+C in the shell
-// until atty grows a CSI-u → legacy translator.
+// ON by default (enable_kitty_keyboard = true). atty pushes the kitty
+// keyboard protocol's `disambiguate` flag at startup so terminals that
+// support it (Ghostty/kitty/foot/WezTerm/…) emit distinct CSI-u
+// sequences for keys that otherwise collide with control bytes (e.g.
+// Ctrl+Shift+I, Ctrl+Tab). atty intercepts CSI-u in the stdin path —
+// matched bindings fire, unmatched sequences are dropped (never echoed
+// as mojibake) — and translates press events back to legacy form, so
+// Ctrl+D / Ctrl+C / arrows reach the shell unchanged. Set to false to
+// opt OUT (e.g. a terminal that mishandles the protocol); bindings that
+// require it then fall back to their legacy encodings where one exists.
 //
-// pub const terminal: atty.Terminal = .{ .enable_kitty_keyboard = true };
+// pub const terminal: atty.Terminal = .{ .enable_kitty_keyboard = false };
 
 // ───── Key bindings ─────────────────────────────────────────────────────
 //
-// Defaults: Right / End / Ctrl+F → ghost_accept, Alt+i → incognito_toggle.
+// Defaults: Right / End / Ctrl+F / Ctrl+Tab → ghost_accept;
+// Ctrl+Right → ghost_accept_word; Ctrl+Shift+I (+ Alt+i fallback) →
+// incognito_toggle; Ctrl+Shift+D → delete_history_match; Alt+Shift+W →
+// security_guard_show_warnings. The LLM module adds its own Alt+letter
+// bindings when enabled (see atty.modules.llm.default_bindings).
 // `atty.keymap.key("…")` resolves at compile time — typos error the
 // build. See src/keymap.zig for supported names (Ctrl+Shift+Right,
-// Alt+f, F1–F12, …).
+// Alt+f, F1–F12, …). Your entries are scanned first, so an override
+// wins over the default for the same key.
 //
 // pub const keymap: atty.Keymap = .{
 //     .bindings = &.{
@@ -337,7 +348,7 @@ const atty = @import("atty");
 //
 // pub const statusbar: atty.StatusBar = .{
 //     .enabled = true,
-//     .reserve_rows = 2,                              // text row + 1 blank above
+//     .reserve_rows = 3,                              // hint row + blank pad + status row (default)
 //     .style = atty.style.presets.muted,
 //     .base_text = "atty",                            // proxy-level prefix
 //     .incognito_style = .{ .dim = true, .fg = 1 },   // muted red 🔒 segment
