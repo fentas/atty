@@ -1177,14 +1177,48 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     // window is the PID-recycle case above, which create_new
     // surfaces as a hard EEXIST instead of silent data loss.
     {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // Create the tmp at the final 0640 from the start (umask can
+        // only tighten this), so it never carries broader-than-0640
+        // perms — e.g. other-readable — while we write the content. The
+        // explicit set_permissions below then guarantees the exact 0640
+        // even if umask stripped the group-read bit here.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o640);
+        }
+        let mut f = opts.open(&tmp)?;
         if let Err(e) = f.write_all(content) {
             // Best-effort cleanup; if the write half-failed we
             // shouldn't leave the tmp behind for the next caller
             // to wonder about.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        // Mode 0640: owner (atty) rw, group (atty) r, others nothing.
+        // Group `atty` includes the user accounts that talk to the
+        // daemon — they can READ the persisted decisions via the
+        // daemon, but the file itself is also stat()'able by them.
+        // Set it on the tmp BEFORE the rename so the published file is
+        // 0640 the instant it appears: no post-rename window where it
+        // carries looser perms, and no dependence on umask having left
+        // the group-read bit set.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = f.set_permissions(std::fs::Permissions::from_mode(0o640)) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+        // fsync the content + metadata before the rename. Without this,
+        // a crash or power loss after the rename can publish an empty or
+        // truncated file — the rename would point at bytes the kernel
+        // hadn't flushed — silently dropping operator-added detections
+        // (a fail-open for the user-atom layer).
+        if let Err(e) = f.sync_all() {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
@@ -1193,14 +1227,19 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    // Mode 0640: owner (atty) rw, group (atty) r, others nothing.
-    // Group `atty` includes the user accounts that talk to the
-    // daemon — they can READ the persisted decisions via the
-    // daemon, but the file itself is also stat()'able by them.
+    // fsync the parent directory so the rename itself (the directory
+    // entry swap) is durable. The content sync above guarantees the
+    // bytes survive a crash; this guarantees the new name does too,
+    // rather than reverting to the old file. Best-effort: the write has
+    // already succeeded, so a parent that can't be opened/synced (rare)
+    // isn't worth failing the whole operation over.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
     }
     Ok(())
 }
