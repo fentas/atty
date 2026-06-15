@@ -1179,9 +1179,11 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     {
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
-        // Create the tmp restrictive from the start (umask can only
-        // tighten this), so it is never briefly group/other-readable
-        // while we write the content into it.
+        // Create the tmp at the final 0640 from the start (umask can
+        // only tighten this), so it never carries broader-than-0640
+        // perms — e.g. other-readable — while we write the content. The
+        // explicit set_permissions below then guarantees the exact 0640
+        // even if umask stripped the group-read bit here.
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
