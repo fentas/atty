@@ -1117,15 +1117,11 @@ pub fn Module(comptime cfg: Config) type {
                     // below don't double-close.
                     child.stdin = null;
                     stdin_thread = std.Thread.spawn(.{}, StdinWriter.run, .{ io, stdin_file, prompt }) catch blk: {
-                        // Thread exhaustion — fall back to a synchronous
-                        // write. Reintroduces the deadlock risk only in
-                        // this rare case, which still beats not sending
-                        // the prompt at all.
-                        var write_buf: [4096]u8 = undefined;
-                        var w = stdin_file.writer(io, &write_buf);
-                        w.interface.writeAll(prompt) catch {};
-                        w.interface.flush() catch {};
-                        stdin_file.close(io);
+                        // Thread exhaustion — run the same writer inline
+                        // on this thread. Reintroduces the deadlock risk
+                        // only in this rare case, which still beats not
+                        // sending the prompt at all.
+                        StdinWriter.run(io, stdin_file, prompt);
                         break :blk null;
                     };
                 }
