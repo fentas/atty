@@ -752,3 +752,56 @@ fn write_locks_prune_single_trigger_drops_all_idle() {
     assert_eq!(map.len(), 1);
     assert!(map.contains_key(&9999u32));
 }
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_publishes_content_at_0640() {
+    // Audit #432: the published file must carry mode exactly 0640 the
+    // moment it appears (perms set on the tmp BEFORE rename, not after),
+    // and hold the full content. We can't unit-test crash durability,
+    // but we can pin the content + perms contract that the fsync
+    // reordering must preserve.
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("atoms.user.txt");
+    let content = b"# atoms\nrm -rf /\ncurl x | sh\n";
+
+    write_atomic(&path, content).expect("write_atomic");
+
+    let read = std::fs::read(&path).expect("read back");
+    assert_eq!(read, content, "content must round-trip intact");
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o640,
+        "published file must be exactly 0640, got {mode:o}"
+    );
+
+    // No scratch tmp left behind after a successful write.
+    let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(leftovers.is_empty(), "no .tmp.* scratch should remain");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_overwrites_existing_file_preserving_0640() {
+    // Re-writing an existing target (the common "operator adds another
+    // atom" path) must also land at 0640 — the rename replaces the old
+    // inode, so the new file's perms come from the tmp, not the old one.
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("urls.decisions.txt");
+    write_atomic(&path, b"first\n").expect("first write");
+    // Loosen perms on the existing file to prove the rewrite re-tightens.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+    write_atomic(&path, b"second\n").expect("second write");
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"second\n");
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640, "rewrite must republish at 0640, got {mode:o}");
+}
