@@ -1087,19 +1087,43 @@ pub fn Module(comptime cfg: Config) type {
                 break :blk t;
             } else null;
 
+            // Write the prompt to the child's stdin from a DEDICATED
+            // thread, concurrent with the stdout/stderr drainers below.
+            // A streaming CLI (claude -p / llm / ollama) can begin
+            // emitting stdout while it's still reading stdin; writing the
+            // whole prompt synchronously first would deadlock whenever
+            // the prompt OR the early response exceeds the ~64 KiB pipe
+            // buffer — child blocked writing stdout, atty blocked writing
+            // stdin — until the watchdog SIGKILLs and reports a spurious
+            // timeout. Dialog transcripts routinely exceed 64 KiB, so
+            // this is the common path, not an edge case.
+            const StdinWriter = struct {
+                fn run(d_io: std.Io, file: std.Io.File, payload: []const u8) void {
+                    var write_buf: [4096]u8 = undefined;
+                    var w = file.writer(d_io, &write_buf);
+                    // EPIPE is fine — the child can close stdin before we
+                    // finish (it already had the bytes it needed).
+                    w.interface.writeAll(payload) catch {};
+                    w.interface.flush() catch {};
+                    // Close to signal EOF so read-until-EOF CLIs proceed.
+                    file.close(d_io);
+                }
+            };
+            var stdin_thread: ?std.Thread = null;
             if (want_stdin) {
                 if (child.stdin) |stdin_file| {
-                    var write_buf: [4096]u8 = undefined;
-                    var w = stdin_file.writer(io, &write_buf);
-                    // EPIPE here is fine — the child can legitimately
-                    // close stdin before we finish writing (it had
-                    // all the bytes it needed). Other write errors
-                    // would still result in a downstream stdout-read
-                    // failure that surfaces a useful message.
-                    w.interface.writeAll(prompt) catch {};
-                    w.interface.flush() catch {};
-                    stdin_file.close(io);
+                    // Hand ownership of the fd to the writer thread (or
+                    // the inline fallback); clear it so the cleanup paths
+                    // below don't double-close.
                     child.stdin = null;
+                    stdin_thread = std.Thread.spawn(.{}, StdinWriter.run, .{ io, stdin_file, prompt }) catch blk: {
+                        // Thread exhaustion — run the same writer inline
+                        // on this thread. Reintroduces the deadlock risk
+                        // only in this rare case, which still beats not
+                        // sending the prompt at all.
+                        StdinWriter.run(io, stdin_file, prompt);
+                        break :blk null;
+                    };
                 }
             }
 
@@ -1113,6 +1137,9 @@ pub fn Module(comptime cfg: Config) type {
                 const cid = child.id orelse unreachable;
                 std.posix.kill(-cid, .KILL) catch child.kill(io);
                 completed.store(true, .release);
+                // SIGKILL EPIPEs the stdin writer; join so it can't
+                // outlive `prompt` or leak the thread.
+                if (stdin_thread) |t| t.join();
                 if (watchdog_thread) |t| t.join();
                 // Reap to avoid leaving a zombie in atty.
                 _ = child.wait(io) catch null;
@@ -1146,6 +1173,7 @@ pub fn Module(comptime cfg: Config) type {
                 const cid = child.id orelse unreachable;
                 std.posix.kill(-cid, .KILL) catch child.kill(io);
                 completed.store(true, .release);
+                if (stdin_thread) |t| t.join();
                 if (stderr_thread) |t| t.join();
                 if (watchdog_thread) |t| t.join();
                 // Reap to avoid leaving a zombie in atty.
@@ -1160,6 +1188,7 @@ pub fn Module(comptime cfg: Config) type {
             // than waiting out the full budget if `wait` happens
             // to block briefly.
             completed.store(true, .release);
+            if (stdin_thread) |t| t.join();
             if (stderr_thread) |t| t.join();
             if (watchdog_thread) |t| t.join();
 
