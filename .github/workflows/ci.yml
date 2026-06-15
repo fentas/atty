@@ -124,6 +124,9 @@ jobs:
           version: 0.16.0
 
       - name: zig build (${{ matrix.target }})
+        # Keep this invocation in sync with release.yml's binary job —
+        # the point of the gate is to exercise the SAME build the
+        # release produces.
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
   docker:
