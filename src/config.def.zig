@@ -318,9 +318,9 @@ const atty = @import("atty");
 // to legacy form, so Ctrl+D / Ctrl+C / arrows reach the shell unchanged.
 // Once a TUI takes the alt-screen (vim/htop/…), atty stops intercepting
 // and the raw CSI-u passes straight through so the app decodes it
-// natively. Set to false to
-// opt OUT (e.g. a terminal that mishandles the protocol); bindings that
-// require it then fall back to their legacy encodings where one exists.
+// natively. Set to false to opt OUT (e.g. a terminal that mishandles
+// the protocol); bindings that require it then fall back to their
+// legacy encodings where one exists.
 //
 // pub const terminal: atty.Terminal = .{ .enable_kitty_keyboard = false };
 
