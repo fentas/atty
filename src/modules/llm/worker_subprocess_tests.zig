@@ -494,6 +494,67 @@ test "subprocess timeout kills the whole process group (grandchildren too)" {
     try testing.expect(gone);
 }
 
+test "subprocess: large stdin prompt to a streaming echo completes without deadlock" {
+    // Regression for audit #430. `/bin/cat` is a full-duplex streaming
+    // echo: it writes stdout as it reads stdin. With a prompt larger
+    // than the ~64 KiB pipe buffer, the pre-fix synchronous "write all
+    // of stdin, THEN read stdout" order deadlocks — cat blocks writing
+    // stdout (pipe full) while atty blocks writing stdin (pipe full) —
+    // and the watchdog SIGKILLs at the budget, surfacing a spurious
+    // timeout. Writing stdin from its own thread (concurrent with the
+    // stdout drainer) breaks the cycle.
+    const cfg = comptime types.Config{
+        .provider = .{
+            .subprocess = .{
+                .argv = &.{"/bin/cat"},
+                .prompt_via = .stdin,
+                .output = .raw,
+                // Generous budget: a working run finishes in milliseconds,
+                // so any timeout here means the deadlock regressed.
+                .timeout_ms = 5000,
+            },
+        },
+        .with_explanation = false,
+        // read_cap = max_response_bytes * 16; keep it well above the
+        // echoed prompt so the read isn't what bounds the test.
+        .max_response_bytes = 1024 * 1024,
+    };
+    const M = worker_mod.Module(cfg);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 256 KiB — 4× the default Linux pipe buffer, so both the stdin
+    // and stdout pipes fill mid-transfer.
+    const prompt_size = 256 * 1024;
+    const prompt = try testing.allocator.alloc(u8, prompt_size);
+    defer testing.allocator.free(prompt);
+    @memset(prompt, 'x');
+
+    var err: [128]u8 = undefined;
+    var err_len: usize = 0;
+    const start = nowMs();
+    const stdout = try M.runSubprocess(
+        testing.allocator,
+        io,
+        cfg.provider.subprocess,
+        prompt,
+        &.{},
+        &err,
+        &err_len,
+    );
+    defer testing.allocator.free(stdout);
+    const elapsed = nowMs() - start;
+
+    try testing.expectEqual(@as(usize, 0), err_len);
+    // cat is a pure echo — every byte comes back.
+    try testing.expectEqual(prompt_size, stdout.len);
+    // A deadlock would have run to the 5s budget; a healthy concurrent
+    // transfer is near-instant. Bound well under the budget.
+    try testing.expect(elapsed < 4000);
+}
+
 test "subprocess timeout = 0 disables watchdog (echo still works)" {
     const cfg = comptime makeTestCfg(.{
         .argv = &.{"/bin/echo"},
