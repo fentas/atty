@@ -96,6 +96,36 @@ jobs:
         working-directory: atty-guard
         run: cargo check --features ebpf --quiet
 
+  # Cross-compile the SHIPPED musl release configuration on every PR.
+  # CI's `zig` job builds glibc-native, so a musl-only breakage — a
+  # libc extern that resolves differently under musl (history.zig's
+  # variadic `open`), a struct field musl lacks, a ReleaseFast-only
+  # miscompile — would otherwise first surface in release.yml at tag
+  # push, after the PR already merged. This gate runs the exact build
+  # invocation release.yml uses for both shipped arches. Compile-only:
+  # cross-built musl/aarch64 binaries can't execute on the x86_64
+  # runner without QEMU, and the `zig` job already covers native
+  # execution (test/itest/e2e/smoke).
+  musl:
+    name: musl cross-compile (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux-musl
+          - aarch64-linux-musl
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: zig build (${{ matrix.target }})
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+
   docker:
     name: docker build
     runs-on: ubuntu-24.04
