@@ -792,13 +792,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     trace.log(.cursor, "DSR-6n reply: row={d} col={d}", .{ pos.row, pos.col });
                 }
                 // Second pass: strip CPR replies the gated DsrParser
-                // didn't claim — some shells/prompts fire their own
-                // DSR queries on redraw, and the trailing `<col>R`
-                // tail otherwise echoes onto the prompt as text.
-                // Skip when alt-screen is active: the running TUI
-                // owns its own CPR protocol.
+                // didn't claim — a prompt that fires its own DSR on
+                // redraw otherwise leaks the trailing `<col>R` onto the
+                // prompt as text. Gate it twice: an alt-screen TUI owns
+                // its own CPR protocol, and a foreground command's CPR
+                // is the answer to ITS OWN cursor query — scrubbing it
+                // strands a program blocked reading the reply. Only the
+                // shell-at-its-prompt case is safe to scrub.
                 var input: []const u8 = stdin_filtered_buf[0..dsr_result.filtered_len];
-                if (!alt_screen.active) {
+                // Only a chunk carrying an ESC can hold a CPR reply —
+                // gate the foreground-pgrp ioctl behind that cheap scan
+                // so ordinary typing never pays for it.
+                if (!alt_screen.active and
+                    std.mem.indexOfScalar(u8, input, 0x1B) != null and
+                    shellOwnsForeground(pty.master, child_pid))
+                {
                     const cpr_drop_len = cursor_dsr.dropWellFormedCpr(
                         stdin_filtered_buf[0..dsr_result.filtered_len],
                         stdin_filtered_buf[0..dsr_result.filtered_len],
@@ -2342,6 +2350,35 @@ fn inSubprocess(alt: *const AltScreen, osc: *const Osc133) bool {
     if (alt.active) return true;
     if (osc.active and !osc.inInputPhase()) return true;
     return false;
+}
+
+/// True when atty's direct child shell owns the terminal foreground —
+/// i.e. we're at the shell prompt, not inside a command it spawned.
+/// The child is a session/pgrp leader (`setsid` + `TIOCSCTTY` in
+/// `pty.childSetup`), so its pgid equals its pid; the foreground pgrp
+/// read off the master matches that only at the prompt. A spawned
+/// foreground command runs in its own pgrp under job control.
+///
+/// Gates stray-CPR scrubbing: a foreground command's `\x1B[<r>;<c>R`
+/// is the reply to its own DSR cursor query — scrubbing it strands a
+/// program blocked reading the report. Fails safe to `false` (forward
+/// the reply) when the pgrp can't be read: a missed scrub is cosmetic,
+/// a stolen reply is a hang.
+///
+/// Assumes job control: an interactive shell moves spawned commands
+/// into their own pgrp. With job control off (`set +m`) the fg pgrp
+/// never leaves the shell, so a command's CPR is still scrubbed — but
+/// atty proxies interactive shells, where job control is on.
+pub fn shellOwnsForeground(master: posix.fd_t, child_pid: posix.pid_t) bool {
+    if (child_pid <= 0) return false;
+    // TIOCGPGRP off the master returns the terminal's foreground pgrp
+    // on Linux. Hardcoded like the other ioctls in pty.zig (the libc
+    // `tcgetpgrp` binding isn't available for every cross target).
+    const TIOCGPGRP: u32 = 0x540F;
+    var fg: posix.pid_t = -1;
+    const rc = linux.ioctl(master, TIOCGPGRP, @intFromPtr(&fg));
+    if (@as(isize, @bitCast(rc)) < 0) return false;
+    return fg == child_pid;
 }
 
 /// Render the current best suggestion (or clear the overlay if no

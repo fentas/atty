@@ -16,6 +16,12 @@ const Pty = atty.pty.Pty;
 extern "c" fn clock_gettime(clk_id: c_int, tp: *posix.timespec) c_int;
 const CLOCK_MONOTONIC: c_int = 1;
 
+fn nowMillis() i64 {
+    var t: posix.timespec = undefined;
+    _ = clock_gettime(CLOCK_MONOTONIC, &t);
+    return @as(i64, t.sec) * 1000 + @divFloor(@as(i64, t.nsec), 1_000_000);
+}
+
 test "PTY round-trips bytes through /bin/echo" {
     const allocator = std.testing.allocator;
 
@@ -190,6 +196,81 @@ test "RawMode.enter on a non-TTY fd surfaces NotATty" {
         _ = std.c.close(pipe_fds[1]);
     }
     try std.testing.expectError(error.NotATty, RawMode.enter(pipe_fds[0]));
+}
+
+test "foreground pgrp on the master distinguishes shell-at-prompt from a running command" {
+    // Exercises proxy.shellOwnsForeground (the CPR scrub gate) against a
+    // real PTY. The terminal's foreground pgrp equals the child shell's
+    // pid only while it sits at its prompt — the child is a session
+    // leader (setsid + TIOCSCTTY in pty.childSetup), and a spawned
+    // foreground command runs in its own pgrp under job control. Calling
+    // the real helper (not a re-derived ioctl) pins the comparison
+    // direction: an inverted gate fails this test.
+    const allocator = std.testing.allocator;
+    const shellOwnsForeground = atty.proxy.shellOwnsForeground;
+
+    var pty = try Pty.open(allocator);
+    defer pty.deinit();
+
+    const argv = [_:null]?[*:0]const u8{ "/bin/bash", "--norc", "--noprofile", "-i", null };
+    const envp = [_:null]?[*:0]const u8{null};
+    const pid = try pty.spawn(@ptrCast(&argv), @ptrCast(&envp));
+    defer {
+        _ = posix.kill(pid, posix.SIG.KILL) catch {};
+        var st: u32 = 0;
+        _ = std.os.linux.waitpid(pid, &st, 0);
+    }
+
+    const POLLIN: i16 = 0x001;
+    // Drain `fd` until it goes idle for one poll interval, or `budget_ms`
+    // elapses. EINTR is retried, not mistaken for idle.
+    const drainIdle = struct {
+        fn f(fd: posix.fd_t, in_flag: i16, budget_ms: i64) void {
+            var scratch: [4096]u8 = undefined;
+            const start = nowMillis();
+            while (nowMillis() - start < budget_ms) {
+                var pfd = [_]posix.pollfd{.{ .fd = fd, .events = in_flag, .revents = 0 }};
+                const n = posix.poll(&pfd, 300) catch continue; // retry on EINTR
+                if (n == 0) return; // idle → at the prompt
+                if (pfd[0].revents & in_flag != 0) _ = posix.read(fd, &scratch) catch 0;
+            }
+        }
+    }.f;
+
+    // Let the shell settle at its prompt.
+    drainIdle(pty.master, POLLIN, 6000);
+
+    // At the prompt: the shell owns the foreground → scrub is enabled.
+    try std.testing.expect(shellOwnsForeground(pty.master, pid));
+
+    // Launch a foreground command and wait for it to take the terminal:
+    // the shell no longer owns the foreground → scrub is disabled, so a
+    // CPR reply is forwarded to the command instead of stolen. `sleep`
+    // outlives the wait window so the pgrp flip is observable throughout.
+    const cmd = "sleep 5\n";
+    var off: usize = 0;
+    while (off < cmd.len) {
+        const rc = std.c.write(pty.master, cmd.ptr + off, cmd.len - off);
+        if (rc < 0) {
+            if (posix.errno(rc) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (rc == 0) return error.WriteFailed; // EOF: command would be truncated
+        off += @intCast(rc);
+    }
+    var scratch: [4096]u8 = undefined;
+    const wait_start = nowMillis();
+    var command_owns_fg = false;
+    while (nowMillis() - wait_start < 4000) {
+        var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = POLLIN, .revents = 0 }};
+        if ((posix.poll(&pfd, 100) catch continue) != 0 and pfd[0].revents & POLLIN != 0)
+            _ = posix.read(pty.master, &scratch) catch 0;
+        if (!shellOwnsForeground(pty.master, pid)) {
+            command_owns_fg = true;
+            break;
+        }
+    }
+    try std.testing.expect(command_owns_fg);
 }
 
 test "ghost.list_count ships off (0) by default — matches docs" {
