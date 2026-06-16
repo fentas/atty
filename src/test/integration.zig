@@ -194,15 +194,12 @@ test "RawMode.enter on a non-TTY fd surfaces NotATty" {
 
 test "foreground pgrp on the master distinguishes shell-at-prompt from a running command" {
     // Exercises proxy.shellOwnsForeground (the CPR scrub gate) against a
-    // real PTY. It reads the terminal's foreground pgrp via TIOCGPGRP on
-    // the *master*; the child shell is a session leader (setsid +
-    // TIOCSCTTY in pty.childSetup), so the fg pgrp equals child_pid ONLY
-    // while the shell sits at its prompt — a spawned foreground command
-    // runs in its own pgrp under job control. The fix scrubs stray
-    // cursor reports only in the former case so it never steals a
-    // foreground program's (aichat/reedline) cursor-query reply. Calling
+    // real PTY. The terminal's foreground pgrp equals the child shell's
+    // pid only while it sits at its prompt — the child is a session
+    // leader (setsid + TIOCSCTTY in pty.childSetup), and a spawned
+    // foreground command runs in its own pgrp under job control. Calling
     // the real helper (not a re-derived ioctl) pins the comparison
-    // direction too: an inverted gate fails this test.
+    // direction: an inverted gate fails this test.
     const allocator = std.testing.allocator;
     const shellOwnsForeground = atty.proxy.shellOwnsForeground;
 
@@ -244,7 +241,16 @@ test "foreground pgrp on the master distinguishes shell-at-prompt from a running
     // the shell no longer owns the foreground → scrub is disabled, so a
     // CPR reply is forwarded to the command instead of stolen.
     const cmd = "sleep 3\n";
-    _ = std.c.write(pty.master, cmd.ptr, cmd.len);
+    var off: usize = 0;
+    while (off < cmd.len) {
+        const rc = std.c.write(pty.master, cmd.ptr + off, cmd.len - off);
+        if (rc < 0) {
+            if (posix.errno(rc) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (rc == 0) break;
+        off += @intCast(rc);
+    }
     var command_owns_fg = false;
     while (nowMs() - start_ms < deadline_ms) {
         var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = 0x001, .revents = 0 }};
