@@ -2,15 +2,15 @@
 //! and renders text to the last row. Implements the dwm-style
 //! reserved region via DECSTBM (`\x1b[<top>;<bottom>r`).
 //!
-//! The shell's view of the terminal is shrunk: we keep our own
-//! `rows` (the real terminal size) but propagate `rows - reserve` to
-//! the slave PTY via `TIOCSWINSZ`. Shells then wrap and scroll
-//! within rows 1..(rows-reserve), and the reserved rows at the
-//! bottom stay ours.
+//! The reserved region is enforced by DECSTBM alone: the slave PTY is
+//! told the FULL terminal size (`pty.setSize` in proxy.zig) — NOT a
+//! slimmed `rows - reserve` — so inner TUIs (nvim/lazygit/…) size
+//! correctly off `TIOCGWINSZ`, while DECSTBM keeps the shell's scroll
+//! region within rows 1..(rows-reserve) and the bottom rows stay ours.
 //!
-//! `reserve_rows = 2` by default = one blank row above + one row of
-//! text — gives the status a bit of breathing room above the last
-//! shell output line.
+//! `reserve_rows` defaults to 3 (see defaults.zig): the last row holds
+//! the status text, the topmost reserved row the hint/error line, and
+//! the row between is blank padding for breathing room.
 //!
 //! Lifecycle (driven from src/proxy.zig):
 //!

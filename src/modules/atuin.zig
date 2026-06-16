@@ -779,10 +779,11 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         /// Fired by the dispatcher when the user presses Enter on a
-        /// non-empty, certain line. We push it into the worker's
-        /// single-slot record mailbox; the worker shells out to
-        /// `atuin history start <cmd>` on its own thread so the proxy
-        /// loop stays responsive.
+        /// non-empty, certain line. We push it onto the worker's bounded
+        /// FIFO record queue (`rec_queue`, capacity
+        /// `record_queue_capacity`); the worker drains it head-first and
+        /// shells out to `atuin history start <cmd>` on its own thread so
+        /// the proxy loop stays responsive.
         pub fn onLineCommit(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
             if (!cfg.record) return;
             if (line.len == 0 or line.len > cfg.max_query) return;
