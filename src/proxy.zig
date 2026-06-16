@@ -23,12 +23,12 @@ const containsEnter = io_helpers.containsEnter;
 const writeAll = io_helpers.writeAll;
 const PtmWriter = io_helpers.PtmWriter;
 
-extern "c" fn clock_gettime(clk_id: c_int, tp: *posix.timespec) c_int;
-const CLOCK_MONOTONIC: c_int = 1;
-
 fn nowMs() i64 {
     var ts: posix.timespec = undefined;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    // `.MONOTONIC` is the OS-correct clockid_t (Linux 1, Darwin 6, …).
+    // Hardcoding the Linux value made `nowMs()` return 0 on Darwin,
+    // breaking the proxy's tick/ghost/statusbar timing.
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
 }
 
