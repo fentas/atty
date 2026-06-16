@@ -2147,9 +2147,11 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["verdict"], "warn", "overlay atom hit must upgrade Safe→Warn");
         let reason = v["reason"].as_str().unwrap_or("");
+        // Pin the persistent-overlay scope specifically (vs system-fetched
+        // / session), and that the matched atom is cited.
         assert!(
-            reason.contains("zzqq-overlay-marker"),
-            "reason should cite the matched atom, got: {reason}"
+            reason.contains("user-persistent") && reason.contains("zzqq-overlay-marker"),
+            "reason should cite the user-persistent atom, got: {reason}"
         );
         let _ = std::fs::remove_file(socket);
     }
