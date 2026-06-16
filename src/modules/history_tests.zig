@@ -569,7 +569,10 @@ test "loadRecent keeps the first tail line whole when the window starts on a lin
         try buf.appendSlice(testing.allocator, &lb);
     }
     try testing.expectEqual(@as(usize, 4 + (1 << 20)), buf.items.len);
-    _ = std.c.write(fd, buf.items.ptr, buf.items.len);
+    // Assert the whole fixture lands on disk — a short write would
+    // silently shift the window and weaken the boundary coverage.
+    const wrote = std.c.write(fd, buf.items.ptr, buf.items.len);
+    try testing.expectEqual(@as(isize, @intCast(buf.items.len)), wrote);
     _ = std.c.close(fd);
 
     const H = configure(.{ .path = path, .format = .plain });
