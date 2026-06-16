@@ -1669,11 +1669,17 @@ mod tests {
     /// covering anything — the exact blind spot audit #433 flagged.
     /// Print a visible SKIP so the coverage gap is obvious in the log
     /// instead of masquerading as a pass.
+    #[track_caller]
     fn skip_if_root(test_name: &str) -> bool {
         if running_as_root() {
+            // Print the call-site location too, so the SKIP is traceable
+            // even if `test_name` drifts after a rename.
+            let loc = std::panic::Location::caller();
             eprintln!(
-                "SKIP {test_name}: running as root — the cross-UID gate is bypassed by \
-                 design; run the suite as a non-root user to exercise it"
+                "SKIP {test_name} ({}:{}): running as root — the cross-UID gate is \
+                 bypassed by design; run the suite as a non-root user to exercise it",
+                loc.file(),
+                loc.line(),
             );
             return true;
         }
