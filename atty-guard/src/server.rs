@@ -1663,6 +1663,29 @@ mod tests {
         unsafe { geteuid() }
     }
 
+    /// Loud skip for tests that exercise the cross-UID authorization
+    /// gate. The gate is bypassed for root by design, so under a
+    /// root-running CI these tests would otherwise pass SILENTLY without
+    /// covering anything — the exact blind spot audit #433 flagged.
+    /// Print a visible SKIP so the coverage gap is obvious in the log
+    /// instead of masquerading as a pass.
+    #[track_caller]
+    fn skip_if_root(test_name: &str) -> bool {
+        if running_as_root() {
+            // Print the call-site location too, so the SKIP is traceable
+            // even if `test_name` drifts after a rename.
+            let loc = std::panic::Location::caller();
+            eprintln!(
+                "SKIP {test_name} ({}:{}): running as root — the cross-UID gate is \
+                 bypassed by design; run the suite as a non-root user to exercise it",
+                loc.file(),
+                loc.line(),
+            );
+            return true;
+        }
+        false
+    }
+
     #[test]
     fn warn_subscribe_root_may_use_pid_zero_firehose() {
         let peer = PeerCred {
@@ -1689,8 +1712,8 @@ mod tests {
 
     #[test]
     fn warn_subscribe_nonroot_allowed_for_owned_pid() {
-        if running_as_root() {
-            return; // gate is bypassed for root; nothing to assert
+        if skip_if_root("warn_subscribe_nonroot_allowed_for_owned_pid") {
+            return;
         }
         // The test process is owned by the test's own UID.
         let peer = PeerCred {
@@ -2102,6 +2125,44 @@ mod tests {
     }
 
     #[test]
+    fn classify_warns_on_persistent_atom_overlay_hit() {
+        // The per-UID persistent atom overlay (added via `atoms add`) is
+        // scanned in handle_classify and must upgrade a Safe verdict to
+        // Warn when a command contains a user atom. This had no
+        // server-level coverage (audit #433) — dropping the scan kept
+        // every other test green. Seed a distinctive atom for the
+        // connecting UID via an injected store, then classify a command
+        // containing it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(crate::trust_store::TrustStore::new(
+            tmp.path().to_path_buf(),
+        ));
+        // peer.uid on a local UnixStream is the test process's EUID, so
+        // seed the atom under that UID for the overlay scan to see it.
+        let uid = current_uid();
+        store
+            .persistent_add_atom(uid, "zzqq-overlay-marker")
+            .expect("seed persistent atom");
+
+        let (socket, _h) = spawn_server_with_trust_store(store);
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"classify","command":"echo zzqq-overlay-marker please"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["verdict"], "warn", "overlay atom hit must upgrade Safe→Warn");
+        let reason = v["reason"].as_str().unwrap_or("");
+        // Pin the persistent-overlay scope specifically (vs system-fetched
+        // / session), and that the matched atom is cited.
+        assert!(
+            reason.contains("user-persistent") && reason.contains("zzqq-overlay-marker"),
+            "reason should cite the user-persistent atom, got: {reason}"
+        );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
     fn classify_critical_pid_beats_lesser_existing_verdict() {
         // Regression pin for issue #268: a Critical-tagged PID
         // must escalate to Block even when an earlier signal
@@ -2186,7 +2247,7 @@ mod tests {
         // e.g., a single-UID container or `hidepid=2` mount. Without
         // a visible cross-UID PID we can't pin the invariant the
         // gate is meant to enforce.
-        if running_as_root() {
+        if skip_if_root("set_threat_level_rejects_pid_owned_by_other_uid") {
             return;
         }
         let other_pid = match find_pid_owned_by_other_uid() {
@@ -2219,7 +2280,7 @@ mod tests {
 
     #[test]
     fn set_threat_level_rejects_nonexistent_pid_from_non_root() {
-        if running_as_root() {
+        if skip_if_root("set_threat_level_rejects_nonexistent_pid_from_non_root") {
             return;
         }
         let (socket, _h) = spawn_server();
@@ -2245,7 +2306,7 @@ mod tests {
         // clear the mark. Without this allowance, step (c) would
         // be rejected with "non-root cannot set level for pid
         // (owned by uid ?)".
-        if running_as_root() {
+        if skip_if_root("set_threat_level_low_allowed_for_nonexistent_pid_from_non_root") {
             return;
         }
         let (socket, _h) = spawn_server();
