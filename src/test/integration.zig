@@ -192,6 +192,80 @@ test "RawMode.enter on a non-TTY fd surfaces NotATty" {
     try std.testing.expectError(error.NotATty, RawMode.enter(pipe_fds[0]));
 }
 
+test "foreground pgrp on the master distinguishes shell-at-prompt from a running command" {
+    // Load-bearing assumption behind proxy.shellOwnsForeground (the CPR
+    // scrub gate): TIOCGPGRP read off the PTY *master* returns the
+    // terminal's foreground process group. The child shell is a session
+    // leader (setsid + TIOCSCTTY in pty.childSetup), so its pgid == its
+    // pid and the foreground pgrp equals child_pid ONLY while the shell
+    // sits at its prompt; a spawned foreground command runs in its own
+    // pgrp under job control. The DSR/CPR fix scrubs stray cursor
+    // reports only in the former case so it never steals a foreground
+    // program's (aichat/reedline) cursor-query reply.
+    const allocator = std.testing.allocator;
+
+    const TIOCGPGRP: u32 = 0x540F;
+    const fgPgrp = struct {
+        fn get(master: posix.fd_t) ?i32 {
+            var pgrp: i32 = -1;
+            const rc = std.os.linux.ioctl(master, TIOCGPGRP, @intFromPtr(&pgrp));
+            if (@as(isize, @bitCast(rc)) < 0) return null;
+            return pgrp;
+        }
+    }.get;
+
+    var pty = try Pty.open(allocator);
+    defer pty.deinit();
+
+    const argv = [_:null]?[*:0]const u8{ "/bin/bash", "--norc", "--noprofile", "-i", null };
+    const envp = [_:null]?[*:0]const u8{null};
+    const pid = try pty.spawn(@ptrCast(&argv), @ptrCast(&envp));
+    defer {
+        _ = posix.kill(pid, posix.SIG.KILL) catch {};
+        var st: u32 = 0;
+        _ = std.os.linux.waitpid(pid, &st, 0);
+    }
+
+    const deadline_ms: i64 = 6000;
+    const nowMs = struct {
+        fn f() i64 {
+            var t: posix.timespec = undefined;
+            _ = clock_gettime(CLOCK_MONOTONIC, &t);
+            return @as(i64, t.sec) * 1000 + @divFloor(@as(i64, t.nsec), 1_000_000);
+        }
+    }.f;
+    const start_ms = nowMs();
+
+    // Drain startup output until the shell goes idle (prompt printed).
+    var scratch: [4096]u8 = undefined;
+    while (nowMs() - start_ms < deadline_ms) {
+        var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = 0x001, .revents = 0 }};
+        const n = posix.poll(&pfd, 300) catch 0;
+        if (n == 0) break; // idle → at the prompt
+        if (pfd[0].revents & 0x001 != 0) _ = posix.read(pty.master, &scratch) catch 0;
+    }
+
+    // At the prompt: foreground pgrp is the shell (== child pid).
+    try std.testing.expectEqual(@as(?i32, @intCast(pid)), fgPgrp(pty.master));
+
+    // Launch a foreground command and wait for it to take the terminal.
+    const cmd = "sleep 3\n";
+    _ = std.c.write(pty.master, cmd.ptr, cmd.len);
+    var saw_command_fg = false;
+    while (nowMs() - start_ms < deadline_ms) {
+        var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = 0x001, .revents = 0 }};
+        if ((posix.poll(&pfd, 100) catch 0) != 0 and pfd[0].revents & 0x001 != 0)
+            _ = posix.read(pty.master, &scratch) catch 0;
+        if (fgPgrp(pty.master)) |fg| {
+            if (fg > 0 and fg != @as(i32, @intCast(pid))) {
+                saw_command_fg = true;
+                break;
+            }
+        }
+    }
+    try std.testing.expect(saw_command_fg);
+}
+
 test "ghost.list_count ships off (0) by default — matches docs" {
     // Regression pin for audit #426: the shipped default drifted to 2
     // while the field's own doc comment, config.def.zig, and
