@@ -391,11 +391,12 @@ pub fn configure(comptime cfg: Config) type {
             // `ghost_accept` in `defaults.zig` — atty's user-config
             // bindings beat module defaults in the match scan, so
             // a bare-End rebind here would be dead code. Modified
-            // arrow forms (Ctrl+End, Ctrl+Home) aren't bound to
-            // anything else in atty. Dual-encoded for kitty kbd +
-            // legacy.
+            // arrow/nav keys carry their modifier in the legacy CSI-1
+            // form the terminal emits directly (`\x1b[1;5F`) even under
+            // the kitty kbd flag, so — unlike Ctrl+Tab / Ctrl+<digit> —
+            // there's no separate CSI-u sibling to bind; the single
+            // `keymap.key("Ctrl+End")` encoding suffices.
             .{ .bytes = keymap.key("Ctrl+End"), .action = .chat_scroll_to_tail, .label = "Ctrl+End", .description = "chat: jump back to the live tail (when scrolled up)" },
-            .{ .bytes = "\x1b[1;5F", .action = .chat_scroll_to_tail },
             // Chat recall — loads the newest persisted dialog into
             // the inline panel. Dual-encoded: legacy `\x1bR`
             // (Alt+Shift+R — capital R = shift implicit on most

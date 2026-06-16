@@ -11,6 +11,10 @@
 //!     pub fn   onOutput  (rt: *Runtime, ctx: *Context, output: []const u8) !void
 //!     pub fn   onTick    (rt: *Runtime, ctx: *Context, elapsed_ms: u64) !void
 //!     pub fn   onLineCommit(rt: *Runtime, ctx: *Context, line: []const u8) !void
+//!     pub fn   onAction  (rt: *Runtime, ctx: *Context, action: Action) !bool   // true = consumed
+//!     pub fn   onMouseClick(rt: *Runtime, ctx: *Context, evt: mouse.Event) !MouseAction
+//!     pub fn   onResize  (rt: *Runtime) void                  // re-arm paint latches
+//!     pub fn   isOverlayActive(rt: *Runtime) bool             // module owns the alt-screen
 //!     pub fn   deleteHistoryMatch(rt: *Runtime, ctx: *Context, line: []const u8) !void
 //!     pub fn   provideGhostText(rt: *Runtime, ctx: *Context) !?[]const u8
 //!     pub fn   provideGhostList(rt: *Runtime, ctx: *Context) !?[]const []const u8
