@@ -395,9 +395,16 @@ pub(super) fn write_atoms(path: &Path, atoms: &BTreeSet<String>) -> Result<(), F
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640))
                 .map_err(|e| FetchError::WriteError(format!("chmod 0640 {tmp:?}: {e}")))?;
         }
+        // fsync the corpus before the rename so a crash can't publish a
+        // truncated atom file — fail closed (keep the last-good file),
+        // matching the chmod handling above.
+        f.sync_all()
+            .map_err(|e| FetchError::WriteError(format!("sync {tmp:?}: {e}")))?;
     }
     std::fs::rename(&tmp, path)
         .map_err(|e| FetchError::WriteError(format!("rename → {path:?}: {e}")))?;
+    // Make the rename itself durable, not just the bytes.
+    crate::fsutil::fsync_parent_dir(path);
     Ok(())
 }
 

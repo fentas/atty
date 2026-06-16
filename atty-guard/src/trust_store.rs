@@ -1228,19 +1228,9 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
         return Err(e);
     }
     // fsync the parent directory so the rename itself (the directory
-    // entry swap) is durable. The content sync above guarantees the
-    // bytes survive a crash; this guarantees the new name does too,
-    // rather than reverting to the old file. Best-effort: the write has
-    // already succeeded, so a parent that can't be opened/synced (rare)
-    // isn't worth failing the whole operation over.
-    #[cfg(unix)]
-    {
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-    }
+    // entry swap) is durable — the content sync above covers the bytes,
+    // this covers the new name surviving a crash.
+    crate::fsutil::fsync_parent_dir(path);
     Ok(())
 }
 

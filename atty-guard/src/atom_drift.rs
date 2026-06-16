@@ -353,9 +353,16 @@ pub fn write_snapshot(path: &Path, snapshot: &DriftSnapshot) -> std::io::Result<
                 );
             }
         }
+        // fsync the content before the rename so a crash can't publish a
+        // truncated snapshot (consistent with the write_all `?` above).
+        f.sync_all()?;
     }
     match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // Make the rename itself durable, not just the bytes.
+            crate::fsutil::fsync_parent_dir(path);
+            Ok(())
+        }
         Err(e) => {
             // Best-effort cleanup so a failed rename doesn't leave
             // a stale .tmp.<pid> sitting around forever.
