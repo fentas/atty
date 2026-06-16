@@ -193,26 +193,18 @@ test "RawMode.enter on a non-TTY fd surfaces NotATty" {
 }
 
 test "foreground pgrp on the master distinguishes shell-at-prompt from a running command" {
-    // Load-bearing assumption behind proxy.shellOwnsForeground (the CPR
-    // scrub gate): TIOCGPGRP read off the PTY *master* returns the
-    // terminal's foreground process group. The child shell is a session
-    // leader (setsid + TIOCSCTTY in pty.childSetup), so its pgid == its
-    // pid and the foreground pgrp equals child_pid ONLY while the shell
-    // sits at its prompt; a spawned foreground command runs in its own
-    // pgrp under job control. The DSR/CPR fix scrubs stray cursor
-    // reports only in the former case so it never steals a foreground
-    // program's (aichat/reedline) cursor-query reply.
+    // Exercises proxy.shellOwnsForeground (the CPR scrub gate) against a
+    // real PTY. It reads the terminal's foreground pgrp via TIOCGPGRP on
+    // the *master*; the child shell is a session leader (setsid +
+    // TIOCSCTTY in pty.childSetup), so the fg pgrp equals child_pid ONLY
+    // while the shell sits at its prompt — a spawned foreground command
+    // runs in its own pgrp under job control. The fix scrubs stray
+    // cursor reports only in the former case so it never steals a
+    // foreground program's (aichat/reedline) cursor-query reply. Calling
+    // the real helper (not a re-derived ioctl) pins the comparison
+    // direction too: an inverted gate fails this test.
     const allocator = std.testing.allocator;
-
-    const TIOCGPGRP: u32 = 0x540F;
-    const fgPgrp = struct {
-        fn get(master: posix.fd_t) ?i32 {
-            var pgrp: i32 = -1;
-            const rc = std.os.linux.ioctl(master, TIOCGPGRP, @intFromPtr(&pgrp));
-            if (@as(isize, @bitCast(rc)) < 0) return null;
-            return pgrp;
-        }
-    }.get;
+    const shellOwnsForeground = atty.proxy.shellOwnsForeground;
 
     var pty = try Pty.open(allocator);
     defer pty.deinit();
@@ -245,25 +237,25 @@ test "foreground pgrp on the master distinguishes shell-at-prompt from a running
         if (pfd[0].revents & 0x001 != 0) _ = posix.read(pty.master, &scratch) catch 0;
     }
 
-    // At the prompt: foreground pgrp is the shell (== child pid).
-    try std.testing.expectEqual(@as(?i32, @intCast(pid)), fgPgrp(pty.master));
+    // At the prompt: the shell owns the foreground → scrub is enabled.
+    try std.testing.expect(shellOwnsForeground(pty.master, pid));
 
-    // Launch a foreground command and wait for it to take the terminal.
+    // Launch a foreground command and wait for it to take the terminal:
+    // the shell no longer owns the foreground → scrub is disabled, so a
+    // CPR reply is forwarded to the command instead of stolen.
     const cmd = "sleep 3\n";
     _ = std.c.write(pty.master, cmd.ptr, cmd.len);
-    var saw_command_fg = false;
+    var command_owns_fg = false;
     while (nowMs() - start_ms < deadline_ms) {
         var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = 0x001, .revents = 0 }};
         if ((posix.poll(&pfd, 100) catch 0) != 0 and pfd[0].revents & 0x001 != 0)
             _ = posix.read(pty.master, &scratch) catch 0;
-        if (fgPgrp(pty.master)) |fg| {
-            if (fg > 0 and fg != @as(i32, @intCast(pid))) {
-                saw_command_fg = true;
-                break;
-            }
+        if (!shellOwnsForeground(pty.master, pid)) {
+            command_owns_fg = true;
+            break;
         }
     }
-    try std.testing.expect(saw_command_fg);
+    try std.testing.expect(command_owns_fg);
 }
 
 test "ghost.list_count ships off (0) by default — matches docs" {

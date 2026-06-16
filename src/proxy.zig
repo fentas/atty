@@ -2363,7 +2363,12 @@ fn inSubprocess(alt: *const AltScreen, osc: *const Osc133) bool {
 /// `false` (don't scrub → forward the reply) when the pgrp can't be
 /// read, since a missed scrub is a cosmetic glitch but a stolen reply
 /// is a hang.
-fn shellOwnsForeground(master: posix.fd_t, child_pid: posix.pid_t) bool {
+///
+/// Assumes job control: an interactive shell moves spawned commands
+/// into their own pgrp. With job control off (`set +m`) the fg pgrp
+/// never leaves the shell, so a command's CPR is still scrubbed — but
+/// atty proxies interactive shells, where job control is on.
+pub fn shellOwnsForeground(master: posix.fd_t, child_pid: posix.pid_t) bool {
     if (child_pid <= 0) return false;
     // TIOCGPGRP off the master returns the terminal's foreground pgrp
     // on Linux. Hardcoded like the other ioctls in pty.zig (the libc
