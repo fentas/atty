@@ -38,9 +38,10 @@ mod tests {
     }
 
     #[test]
-    fn fsync_parent_dir_is_noop_for_a_bare_filename() {
-        // A path with no directory component falls back to "." and must
-        // still not panic (the open may fail; that's swallowed).
+    fn fsync_parent_dir_falls_back_to_cwd_for_a_bare_filename() {
+        // A path with no directory component falls back to syncing "."
+        // (the cwd). This must not panic — and exercises the
+        // empty-parent → "." branch.
         fsync_parent_dir(Path::new("just-a-name"));
     }
 }
