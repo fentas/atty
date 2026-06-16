@@ -43,15 +43,15 @@ extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn getpid() c_int;
-extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
-const CLOCK_REALTIME: c_int = 0;
-const O_EXCL: c_int = 0o200;
-const O_DIRECTORY: c_int = 0o200000;
-
-const O_RDONLY: c_int = 0;
-const O_WRONLY: c_int = 1;
-const O_CREAT: c_int = 0o100;
-const O_APPEND: c_int = 0o2000;
+// open(2) flags derived from std.posix.O so the bit positions are
+// OS-correct (Darwin/BSD differ from Linux) instead of hardcoded Linux
+// octals. clock_gettime uses std.c so the clockid_t is OS-correct too.
+const O_EXCL: c_int = @bitCast(std.posix.O{ .EXCL = true });
+const O_DIRECTORY: c_int = @bitCast(std.posix.O{ .DIRECTORY = true });
+const O_RDONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .RDONLY });
+const O_WRONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .WRONLY });
+const O_CREAT: c_int = @bitCast(std.posix.O{ .CREAT = true });
+const O_APPEND: c_int = @bitCast(std.posix.O{ .APPEND = true });
 const FILE_MODE: c_int = 0o600;
 const DIR_MODE: c_uint = 0o700;
 
@@ -142,7 +142,7 @@ pub fn resolveDir(allocator: std.mem.Allocator, explicit_dir: []const u8) ![]u8 
 pub fn createSessionPath(allocator: std.mem.Allocator, dir: []const u8) ![]u8 {
     if (dir.len == 0) return allocator.dupe(u8, "");
     var ts: std.posix.timespec = undefined;
-    _ = clock_gettime(CLOCK_REALTIME, &ts);
+    _ = std.c.clock_gettime(.REALTIME, &ts);
     const epoch_secs: u64 = if (ts.sec > 0) @intCast(ts.sec) else 0;
     const ep = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
     const yd = ep.getEpochDay().calculateYearDay();

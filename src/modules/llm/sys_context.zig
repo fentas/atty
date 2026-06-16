@@ -35,8 +35,10 @@ extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*]u8;
 extern "c" fn system(command: [*:0]const u8) c_int;
 
-const O_RDONLY: c_int = 0;
-const F_OK: c_int = 0;
+// O_RDONLY is 0 on every supported OS, but derive it from std.posix.O
+// for consistency with the other modules' portable flag handling.
+const O_RDONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .RDONLY });
+const F_OK: c_int = 0; // access(2) existence check — 0 on all POSIX
 
 /// One-shot resolution of static OS info. Returns owned bytes.
 /// Format examples:
