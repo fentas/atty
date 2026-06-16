@@ -3,17 +3,18 @@
 # One-shot install: build atty inside Docker, drop the binary in ./dist/.
 # Use this when you want the binary without installing Zig on your host.
 #
-# Customise the target by setting TARGET (e.g. x86_64-linux-musl for a
-# fully static binary).
+# The Dockerfile selects the Zig target from the build platform's
+# TARGETARCH (amd64 → x86_64-linux-musl, arm64 → aarch64-linux-musl) and
+# always produces a fully static musl binary. To cross-build, pick the
+# platform with buildx, e.g. `docker buildx build --platform linux/arm64`.
 
 set -eu
 
-TARGET="${TARGET:-x86_64-linux-gnu}"
 IMAGE="${IMAGE:-atty:builder}"
 OUT_DIR="${OUT_DIR:-$PWD/dist}"
 
-echo "▶ Building $IMAGE (target: $TARGET) …"
-docker build --build-arg "TARGET=$TARGET" -t "$IMAGE" --target builder .
+echo "▶ Building $IMAGE …"
+docker build -t "$IMAGE" --target builder .
 
 mkdir -p "$OUT_DIR"
 echo "▶ Extracting binary to $OUT_DIR/atty …"
