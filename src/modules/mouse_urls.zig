@@ -514,11 +514,11 @@ fn setHintErr(rt: anytype, url: []const u8, err: anyerror) void {
     setHint(rt, msg, url);
 }
 
-extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
-
 fn nowMs() u64 {
     var ts: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
-    _ = clock_gettime(1, &ts); // CLOCK_MONOTONIC
+    // `.MONOTONIC` resolves the OS-correct clockid_t (Linux 1, Darwin
+    // 6, …); a hardcoded Linux `1` is wrong on Darwin.
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 }
 
