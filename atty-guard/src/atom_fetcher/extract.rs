@@ -379,8 +379,13 @@ pub(super) fn write_atoms(path: &Path, atoms: &BTreeSet<String>) -> Result<(), F
         let mut f = opts
             .open(&tmp)
             .map_err(|e| FetchError::WriteError(format!("create {tmp:?}: {e}")))?;
-        f.write_all(content.as_bytes())
-            .map_err(|e| FetchError::WriteError(format!("write {tmp:?}: {e}")))?;
+        // Clean up the (PID-stable, create_new) tmp on any error so a
+        // later refresh in the same process doesn't hit a deterministic
+        // EEXIST on the leftover scratch file.
+        f.write_all(content.as_bytes()).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            FetchError::WriteError(format!("write {tmp:?}: {e}"))
+        })?;
         // Re-assert exactly 0640 (owner-write, group-read, no world
         // access) before rename — a restrictive umask could have
         // narrowed the create mode; this brings it to the loader's
@@ -392,12 +397,25 @@ pub(super) fn write_atoms(path: &Path, atoms: &BTreeSet<String>) -> Result<(), F
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640))
-                .map_err(|e| FetchError::WriteError(format!("chmod 0640 {tmp:?}: {e}")))?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640)).map_err(
+                |e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    FetchError::WriteError(format!("chmod 0640 {tmp:?}: {e}"))
+                },
+            )?;
         }
+        // fsync the corpus before the rename so a crash can't publish a
+        // truncated atom file — fail closed (keep the last-good file),
+        // matching the chmod handling above.
+        f.sync_all().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            FetchError::WriteError(format!("sync {tmp:?}: {e}"))
+        })?;
     }
     std::fs::rename(&tmp, path)
         .map_err(|e| FetchError::WriteError(format!("rename → {path:?}: {e}")))?;
+    // Make the rename itself durable, not just the bytes.
+    crate::fsutil::fsync_parent_dir(path);
     Ok(())
 }
 

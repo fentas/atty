@@ -331,7 +331,13 @@ pub fn write_snapshot(path: &Path, snapshot: &DriftSnapshot) -> std::io::Result<
             .create_new(true)
             .open(&tmp)?;
         let bytes = serde_json::to_vec_pretty(snapshot).map_err(std::io::Error::other)?;
-        f.write_all(&bytes)?;
+        // Remove the (PID-stable, create_new) tmp on any error so a
+        // later snapshot in the same process doesn't hit a deterministic
+        // EEXIST on the leftover scratch file.
+        f.write_all(&bytes).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e
+        })?;
         // Match the rest of /var/lib/atty-guard's 0640 posture so
         // any user in the atty group can read but only the daemon
         // can write. A chmod failure is logged but not propagated:
@@ -353,9 +359,20 @@ pub fn write_snapshot(path: &Path, snapshot: &DriftSnapshot) -> std::io::Result<
                 );
             }
         }
+        // fsync the content before the rename so a crash can't publish a
+        // truncated snapshot. Clean up the tmp on failure (same EEXIST
+        // reasoning as the write above).
+        f.sync_all().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e
+        })?;
     }
     match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // Make the rename itself durable, not just the bytes.
+            crate::fsutil::fsync_parent_dir(path);
+            Ok(())
+        }
         Err(e) => {
             // Best-effort cleanup so a failed rename doesn't leave
             // a stale .tmp.<pid> sitting around forever.

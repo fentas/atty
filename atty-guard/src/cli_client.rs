@@ -540,11 +540,18 @@ fn handle_pin_init(force: bool) -> std::io::Result<()> {
         // owned, no group/world-write). 0600 also passes the check;
         // we pick 0644 so a non-root operator can `cat` the file.
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+        // fsync before rename so a crash can't publish an empty pin file.
+        f.sync_all().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            std::io::Error::new(e.kind(), format!("sync {}: {}", tmp.display(), e))
+        })?;
     }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         std::io::Error::new(e.kind(), format!("rename {}: {}", path.display(), e))
     })?;
+    // Make the rename itself durable, not just the bytes.
+    crate::fsutil::fsync_parent_dir(path);
     println!(
         "atty-guard: created {} from the bundled template. Edit it to uncomment \
          + fill the [gtfobins] / [sigma] sections, then `sudo systemctl reload \
