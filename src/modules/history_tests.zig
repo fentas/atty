@@ -531,29 +531,22 @@ test "loadRecent strips zsh extended-history prefixes on load" {
 }
 
 test "loadRecent keeps the first tail line whole when the window starts on a line boundary" {
-    // Audit #439: loadRecent reads from `start_off - 1` so it can tell a
-    // boundary-aligned tail window (preceding byte == '\n' → keep the
-    // first line whole) from a mid-line one. The >1 MiB test above only
-    // exercises the mid-line `indexOfScalar` branch; this pins the
-    // `slice[0] == '\n'` branch.
+    // When the 1 MiB tail window begins exactly on a line boundary (the
+    // byte before it is '\n'), the first line in the window must be kept
+    // whole, not dropped as a partial. The >1 MiB test above only covers
+    // the mid-line case where the window starts inside a line.
     //
-    // Construct: a 4-byte head "OLD\n" followed by exactly 1 MiB of
-    // fixed-width 256-byte lines. size-max == 4, so read_off == 3 lands
-    // on the head's '\n' → boundary branch. The 1 MiB window is 4096
-    // lines (< the 5000 ring cap), so the FIRST tail line survives at
-    // entries[0]; a broken branch would drop it and start at "L000001".
+    // Fixture: a 4-byte head "OLD\n" + exactly 1 MiB of fixed-width
+    // 256-byte lines, so size-max == 4 and the byte read at start_off-1
+    // (== 3) is the head's '\n' → boundary case. The window is 4096
+    // lines (< the 5000 ring cap), so the first line survives at
+    // entries[0]; dropping it would leave "L000001" there instead.
     const path = "/tmp/atty-unit-history-boundary.txt";
     const path_z = try testing.allocator.dupeZ(u8, path);
     defer testing.allocator.free(path_z);
-    _ = std.c.unlink(path_z.ptr);
-    const fd = std.c.open(
-        path_z.ptr,
-        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
-        @as(std.c.mode_t, 0o600),
-    );
-    try testing.expect(fd >= 0);
-    defer _ = std.c.unlink(path_z.ptr);
 
+    // Build the whole fixture in memory first, so the fd is opened only
+    // around the write/close (no open-fd leak if an earlier `try` fails).
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     // 4-byte head; its trailing '\n' is the byte at read_off == 3.
@@ -569,11 +562,23 @@ test "loadRecent keeps the first tail line whole when the window starts on a lin
         try buf.appendSlice(testing.allocator, &lb);
     }
     try testing.expectEqual(@as(usize, 4 + (1 << 20)), buf.items.len);
-    // Assert the whole fixture lands on disk — a short write would
-    // silently shift the window and weaken the boundary coverage.
-    const wrote = std.c.write(fd, buf.items.ptr, buf.items.len);
-    try testing.expectEqual(@as(isize, @intCast(buf.items.len)), wrote);
-    _ = std.c.close(fd);
+
+    _ = std.c.unlink(path_z.ptr);
+    defer _ = std.c.unlink(path_z.ptr);
+    const fd = std.c.open(
+        path_z.ptr,
+        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
+        @as(std.c.mode_t, 0o600),
+    );
+    try testing.expect(fd >= 0);
+    {
+        errdefer _ = std.c.close(fd);
+        // Assert the whole fixture lands on disk — a short write would
+        // silently shift the window and weaken the boundary coverage.
+        const wrote = std.c.write(fd, buf.items.ptr, buf.items.len);
+        try testing.expectEqual(@as(isize, @intCast(buf.items.len)), wrote);
+    }
+    try testing.expectEqual(@as(c_int, 0), std.c.close(fd));
 
     const H = configure(.{ .path = path, .format = .plain });
     var rt = try H.attach(testing.allocator, std.Io.failing);
