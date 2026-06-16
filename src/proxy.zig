@@ -800,7 +800,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // strands a program blocked reading the reply. Only the
                 // shell-at-its-prompt case is safe to scrub.
                 var input: []const u8 = stdin_filtered_buf[0..dsr_result.filtered_len];
-                if (!alt_screen.active and shellOwnsForeground(pty.master, child_pid)) {
+                // Only a chunk carrying an ESC can hold a CPR reply —
+                // gate the foreground-pgrp ioctl behind that cheap scan
+                // so ordinary typing never pays for it.
+                if (!alt_screen.active and
+                    std.mem.indexOfScalar(u8, input, 0x1B) != null and
+                    shellOwnsForeground(pty.master, child_pid))
+                {
                     const cpr_drop_len = cursor_dsr.dropWellFormedCpr(
                         stdin_filtered_buf[0..dsr_result.filtered_len],
                         stdin_filtered_buf[0..dsr_result.filtered_len],

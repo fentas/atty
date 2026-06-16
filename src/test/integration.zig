@@ -16,6 +16,12 @@ const Pty = atty.pty.Pty;
 extern "c" fn clock_gettime(clk_id: c_int, tp: *posix.timespec) c_int;
 const CLOCK_MONOTONIC: c_int = 1;
 
+fn nowMillis() i64 {
+    var t: posix.timespec = undefined;
+    _ = clock_gettime(CLOCK_MONOTONIC, &t);
+    return @as(i64, t.sec) * 1000 + @divFloor(@as(i64, t.nsec), 1_000_000);
+}
+
 test "PTY round-trips bytes through /bin/echo" {
     const allocator = std.testing.allocator;
 
@@ -215,32 +221,33 @@ test "foreground pgrp on the master distinguishes shell-at-prompt from a running
         _ = std.os.linux.waitpid(pid, &st, 0);
     }
 
-    const deadline_ms: i64 = 6000;
-    const nowMs = struct {
-        fn f() i64 {
-            var t: posix.timespec = undefined;
-            _ = clock_gettime(CLOCK_MONOTONIC, &t);
-            return @as(i64, t.sec) * 1000 + @divFloor(@as(i64, t.nsec), 1_000_000);
+    const POLLIN: i16 = 0x001;
+    // Drain `fd` until it goes idle for one poll interval, or `budget_ms`
+    // elapses. EINTR is retried, not mistaken for idle.
+    const drainIdle = struct {
+        fn f(fd: posix.fd_t, in_flag: i16, budget_ms: i64) void {
+            var scratch: [4096]u8 = undefined;
+            const start = nowMillis();
+            while (nowMillis() - start < budget_ms) {
+                var pfd = [_]posix.pollfd{.{ .fd = fd, .events = in_flag, .revents = 0 }};
+                const n = posix.poll(&pfd, 300) catch continue; // retry on EINTR
+                if (n == 0) return; // idle → at the prompt
+                if (pfd[0].revents & in_flag != 0) _ = posix.read(fd, &scratch) catch 0;
+            }
         }
     }.f;
-    const start_ms = nowMs();
 
-    // Drain startup output until the shell goes idle (prompt printed).
-    var scratch: [4096]u8 = undefined;
-    while (nowMs() - start_ms < deadline_ms) {
-        var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = 0x001, .revents = 0 }};
-        const n = posix.poll(&pfd, 300) catch 0;
-        if (n == 0) break; // idle → at the prompt
-        if (pfd[0].revents & 0x001 != 0) _ = posix.read(pty.master, &scratch) catch 0;
-    }
+    // Let the shell settle at its prompt.
+    drainIdle(pty.master, POLLIN, 6000);
 
     // At the prompt: the shell owns the foreground → scrub is enabled.
     try std.testing.expect(shellOwnsForeground(pty.master, pid));
 
     // Launch a foreground command and wait for it to take the terminal:
     // the shell no longer owns the foreground → scrub is disabled, so a
-    // CPR reply is forwarded to the command instead of stolen.
-    const cmd = "sleep 3\n";
+    // CPR reply is forwarded to the command instead of stolen. `sleep`
+    // outlives the wait window so the pgrp flip is observable throughout.
+    const cmd = "sleep 5\n";
     var off: usize = 0;
     while (off < cmd.len) {
         const rc = std.c.write(pty.master, cmd.ptr + off, cmd.len - off);
@@ -248,13 +255,15 @@ test "foreground pgrp on the master distinguishes shell-at-prompt from a running
             if (posix.errno(rc) == .INTR) continue;
             return error.WriteFailed;
         }
-        if (rc == 0) break;
+        if (rc == 0) return error.WriteFailed; // EOF: command would be truncated
         off += @intCast(rc);
     }
+    var scratch: [4096]u8 = undefined;
+    const wait_start = nowMillis();
     var command_owns_fg = false;
-    while (nowMs() - start_ms < deadline_ms) {
-        var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = 0x001, .revents = 0 }};
-        if ((posix.poll(&pfd, 100) catch 0) != 0 and pfd[0].revents & 0x001 != 0)
+    while (nowMillis() - wait_start < 4000) {
+        var pfd = [_]posix.pollfd{.{ .fd = pty.master, .events = POLLIN, .revents = 0 }};
+        if ((posix.poll(&pfd, 100) catch continue) != 0 and pfd[0].revents & POLLIN != 0)
             _ = posix.read(pty.master, &scratch) catch 0;
         if (!shellOwnsForeground(pty.master, pid)) {
             command_owns_fg = true;
