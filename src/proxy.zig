@@ -197,9 +197,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
     // --- Bottom status bar (DECSTBM reserved region) ----------------------
     //
-    // When enabled, slim the slave PTY's reported size by N rows so the
-    // shell wraps inside the visible region, and emit DECSTBM so its
-    // scrolling stays out of our reserved rows.
+    // When enabled, reserve N bottom rows for the bar. The StatusBar
+    // tracks the reserved region and emits DECSTBM so shell scrolling
+    // stays out of those rows; the slave PTY is still told the FULL
+    // terminal size below (see the `pty.setSize` note) — DECSTBM alone
+    // does the reserving, the winsize is not slimmed.
     //
     // The pick list NO LONGER inflates this reservation — it makes
     // its own room dynamically (LF + CUU dance, atuin Ctrl+R style)
