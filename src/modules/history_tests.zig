@@ -529,3 +529,58 @@ test "loadRecent strips zsh extended-history prefixes on load" {
     try testing.expectEqualStrings("echo zsh-style", rt.entries.items[0]);
     try testing.expectEqualStrings("ls", rt.entries.items[1]);
 }
+
+test "loadRecent keeps the first tail line whole when the window starts on a line boundary" {
+    // Audit #439: loadRecent reads from `start_off - 1` so it can tell a
+    // boundary-aligned tail window (preceding byte == '\n' → keep the
+    // first line whole) from a mid-line one. The >1 MiB test above only
+    // exercises the mid-line `indexOfScalar` branch; this pins the
+    // `slice[0] == '\n'` branch.
+    //
+    // Construct: a 4-byte head "OLD\n" followed by exactly 1 MiB of
+    // fixed-width 256-byte lines. size-max == 4, so read_off == 3 lands
+    // on the head's '\n' → boundary branch. The 1 MiB window is 4096
+    // lines (< the 5000 ring cap), so the FIRST tail line survives at
+    // entries[0]; a broken branch would drop it and start at "L000001".
+    const path = "/tmp/atty-unit-history-boundary.txt";
+    const path_z = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_z);
+    _ = std.c.unlink(path_z.ptr);
+    const fd = std.c.open(
+        path_z.ptr,
+        @bitCast(std.c.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }),
+        @as(std.c.mode_t, 0o600),
+    );
+    try testing.expect(fd >= 0);
+    defer _ = std.c.unlink(path_z.ptr);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    // 4-byte head; its trailing '\n' is the byte at read_off == 3.
+    try buf.appendSlice(testing.allocator, "OLD\n");
+    // 4096 lines × 256 bytes = exactly 1 MiB (the cap). Each line is
+    // "L<6 digits>" padded with 'x' to 255 chars + '\n'.
+    var n: usize = 0;
+    while (n < 4096) : (n += 1) {
+        var lb: [256]u8 = undefined;
+        const head = std.fmt.bufPrint(&lb, "L{d:0>6}", .{n}) catch unreachable;
+        @memset(lb[head.len..255], 'x');
+        lb[255] = '\n';
+        try buf.appendSlice(testing.allocator, &lb);
+    }
+    try testing.expectEqual(@as(usize, 4 + (1 << 20)), buf.items.len);
+    _ = std.c.write(fd, buf.items.ptr, buf.items.len);
+    _ = std.c.close(fd);
+
+    const H = configure(.{ .path = path, .format = .plain });
+    var rt = try H.attach(testing.allocator, std.Io.failing);
+    defer H.detach(&rt, std.Io.failing);
+
+    // All 4096 tail lines loaded (none evicted); first one kept whole.
+    try testing.expectEqual(@as(usize, 4096), rt.entries.items.len);
+    try testing.expectEqual(@as(usize, 255), rt.entries.items[0].len);
+    try testing.expect(std.mem.startsWith(u8, rt.entries.items[0], "L000000"));
+    try testing.expectEqualStrings("L004095", rt.entries.items[4095][0..7]);
+    // The pre-window head line must NOT have leaked into the ring.
+    for (rt.entries.items) |e| try testing.expect(!std.mem.eql(u8, e, "OLD"));
+}
