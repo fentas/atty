@@ -516,8 +516,8 @@ fn setHintErr(rt: anytype, url: []const u8, err: anyerror) void {
 
 fn nowMs() u64 {
     var ts: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
-    // `.MONOTONIC` resolves the OS-correct clockid_t (was a hardcoded
-    // Linux `1`, which is 0/wrong on Darwin).
+    // `.MONOTONIC` resolves the OS-correct clockid_t (Linux 1, Darwin
+    // 6, …); a hardcoded Linux `1` is wrong on Darwin.
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 }

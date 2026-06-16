@@ -141,7 +141,9 @@ pub fn resolveDir(allocator: std.mem.Allocator, explicit_dir: []const u8) ![]u8 
 /// no-overwrite guarantee.
 pub fn createSessionPath(allocator: std.mem.Allocator, dir: []const u8) ![]u8 {
     if (dir.len == 0) return allocator.dupe(u8, "");
-    var ts: std.posix.timespec = undefined;
+    // Zero-init so a (rare) clock_gettime failure yields a best-effort
+    // 0 timestamp rather than reading uninitialized fields.
+    var ts: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
     _ = std.c.clock_gettime(.REALTIME, &ts);
     const epoch_secs: u64 = if (ts.sec > 0) @intCast(ts.sec) else 0;
     const ep = std.time.epoch.EpochSeconds{ .secs = epoch_secs };

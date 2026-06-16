@@ -30,9 +30,8 @@ const Style = @import("style.zig").Style;
 
 fn nowMs() i64 {
     var ts: std.posix.timespec = undefined;
-    // `.MONOTONIC` is the OS-correct clockid_t (Linux 1, Darwin 6, …).
-    // Hardcoding the Linux value made `nowMs()` return 0 on Darwin,
-    // freezing every timed status-bar surface (hints/errors/transients).
+    // `.MONOTONIC` resolves the OS-correct clockid_t (Linux 1, Darwin
+    // 6, …); a hardcoded Linux `1` is wrong on Darwin.
     if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
 }
