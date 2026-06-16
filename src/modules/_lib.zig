@@ -17,12 +17,12 @@ const std = @import("std");
 // the modules dir keeps its own copy until the next refactor sweep).
 // ---------------------------------------------------------------------------
 
-extern "c" fn clock_gettime(clk_id: c_int, tp: *std.posix.timespec) c_int;
-const CLOCK_MONOTONIC: c_int = 1;
-
 pub fn nowMs() i64 {
     var ts: std.posix.timespec = undefined;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    // `.MONOTONIC` is the OS-correct clockid_t (Linux 1, Darwin 6, …).
+    // Hardcoding the Linux value made `nowMs()` return 0 on Darwin,
+    // silently breaking every module timer.
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
 }
 

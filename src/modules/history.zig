@@ -33,11 +33,14 @@ extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 
-const O_RDONLY: c_int = 0;
-const O_WRONLY: c_int = 1;
-const O_CREAT: c_int = 0o100;
-const O_APPEND: c_int = 0o2000;
-const O_TRUNC: c_int = 0o1000;
+// Derive open(2) flags from std.posix.O so the values are OS-correct
+// (the bit positions differ on Darwin/BSD) rather than hardcoded Linux
+// octals — the latter silently corrupted the flags on non-Linux.
+const O_RDONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .RDONLY });
+const O_WRONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .WRONLY });
+const O_CREAT: c_int = @bitCast(std.posix.O{ .CREAT = true });
+const O_APPEND: c_int = @bitCast(std.posix.O{ .APPEND = true });
+const O_TRUNC: c_int = @bitCast(std.posix.O{ .TRUNC = true });
 const SEEK_SET: c_int = 0;
 const SEEK_END: c_int = 2;
 const FILE_MODE: c_int = 0o600;
