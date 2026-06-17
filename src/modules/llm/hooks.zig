@@ -3209,7 +3209,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // through `effective_dialog_system_prompt` and missing
             // the auto-mode refusal list / chat-mode prose default.
             const live_mode = currentDispatchMode(rt);
-            const live_prompt: []const u8 = switch (live_mode) {
+            const base_prompt: []const u8 = switch (live_mode) {
                 // `.chat` is reserved for `for_modes` provider
                 // masks; `currentDispatchMode` doesn't return it
                 // any more. Route to the dialog prompt for
@@ -3217,6 +3217,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 .single, .dialog, .chat => effective_dialog_system_prompt,
                 .auto => effective_auto_system_prompt,
             };
+            // Append the resolved provider's prompt extension (agentic
+            // CLIs steer the model to the `exec` block; plain models
+            // set none). The body carries it to both the HTTP and
+            // subprocess dialog transports.
+            const provider_ext = types.providerPromptExt(resolved_for_body.provider);
+            const live_prompt_alloc: ?[]u8 = if (provider_ext.len > 0)
+                std.fmt.allocPrint(rt.allocator, "{s}\n\n{s}", .{ base_prompt, provider_ext }) catch null
+            else
+                null;
+            defer if (live_prompt_alloc) |p| rt.allocator.free(p);
+            const live_prompt: []const u8 = live_prompt_alloc orelse base_prompt;
             const built_body: ?[]u8 = if (cfg.fixture_responses.len > 0) null else blk: {
                 const body = try buildDialogRequestBody(
                     rt.allocator,

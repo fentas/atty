@@ -36,6 +36,13 @@ pub const prompt_dialog: []const u8 = @embedFile("prompts/dialog.md");
 /// Alt+Shift+S — multi-turn dialog, atty auto-executes each command.
 pub const prompt_auto: []const u8 = @embedFile("prompts/auto.md");
 
+/// Provider-specific extension for agentic CLIs (gemini, claude) whose
+/// runtime exposes their own shell/filesystem tools. Tells the model
+/// those tools don't work under atty and to route everything through
+/// the `exec` block. The `geminiCli`/`claudeCode` presets default
+/// `prompt_ext` to this; plain HTTP models never see it.
+pub const agentic_cli_ext: []const u8 = @embedFile("prompts/agentic_cli.md");
+
 /// Select the atty-owned prompt for `mode`. Caller appends the
 /// user's `cfg.system_prompt` (if any) after a blank line so domain
 /// context stacks on top of the action protocol.

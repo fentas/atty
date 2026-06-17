@@ -164,6 +164,16 @@ pub fn providerLabel(p: Provider) []const u8 {
     };
 }
 
+/// Provider-specific prompt extension (see `prompt_ext` on each
+/// transport). Appended to atty's mode prompt for requests this
+/// provider serves; empty when the provider sets none.
+pub fn providerPromptExt(p: Provider) []const u8 {
+    return switch (p) {
+        .http => |h| h.prompt_ext,
+        .subprocess => |s| s.prompt_ext,
+    };
+}
+
 /// Pick the provider that serves `mode` from `providers[]`,
 /// preferring the entry at `current_idx` when its `for_modes`
 /// covers the mode. Falls back to the first matching entry,
@@ -257,6 +267,11 @@ pub const HttpProvider = struct {
     /// Env-var holding the API key. Optional — when unset we send
     /// no `Authorization` header.
     api_key_env: []const u8 = "LLM_API_KEY",
+    /// Provider-specific text appended to atty's mode prompt for
+    /// requests this provider serves (after `cfg.system_prompt`).
+    /// Empty for plain HTTP models — they have no built-in tools to
+    /// steer away from. See `SubprocessProvider.prompt_ext`.
+    prompt_ext: []const u8 = "",
 };
 
 /// CLI-tool transport. The prompt is delivered to the named
@@ -318,6 +333,15 @@ pub const SubprocessProvider = struct {
     /// 5–15 s for non-trivial prompts; tighten for faster local
     /// CLIs. Set to 0 to disable the watchdog entirely.
     timeout_ms: u64 = 30_000,
+
+    /// Provider-specific text appended to atty's mode prompt (after
+    /// `cfg.system_prompt`) for requests this provider serves.
+    /// Agentic CLIs (gemini, claude) ship a default here that tells
+    /// the model its own built-in tools don't work under atty and to
+    /// route everything through the `exec` block — see
+    /// `providers.geminiCli` / `providers.claudeCode`. Empty = no
+    /// extension. Overridable per provider.
+    prompt_ext: []const u8 = "",
 
     pub const PromptVia = enum { final_arg, stdin };
 

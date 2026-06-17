@@ -803,6 +803,7 @@ pub fn Module(comptime cfg: Config) type {
             context_blob: []const u8,
             prompt: []const u8,
             model: []const u8,
+            prompt_ext: []const u8,
             out: []u8,
             explanation_out: []u8,
             error_out: []u8,
@@ -810,7 +811,14 @@ pub fn Module(comptime cfg: Config) type {
             const url = try std.fmt.allocPrint(gpa, "{s}/chat/completions", .{api_base});
             defer gpa.free(url);
 
-            const body = try buildRequestBody(gpa, model, effective_system_prompt, shell_name, context_blob, prompt);
+            const sys_alloc: ?[]u8 = if (prompt_ext.len > 0)
+                try std.fmt.allocPrint(gpa, "{s}\n\n{s}", .{ effective_system_prompt, prompt_ext })
+            else
+                null;
+            defer if (sys_alloc) |s| gpa.free(s);
+            const sys_prompt: []const u8 = sys_alloc orelse effective_system_prompt;
+
+            const body = try buildRequestBody(gpa, model, sys_prompt, shell_name, context_blob, prompt);
             defer gpa.free(body);
 
             var auth_buf: [256]u8 = undefined;
@@ -1370,6 +1378,7 @@ pub fn Module(comptime cfg: Config) type {
             context_blob: []const u8,
             prompt: []const u8,
             model: []const u8,
+            prompt_ext: []const u8,
             prepend_argv: []const []const u8,
             session_id_out: []u8,
             session_id_len_out: *usize,
@@ -1398,10 +1407,17 @@ pub fn Module(comptime cfg: Config) type {
                 );
             defer gpa.free(user_msg);
 
+            const sys_alloc: ?[]u8 = if (prompt_ext.len > 0)
+                try std.fmt.allocPrint(gpa, "{s}\n\n{s}", .{ effective_system_prompt, prompt_ext })
+            else
+                null;
+            defer if (sys_alloc) |s| gpa.free(s);
+            const sys_prompt: []const u8 = sys_alloc orelse effective_system_prompt;
+
             const full_prompt = try std.fmt.allocPrint(
                 gpa,
                 "{s}\n\n{s}",
-                .{ effective_system_prompt, user_msg },
+                .{ sys_prompt, user_msg },
             );
             defer gpa.free(full_prompt);
 
@@ -1801,6 +1817,7 @@ pub fn Module(comptime cfg: Config) type {
                                 context_blob,
                                 prompt_local[0..prompt_len],
                                 http.model,
+                                http.prompt_ext,
                                 &response_buf,
                                 &explanation_local,
                                 &error_local,
@@ -1833,6 +1850,7 @@ pub fn Module(comptime cfg: Config) type {
                             context_blob,
                             prompt_local[0..prompt_len],
                             "", // model: subprocess bakes it into argv
+                            sub.prompt_ext,
                             resume_argv,
                             &captured_session_id,
                             &captured_session_id_len,
