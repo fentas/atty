@@ -341,6 +341,10 @@ pub const SubprocessProvider = struct {
     /// route everything through the `exec` block — see
     /// `providers.geminiCli` / `providers.claudeCode`. Empty = no
     /// extension. Overridable per provider.
+    ///
+    /// With `session = .continuation` the ext (like the rest of the
+    /// system prompt) is delivered only on the first turn — the CLI
+    /// retains it for the resumed session.
     prompt_ext: []const u8 = "",
 
     pub const PromptVia = enum { final_arg, stdin };
