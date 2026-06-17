@@ -278,6 +278,12 @@ test "geminiCli factory: no-model + extra_argv branch lands extras before -p" {
     // is inserted before the trailing -p.
     try expectArgv(llm.providers.geminiCli(.{ .extra_argv = &.{"--yolo"} }), &.{ "gemini", "--skip-trust", "-o", "text", "--yolo", "-p" });
     try expectArgv(llm.providers.geminiCli(.{}), &.{ "gemini", "--skip-trust", "-o", "text", "-p" });
+    // has_model + extra_argv together: extras still land after -o text,
+    // before the trailing -p, with the -m MODEL pair intact.
+    try expectArgv(
+        llm.providers.geminiCli(.{ .model = "gemini-2.5-pro", .extra_argv = &.{ "--yolo", "--approval-mode", "yolo" } }),
+        &.{ "gemini", "--skip-trust", "-m", "gemini-2.5-pro", "-o", "text", "--yolo", "--approval-mode", "yolo", "-p" },
+    );
 }
 
 test "openai preset hits the right base URL + key env" {

@@ -237,10 +237,10 @@ pub const providers = struct {
     /// headless runs in an untrusted workspace, and atty invokes it in
     /// the shell's cwd — note this auto-trusts that cwd for the run, so
     /// gemini's own tool-calls execute there without a prompt. `-o text`
-    /// keeps stdout the bare reply (parsed
-    /// `.raw`). The prompt rides the trailing `-p` slot, so argv ENDS
-    /// in `-p` and atty appends the rendered prompt after it. `model`
-    /// empty → CLI default; `extra_argv` lands before the `-p` slot.
+    /// keeps stdout the bare reply (parsed as `.raw`). The prompt rides
+    /// the trailing `-p` slot, so argv ENDS in `-p` and atty appends the
+    /// rendered prompt after it. `model` empty → CLI default;
+    /// `extra_argv` lands before the `-p` slot.
     pub fn geminiCli(comptime options: struct {
         model: []const u8 = "",
         extra_argv: []const []const u8 = &.{},
