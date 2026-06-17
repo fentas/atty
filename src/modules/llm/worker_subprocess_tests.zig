@@ -249,32 +249,35 @@ test "preset constants pin the expected model identifier" {
     }
 }
 
-test "geminiCli factory: skip-trust + text output, prompt via trailing -p" {
-    const llm = @import("../llm.zig");
-    const p = llm.providers.gemini_2_5_pro;
+fn expectArgv(p: @import("types.zig").Provider, expected: []const []const u8) !void {
     switch (p) {
-        .http => unreachable,
+        .http => return error.TestUnexpectedHttp,
         .subprocess => |sub| {
-            try testing.expectEqualStrings("gemini", sub.argv[0]);
-            // --skip-trust is mandatory for headless runs in untrusted dirs.
-            var saw_skip = false;
-            var saw_model = false;
-            for (sub.argv) |a| {
-                if (std.mem.eql(u8, a, "--skip-trust")) saw_skip = true;
-                if (std.mem.eql(u8, a, "gemini-2.5-pro")) saw_model = true;
-            }
-            try testing.expect(saw_skip);
-            try testing.expect(saw_model);
-            // The prompt rides the trailing slot, so argv must END in -p
-            // (atty appends the rendered prompt after it).
-            try testing.expectEqualStrings("-p", sub.argv[sub.argv.len - 1]);
             try testing.expectEqual(types.SubprocessProvider.PromptVia.final_arg, sub.prompt_via);
             switch (sub.output) {
                 .raw => {},
-                .json_field, .json_stream => unreachable,
+                .json_field, .json_stream => return error.TestUnexpectedJson,
             }
+            try testing.expectEqual(expected.len, sub.argv.len);
+            for (expected, sub.argv) |want, got| try testing.expectEqualStrings(want, got);
         },
     }
+}
+
+test "geminiCli factory: exact argv pins order — skip-trust, model, -o text, trailing -p" {
+    const llm = @import("../llm.zig");
+    // With a model: --skip-trust precedes the model; argv ENDS in -p so
+    // atty's appended prompt lands as `-p <prompt>`; -o text → .raw.
+    try expectArgv(llm.providers.gemini_2_5_pro, &.{ "gemini", "--skip-trust", "-m", "gemini-2.5-pro", "-o", "text", "-p" });
+    try expectArgv(llm.providers.gemini_2_5_flash, &.{ "gemini", "--skip-trust", "-m", "gemini-2.5-flash", "-o", "text", "-p" });
+}
+
+test "geminiCli factory: no-model + extra_argv branch lands extras before -p" {
+    const llm = @import("../llm.zig");
+    // No model → the -m/MODEL pair is dropped (CLI default); extra_argv
+    // is inserted before the trailing -p.
+    try expectArgv(llm.providers.geminiCli(.{ .extra_argv = &.{"--yolo"} }), &.{ "gemini", "--skip-trust", "-o", "text", "--yolo", "-p" });
+    try expectArgv(llm.providers.geminiCli(.{}), &.{ "gemini", "--skip-trust", "-o", "text", "-p" });
 }
 
 test "openai preset hits the right base URL + key env" {

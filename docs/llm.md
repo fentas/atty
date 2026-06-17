@@ -139,8 +139,10 @@ shorthand for:
 headless (`-p`) runs in an untrusted workspace, and atty invokes it in
 the shell's cwd. The factory bakes `--skip-trust` in so calls don't
 fail with the trust error (alternatively set
-`GEMINI_CLI_TRUST_WORKSPACE=true` in the env). Auth stays in your
-`gemini` login; atty never sees tokens.
+`GEMINI_CLI_TRUST_WORKSPACE=true` in the env). Note the tradeoff: this
+auto-trusts the current directory for that run, so gemini's own
+tool-calls execute there without a confirmation prompt. Auth stays in
+your `gemini` login; atty never sees tokens.
 
 Any prompt-in / text-out CLI follows the same pattern. For
 [simonw/llm](https://github.com/simonw/llm):

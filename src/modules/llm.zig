@@ -235,7 +235,9 @@ pub const providers = struct {
     /// CLI handles its own auth from the user's gemini login; atty
     /// doesn't see tokens. `--skip-trust` is mandatory: gemini refuses
     /// headless runs in an untrusted workspace, and atty invokes it in
-    /// the shell's cwd. `-o text` keeps stdout the bare reply (parsed
+    /// the shell's cwd — note this auto-trusts that cwd for the run, so
+    /// gemini's own tool-calls execute there without a prompt. `-o text`
+    /// keeps stdout the bare reply (parsed
     /// `.raw`). The prompt rides the trailing `-p` slot, so argv ENDS
     /// in `-p` and atty appends the rendered prompt after it. `model`
     /// empty → CLI default; `extra_argv` lands before the `-p` slot.
