@@ -110,6 +110,12 @@ const atty = @import("atty");
 //         // .provider = atty.modules.llm.providers.claude_haiku_4_5,
 //         // .provider = atty.modules.llm.providers.claude_default,   // CLI picks
 //         //
+//         // …or the Gemini CLI (bakes in --skip-trust so headless
+//         // runs don't refuse in an untrusted workspace):
+//         //
+//         // .provider = atty.modules.llm.providers.gemini_2_5_pro,
+//         // .provider = atty.modules.llm.providers.gemini_2_5_flash,
+//         //
 //         // …or hosted OpenAI + an OPENAI_API_KEY in env:
 //         //
 //         // .provider = atty.modules.llm.providers.openai,
@@ -119,6 +125,9 @@ const atty = @import("atty");
 //         // .provider = atty.modules.llm.providers.claudeCode(.{
 //         //     .model = "claude-sonnet-4-6",
 //         //     .extra_argv = &.{ "--permission-mode", "acceptEdits" },
+//         // }),
+//         // .provider = atty.modules.llm.providers.geminiCli(.{
+//         //     .model = "gemini-2.5-pro",
 //         // }),
 //         // .provider = atty.modules.llm.providers.simonwLlm(.{
 //         //     .model = "gpt-4o-mini",

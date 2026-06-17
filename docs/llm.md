@@ -91,6 +91,8 @@ Available preset constants (all under `atty.modules.llm.providers`):
 | `claude_opus_4_7`      | Opus 4.7 — biggest model. Slower + pricier, best for hairy prompts. |
 | `claude_haiku_4_5`     | Haiku 4.5 — small + cheap. Fast single-line `#:` flow.           |
 | `claude_default`       | Let the CLI pick whichever model your `claude config` selected. |
+| `gemini_2_5_pro`       | Gemini 2.5 Pro via the `gemini` CLI — biggest Gemini, best for chat / hairy prompts. |
+| `gemini_2_5_flash`     | Gemini 2.5 Flash via the `gemini` CLI — fast + cheap, good for single-line `#:` work. |
 | `openai`               | Hosted OpenAI (`https://api.openai.com/v1`, reads `$OPENAI_API_KEY`). Pair with `Config.model = "gpt-4o-mini"` or similar. |
 | `ollama`               | Local Ollama on `localhost:11434` — same as the default HTTP behavior, exposed as a constant for symmetry. |
 
@@ -113,6 +115,34 @@ The factory is shorthand for:
     .timeout_ms = 60_000,
 }},
 ```
+
+For the [Gemini CLI](https://geminicli.com) there's a matching factory:
+
+```zig
+.provider = atty.modules.llm.providers.geminiCli(.{
+    .model = "gemini-2.5-pro",
+}),
+```
+
+shorthand for:
+
+```zig
+.provider = .{ .subprocess = .{
+    .argv = &.{ "gemini", "--skip-trust", "-m", "gemini-2.5-pro", "-o", "text", "-p" },
+    .prompt_via = .final_arg,
+    .output = .raw,
+    .timeout_ms = 60_000,
+}},
+```
+
+**Gotcha — `--skip-trust` is mandatory.** The gemini CLI refuses
+headless (`-p`) runs in an untrusted workspace, and atty invokes it in
+the shell's cwd. The factory bakes `--skip-trust` in so calls don't
+fail with the trust error (alternatively set
+`GEMINI_CLI_TRUST_WORKSPACE=true` in the env). Note the tradeoff: this
+auto-trusts the current directory for that run, so gemini's own
+tool-calls execute there without a confirmation prompt. Auth stays in
+your `gemini` login; atty never sees tokens.
 
 Any prompt-in / text-out CLI follows the same pattern. For
 [simonw/llm](https://github.com/simonw/llm):
