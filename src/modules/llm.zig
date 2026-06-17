@@ -39,6 +39,7 @@ const pty_mod = @import("../pty.zig");
 const Pty = pty_mod.Pty;
 const parse = @import("llm/parse.zig");
 const types = @import("llm/types.zig");
+pub const prompts = @import("llm/prompts.zig");
 const dialog = @import("llm/dialog.zig");
 const chat_persist = @import("llm/chat_persist.zig");
 const sys_context = @import("llm/sys_context.zig");
@@ -82,6 +83,10 @@ pub const providers = struct {
     pub fn claudeCode(comptime options: struct {
         model: []const u8 = "",
         extra_argv: []const []const u8 = &.{},
+        /// Appended to atty's mode prompt for this provider. Defaults
+        /// to the agentic-CLI guidance (claude-code has its own tools;
+        /// steer it to the `exec` block). Set "" to drop it.
+        prompt_ext: []const u8 = prompts.agentic_cli_ext,
     }) Provider {
         const argv = comptime blk: {
             const has_model = options.model.len > 0;
@@ -104,6 +109,7 @@ pub const providers = struct {
             .prompt_via = .final_arg,
             .output = .{ .json_field = "result" },
             .timeout_ms = 60_000,
+            .prompt_ext = options.prompt_ext,
         } };
     }
 
@@ -127,6 +133,9 @@ pub const providers = struct {
         /// default because it delegates conversation memory to the
         /// CLI; opt in deliberately.
         continuation: bool = false,
+        /// Appended to atty's mode prompt for this provider. Defaults
+        /// to the agentic-CLI guidance. Set "" to drop it.
+        prompt_ext: []const u8 = prompts.agentic_cli_ext,
     }) Provider {
         const argv = comptime blk: {
             const has_model = options.model.len > 0;
@@ -157,6 +166,7 @@ pub const providers = struct {
             .output = .{ .json_stream = .{ .field = "result" } },
             .session = if (options.continuation) .{ .continuation = .{} } else .none,
             .timeout_ms = 60_000,
+            .prompt_ext = options.prompt_ext,
         } };
     }
 
@@ -212,6 +222,10 @@ pub const providers = struct {
     pub fn simonwLlm(comptime options: struct {
         model: []const u8,
         extra_argv: []const []const u8 = &.{},
+        /// Appended to atty's mode prompt for this provider. Default
+        /// "" — `llm` is a plain prompt→completion CLI with no
+        /// built-in tools, so no agentic steering is needed.
+        prompt_ext: []const u8 = "",
     }) Provider {
         const argv = comptime blk: {
             var buf: [3 + options.extra_argv.len][]const u8 = undefined;
@@ -227,6 +241,7 @@ pub const providers = struct {
             .prompt_via = .stdin,
             .output = .raw,
             .timeout_ms = 60_000,
+            .prompt_ext = options.prompt_ext,
         } };
     }
 
@@ -244,6 +259,10 @@ pub const providers = struct {
     pub fn geminiCli(comptime options: struct {
         model: []const u8 = "",
         extra_argv: []const []const u8 = &.{},
+        /// Appended to atty's mode prompt for this provider. Defaults
+        /// to the agentic-CLI guidance (gemini-cli has its own tools;
+        /// steer it to the `exec` block). Set "" to drop it.
+        prompt_ext: []const u8 = prompts.agentic_cli_ext,
     }) Provider {
         const argv = comptime blk: {
             const has_model = options.model.len > 0;
@@ -278,6 +297,7 @@ pub const providers = struct {
             .prompt_via = .final_arg,
             .output = .raw,
             .timeout_ms = 60_000,
+            .prompt_ext = options.prompt_ext,
         } };
     }
 

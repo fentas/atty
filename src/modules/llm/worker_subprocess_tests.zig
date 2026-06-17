@@ -53,6 +53,7 @@ test "subprocess (raw): echo returns its arg as the command" {
         "",
         "ls -la",
         "",
+        "",
         &.{},
         &_sid_buf,
         &_sid_len,
@@ -167,6 +168,7 @@ test "subprocess: spawn failure populates error_out, returns 0" {
         "bash",
         "",
         "irrelevant",
+        "",
         "",
         &.{},
         &_sid_buf,
@@ -284,6 +286,28 @@ test "geminiCli factory: no-model + extra_argv branch lands extras before -p" {
         llm.providers.geminiCli(.{ .model = "gemini-2.5-pro", .extra_argv = &.{ "--yolo", "--approval-mode", "yolo" } }),
         &.{ "gemini", "--skip-trust", "-m", "gemini-2.5-pro", "-o", "text", "--yolo", "--approval-mode", "yolo", "-p" },
     );
+}
+
+test "prompt_ext: agentic CLI presets carry the steering text, plain providers don't" {
+    const llm = @import("../llm.zig");
+    const agentic = llm.prompts.agentic_cli_ext;
+    try testing.expect(agentic.len > 0);
+    // Agentic CLIs (own tools) default to the steering extension.
+    try testing.expectEqualStrings(agentic, types.providerPromptExt(llm.providers.gemini_2_5_pro));
+    try testing.expectEqualStrings(agentic, types.providerPromptExt(llm.providers.gemini_2_5_flash));
+    try testing.expectEqualStrings(agentic, types.providerPromptExt(llm.providers.claude_opus_4_7));
+    try testing.expectEqualStrings(agentic, types.providerPromptExt(llm.providers.claudeCodeStream(.{ .model = "claude-opus-4-7" })));
+    // Plain transports have no built-in tools → no extension.
+    try testing.expectEqualStrings("", types.providerPromptExt(llm.providers.openai));
+    try testing.expectEqualStrings("", types.providerPromptExt(llm.providers.ollama));
+    try testing.expectEqualStrings("", types.providerPromptExt(llm.providers.simonwLlm(.{ .model = "gpt-4o-mini" })));
+}
+
+test "prompt_ext: override replaces the preset default" {
+    const llm = @import("../llm.zig");
+    try testing.expectEqualStrings("just exec please", types.providerPromptExt(llm.providers.geminiCli(.{ .model = "gemini-2.5-pro", .prompt_ext = "just exec please" })));
+    // Explicitly empty drops the steering text.
+    try testing.expectEqualStrings("", types.providerPromptExt(llm.providers.geminiCli(.{ .model = "gemini-2.5-pro", .prompt_ext = "" })));
 }
 
 test "openai preset hits the right base URL + key env" {
