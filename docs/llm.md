@@ -398,6 +398,7 @@ Available as `Config.provider.http.<field>` (or on each
 | `api_base_env`                | `"LLM_API_BASE"`   | Env-var name for the primary endpoint.                                                |
 | `api_base_fallback_env`       | `"OLLAMA_HOST"`    | Env-var name for the Ollama-native fallback (`/v1` auto-suffixed).                    |
 | `api_key_env`                 | `"LLM_API_KEY"`    | Env-var name for the optional `Authorization: Bearer …` token.                        |
+| `prompt_ext`                  | `""`               | Text appended to atty's mode prompt for this provider (same as the subprocess field below). Empty for the `openai`/`ollama` presets — plain HTTP models have no built-in tools to steer away from — but settable if you want per-model prompt steering. |
 
 ### Per-mode dispatch (`providers[]`)
 

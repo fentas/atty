@@ -40,7 +40,9 @@ pub const prompt_auto: []const u8 = @embedFile("prompts/auto.md");
 /// runtime exposes their own shell/filesystem tools. Tells the model
 /// those tools don't work under atty and to route everything through
 /// the `exec` block. The `geminiCli`/`claudeCode` presets default
-/// `prompt_ext` to this; plain HTTP models never see it.
+/// `prompt_ext` to this; the plain HTTP presets (`openai`, `ollama`)
+/// leave it empty — though any provider, HTTP included, can opt in via
+/// its own `prompt_ext`.
 pub const agentic_cli_ext: []const u8 = @embedFile("prompts/agentic_cli.md");
 
 /// Select the atty-owned prompt for `mode`. Caller appends the
