@@ -3222,8 +3222,16 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // set none). The body carries it to both the HTTP and
             // subprocess dialog transports.
             const provider_ext = types.providerPromptExt(resolved_for_body.provider);
+            // Degrade to the un-extended prompt on OOM rather than
+            // `try`: with fixture configs the only other error path
+            // (`BodyTooLarge`) is comptime-eliminated, so propagating
+            // here would make this fn's error set non-empty and force
+            // the `error.BodyTooLarge` switch prongs in callers to be
+            // validated against a set that no longer contains it. A
+            // failed ext-alloc means the agentic steering is missing
+            // for one request — cosmetic next to crashing the build.
             const live_prompt_alloc: ?[]u8 = if (provider_ext.len > 0)
-                try std.fmt.allocPrint(rt.allocator, "{s}\n\n{s}", .{ base_prompt, provider_ext })
+                std.fmt.allocPrint(rt.allocator, "{s}\n\n{s}", .{ base_prompt, provider_ext }) catch null
             else
                 null;
             defer if (live_prompt_alloc) |p| rt.allocator.free(p);
