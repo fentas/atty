@@ -3223,7 +3223,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // subprocess dialog transports.
             const provider_ext = types.providerPromptExt(resolved_for_body.provider);
             const live_prompt_alloc: ?[]u8 = if (provider_ext.len > 0)
-                std.fmt.allocPrint(rt.allocator, "{s}\n\n{s}", .{ base_prompt, provider_ext }) catch null
+                try std.fmt.allocPrint(rt.allocator, "{s}\n\n{s}", .{ base_prompt, provider_ext })
             else
                 null;
             defer if (live_prompt_alloc) |p| rt.allocator.free(p);
