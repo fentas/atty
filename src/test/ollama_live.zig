@@ -149,6 +149,7 @@ test "live: single-mode round-trip returns a non-empty command" {
         "", // context_blob
         "echo the literal word hello",
         env_setup.model,
+        "", // prompt_ext (plain HTTP — none)
         &cmd_buf,
         &exp_buf,
         &err_buf,

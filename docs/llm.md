@@ -398,6 +398,7 @@ Available as `Config.provider.http.<field>` (or on each
 | `api_base_env`                | `"LLM_API_BASE"`   | Env-var name for the primary endpoint.                                                |
 | `api_base_fallback_env`       | `"OLLAMA_HOST"`    | Env-var name for the Ollama-native fallback (`/v1` auto-suffixed).                    |
 | `api_key_env`                 | `"LLM_API_KEY"`    | Env-var name for the optional `Authorization: Bearer …` token.                        |
+| `prompt_ext`                  | `""`               | Text appended to atty's mode prompt for this provider (same as the subprocess field below). Empty for the `openai`/`ollama` presets — plain HTTP models have no built-in tools to steer away from — but settable if you want per-model prompt steering. |
 
 ### Per-mode dispatch (`providers[]`)
 
@@ -437,6 +438,9 @@ Available as `Config.provider.subprocess.<field>`:
 | `output`       | `.raw`         | `.raw` = stdout text IS the response; `.{ .json_field = "name" }` = parse stdout as JSON, take the named top-level string field; `.{ .json_stream = .{ .field = "result" } }` = newline-delimited JSON (claude's `--output-format stream-json`), skips intermediate `system` / `assistant` events and takes the named field from the `type="result"` line. |
 | `timeout_ms`   | `30_000`       | Wall-clock timeout in ms. A watchdog thread sends SIGTERM (then SIGKILL after 200 ms grace) when the budget expires. Set to `0` to disable. |
 | `session`      | `.none`        | CLI-side session continuation. `.none` sends the full rendered conversation each request (works for any CLI). `.{ .continuation = .{ .flag = "--resume", .id_field = "session_id" } }` captures the session id from the CLI's stream-json `type=system,subtype=init` event and reuses it via the named argv flag on subsequent turns. Only meaningful with `output = .json_stream`. Use `providers.claudeCodeStream(.{ .continuation = true })` for the canned claude shape. |
+| `prompt_ext`   | `""`           | Provider-specific text appended to atty's resolved mode prompt for requests this provider serves — after the mode's user extension (`cfg.system_prompt` in single mode, `cfg.dialog_system_prompt` in dialog/auto/chat). The `geminiCli` / `claudeCode` / `claudeCodeStream` factories default it to the **agentic-CLI** guidance — agentic CLIs expose their own `run_shell_command` / `list_directory` tools, and this tells the model those don't work under atty and to route everything through the `exec` block. Plain HTTP models (`openai`, `ollama`) leave it empty. Override per provider: `providers.geminiCli(.{ .model = "gemini-2.5-pro", .prompt_ext = "…" })`, or `""` to drop it. `HttpProvider` has the same field. |
+
+> **Why agentic CLIs need this.** `gemini`/`claude` run as autonomous agents with their own filesystem/shell tools. Without the steering text they'll reach for those tools instead of emitting atty's `exec` block — atty never sees the result and the user can't confirm it. The presets ship the override on by default so chat/dialog "just works"; a plain prompt→completion model (`simonw/llm`, OpenAI HTTP) has no such tools and gets no extra text.
 
 ### Session continuation — trade-offs
 
