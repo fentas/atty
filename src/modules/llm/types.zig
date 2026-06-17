@@ -267,10 +267,12 @@ pub const HttpProvider = struct {
     /// Env-var holding the API key. Optional — when unset we send
     /// no `Authorization` header.
     api_key_env: []const u8 = "LLM_API_KEY",
-    /// Provider-specific text appended to atty's mode prompt for
-    /// requests this provider serves (after `cfg.system_prompt`).
-    /// Empty for plain HTTP models — they have no built-in tools to
-    /// steer away from. See `SubprocessProvider.prompt_ext`.
+    /// Provider-specific text appended to atty's resolved mode prompt
+    /// for requests this provider serves — after the mode's user
+    /// extension (`cfg.system_prompt` in single mode,
+    /// `cfg.dialog_system_prompt` in dialog/auto/chat). Empty for
+    /// plain HTTP models — they have no built-in tools to steer away
+    /// from. See `SubprocessProvider.prompt_ext`.
     prompt_ext: []const u8 = "",
 };
 
@@ -334,8 +336,10 @@ pub const SubprocessProvider = struct {
     /// CLIs. Set to 0 to disable the watchdog entirely.
     timeout_ms: u64 = 30_000,
 
-    /// Provider-specific text appended to atty's mode prompt (after
-    /// `cfg.system_prompt`) for requests this provider serves.
+    /// Provider-specific text appended to atty's resolved mode prompt
+    /// for requests this provider serves — after the mode's user
+    /// extension (`cfg.system_prompt` in single mode,
+    /// `cfg.dialog_system_prompt` in dialog/auto/chat).
     /// Agentic CLIs (gemini, claude) ship a default here that tells
     /// the model its own built-in tools don't work under atty and to
     /// route everything through the `exec` block — see
