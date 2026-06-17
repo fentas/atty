@@ -229,6 +229,60 @@ pub const providers = struct {
             .timeout_ms = 60_000,
         } };
     }
+
+    /// Build a subprocess provider for the Gemini CLI's headless mode
+    /// (`gemini --skip-trust [-m MODEL] -o text … -p <prompt>`). The
+    /// CLI handles its own auth from the user's gemini login; atty
+    /// doesn't see tokens. `--skip-trust` is mandatory: gemini refuses
+    /// headless runs in an untrusted workspace, and atty invokes it in
+    /// the shell's cwd. `-o text` keeps stdout the bare reply (parsed
+    /// `.raw`). The prompt rides the trailing `-p` slot, so argv ENDS
+    /// in `-p` and atty appends the rendered prompt after it. `model`
+    /// empty → CLI default; `extra_argv` lands before the `-p` slot.
+    pub fn geminiCli(comptime options: struct {
+        model: []const u8 = "",
+        extra_argv: []const []const u8 = &.{},
+    }) Provider {
+        const argv = comptime blk: {
+            const has_model = options.model.len > 0;
+            // gemini --skip-trust [-m MODEL] -o text <extra…> -p
+            const fixed_len: usize = (if (has_model) @as(usize, 6) else 4) + 1;
+            var buf: [fixed_len + options.extra_argv.len][]const u8 = undefined;
+            var i: usize = 0;
+            buf[i] = "gemini";
+            i += 1;
+            buf[i] = "--skip-trust";
+            i += 1;
+            if (has_model) {
+                buf[i] = "-m";
+                i += 1;
+                buf[i] = options.model;
+                i += 1;
+            }
+            buf[i] = "-o";
+            i += 1;
+            buf[i] = "text";
+            i += 1;
+            for (options.extra_argv) |a| {
+                buf[i] = a;
+                i += 1;
+            }
+            buf[i] = "-p"; // prompt appended as the final argv slot
+            const fixed = buf;
+            break :blk &fixed;
+        };
+        return .{ .subprocess = .{
+            .argv = argv,
+            .prompt_via = .final_arg,
+            .output = .raw,
+            .timeout_ms = 60_000,
+        } };
+    }
+
+    /// Gemini 2.5 Pro — biggest Gemini; best for chat / hairy prompts.
+    pub const gemini_2_5_pro: Provider = geminiCli(.{ .model = "gemini-2.5-pro" });
+    /// Gemini 2.5 Flash — fast + cheap; good for one-shot `#:` work.
+    pub const gemini_2_5_flash: Provider = geminiCli(.{ .model = "gemini-2.5-flash" });
 };
 
 /// Submodule re-exports for tests + advanced users that want to

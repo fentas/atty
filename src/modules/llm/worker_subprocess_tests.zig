@@ -249,6 +249,34 @@ test "preset constants pin the expected model identifier" {
     }
 }
 
+test "geminiCli factory: skip-trust + text output, prompt via trailing -p" {
+    const llm = @import("../llm.zig");
+    const p = llm.providers.gemini_2_5_pro;
+    switch (p) {
+        .http => unreachable,
+        .subprocess => |sub| {
+            try testing.expectEqualStrings("gemini", sub.argv[0]);
+            // --skip-trust is mandatory for headless runs in untrusted dirs.
+            var saw_skip = false;
+            var saw_model = false;
+            for (sub.argv) |a| {
+                if (std.mem.eql(u8, a, "--skip-trust")) saw_skip = true;
+                if (std.mem.eql(u8, a, "gemini-2.5-pro")) saw_model = true;
+            }
+            try testing.expect(saw_skip);
+            try testing.expect(saw_model);
+            // The prompt rides the trailing slot, so argv must END in -p
+            // (atty appends the rendered prompt after it).
+            try testing.expectEqualStrings("-p", sub.argv[sub.argv.len - 1]);
+            try testing.expectEqual(types.SubprocessProvider.PromptVia.final_arg, sub.prompt_via);
+            switch (sub.output) {
+                .raw => {},
+                .json_field, .json_stream => unreachable,
+            }
+        },
+    }
+}
+
 test "openai preset hits the right base URL + key env" {
     const llm = @import("../llm.zig");
     switch (llm.providers.openai) {
