@@ -201,6 +201,46 @@ test "configure exposes deleteHistoryMatch hook (regression: atuin-side delete m
     try testing.expect(@hasDecl(A, "deleteHistoryMatch"));
 }
 
+// ---- search argv (newest-first ordering) --------------------------------------
+
+test "buildSearchArgv: emits --reverse so the inline ghost is the newest match" {
+    // Regression: atuin's `search` CLI prints matches oldest→newest
+    // (freshest pinned last). atty reads row 0 as the inline ghost, so
+    // without --reverse it surfaced the OLDEST match and the command the
+    // user just ran fell off the bottom of the pick list. Pin the flag.
+    const A = configure(.{});
+    const argv = A.buildSearchArgv("nmcli");
+    var saw_reverse = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--reverse")) saw_reverse = true;
+    }
+    try testing.expect(saw_reverse);
+}
+
+test "buildSearchArgv: query is the trailing positional, flags carry cfg" {
+    const A = configure(.{ .search_mode = .fuzzy, .filter_mode = .session, .list_count_max = 5 });
+    const argv = A.buildSearchArgv("git st");
+    try testing.expectEqualStrings("atuin", argv[0]);
+    try testing.expectEqualStrings("search", argv[1]);
+    try testing.expectEqualStrings("--search-mode", argv[2]);
+    try testing.expectEqualStrings("fuzzy", argv[3]);
+    try testing.expectEqualStrings("--filter-mode", argv[4]);
+    try testing.expectEqualStrings("session", argv[5]);
+    try testing.expectEqualStrings("--limit", argv[6]);
+    try testing.expectEqualStrings("5", argv[7]);
+    try testing.expectEqualStrings("--reverse", argv[8]);
+    try testing.expectEqualStrings("--cmd-only", argv[9]);
+    // Query must be the LAST slot — atuin treats it as the positional
+    // search term; any flag after it would be parsed as the query.
+    try testing.expectEqualStrings("git st", argv[argv.len - 1]);
+}
+
+test "buildSearchArgv: custom atuin_binary flows through to argv[0]" {
+    const A = configure(.{ .atuin_binary = "/opt/atuin/bin/atuin" });
+    const argv = A.buildSearchArgv("ls");
+    try testing.expectEqualStrings("/opt/atuin/bin/atuin", argv[0]);
+}
+
 // ---- record FIFO + sync lifecycle regressions ---------------------------------
 
 test "config exposes record_queue_capacity + sync_on_detach_timeout_ms knobs" {

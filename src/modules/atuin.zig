@@ -418,7 +418,28 @@ pub fn configure(comptime cfg: Config) type {
             };
         }
 
-        fn subprocessLookup(gpa: std.mem.Allocator, io: std.Io, query: []const u8, out: []u8) !?usize {
+        /// Pure argv builder for the search lookup, factored out so the
+        /// flag set — in particular `--reverse` — is unit-testable
+        /// without spawning atuin. The query is the only runtime input;
+        /// every other slot is fixed by `cfg` at comptime.
+        ///
+        /// atuin's `search` CLI emits matches oldest→newest: the freshest
+        /// command is pinned LAST, mirroring the interactive TUI where the
+        /// most recent match sits nearest the prompt. atty reads row 0 as
+        /// the inline ghost and walks rows top-down for the pick list, so
+        /// it needs newest-FIRST — hence `--reverse`. Without it the
+        /// inline ghost is the oldest match and the command you just ran
+        /// falls off the bottom of the list. (`--limit` already selects
+        /// the N newest matches; `--reverse` only flips their display
+        /// order, so nothing is lost.) The CLI help's "oldest first"
+        /// wording is misleading: empirically `--reverse` puts the newest
+        /// match at the top.
+        ///
+        /// We fetch up to `list_count_max` rows on one round-trip so a
+        /// single keystroke feeds both the inline ghost (first row) and
+        /// the multi-row pick list (remaining rows). The proxy reads
+        /// `cfg.ghost.list_count` from these — bounded by `list_count_max`.
+        pub fn buildSearchArgv(query: []const u8) [11][]const u8 {
             const search_arg = switch (cfg.search_mode) {
                 .prefix => "prefix",
                 .full_text => "full-text",
@@ -431,17 +452,7 @@ pub fn configure(comptime cfg: Config) type {
                 .directory => "directory",
             };
             const limit_arg = std.fmt.comptimePrint("{d}", .{cfg.list_count_max});
-
-            // No --reverse: atuin's default order is newest-first, which
-            // is what a "fish-style autosuggest" wants. With --reverse
-            // we'd pin the oldest matches at the front.
-            //
-            // We fetch up to `list_count_max` rows on one round-trip so
-            // a single keystroke produces enough data for both the
-            // inline ghost (first row) and the multi-row pick list
-            // (remaining rows). The proxy reads `cfg.ghost.list_count`
-            // from these — bounded above by `list_count_max`.
-            const argv = [_][]const u8{
+            return .{
                 cfg.atuin_binary,
                 "search",
                 "--search-mode",
@@ -450,9 +461,14 @@ pub fn configure(comptime cfg: Config) type {
                 filter_arg,
                 "--limit",
                 limit_arg,
+                "--reverse",
                 "--cmd-only",
                 query,
             };
+        }
+
+        fn subprocessLookup(gpa: std.mem.Allocator, io: std.Io, query: []const u8, out: []u8) !?usize {
+            const argv = buildSearchArgv(query);
 
             const result = std.process.run(gpa, io, .{
                 .argv = &argv,
