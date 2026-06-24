@@ -220,6 +220,10 @@ test "buildSearchArgv: emits --reverse so the inline ghost is the newest match" 
 test "buildSearchArgv: query is the trailing positional, flags carry cfg" {
     const A = configure(.{ .search_mode = .fuzzy, .filter_mode = .session, .list_count_max = 5 });
     const argv = A.buildSearchArgv("git st");
+    // Localize the length contract: the index-pinned asserts below
+    // already trip if a slot is added/removed, but a single len check
+    // names the invariant the `[11]` return type encodes.
+    try testing.expectEqual(@as(usize, 11), argv.len);
     try testing.expectEqualStrings("atuin", argv[0]);
     try testing.expectEqualStrings("search", argv[1]);
     try testing.expectEqualStrings("--search-mode", argv[2]);
