@@ -419,12 +419,11 @@ pub fn configure(comptime cfg: Config) type {
         }
 
         /// atuin's `search` CLI emits matches oldest→newest — the
-        /// freshest command is pinned LAST. Autosuggestion wants the most
-        /// recent match first, so `--reverse` flips the output. `--limit`
-        /// selects the newest N up front; `--reverse` only reorders them,
-        /// so nothing is dropped. (The CLI help's "oldest first" wording
-        /// is misleading: empirically `--reverse` puts the newest match
-        /// at the top.)
+        /// freshest command is pinned LAST — so `--reverse` is required
+        /// for newest-first output. `--limit` selects the newest N up
+        /// front; `--reverse` only reorders them, so nothing is dropped.
+        /// (The CLI help's "oldest first" wording is misleading:
+        /// empirically `--reverse` puts the newest match at the top.)
         pub fn buildSearchArgv(query: []const u8) [11][]const u8 {
             const search_arg = switch (cfg.search_mode) {
                 .prefix => "prefix",

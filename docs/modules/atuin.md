@@ -22,9 +22,10 @@ Fish/zsh-autosuggestion-style ghost text driven by your [Atuin](https://github.c
 1. Every keystroke updates the line model; `onInput` copies the
    current buffer into the worker's latest-wins query slot and signals.
 2. The worker calls `atuin search --search-mode prefix --filter-mode
-   global --limit <list_count_max> --cmd-only <query>` (newest match
-   wins; no `--reverse` — that flag flips the default and gives the
-   *oldest* match instead). `list_count_max` defaults to 9 so the
+   global --limit <list_count_max> --reverse --cmd-only <query>`.
+   atuin emits matches oldest→newest (freshest pinned last), so
+   `--reverse` flips them to newest-first; without it the inline ghost
+   would be the *oldest* match. `list_count_max` defaults to 9 so the
    inline ghost uses entry 0 and the multi-row pick list
    (`Ctrl+1..9`) consumes the rest.
 3. `provideGhostText` reads the latest result under a mutex; if it
