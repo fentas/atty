@@ -418,7 +418,13 @@ pub fn configure(comptime cfg: Config) type {
             };
         }
 
-        fn subprocessLookup(gpa: std.mem.Allocator, io: std.Io, query: []const u8, out: []u8) !?usize {
+        /// atuin's `search` CLI emits matches oldest→newest — the
+        /// freshest command is pinned LAST — so `--reverse` is required
+        /// for newest-first output. `--limit` selects the newest N up
+        /// front; `--reverse` only reorders them, so nothing is dropped.
+        /// (The CLI help's "oldest first" wording is misleading:
+        /// empirically `--reverse` puts the newest match at the top.)
+        pub fn buildSearchArgv(query: []const u8) [11][]const u8 {
             const search_arg = switch (cfg.search_mode) {
                 .prefix => "prefix",
                 .full_text => "full-text",
@@ -431,17 +437,7 @@ pub fn configure(comptime cfg: Config) type {
                 .directory => "directory",
             };
             const limit_arg = std.fmt.comptimePrint("{d}", .{cfg.list_count_max});
-
-            // No --reverse: atuin's default order is newest-first, which
-            // is what a "fish-style autosuggest" wants. With --reverse
-            // we'd pin the oldest matches at the front.
-            //
-            // We fetch up to `list_count_max` rows on one round-trip so
-            // a single keystroke produces enough data for both the
-            // inline ghost (first row) and the multi-row pick list
-            // (remaining rows). The proxy reads `cfg.ghost.list_count`
-            // from these — bounded above by `list_count_max`.
-            const argv = [_][]const u8{
+            return .{
                 cfg.atuin_binary,
                 "search",
                 "--search-mode",
@@ -450,9 +446,14 @@ pub fn configure(comptime cfg: Config) type {
                 filter_arg,
                 "--limit",
                 limit_arg,
+                "--reverse",
                 "--cmd-only",
                 query,
             };
+        }
+
+        fn subprocessLookup(gpa: std.mem.Allocator, io: std.Io, query: []const u8, out: []u8) !?usize {
+            const argv = buildSearchArgv(query);
 
             const result = std.process.run(gpa, io, .{
                 .argv = &argv,
