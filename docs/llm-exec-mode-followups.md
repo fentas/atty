@@ -5,6 +5,8 @@ title: Follow-up improvements
 
 # Follow-up improvements — design questions to revisit
 
+> **Status (2026-06): historical design-questions log.** Some items have since been resolved (OSC 133 landed; ghost-text edge cases fixed); others may remain open. Not a live tracker — check git history / issues for current state.
+
 Tracking items that surfaced during the Wave 2/3/4 refactor sweep
 + feature implementation but are deliberately deferred because they
 either:

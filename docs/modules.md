@@ -14,7 +14,7 @@ permalink: /modules/
 | [`atuin`]({{ '/modules/atuin/' | relative_url }}) | Ghost suggestions + recording via Atuin's `atuin search` / `atuin history start` | opt-in |
 | [`guardrail`]({{ '/modules/guardrail/' | relative_url }}) | Comptime-list confirmation for `rm -rf`, `dd`, fork bombs, `curl … \| sh` | ✅ |
 | [`history`]({{ '/modules/history/' | relative_url }}) | Shell-native suggestions from `~/.bash_history` / `~/.zsh_history` | ✅ |
-| [`llm`]({{ '/llm/' | relative_url }}) | `#: <intent>` → command rewrite; Alt+A single, Alt+S dialog, Alt+R recall | opt-in |
+| [`llm`]({{ '/llm/' | relative_url }}) | `#: <intent>` → command rewrite; Alt+A single · Alt+S dialog · Alt+C chat · Alt+r resend | opt-in |
 | [`mouse_links`]({{ '/modules/mouse_links/' | relative_url }}) | Left-click a path token in output → `$EDITOR +LINE 'path'` | opt-in |
 | [`mouse_urls`]({{ '/modules/mouse_urls/' | relative_url }}) | Left-click a URL → opener, gated by `whitelist_only` / `ask_each` trust | opt-in |
 | [`security_guard`]({{ '/modules/security_guard/' | relative_url }}) | Pre-Enter Tier-1 + UDS to atty-guard sidecar; `Alt+Shift+W` warn dump | opt-in |

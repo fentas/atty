@@ -1,5 +1,7 @@
 # LLM exec mode — post-#21 roadmap
 
+> **Status (2026-06): historical record.** The PR waves below have shipped; this is the original plan, not a live queue. For current LLM behavior see [llm.md](llm.md).
+
 Living plan for the work remaining after the Alt+S exec dialog (PR #21) lands.
 Each PR below runs **10 rounds of the Copilot review loop per PR** (early-stops
 on two empty rounds in a row), then squash-merges to master.

