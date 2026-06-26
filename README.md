@@ -292,7 +292,7 @@ Two layers, both opt-in beyond the default guardrail.
 
 - **Tiered classifier** — Tier-1 regex + an Aho-Corasick scan over a threat-**atom** corpus (GTFOBins + sanitized Sigma); optional Tier-2 SLM (ONNX: SecureBERT 2.0 / Qwen2.5-Coder, pure-Rust `tract`).
 - **Multi-hit accumulator** — combines every signal that fires into one confidence score, so death-by-a-thousand-cuts attacks (Shai-Hulud-style) escalate; opt-in auto-**Block** above a threshold.
-- **eBPF LSM** — kernel-side `bprm_check_security` hook + `execve`/`AF_ALG` tracepoints enforce verdicts even when a payload forks away from the shell.
+- **eBPF LSM** — a kernel-side `bprm_check_security` hook gates a flagged process's **direct children** at `execve` (plus `execve`/`AF_ALG` tracepoints), backstopping a payload that bypasses atty's readline. One level only — see the [threat model](https://atty.sh/operator-workflow/) for exactly what it does and doesn't stop.
 - **Live CVE lookups** — `npm install <pkg>` hits OSV.dev when the local list misses.
 - **Auto-updating atoms + per-UID trust** — corpus refreshed from upstream (with opt-in commit pinning); trust decisions persist per user via a sudo-mediated CLI.
 
@@ -304,7 +304,7 @@ Warn   → ! banner: [y]es once · [a]llow always · [t]rust · [B]lock host · 
 Block  → ✗ red REFUSED line, readline cleared (and eBPF EPERMs the child tree)
 ```
 
-Manage trust and atoms with `sudo atty-guard atoms|urls|session|trust …` (SO_PEERCRED-gated, per-UID), and dump buffered warn events to scrollback with `Alt+Shift+W`. Cargo features `tier2-onnx`, `osv-live`, `atoms-fetch` (default) and `ebpf` (opt-in) gate each capability. Setup + verification: [operator-workflow](https://atty.sh/operator-workflow/).
+Manage trust and atoms with `sudo atty-guard atoms|urls|session|trust …` (SO_PEERCRED-gated, per-UID), and dump buffered warn events to scrollback with `Alt+Shift+W`. Cargo features `tier2-onnx`, `osv-live`, `atoms-fetch` (the `make install-guard` default) and `ebpf` (opt-in) gate each capability. Setup + verification: [operator-workflow](https://atty.sh/operator-workflow/).
 
 &nbsp;
 

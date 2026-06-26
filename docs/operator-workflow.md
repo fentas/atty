@@ -569,12 +569,17 @@ does and doesn't stop:
   passes through atty's prompt (a cron job, a compromised dotfile, a
   background daemon). atty-guard raises the cost and catches the
   obvious shapes; it does not contain a hostile process.
-- **eBPF Block is scoped to the marked PID tree.** The LSM hook
-  refuses `execve()` for processes descended from a PID atty flagged
-  Critical. A *fresh* login (a new SSH session, a separate terminal,
-  a systemd service) starts a new tree that hasn't been classified —
-  it isn't covered until its own command trips a verdict. eBPF closes
-  the "fork away from the shell" gap, not "log in somewhere else."
+- **eBPF Block is one level deep.** The LSM hook gates the `execve()`
+  of a flagged process's *direct* children — **not** deeper
+  descendants. `npm`(flagged) → `node`(gated) → `sh`(NOT gated: its
+  parent `node` isn't flagged), and any double-fork / `nohup … &` /
+  daemonize reparents the descendant to PID 1 and drops the mark
+  entirely (see `atty-guard/ebpf/atty_guard.bpf.c`). It backstops a
+  payload that execs *directly* from the flagged process; it does
+  **not** contain one that deliberately detaches. Separately, a
+  *fresh* login (new SSH session, separate terminal, systemd service)
+  starts an unclassified tree that isn't covered until its own
+  command trips a verdict.
 - **Tier-1 + atoms are signature-based.** Regex and the IOC atom
   corpus catch *known* shapes. A novel payload that matches nothing
   is Safe at Tier-1 — that's what Tier-2 (the SLM) and the eBPF
