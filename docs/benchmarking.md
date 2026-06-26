@@ -32,17 +32,19 @@ Two tiers, because not everything can run in CI:
 ### Tier A — in-process microbenchmarks (CI-safe)
 
 A standalone `ReleaseFast` executable (`bench/main.zig`) that times
-tight loops over the hot paths and prints `ns/op` + bytes allocated
-(via a counting allocator, to assert the zero-alloc claim):
+tight loops over the hot paths and prints `ns/op` + the per-op
+**allocation count** (via a counting allocator, to assert the
+zero-alloc claim). The first three rows are implemented today; the rest
+are the planned target set:
 
-| Benchmark | Measures | Asserts |
-|---|---|---|
-| `dispatch_input` | one keystroke through the module chain (`Dispatcher(modules).dispatchInput`) | ns/op, **0 allocs** |
-| `ghost_text` | `provideGhostText` over a warm history ring (prefix match) | ns/op |
-| `line_state` | `LineState.applyInput` for printable / CSI / paste bursts | ns/op, 0 allocs |
-| `keymap_match` | CSI-u + legacy binding scan | ns/op |
-| `output_throughput` | `onOutput` over a multi-KiB shell chunk (mouse-ring ingest, SGR strip) | MB/s |
-| `atom_scan` (guard) | Aho-Corasick scan of a command line vs the atom corpus | ns/op |
+| Benchmark | Status | Measures | Asserts |
+|---|---|---|---|
+| `dispatch_input` | ✅ | one keystroke through the module chain (`Dispatcher(modules).dispatchInput`) | ns/op, **0 allocs** |
+| `line_state_apply` | ✅ | `LineState.applyInput` for printable / CSI bytes | ns/op, 0 allocs |
+| `ghost_text` | ✅ | `gatherGhostText` over a seeded history ring (prefix match + trailing copy) | ns/op, 0 allocs |
+| `keymap_match` | planned | CSI-u + legacy binding scan | ns/op |
+| `output_throughput` | planned | `onOutput` over a multi-KiB shell chunk (mouse-ring ingest, SGR strip) | MB/s |
+| `atom_scan` (guard) | planned | Aho-Corasick scan of a command line vs the atom corpus | ns/op |
 
 The alloc counter sees allocations made through `ctx.allocator` /
 `ctx.scratch` — the path the hot loop is supposed to use. A module that

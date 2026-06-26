@@ -58,6 +58,11 @@ const Counting = struct {
     }
     fn remap(p: *anyopaque, mem: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
         const self: *Counting = @ptrCast(@alignCast(p));
+        // remap is the realloc primitive — count it too, else a buffer
+        // that grows via realloc (not a fresh alloc) would be invisible
+        // and undercount the hot path. resize is in-place (no new
+        // memory) so it stays uncounted.
+        self.count += 1;
         return self.backing.rawRemap(mem, a, new_len, ra);
     }
     fn free(p: *anyopaque, mem: []u8, a: std.mem.Alignment, ra: usize) void {
@@ -120,6 +125,12 @@ fn runDispatchInput(env: *Env, iters: usize) void {
     // deleting the work we're timing.
     var i: usize = 0;
     while (i < iters) : (i += 1) {
+        // Keep the line well under max_line so it never flips into the
+        // `uncertain` path (which would benchmark the wrong branch).
+        // Threshold-reset rather than every-N so the (multi-KiB)
+        // LineState re-init amortizes to ~nothing per op instead of
+        // dominating the measurement.
+        if (env.line.current().len > 200) env.line.* = .{};
         std.mem.doNotOptimizeAway(env.line.applyInput("a"));
         const act = D.dispatchInput(env.rts, env.ctx, "a") catch atty.module.Action.forward;
         std.mem.doNotOptimizeAway(act);
@@ -131,15 +142,21 @@ fn runLineState(env: *Env, iters: usize) void {
     const samples = [_][]const u8{ "g", "i", "t", " ", "s", "\x1b[D", "\x1b[C", "\x08" };
     var i: usize = 0;
     while (i < iters) : (i += 1) {
+        if (env.line.current().len > 200) env.line.* = .{}; // bound length (see runDispatchInput)
         std.mem.doNotOptimizeAway(env.line.applyInput(samples[i % samples.len]));
     }
 }
 
 fn runGhostText(env: *Env, iters: usize) void {
     // Ghost suggestion lookup over the seeded ring (prefix scan +
-    // trailing-copy into scratch). Reset scratch each iteration the way
-    // the proxy does per event — otherwise the trailing-copy grows the
-    // buffer unbounded and reallocates instead of measuring steady state.
+    // trailing-copy into scratch). Set the input to a matching prefix
+    // here — the LineState is shared + sequential, so don't rely on what
+    // earlier benchmarks left in it. The loop only reads the line.
+    env.line.* = .{};
+    _ = env.line.applyInput("git ");
+    // Reset scratch each iteration the way the proxy does per event —
+    // otherwise the trailing-copy grows the buffer unbounded and
+    // reallocates instead of measuring steady state.
     var i: usize = 0;
     while (i < iters) : (i += 1) {
         env.ctx.scratch.clearRetainingCapacity();
@@ -215,10 +232,9 @@ pub fn main(init: std.process.Init) !void {
     defer scratch.deinit(alloc);
 
     // Seed the history ring (in-memory, no file I/O) so ghost_text
-    // exercises a real prefix scan rather than the empty-ring null
-    // path, then prime the input line to a matching prefix.
+    // exercises a real prefix scan. Each benchmark sets up the input
+    // line it needs — the LineState is shared and benches run in order.
     try seedHistory(&rts);
-    _ = line.applyInput("git ");
 
     var ctx: Context = .{
         .allocator = alloc,
