@@ -264,11 +264,9 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
         /// in the same shape as a freshly-typed prompt, so this both
         /// retries a soft failure (tail already the user turn — no-op
         /// trim) and regenerates after an answer (drops the trailing
-        /// assistant/observation turns). Shared by the Alt+r action and
-        /// the post-failure retry banner's Enter so the gate, the fire,
-        /// and the user-facing vocabulary stay in one place. Latches a
-        /// hint when a request is already running or nothing is left to
-        /// resend; arms the open surface's repaint either way.
+        /// assistant/observation turns). Latches a hint when a request
+        /// is already running or nothing is left to resend; arms the
+        /// open surface's repaint when it fires.
         fn resendLastPrompt(rt: *Runtime, ctx: *m.Context) void {
             if (rt.in_flight or rt.dialog_state != .idle) {
                 latchHint(rt, "resend: a request is already in flight");
