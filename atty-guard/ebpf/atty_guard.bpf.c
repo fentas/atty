@@ -51,8 +51,9 @@
 #define ENFORCE_ANCESTRY  1 // walk up to cfg.max_depth ancestors
 #define ENFORCE_PROPAGATE 2 // mark propagates on fork; check own PID
 
-// Compile-time ceiling on the ancestry walk — the runtime cfg.max_depth
-// clamps below this. Bounded so the verifier accepts the unrolled loop.
+// Compile-time ceiling on the ancestry walk — a larger runtime
+// cfg.max_depth is truncated here (the walk just stops at 16). Bounded
+// so the verifier accepts the (non-unrolled, pointer-chasing) loop.
 #define MAX_ANCESTRY 16
 
 // PID → threat level. Owned by userspace atty-guard; updated via
@@ -89,7 +90,7 @@ struct {
 // then padding to 8 bytes).
 struct enforce_config {
     __u8 mode;      // ENFORCE_ONE_LEVEL / _ANCESTRY / _PROPAGATE
-    __u8 max_depth; // ancestry ceiling (clamped to MAX_ANCESTRY)
+    __u8 max_depth; // ancestry ceiling; kernel walks at most MAX_ANCESTRY
     __u8 _pad[6];
 };
 
