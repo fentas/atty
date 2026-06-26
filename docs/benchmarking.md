@@ -44,6 +44,15 @@ tight loops over the hot paths and prints `ns/op` + bytes allocated
 | `output_throughput` | `onOutput` over a multi-KiB shell chunk (mouse-ring ingest, SGR strip) | MB/s |
 | `atom_scan` (guard) | Aho-Corasick scan of a command line vs the atom corpus | ns/op |
 
+The alloc counter sees allocations made through `ctx.allocator` /
+`ctx.scratch` — the path the hot loop is supposed to use. A module that
+captured a *different* allocator at `attach` (e.g. atuin's worker
+thread) and allocated through that in `onInput` would be invisible to
+the counter; the figure is "zero alloc on the dispatched path," which is
+the property that matters for the keystroke loop. The
+`hot path makes zero heap allocations` test (in `bench/main.zig`, run by
+`zig build test`) gates this so a regression fails CI.
+
 Output is a stable table (and a `--json` mode) so CI can diff against a
 committed baseline and fail a PR that regresses the hot path past a
 threshold. Run:

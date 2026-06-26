@@ -203,23 +203,28 @@ pub fn build(b: *std.Build) void {
     //     zig build bench -Doptimize=ReleaseFast -- --json
     //     zig build bench -Doptimize=ReleaseFast -- --filter dispatch
     // -------------------------------------------------------------------------
-    const bench_exe = b.addExecutable(.{
-        .name = "atty-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "atty", .module = atty_module },
-            },
-        }),
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "atty", .module = atty_module },
+        },
     });
+    const bench_exe = b.addExecutable(.{ .name = "atty-bench", .root_module = bench_module });
     const run_bench = b.addRunArtifact(bench_exe);
     run_bench.has_side_effects = true; // always re-run; never cache the numbers
     if (b.args) |a| run_bench.addArgs(a);
-    const bench_step = b.step("bench", "Run microbenchmarks (build with -Doptimize=ReleaseFast)");
+    const bench_step = b.step("bench", "Run microbenchmarks (REQUIRES -Doptimize=ReleaseFast for meaningful numbers)");
     bench_step.dependOn(&run_bench.step);
+
+    // The harness's zero-allocation-hot-path assertion runs under
+    // `zig build test` so a regression in that claim fails CI — the
+    // bench binary itself is opt-in, but its guarantee is not.
+    const bench_tests = b.addTest(.{ .root_module = bench_module });
+    const run_bench_tests = b.addRunArtifact(bench_tests);
+    test_step.dependOn(&run_bench_tests.step);
 }
 
 /// Copy `src/config.def.zig` → `src/config.zig` if the latter is missing.

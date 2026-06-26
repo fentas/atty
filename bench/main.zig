@@ -136,14 +136,31 @@ fn runLineState(env: *Env, iters: usize) void {
 }
 
 fn runGhostText(env: *Env, iters: usize) void {
-    // Ghost suggestion lookup. Best-effort: with an empty history ring
-    // this measures the fast null path; with a populated one it measures
-    // the prefix scan. (The harness pre-seeds a `gi` prefix in main.)
+    // Ghost suggestion lookup over the seeded ring (prefix scan +
+    // trailing-copy into scratch). Reset scratch each iteration the way
+    // the proxy does per event — otherwise the trailing-copy grows the
+    // buffer unbounded and reallocates instead of measuring steady state.
     var i: usize = 0;
     while (i < iters) : (i += 1) {
+        env.ctx.scratch.clearRetainingCapacity();
         const g = D.gatherGhostText(env.rts, env.ctx) catch null;
         std.mem.doNotOptimizeAway(g);
     }
+}
+
+// Populate the history module's in-memory ring so ghost_text has
+// matches to scan. `bench_modules[1]` is the history type; `rts[1]` its
+// runtime. pushEntry touches no files.
+fn seedHistory(rts: *D.Runtimes) !void {
+    const History = bench_modules[1];
+    const seeds = [_][]const u8{
+        "git status",
+        "git commit -m wip",
+        "git push origin main",
+        "grep -rn TODO src",
+        "cargo build --release",
+    };
+    for (seeds) |s| try History.pushEntry(rts[1], s);
 }
 
 const benches = [_]Bench{
@@ -196,8 +213,12 @@ pub fn main(init: std.process.Init) !void {
     var line: LineState = .{};
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(alloc);
-    // Seed a prefix so the ghost-text scan has something to match.
-    _ = line.applyInput("gi");
+
+    // Seed the history ring (in-memory, no file I/O) so ghost_text
+    // exercises a real prefix scan rather than the empty-ring null
+    // path, then prime the input line to a matching prefix.
+    try seedHistory(&rts);
+    _ = line.applyInput("git ");
 
     var ctx: Context = .{
         .allocator = alloc,
@@ -236,4 +257,40 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("{s:<20} {d:>12.1} {d:>12.4}\n", .{ r.name, r.ns_per_op, r.allocs_per_op });
         }
     }
+}
+
+// CI gate for the zero-allocation-hot-path claim. Wired into
+// `zig build test` (see build.zig) so a change that makes the
+// per-keystroke path allocate (through ctx.allocator / ctx.scratch)
+// fails loudly rather than silently regressing a headline property.
+test "hot path makes zero heap allocations" {
+    const gpa = std.testing.allocator;
+    var counting: Counting = .{ .backing = gpa };
+    const alloc = counting.allocator();
+
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var rts = try D.attachAll(alloc, io);
+    defer D.detachAll(alloc, io, &rts);
+
+    var line: LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(alloc);
+    var ctx: Context = .{
+        .allocator = alloc,
+        .io = io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+    var env: Env = .{ .rts = &rts, .ctx = &ctx, .line = &line, .counting = &counting };
+
+    runDispatchInput(&env, 64); // warm up any one-time setup
+    runLineState(&env, 64);
+    const before = counting.count;
+    runDispatchInput(&env, 256);
+    runLineState(&env, 256);
+    try std.testing.expectEqual(@as(usize, 0), counting.count - before);
 }
