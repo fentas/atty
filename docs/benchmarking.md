@@ -91,31 +91,50 @@ userspace before/after delta drowns in container noise. With
 fork+exec workload is the precise mean ns *per program invocation* — the
 actual quantity we care about.
 
-#### Results (Phase 3, 6.x x86_64, fork+execve ×4000/mode, median of 3 runs)
+#### Results (Phase 3, x86_64, fork+execve ×4000/mode, median of 3)
 
-| mode | `check_execve` (per execve) | `trace_fork` (per fork) | `trace_exit` (per exit) |
-|---|---|---|---|
-| `one_level` | ~322 ns | ~85 ns (early-return) | ~330 ns |
-| `ancestry(8)` | ~425 ns (**+~100 ns**) | ~84 ns (early-return) | ~325 ns |
-| `propagate_on_fork` | ~309 ns | ~129 ns (**+~44 ns**) | ~261 ns |
+ns **per BPF-program invocation** (kernel `run_time_ns/run_cnt`). A
+fork+execve+exit fires four of our programs once each, so `sum/cmd` is
+the eBPF cost added per command:
 
-What the numbers say:
+| mode | `trace_fork` | `check_execve` | `trace_execve` | `trace_exit` | sum/cmd |
+|---|---|---|---|---|---|
+| `one_level` | 80 | 328 | 2596 | 327 | **3331 ns** |
+| `ancestry(8)` | 83 | 439 *(+111)* | 2613 | 343 | **3478 ns** |
+| `propagate_on_fork` | 129 *(+49)* | 333 | 2610 | 258 | **3330 ns** |
 
-- **The "cost of a full tree-shake" — the question that motivated making
-  this configurable — is negligible.** `ancestry(8)` adds **~100 ns per
-  execve** (the 8-hop `real_parent` walk, ~12 ns/hop); `propagate` adds
-  **~44 ns per fork** (the mark-copy) and is otherwise as cheap as
-  `one_level` on execve (an own-PID lookup ≈ a parent lookup). Against a
-  real fork+execve (hundreds of µs) every mode is **<0.5%** overhead.
-- `trace_exit` (~300 ns) is the priciest common-path hook — it runs the
-  GC `map_delete` on *every* process exit in *every* mode (the
-  leak-safe, mode-independent reclaim). One cheap hash op; aggregate
-  cost is ~0.03% CPU even at thousands of exits/s, so the leak-safety is
-  the right trade.
+Measured baseline: one Python `fork+execve(/bin/true)+wait` with eBPF
+off ≈ **1.13 ms/op** on this (loaded) box → sum/cmd is ≈ **0.3 %**.
 
-These emit a plain table; per-mode JSON can follow if a baseline gate is
-added (numbers are kernel-specific, so a committed baseline needs a
-pinned runner first — same caveat as Tier A).
+What the numbers say (lead with the absolute ns — the percentage's
+denominator is a Python fork on one loaded host; a C/shell exec is
+faster, so treat ~0.3 % as order-of-magnitude, the per-program ns as the
+portable figure):
+
+- **The enforcement-depth choice is not a perf differentiator.** The
+  only depth-dependent program is `check_execve`: 328 ns (one_level) →
+  439 ns (`ancestry(8)`, **+111 ns** for the 8-hop walk) → 333 ns
+  (propagate, an own-PID lookup ≈ a parent lookup). `propagate` adds
+  **+49 ns/fork** in `trace_fork`. Single-digit-to-low-hundreds of
+  nanoseconds — negligible against any real command's process creation.
+  So the **"cost of a full tree-shake" that motivated making this
+  configurable is, empirically, nothing to worry about.**
+- **The dominant eBPF cost is `trace_execve` (~2600 ns/execve), and it's
+  identical across modes** — the existing execve-argument-capture
+  tracepoint that feeds the Tier-1/2 classifier, unrelated to the depth
+  feature. ~78 % of sum/cmd. If per-execve eBPF cost ever matters, *that*
+  is the program to optimize, not the enforcement-depth branch.
+- `propagate`'s +49 ns is the per-fork `threat_map` **gating lookup**
+  paid by every fork in propagate mode — not the mark-*copy*, which
+  only runs for descendants of a flagged command (rare, and strictly
+  costlier; out of scope for this always-paid measurement).
+- `trace_exit` (~300 ns) runs the GC `map_delete` on every process exit
+  in every mode (the leak-safe, mode-independent reclaim from Phase 2).
+  Aggregate ~0.03 % CPU even at thousands of exits/s — the leak-safety
+  is the right trade.
+
+Numbers are kernel/host-specific; a committed baseline + CI gate needs a
+pinned runner first (same caveat as Tier A).
 
 ## eBPF enforcement depth — the configurable feature
 
@@ -127,9 +146,9 @@ two deeper modes and make the active mode runtime-selectable.
 
 | Mode | Mechanism | Closes | Cost |
 |---|---|---|---|
-| `one_level` *(default)* | check immediate parent in `threat_map` | direct children of a marked PID | 1 lookup / execve — **~322 ns** (measured) |
-| `ancestry(N)` | walk `real_parent` up to N hops (bounded loop, runtime `break` at configured depth), block if any ancestor is Critical | deeper descendants **while the process chain is intact** | ≤ N lookups + CO-RE reads / execve — **~+100 ns/execve at N=8** (measured). Does **not** catch double-fork/daemonize (reparent to PID 1 severs the chain) |
-| `propagate_on_fork` | `sched_process_fork` copies the parent's mark to the child; `sched_process_exit` GCs the entry; LSM checks the process's own (inherited) mark | **all** descendants incl. double-fork/daemonize (mark is copied before any reparenting) | per-fork mark-copy — **~+44 ns/fork** (measured); map-pressure under fork bombs |
+| `one_level` *(default)* | check immediate parent in `threat_map` | direct children of a marked PID | `check_execve` ~328 ns/execve (measured) |
+| `ancestry(N)` | walk `real_parent` up to N hops (bounded loop, runtime `break` at configured depth), block if any ancestor is Critical | deeper descendants **while the process chain is intact** | the walk adds **~+111 ns/execve at N=8** (measured). Does **not** catch double-fork/daemonize (reparent to PID 1 severs the chain) |
+| `propagate_on_fork` | `sched_process_fork` copies the parent's mark to the child; `sched_process_exit` GCs the entry; LSM checks the process's own (inherited) mark | **all** descendants incl. double-fork/daemonize (mark is copied before any reparenting) | per-fork `threat_map` gating lookup adds **~+49 ns/fork** (measured; the mark-copy itself runs only under an active mark); map-pressure under fork bombs |
 
 ### Mechanism — one `.bpf.o`, runtime-switchable
 
@@ -203,9 +222,9 @@ not speed.
 
 | Use-case | Suggested mode | Rationale (from measurements) |
 |---|---|---|
-| Latency-sensitive / default | `one_level` | floor (~322 ns/execve); blocks the flagged command itself (a direct child of the marked shell); precise — won't sweep in the shell's unrelated descendants during the sticky window |
-| Defense-in-depth dev box | `ancestry(8)` | +~100 ns/execve — negligible — to also catch the flagged command's descendants while the chain is intact |
-| High-security / CI runner | `propagate_on_fork` | +~44 ns/fork; full containment incl. double-fork/daemonize. Opt-in/experimental until the proxy marks the command PID (see the marking-model note) |
+| Latency-sensitive / default | `one_level` | floor (`check_execve` ~328 ns/execve); blocks the flagged command itself (a direct child of the marked shell); precise — won't sweep in the shell's unrelated descendants during the sticky window |
+| Defense-in-depth dev box | `ancestry(8)` | +~111 ns/execve — negligible — to also catch the flagged command's descendants while the chain is intact |
+| High-security / CI runner | `propagate_on_fork` | +~49 ns/fork; full containment incl. double-fork/daemonize. Opt-in/experimental until the proxy marks the command PID (see the marking-model note) |
 
 **Measured default: `one_level`.** Not because the deeper modes are
 costly — they aren't — but because it's the zero-overhead floor, it's

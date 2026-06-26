@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
 """57-ebpf-overhead — Tier-B per-mode eBPF program overhead.
 
-MEASUREMENT scenario (not a pass/fail gate). Instead of timing
-fork+exec from userspace — where the sub-µs hook cost drowns in the
-hundreds-of-µs of process creation plus container noise — it uses the
-kernel's own per-program accounting: with `bpf_stats_enabled`, the
-kernel records each BPF program's cumulative `run_time_ns` and
-`run_cnt`, so `Δrun_time_ns / Δrun_cnt` over a fixed fork+exec workload
-is the precise average ns *per invocation* of each program.
+MEASUREMENT scenario (not a pass/fail gate).
 
-For each enforcement depth we report ns/call of:
-  - check_execve   — the LSM hook (one_level: 1 lookup; ancestry(N):
-                     bounded walk; propagate: own-PID lookup)
-  - trace_fork     — sched_process_fork (early-returns unless propagate;
-                     this is propagate's per-fork cost)
-  - trace_exit     — sched_process_exit GC (runs every mode now)
+Two quantities, each measured (nothing assumed):
 
-This isolates exactly what each mode adds, and where. Feeds the decision
-matrix in docs/benchmarking.md.
+1. **Denominator** — the eBPF-off cost of one fork + execve(/bin/true) +
+   wait, timed in userspace with no daemon attached. This is what the
+   hook overhead is a fraction *of*.
 
-Not in the `make sandbox-ebpf` target (measurement, not a gate) — run:
-`python3 tests/sandbox/runner.py --no-build 57-ebpf-overhead`.
+2. **Numerators** — with `bpf_stats_enabled`, the kernel records each BPF
+   program's cumulative `run_time_ns` / `run_cnt`, so
+   `Δrun_time_ns / Δrun_cnt` over a fixed fork+exec workload is the
+   precise mean ns *per invocation*. A fork+execve+exit fires four of
+   our programs once each — trace_fork (fork), check_execve +
+   trace_execve (execve), trace_exit (exit) — so their sum is the eBPF
+   cost added per command, and `sum / denominator` is the honest
+   percentage overhead.
+
+The benchmarked process is UNMARKED, so these are the *always-paid*
+costs on normal processes (the common case). The mark-copy path
+(`trace_fork`'s `bpf_map_update_elem`, and `check_execve`'s block +
+ringbuf submit) only runs for descendants of a flagged command and is
+strictly costlier — out of scope here, which targets the overhead
+enabling a mode imposes on everything else.
+
+Feeds the decision matrix in docs/benchmarking.md. Not in the
+`make sandbox-ebpf` target (measurement, not a gate):
+`python3 tests/sandbox/runner.py --no-build 57-ebpf-overhead`
+or `make sandbox-ebpf-bench`.
 """
 from __future__ import annotations
 
@@ -32,26 +40,28 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, "/sandbox")
-from lib.bpf import skip_if_no_bpf_lsm  # noqa: E402
+from lib.bpf import skip_if_no_bpf_lsm, skip_if_no_bpf_object  # noqa: E402
 from lib.daemon import Daemon  # noqa: E402
 
 NAME = "57-ebpf-overhead"
-BPF_OBJ = Path("/usr/lib/atty-guard/atty_guard.bpf.o")
 STATS_SYSCTL = Path("/proc/sys/kernel/bpf_stats_enabled")
 
-WORKLOAD = 4000  # fork+exec iterations driving the hooks per mode
-PROGS = ("check_execve", "trace_fork", "trace_exit")
+WORKLOAD = 4000  # fork+exec iterations driving the hooks per rep
+REPS = 3
+# Programs that fire once per fork+execve+exit, in firing order.
+PROGS = ("trace_fork", "check_execve", "trace_execve", "trace_exit")
 
 
-def skip_if_no_bpf_object() -> None:
-    if not BPF_OBJ.is_file():
-        print(f"SKIP: {NAME} — {BPF_OBJ} not baked.")
-        sys.exit(0)
-
-
-def set_bpf_stats(on: bool) -> bool:
+def read_stats_sysctl() -> str | None:
     try:
-        STATS_SYSCTL.write_text("1" if on else "0")
+        return STATS_SYSCTL.read_text().strip()
+    except OSError:
+        return None
+
+
+def set_bpf_stats(value: str) -> bool:
+    try:
+        STATS_SYSCTL.write_text(value)
         return True
     except OSError:
         return False
@@ -68,6 +78,22 @@ def fork_exec_workload(n: int) -> None:
             except OSError:
                 os._exit(127)
         os.waitpid(pid, 0)
+
+
+def median(xs: list[float]) -> float:
+    s = sorted(xs)
+    return s[len(s) // 2]
+
+
+def baseline_ns(iters: int, reps: int) -> float:
+    """Median ns per fork+execve+wait with NO daemon (eBPF off)."""
+    samples = []
+    for _ in range(reps):
+        fork_exec_workload(200)  # warm caches
+        t0 = time.perf_counter_ns()
+        fork_exec_workload(iters)
+        samples.append((time.perf_counter_ns() - t0) / iters)
+    return median(samples)
 
 
 def prog_stats() -> dict[str, tuple[int, int]]:
@@ -91,32 +117,36 @@ def prog_stats() -> dict[str, tuple[int, int]]:
 
 
 def measure_mode(idx: int, extra: list[str]) -> dict[str, float]:
-    """ns/call per program for one enforcement mode, as a before/after
-    delta around the workload (excludes the daemon's startup execs)."""
+    """Median ns/call per program for one mode over REPS workloads inside
+    a single daemon lifetime."""
     # Unique socket per mode: a prior daemon's socket file can linger
     # after SIGTERM and cause a false-positive readiness / bind clash.
     sock = f"/run/atty-guard/bench-{idx}.sock"
+    per_call: dict[str, list[float]] = {name: [] for name in PROGS}
     with Daemon(socket=sock, extra_args=["--ebpf-mode", "block", *extra], verbosity=1) as d:
         time.sleep(1.5)
         if "eBPF attached" not in d.read_log():
             d.dump_log()
             raise RuntimeError("daemon didn't attach eBPF")
-        before = prog_stats()
-        fork_exec_workload(WORKLOAD)
-        after = prog_stats()
-    per_call: dict[str, float] = {}
-    for name in PROGS:
-        rt0, c0 = before.get(name, (0, 0))
-        rt1, c1 = after.get(name, (0, 0))
-        dc = c1 - c0
-        per_call[name] = (rt1 - rt0) / dc if dc > 0 else float("nan")
-    return per_call
+        for _ in range(REPS):
+            before = prog_stats()
+            fork_exec_workload(WORKLOAD)
+            after = prog_stats()
+            for name in PROGS:
+                rt0, c0 = before.get(name, (0, 0))
+                rt1, c1 = after.get(name, (0, 0))
+                dc = c1 - c0
+                if dc > 0:
+                    per_call[name].append((rt1 - rt0) / dc)
+    return {name: (median(v) if v else float("nan")) for name, v in per_call.items()}
 
 
 def main() -> None:
     skip_if_no_bpf_lsm(NAME)
-    skip_if_no_bpf_object()
-    if not set_bpf_stats(True):
+    skip_if_no_bpf_object(NAME)
+
+    prior = read_stats_sysctl()
+    if not set_bpf_stats("1"):
         print(f"SKIP: {NAME} — can't enable {STATS_SYSCTL} (need a "
               "privileged container to write the global sysctl).")
         sys.exit(0)
@@ -127,6 +157,7 @@ def main() -> None:
         ("propagate_on_fork", ["--enforcement-depth", "propagate_on_fork"]),
     ]
     try:
+        base = baseline_ns(WORKLOAD, REPS)
         results = []
         for idx, (label, extra) in enumerate(modes):
             try:
@@ -136,18 +167,33 @@ def main() -> None:
                 sys.exit(1)
             time.sleep(1.0)  # let the kernel reclaim BPF before the next mode
     finally:
-        set_bpf_stats(False)
+        # Restore the prior value, not a blind "0" — don't clobber a
+        # concurrent profiler that left it enabled.
+        set_bpf_stats(prior if prior is not None else "0")
+
+    # A wholly failed measurement (no bpftool, no stats) must not read green.
+    if not any(v == v for _, pc in results for v in pc.values()):  # all NaN
+        print(f"FAIL: {NAME}: every program measured n/a — bpftool / stats "
+              "unavailable; the run produced no numbers.", file=sys.stderr)
+        sys.exit(1)
 
     print()
-    print(f"  {NAME} — kernel BPF run-time stats, fork+execve x{WORKLOAD}/mode (ns per program invocation)")
-    print(f"  {'mode':<20} {'check_execve':>13} {'trace_fork':>12} {'trace_exit':>12}")
-    print(f"  {'-' * 20} {'-' * 13} {'-' * 12} {'-' * 12}")
+    print(f"  {NAME} — kernel BPF run-time stats, fork+execve x{WORKLOAD}/mode, median of {REPS}")
+    print(f"  baseline fork+execve+wait (eBPF off): {base:.0f} ns/op")
+    print()
+    hdr = f"  {'mode':<18}" + "".join(f"{p:>13}" for p in PROGS) + f"{'sum/cmd':>10}{'% base':>9}"
+    print(hdr)
+    print(f"  {'-' * 18}" + "".join(f"{'-' * 13:>13}" for _ in PROGS) + f"{'-' * 10:>10}{'-' * 9:>9}")
     for label, pc in results:
-        cells = []
+        cells = ""
+        total = 0.0
         for name in PROGS:
             v = pc.get(name, float("nan"))
-            cells.append("n/a" if v != v else f"{v:.0f}")
-        print(f"  {label:<20} {cells[0]:>13} {cells[1]:>12} {cells[2]:>12}")
+            cells += ("n/a" if v != v else f"{v:.0f}").rjust(13)
+            if v == v:
+                total += v
+        pct = (total / base * 100.0) if base else 0.0
+        print(f"  {label:<18}{cells}{('%.0f' % total):>10}{('%.2f%%' % pct):>9}")
     print()
     print(f"PASS: {NAME}")
 

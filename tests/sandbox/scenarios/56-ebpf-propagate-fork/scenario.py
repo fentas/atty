@@ -20,14 +20,12 @@ Skips cleanly when BPF LSM / the baked .bpf.o aren't available.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 sys.path.insert(0, "/sandbox")
-from lib.bpf import skip_if_no_bpf_lsm  # noqa: E402
+from lib.bpf import skip_if_no_bpf_lsm, skip_if_no_bpf_object  # noqa: E402
 from lib.pty import execve_blocked, mark_and_run  # noqa: E402
 
 NAME = "56-ebpf-propagate-fork"
-BPF_OBJ = Path("/usr/lib/atty-guard/atty_guard.bpf.o")
 
 # /bin/true four fork-levels below the marked bash. Each `( : ; ( … ) )`
 # has two statements so bash can't collapse / exec-in-place — it forks a
@@ -41,15 +39,9 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
-def skip_if_no_bpf_object() -> None:
-    if not BPF_OBJ.is_file():
-        print(f"SKIP: {NAME} — {BPF_OBJ} not baked.")
-        sys.exit(0)
-
-
 def main() -> None:
     skip_if_no_bpf_lsm(NAME)
-    skip_if_no_bpf_object()
+    skip_if_no_bpf_object(NAME)
 
     # Baseline: a depth-2 ancestry walk can't reach the marked bash
     # (it's four hops up) → the deep descendant runs.
