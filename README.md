@@ -194,12 +194,13 @@ Track a config outside the repo with `zig build -Dconfig=/path/to/mine.zig` (or 
 Ordering matters: short-circuiting modules (guardrail, and `mouse_urls` in `ask_each` mode) go first; place `mouse_urls` **before** `guardrail` so its banner keys win. `mouse_links` / `mouse_urls` need `mouse.enabled = true`. Every option is documented inline in [`config.def.zig`](src/config.def.zig) and on [atty.sh/modules](https://atty.sh/modules/).
 
 <details>
-<summary><b>Popular combinations</b> (copy-paste into <code>src/config.zig</code>)</summary>
+<summary><b>Popular combinations</b> — each block is a complete <code>src/config.zig</code> (pick one)</summary>
+
+**Power user** — atuin suggestions + guardrail + LLM, with a status bar:
 
 ```zig
 const atty = @import("atty");
 
-// ── Power user: atuin suggestions + guardrail + LLM ──────────────────
 pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.atuin.configure(.{}),
@@ -211,9 +212,13 @@ pub const modules = .{
     }),
 };
 pub const statusbar: atty.StatusBar = .{ .enabled = true };
+```
 
-// ── Click-to-open paths and URLs ─────────────────────────────────────
-// (separate config; combine with the modules above as you like)
+**Click-to-open** paths and URLs (note `mouse_urls` before `guardrail`):
+
+```zig
+const atty = @import("atty");
+
 pub const mouse: atty.Mouse = .{ .enabled = true };
 pub const modules = .{
     atty.modules.mouse_urls.configure(.{
@@ -224,8 +229,13 @@ pub const modules = .{
     atty.modules.guardrail.configure(.{}),
     atty.modules.history.configure(.{}),
 };
+```
 
-// ── Security stack (needs the atty-guard daemon for full coverage) ────
+**Security stack** (needs the `atty-guard` daemon for full coverage):
+
+```zig
+const atty = @import("atty");
+
 pub const modules = .{
     atty.modules.security_guard.configure(.{
         .enabled            = true,
@@ -258,11 +268,13 @@ $ #: roll back the last migration and re-seed the dev db
 | `Alt+Shift+S` | **auto** — dialog that auto-runs each step |
 | `Alt+C` / `Alt+Shift+C` | inline chat panel (shell stays visible) / full-screen chat overlay |
 | `Alt+M` | cycle model / provider |
-| `Alt+Shift+R` | recall a past dialog into the panel |
-| `Alt+r` | resend / regenerate the last prompt |
-| `Alt+T` | toggle auto-exec inside chat |
+| `Alt+Shift+R` | *(in chat)* recall a past dialog into the panel |
+| `Alt+r` | *(in chat)* resend / regenerate the last prompt |
+| `Alt+T` | *(in chat)* toggle auto-exec |
 | `Alt+H` | LLM help |
 | `Ctrl+Shift+X` | cancel the active LLM action |
+
+*(in chat)* keys act on an open chat surface (`Alt+C` / `Alt+Shift+C`); the rest work straight from the prompt.
 
 **Providers.** Three flavors, switchable per config (or per mode via `providers[]`, cycled with `Alt+M`):
 
