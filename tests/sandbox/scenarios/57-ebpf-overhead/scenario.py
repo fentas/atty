@@ -203,13 +203,23 @@ def main() -> None:
     for label, pc in results:
         cells = ""
         total = 0.0
+        complete = True
         for name in PROGS:
             v = pc.get(name, float("nan"))
-            cells += ("n/a" if v != v else f"{v:.0f}").rjust(13)
-            if v == v:
+            if v != v:  # NaN
+                complete = False
+                cells += "n/a".rjust(13)
+            else:
                 total += v
-        pct = (total / base * 100.0) if base else 0.0
-        print(f"  {label:<18}{cells}{('%.0f' % total):>10}{('%.2f%%' % pct):>9}")
+                cells += f"{v:.0f}".rjust(13)
+        # Only report sum/cmd + %base when ALL four programs measured —
+        # a partial sum (some program n/a) would understate both and read
+        # misleadingly.
+        if complete:
+            pct = (total / base * 100.0) if base else 0.0
+            print(f"  {label:<18}{cells}{('%.0f' % total):>10}{('%.2f%%' % pct):>9}")
+        else:
+            print(f"  {label:<18}{cells}{'n/a':>10}{'n/a':>9}")
     print()
     print(f"PASS: {NAME}")
 
