@@ -141,6 +141,25 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = EbpfMode::Disabled)]
     ebpf_mode: EbpfMode,
 
+    /// eBPF block-mode enforcement depth (only meaningful with
+    /// `--ebpf-mode=block`). Overrides the `[enforcement]` config table.
+    ///   one_level         — gate a marked PID's direct children only
+    ///                       (default; the historical V2-B behavior).
+    ///   ancestry          — walk up to --ancestry-max-depth ancestors;
+    ///                       catches deeper descendants while the chain
+    ///                       is intact (a double-fork to PID 1 escapes).
+    ///   propagate_on_fork — copy the mark onto every fork child;
+    ///                       covers double-fork / daemonize too.
+    /// See docs/benchmarking.md for the coverage/cost trade-off.
+    #[arg(long, value_parser = ["one_level", "ancestry", "propagate_on_fork"])]
+    enforcement_depth: Option<String>,
+
+    /// Ancestor-walk ceiling for `--enforcement-depth=ancestry`
+    /// (clamped to the kernel's MAX_ANCESTRY of 16). Overrides the
+    /// `[enforcement]` max_depth config field.
+    #[arg(long)]
+    ancestry_max_depth: Option<u8>,
+
     /// Enable V2-F live OSV.dev lookups for `npm install <pkg>`
     /// Tier-1 misses. Off by default (network use is opt-in).
     /// Requires `--features osv-live`. See `docs/security-guard-osv.md`.
@@ -919,9 +938,38 @@ fn main() -> std::io::Result<()> {
         };
         match ebpf::EbpfState::attach(loaded_mode, warn_broadcast.clone()) {
             Ok(state) => {
+                // Push the enforcement depth into the kernel `enforce_cfg`
+                // map. CLI wins over the [enforcement] table; both fall
+                // back to one_level. An unrecognized depth fails closed
+                // (the CLI flag is value-restricted, so only a bad TOML
+                // value reaches here).
+                let depth = cli
+                    .enforcement_depth
+                    .clone()
+                    .unwrap_or_else(|| file_cfg.enforcement.depth.clone());
+                let max_depth = cli
+                    .ancestry_max_depth
+                    .unwrap_or(file_cfg.enforcement.max_depth);
+                let mode_byte = match config::depth_mode_byte(&depth) {
+                    Some(b) => b,
+                    None => {
+                        eprintln!(
+                            "atty-guard: invalid enforcement depth {depth:?} \
+                             (expected one_level|ancestry|propagate_on_fork)"
+                        );
+                        std::process::exit(2);
+                    }
+                };
+                if let Err(e) = state.set_enforce_cfg(mode_byte, max_depth) {
+                    eprintln!(
+                        "atty-guard: enforce_cfg write failed — {e}; \
+                         kernel keeps its one_level default"
+                    );
+                }
                 if cli.verbosity >= 1 {
                     eprintln!(
-                        "atty-guard: eBPF attached (LSM + execve tracepoint, mode={:?})",
+                        "atty-guard: eBPF attached (LSM + execve tracepoint, \
+                         mode={:?}, enforcement={depth}, max_depth={max_depth})",
                         effective_mode
                     );
                 }

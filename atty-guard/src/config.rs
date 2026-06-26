@@ -23,6 +23,57 @@ pub struct Config {
     /// and falls back to safe values when omitted.
     #[serde(default)]
     pub server: ServerConfig,
+    /// eBPF kernel enforcement depth (block mode). Optional; the
+    /// `--enforcement-depth` CLI flag wins when set, otherwise this
+    /// table, otherwise one_level. Only meaningful on `ebpf` builds
+    /// running `--ebpf-mode=block`.
+    #[serde(default)]
+    pub enforcement: EnforcementConfig,
+}
+
+/// How far the eBPF LSM hook looks for a Critical mark on each execve.
+/// See `docs/benchmarking.md` for the per-mode coverage/cost trade-off.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnforcementConfig {
+    /// `one_level` (direct children of a marked PID — the historical
+    /// default) / `ancestry` (bounded ancestor walk) / `propagate_on_fork`
+    /// (mark copied onto every fork child; covers double-fork/daemonize).
+    /// Validated at startup — an unrecognized value fails the load.
+    #[serde(default = "default_enforcement_depth")]
+    pub depth: String,
+    /// Ancestor-walk ceiling when `depth = "ancestry"`. The kernel
+    /// clamps this to its compiled MAX_ANCESTRY (16); 0 disables the
+    /// walk (degenerates to never-match), so keep it ≥ 1.
+    #[serde(default = "default_ancestry_max_depth")]
+    pub max_depth: u8,
+}
+
+fn default_enforcement_depth() -> String {
+    "one_level".into()
+}
+fn default_ancestry_max_depth() -> u8 {
+    8
+}
+
+impl Default for EnforcementConfig {
+    fn default() -> Self {
+        EnforcementConfig {
+            depth: default_enforcement_depth(),
+            max_depth: default_ancestry_max_depth(),
+        }
+    }
+}
+
+/// Map a `depth` string to the byte the kernel `enforce_cfg` map
+/// expects, or `None` for an unrecognized value (caller fails closed).
+pub fn depth_mode_byte(depth: &str) -> Option<u8> {
+    match depth {
+        "one_level" => Some(0),
+        "ancestry" => Some(1),
+        "propagate_on_fork" => Some(2),
+        _ => None,
+    }
 }
 
 /// Bounded-resources knobs for the UDS server. The socket is
@@ -285,6 +336,42 @@ block_threshold = 0.9
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.tier2.onnx.model, "securebert2");
         assert_eq!(cfg.tier2.onnx.max_tokens, 1024);
+    }
+
+    #[test]
+    fn parses_enforcement_table() {
+        let src = r#"
+[enforcement]
+depth = "propagate_on_fork"
+max_depth = 12
+"#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.enforcement.depth, "propagate_on_fork");
+        assert_eq!(cfg.enforcement.max_depth, 12);
+    }
+
+    #[test]
+    fn enforcement_defaults_to_one_level() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.enforcement.depth, "one_level");
+        assert_eq!(cfg.enforcement.max_depth, 8);
+    }
+
+    #[test]
+    fn depth_mode_byte_maps_all_modes_and_rejects_garbage() {
+        assert_eq!(depth_mode_byte("one_level"), Some(0));
+        assert_eq!(depth_mode_byte("ancestry"), Some(1));
+        assert_eq!(depth_mode_byte("propagate_on_fork"), Some(2));
+        assert_eq!(depth_mode_byte("nonsense"), None);
+    }
+
+    #[test]
+    fn load_rejects_unknown_key_in_enforcement_table() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"[enforcement]\ndeapth = \"ancestry\"\n").unwrap();
+        let err = load(tmp.path()).expect_err("unknown enforcement field must fail");
+        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
     }
 
     #[test]

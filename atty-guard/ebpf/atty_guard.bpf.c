@@ -43,6 +43,18 @@
 #define THREAT_HIGH     1
 #define THREAT_CRITICAL 2
 
+// Enforcement depth — how far the LSM hook looks for a Critical mark.
+// Selected at runtime by userspace via the `enforce_cfg` map (below);
+// an unset map reads back zero == ENFORCE_ONE_LEVEL, the historical
+// behavior, so a daemon that never writes the config still works.
+#define ENFORCE_ONE_LEVEL 0 // gate a marked PID's direct children only
+#define ENFORCE_ANCESTRY  1 // walk up to cfg.max_depth ancestors
+#define ENFORCE_PROPAGATE 2 // mark propagates on fork; check own PID
+
+// Compile-time ceiling on the ancestry walk — the runtime cfg.max_depth
+// clamps below this. Bounded so the verifier accepts the unrolled loop.
+#define MAX_ANCESTRY 16
+
 // PID → threat level. Owned by userspace atty-guard; updated via
 // `set_threat_level` RPCs from atty in `--ebpf-mode=block`. The
 // LSM hook below reads it on every execve and EPERMs Critical.
@@ -70,6 +82,23 @@ struct {
     __type(key, __u32);
     __type(value, __u8);
 } warn_pids SEC(".maps");
+
+// Enforcement config — single-entry array written by userspace at
+// startup / reload. CO-RE doesn't relocate map *values*, so the layout
+// is hand-fixed (matches the Rust writer's byte order: mode, max_depth,
+// then padding to 8 bytes).
+struct enforce_config {
+    __u8 mode;      // ENFORCE_ONE_LEVEL / _ANCESTRY / _PROPAGATE
+    __u8 max_depth; // ancestry ceiling (clamped to MAX_ANCESTRY)
+    __u8 _pad[6];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct enforce_config);
+} enforce_cfg SEC(".maps");
 
 // Ringbuf for async execve events. Sized at 1 MiB — plenty for the
 // commit-rate of an interactive shell. Userspace drains in a loop.
@@ -108,47 +137,87 @@ struct execve_event {
     char  argv0[128];     // EVENT_EXECVE: first argv. EVENT_AF_ALG: unused.
 };
 
-// LSM hook — fires after the kernel has resolved the new program
-// but before execve() succeeds. Returning a non-zero value rejects
-// the syscall with that errno.
+// Resolve the active enforcement config. An unset map reads back the
+// array's zero value → ENFORCE_ONE_LEVEL with depth forced to 1, so a
+// daemon that never writes the config keeps the historical behavior.
+static __always_inline void read_enforce(struct enforce_config *out)
+{
+    __u32 k = 0;
+    struct enforce_config *cfg = bpf_map_lookup_elem(&enforce_cfg, &k);
+    if (cfg) {
+        out->mode = cfg->mode;
+        out->max_depth = cfg->max_depth;
+    } else {
+        out->mode = ENFORCE_ONE_LEVEL;
+        out->max_depth = 1;
+    }
+}
+
+// Does this execve's lineage carry a Critical mark under the active
+// mode? Returns the matching threat_map key (for the event), else 0.
 //
-// Threat-map pivot: lookup by the PARENT PID, not the current one.
-// `bpf_get_current_pid_tgid()` returns the execve'ing task (the
-// child-to-be); the threat model marks the parent (e.g. `npm`,
-// `sudo`) so its DIRECT children's execve is gated. We read
-// `task->real_parent->tgid` via BPF CO-RE.
+//   one_level : the immediate parent's tgid — the historical pivot.
+//   ancestry  : the nearest Critical ancestor within cfg.max_depth. A
+//               double-fork that reparents to PID 1 severs the chain
+//               and escapes — which is why `propagate` exists.
+//   propagate : the task's OWN pid — the mark was copied onto it at
+//               fork (see trace_fork), so deeper descendants AND
+//               double-forked daemons stay covered.
+static __always_inline __u32 critical_match(struct task_struct *task)
+{
+    struct enforce_config cfg;
+    read_enforce(&cfg);
+
+    if (cfg.mode == ENFORCE_PROPAGATE) {
+        __u32 self = bpf_get_current_pid_tgid() >> 32;
+        __u8 *lvl = bpf_map_lookup_elem(&threat_map, &self);
+        if (lvl && *lvl == THREAT_CRITICAL)
+            return self;
+        return 0;
+    }
+
+    // one_level walks exactly one hop; ancestry walks up to max_depth.
+    // one_level ignores cfg.max_depth so a zero-valued (unwritten) map
+    // can't accidentally disable it. A bounded loop (i < MAX_ANCESTRY)
+    // is verifier-safe on its own — each bpf_core_read is a safe probe,
+    // so the chain walk doesn't need full unrolling.
+    __u32 depth = (cfg.mode == ENFORCE_ANCESTRY) ? cfg.max_depth : 1;
+    struct task_struct *p = task;
+    for (int i = 0; i < MAX_ANCESTRY; i++) {
+        if ((__u32)i >= depth)
+            break;
+        struct task_struct *parent = NULL;
+        bpf_core_read(&parent, sizeof(parent), &p->real_parent);
+        if (!parent)
+            break;
+        __u32 ppid = 0;
+        bpf_core_read(&ppid, sizeof(ppid), &parent->tgid);
+        if (ppid <= 1)
+            break; // reached init — chain root, nothing above
+        __u8 *lvl = bpf_map_lookup_elem(&threat_map, &ppid);
+        if (lvl && *lvl == THREAT_CRITICAL)
+            return ppid;
+        p = parent;
+    }
+    return 0;
+}
+
+// LSM hook — fires after the kernel resolves the new program but
+// before execve() succeeds. A non-zero return rejects the syscall.
+// `critical_match` decides, per the configured depth, whether this
+// execve descends from a marked process.
 //
-// LIMITATION — one level only: this gates a marked PID's direct
-// children, NOT deeper descendants. `npm`(marked) → `node`(gated) →
-// `sh`(NOT gated: its real_parent is `node`, which isn't in the map),
-// and any double-fork / `nohup … &` / daemonize reparents the
-// descendant to PID 1 and drops the mark entirely. Deepening this to
-// a bounded ancestry walk (or propagating the mark on fork) is
-// future work; a verifier-safe loop here needs care and a kernel to
-// test against. Until then the userspace warn-subscriber's PPid-chain
-// walk (warn_consumer.rs::pid_in_tree_root) provides the deeper-tree
-// view for warn-mode telemetry (atty-guard/src/warn_consumer.rs,
-// `pid_in_tree_root`); the kernel BLOCK is one level.
-//
-// Comm note: at bprm_check_security time the kernel hasn't yet
-// updated the new binary's comm — `bpf_get_current_comm` returns
-// the CALLING task's comm (the parent). Userspace must NOT assume
-// `comm` = the binary about to load; we keep it as a diagnostic
-// breadcrumb only.
+// Comm note: at bprm_check_security the kernel hasn't updated the new
+// binary's comm yet — `bpf_get_current_comm` returns the CALLING
+// task's comm. Diagnostic breadcrumb only.
 SEC("lsm/bprm_check_security")
 int BPF_PROG(check_execve, struct linux_binprm *bprm)
 {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    struct task_struct *parent = NULL;
-    bpf_core_read(&parent, sizeof(parent), &task->real_parent);
-    __u32 parent_pid = 0;
-    if (parent)
-        bpf_core_read(&parent_pid, sizeof(parent_pid), &parent->tgid);
-
     __u32 child_pid = bpf_get_current_pid_tgid() >> 32;
-    __u8 *level = bpf_map_lookup_elem(&threat_map, &parent_pid);
 
-    if (level && *level == THREAT_CRITICAL) {
+    __u32 flagged = critical_match(task);
+    if (flagged) {
         // Emit a "blocked" event before refusing so the daemon can
         // surface the reason in atty's banner.
         struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -156,7 +225,7 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
             e->kind = EVENT_EXECVE;
             e->verdict = VERDICT_BLOCK;
             e->pid = child_pid;
-            e->ppid = parent_pid;
+            e->ppid = flagged;
             bpf_get_current_comm(e->comm, sizeof(e->comm));
             e->argv0[0] = '\0';
             bpf_ringbuf_submit(e, 0);
@@ -164,10 +233,15 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
         return -EPERM;
     }
 
-    // warn_pids takes effect only when threat_map didn't match —
-    // block always wins so an operator transitioning from warn to
-    // block on the same PID doesn't see a window where both states
-    // race.
+    // warn_pids stays one-level (parent pivot) regardless of block
+    // depth — it's a pilot signal, not enforcement. Block always wins
+    // above, so a warn→block transition on the same PID has no race.
+    struct task_struct *parent = NULL;
+    bpf_core_read(&parent, sizeof(parent), &task->real_parent);
+    __u32 parent_pid = 0;
+    if (parent)
+        bpf_core_read(&parent_pid, sizeof(parent_pid), &parent->tgid);
+
     __u8 *warn = bpf_map_lookup_elem(&warn_pids, &parent_pid);
     if (warn) {
         struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -180,10 +254,56 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
             e->argv0[0] = '\0';
             bpf_ringbuf_submit(e, 0);
         }
-        // No EPERM — warn mode logs the would-have-blocked event
-        // for operator visibility but lets the execve proceed.
+        // No EPERM — warn logs the would-have-blocked event but allows.
     }
 
+    return 0;
+}
+
+// Fork propagation — only active in ENFORCE_PROPAGATE. When a marked
+// process forks, copy its threat level onto the child's PID so the
+// child's later execve is gated by `critical_match`'s own-PID check.
+// The copy happens at fork, BEFORE any double-fork/daemonize can
+// reparent the descendant away — that's what closes the detach gap a
+// pure ancestry walk can't. No-op (one extra map lookup) in the other
+// modes so they don't pay for propagation they don't use.
+SEC("tracepoint/sched/sched_process_fork")
+int trace_fork(struct trace_event_raw_sched_process_fork *ctx)
+{
+    __u32 k = 0;
+    struct enforce_config *cfg = bpf_map_lookup_elem(&enforce_cfg, &k);
+    if (!cfg || cfg->mode != ENFORCE_PROPAGATE)
+        return 0;
+
+    __u32 parent = (__u32)ctx->parent_pid;
+    __u32 child = (__u32)ctx->child_pid;
+    __u8 *lvl = bpf_map_lookup_elem(&threat_map, &parent);
+    if (lvl) {
+        __u8 v = *lvl;
+        bpf_map_update_elem(&threat_map, &child, &v, BPF_ANY);
+    }
+    return 0;
+}
+
+// Exit GC — only in ENFORCE_PROPAGATE, where the kernel (not
+// userspace) owns the propagated entries. Drop a process's entry when
+// its thread-group leader exits so the map doesn't accumulate stale
+// PIDs (and so a reused PID doesn't inherit a dead mark). one_level /
+// ancestry don't GC here: their entries are userspace-owned and
+// userspace already evicts on PID reuse (threat_map.rs).
+SEC("tracepoint/sched/sched_process_exit")
+int trace_exit(struct trace_event_raw_sched_process_template *ctx)
+{
+    __u32 k = 0;
+    struct enforce_config *cfg = bpf_map_lookup_elem(&enforce_cfg, &k);
+    if (!cfg || cfg->mode != ENFORCE_PROPAGATE)
+        return 0;
+
+    __u64 pt = bpf_get_current_pid_tgid();
+    __u32 tgid = (__u32)(pt >> 32);
+    __u32 tid = (__u32)pt;
+    if (tgid == tid) // process (leader) exit, not a bare thread
+        bpf_map_delete_elem(&threat_map, &tgid);
     return 0;
 }
 
