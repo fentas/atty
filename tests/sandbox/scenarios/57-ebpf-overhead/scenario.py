@@ -102,11 +102,14 @@ def prog_stats() -> dict[tuple[str, int], tuple[int, int]]:
     same name (a stale instance from a prior load, or an unrelated host
     program), so the delta step picks the id whose count actually grew
     rather than letting a same-name entry shadow the live one."""
-    res = subprocess.run(
-        ["bpftool", "prog", "show", "--json"],
-        capture_output=True, timeout=10,
-    )
     out: dict[tuple[str, int], tuple[int, int]] = {}
+    try:
+        res = subprocess.run(
+            ["bpftool", "prog", "show", "--json"],
+            capture_output=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return out  # no bpftool → empty stats → caught by the all-n/a guard
     if res.returncode != 0:
         return out
     try:

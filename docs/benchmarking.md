@@ -75,7 +75,7 @@ under the existing eBPF sandbox, not GitHub CI:
 
 | Benchmark | Status | Measures |
 |---|---|---|
-| `57-ebpf-overhead` | ✅ | per-mode ns **per BPF-program invocation** (`check_execve` / `trace_fork` / `trace_exit`) via the kernel's `bpf_stats_enabled` run-time accounting |
+| `57-ebpf-overhead` | ✅ | per-mode ns **per BPF-program invocation** (`trace_fork` / `check_execve` / `trace_execve` / `trace_exit`) via the kernel's `bpf_stats_enabled` run-time accounting |
 | `map_pressure` | planned | `threat_map` growth + lookup cost under a deep/wide descendant tree |
 | `pty_roundtrip` | planned | end-to-end keystroke→echo latency through the proxy |
 
@@ -170,7 +170,8 @@ struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1);
   the bounded form.)
 - `sched_process_fork` / `sched_process_exit` programs are always
   *attached* but early-return unless `mode == propagate` — so they cost
-  ~nothing in the other modes (to be confirmed by `fork_overhead`).
+  ~nothing in the other modes (confirmed: `trace_fork` early-returns at
+  ~80 ns vs ~129 ns in propagate — see the Phase-3 results).
 - **Map type (decided by measurement, not up front).** Phase 2 keeps
   `threat_map` as a plain `BPF_MAP_TYPE_HASH`. Under a fork bomb in
   propagate mode it fails open *at the cap* (new descendants past 16 384
@@ -202,7 +203,7 @@ Daemon-side (`atty-guard`):
 ```toml
 # /etc/atty-guard/config.toml
 [enforcement]
-depth = "one_level"   # "one_level" | "ancestry" | "propagate"
+depth = "one_level"   # "one_level" | "ancestry" | "propagate_on_fork"
 ancestry_max_depth = 8
 ```
 
