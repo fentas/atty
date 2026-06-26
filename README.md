@@ -268,7 +268,7 @@ $ #: roll back the last migration and re-seed the dev db
 | `Alt+Shift+S` | **auto** — dialog that auto-runs each step |
 | `Alt+C` / `Alt+Shift+C` | inline chat panel (shell stays visible) / full-screen chat overlay |
 | `Alt+M` | cycle model / provider |
-| `Alt+Shift+R` | *(in chat)* recall a past dialog into the panel |
+| `Alt+Shift+R` | recall a past dialog into the panel (opens the picker from the prompt) |
 | `Alt+r` | *(in chat)* resend / regenerate the last prompt |
 | `Alt+T` | *(in chat)* toggle auto-exec |
 | `Alt+H` | LLM help |
@@ -300,7 +300,7 @@ Two layers, both opt-in beyond the default guardrail.
 
 **`guardrail`** (default) is a pure in-process, author-aware pattern check. Each rule's behavior is `confirm` (Enter again), `confirm_once`, `block`, or `warn`, and rules can be scoped to user-typed or LLM-injected lines. Add a couple with `.extra_rules`, or replace the whole policy with `.rules`.
 
-**`atty-guard`** is a Rust system daemon (`atty:atty`, UDS, hardened systemd unit) that the `security_guard` module queries on every Enter, falling back to in-proc rules if it's unreachable. It closes the gap the PTY can't see — background and detached children — and adds real threat intelligence:
+**`atty-guard`** is a Rust system daemon (`atty:atty`, UDS, hardened systemd unit) that the `security_guard` module queries on every Enter, falling back to in-proc rules if it's unreachable. It backstops what the in-proc check can't do on its own and adds real threat intelligence:
 
 - **Tiered classifier** — Tier-1 regex + an Aho-Corasick scan over a threat-**atom** corpus (GTFOBins + sanitized Sigma); optional Tier-2 SLM (ONNX: SecureBERT 2.0 / Qwen2.5-Coder, pure-Rust `tract`).
 - **Multi-hit accumulator** — combines every signal that fires into one confidence score, so death-by-a-thousand-cuts attacks (Shai-Hulud-style) escalate; opt-in auto-**Block** above a threshold.
@@ -313,7 +313,7 @@ At the prompt you see one of three outcomes:
 ```text
 Safe   → forwarded, no friction
 Warn   → ! banner: [y]es once · [a]llow always · [t]rust · [B]lock host · any key cancels
-Block  → ✗ red REFUSED line, readline cleared (and eBPF EPERMs the child tree)
+Block  → ✗ red REFUSED line, readline cleared (and eBPF EPERMs its direct children)
 ```
 
 Manage trust and atoms with `sudo atty-guard atoms|urls|session|trust …` (SO_PEERCRED-gated, per-UID), and dump buffered warn events to scrollback with `Alt+Shift+W`. Cargo features `tier2-onnx`, `osv-live`, `atoms-fetch` (the `make install-guard` default) and `ebpf` (opt-in) gate each capability. Setup + verification: [operator-workflow](https://atty.sh/operator-workflow/).
