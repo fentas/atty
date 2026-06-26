@@ -55,6 +55,25 @@ class Daemon:
         self._log_fd = None
 
     def __enter__(self) -> "Daemon":
+        # eBPF runs need the daemon — running as the unprivileged `atty`
+        # user — to hold CAP_BPF/CAP_PERFMON/CAP_SYS_ADMIN to load the
+        # programs. In production the systemd unit grants these via
+        # AmbientCapabilities; `runuser` drops process caps, so instead
+        # grant them as FILE capabilities on the binary (applied on exec,
+        # so the atty user gets them). Only for --ebpf-mode runs: the
+        # non-eBPF scenarios run in a non-privileged container where
+        # these caps aren't available to grant. `setcap` (libcap2-bin)
+        # knows cap_bpf; the image's `setpriv` cap table is too old to.
+        wants_bpf = "--ebpf-mode" in self.extra_args and "disabled" not in self.extra_args
+        if wants_bpf:
+            subprocess.run(
+                [
+                    "setcap",
+                    "cap_bpf,cap_perfmon,cap_sys_admin+eip",
+                    "/usr/local/bin/atty-guard",
+                ],
+                check=True,
+            )
         cmd = [
             "runuser",
             "-u",
