@@ -1,5 +1,7 @@
 # Chat panel UI/UX proposals
 
+> **Status (2026-06): proposals, not committed work.** The base chat surfaces (`Alt+C` inline panel, `Alt+Shift+C` overlay) have since shipped; the redesigns below are unbuilt ideas kept for reference.
+
 Status: research / proposals only. Pick one (or stitch pieces from a few)
 before designing. Each proposal lists the user-visible change, the
 implementation surface, and the tradeoffs honestly. None of these is

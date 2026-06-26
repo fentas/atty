@@ -1,5 +1,7 @@
 # chat-overlay phase 2 — design doc
 
+> **Status (2026-06): superseded.** Phase 2b shipped — chat input and the overlay LLM round-trip are live (see [llm.md](llm.md)). Kept for the design rationale.
+
 Status: **v2 (2026-05-16)** — decisions locked from PR #54 subagent review. Phase 2a shipped in PR #56.
 
 Phase 1 (PR #48) made the LLM-session "conclusion banner" re-emittable via `Alt+C`. Phase 2a (PR #56) made `Alt+C` toggle a persistent alt-screen overlay rendering the conversation history (render-only). Phase 2b+ adds chat input, LLM round-trip from the overlay, the LLM's ability to *request* opening the overlay, and shell-side robustness (PTY back-pressure, alt-screen guards).

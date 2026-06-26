@@ -357,6 +357,8 @@ Press **`Alt+H`** any time to scroll the full cheat-sheet into shell history. Th
 | `Alt+Shift+C`   | Toggle full-screen chat overlay.                          |
 | `Alt+T`         | (chat only) Toggle auto-exec inside a chat surface.       |
 | `Alt+H`         | Show this cheat-sheet (LLM-mode hint when in `#: `).      |
+| `Alt+Shift+R`   | (chat) Recall a past dialog — loads the selected session straight into the panel. |
+| `Alt+r`         | (chat) Resend the last prompt — retry after a failure, or regenerate after an answer. |
 | `Ctrl+Shift+X`  | Cancel any active exec / dialog / auto.                   |
 | `Ctrl+Alt+Up`   | (chat only) Grow inline chat panel by one row.            |
 | `Ctrl+Alt+Down` | (chat only) Shrink inline chat panel by one row.          |
@@ -461,7 +463,7 @@ re-uploading the transcript every turn) at the cost of:
   session they see atty's full record; the CLI's view may
   include side-effects atty never recorded (e.g. tool calls
   invoked by the CLI itself).
-- **Session id is per-dialog.** `Alt+Shift+R` (cancel) and any
+- **Session id is per-dialog.** `Ctrl+Shift+X` (cancel) and any
   `action: "done"` from the model both reset `rt.session_id` —
   the next dialog starts a fresh CLI session. atty doesn't try
   to persist session ids across atty restarts; the
