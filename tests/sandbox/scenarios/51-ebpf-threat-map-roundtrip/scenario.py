@@ -165,11 +165,15 @@ def run_block_sub() -> None:
                      f"despite threat_map entry — LSM EPERM didn't fire. "
                      "Map write landed but the kernel-side hook isn't "
                      f"reading it.\noutput: {out!r}")
-            if "permission denied" not in out.lower():
-                fail(f"block sub: execve failed (rc={rc}) but the bash "
-                     f"didn't show 'Permission denied' — verify the "
-                     f"EPERM came from the LSM hook, not some other "
-                     f"failure.\noutput: {out!r}")
+            # The LSM hook returns -EPERM (errno 1 → "Operation not
+            # permitted"), NOT EACCES ("Permission denied"). rc=126 is
+            # bash's "found but couldn't exec" code — the canonical
+            # EPERM-on-execve signature. Accept either signal.
+            out_l = out.lower()
+            if rc != 126 and "operation not permitted" not in out_l and "permission denied" not in out_l:
+                fail(f"block sub: execve failed (rc={rc}) but without an "
+                     f"EPERM signature — verify the denial came from the "
+                     f"LSM hook, not some other failure.\noutput: {out!r}")
     finally:
         try:
             proc.kill(9)

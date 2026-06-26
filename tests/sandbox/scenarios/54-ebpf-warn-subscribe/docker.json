@@ -1,12 +1,14 @@
 {
   "_comment": "Same shape as 51 + 53 — kernel-side eBPF needs CAP_BPF + bind mounts.",
   "image": "atty-sandbox:ebpf",
+  "pid": "host",
   "privileged": true,
   "cap_add": ["BPF", "SYS_ADMIN", "PERFMON"],
   "security_opt": ["apparmor=unconfined"],
   "volumes": [
     {"src": "/sys/fs/bpf", "dst": "/sys/fs/bpf", "rw": true},
     {"src": "/sys/kernel/btf", "dst": "/sys/kernel/btf", "rw": false},
-    {"src": "/sys/kernel/security", "dst": "/sys/kernel/security", "rw": false}
+    {"src": "/sys/kernel/security", "dst": "/sys/kernel/security", "rw": false},
+    {"src": "/sys/kernel/tracing", "dst": "/sys/kernel/tracing", "rw": true}
   ]
 }

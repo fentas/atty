@@ -108,27 +108,38 @@ struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1);
 // struct enforce_cfg { __u8 mode; __u8 max_depth; }
 ```
 
-- LSM hook reads `enforce_cfg`: `one_level` → current single lookup;
-  `ancestry` → `#pragma unroll` to `MAX_ANCESTRY` (compile-time bound,
-  e.g. 16) with `if (i >= cfg.max_depth) break;`; `propagate` → check
-  own pid.
+- LSM hook reads `enforce_cfg`: `one_level` → single parent lookup;
+  `ancestry` → bounded walk to `MAX_ANCESTRY` (16) with a runtime
+  `if (i >= depth) break;`; `propagate` → check own pid. (Implemented as
+  a plain bounded loop — clang wouldn't fully unroll the pointer-chasing
+  walk, but each `bpf_core_read` is a safe probe, so the verifier accepts
+  the bounded form.)
 - `sched_process_fork` / `sched_process_exit` programs are always
   *attached* but early-return unless `mode == propagate` — so they cost
-  ~nothing in the other modes (measured by `fork_overhead`).
-- `threat_map` becomes `BPF_MAP_TYPE_LRU_HASH` for fork-bomb safety in
-  propagate mode (eviction fails open — a missed descendant is a missed
-  block, never a wrongful one). Confirm the LRU overhead is negligible
-  for the other modes via `map_pressure`.
+  ~nothing in the other modes (to be confirmed by `fork_overhead`).
+- **Map type (decided by measurement, not up front).** Phase 2 keeps
+  `threat_map` as a plain `BPF_MAP_TYPE_HASH`. Under a fork bomb in
+  propagate mode it fails open *at the cap* (new descendants past 16 384
+  entries simply aren't marked — never a wrongful block). Switching to
+  `BPF_MAP_TYPE_LRU_HASH` (evict-oldest) trades that for evicting the
+  *root* mark instead; which is better is a Phase-3 `map_pressure`
+  question, so we don't commit blind — consistent with the whole point
+  of this suite.
 
 ### Marking-model note (propagate mode)
 
 `one_level` / `ancestry` mark the long-lived **shell** PID and gate its
 (direct / ancestral) children — correct, because the mark is sticky only
 between the flagged command and the next clean line
-(`security_guard.zig`). `propagate` must instead mark the **command's**
-PID, not the shell — propagating from the shell would tag its entire
-future subtree. This is the one Zig-side change the deepest mode needs;
-`one_level`/`ancestry` are kernel-only.
+(`security_guard.zig`). `propagate` ideally marks the **command's** PID
+instead — propagating from the shell tags its entire future subtree for
+the sticky window. **Phase 2 ships the kernel mechanism + config and
+benchmarks all three depths; it does not yet change the Zig proxy's
+shell-marking.** That's deliberate: per-mode *overhead* (the Phase-3
+measurement that picks the default) is independent of which PID is
+marked, and propagate's proxy-side semantics (mark the command, clear on
+its exit) is a focused follow-up tracked separately. Until then,
+propagate is opt-in and labelled experimental.
 
 ### Config surface
 
@@ -162,14 +173,20 @@ The operator picks; atty ships the measured default.
 
 ## Phasing
 
-1. **Phase 1 — harness.** `bench/` + `zig build bench` (Tier A), human
-   table + `--json`. CI-safe; ships first. A committed baseline + a CI
+1. ✅ **Phase 1 — harness.** `bench/` + `zig build bench` (Tier A),
+   human table + `--json`. CI-safe. A committed baseline + a CI
    regression gate follow once a stable perf runner is picked (numbers
    are machine-specific, so a naive committed baseline would be noise).
-2. **Phase 2 — eBPF modes + config.** `enforce_cfg` map, the three-mode
-   branch, fork/exit hooks, LRU map, Rust `EnforcementDepth` plumbing,
-   the Zig command-pid marking for propagate, doctor surfacing. Validated
-   under `make sandbox-ebpf` (not CI).
+2. ✅ **Phase 2 — eBPF modes + config.** `enforce_cfg` map, the
+   three-mode LSM branch, `sched_process_fork`/`_exit` hooks, Rust
+   `[enforcement]` config + `--enforcement-depth` CLI → the map. All
+   three modes are behavior-validated under `make sandbox-ebpf` (not
+   CI): `51` (one_level blocks a direct child), `55` (one_level allows a
+   grandchild, ancestry blocks it), `56` (ancestry(2) allows a 4-deep
+   descendant, propagate_on_fork blocks it). Deferred to follow-ups:
+   the Zig command-pid marking for propagate (see the marking-model
+   note), the LRU-vs-HASH map decision (Phase-3 `map_pressure`), and
+   `atty doctor` surfacing of the active depth.
 3. **Phase 3 — Tier-B benches + the matrix.** Sandbox bench scenarios
    for per-mode `execve`/`fork` overhead, then fill the decision matrix
    and set the default.

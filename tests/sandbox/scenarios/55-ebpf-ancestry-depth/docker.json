@@ -1,7 +1,8 @@
 {
+  "_comment": "ancestry-depth eBPF scenario — same kernel requirements as 51 (CAP_BPF + bind mounts + tracefs + host PID ns).",
   "image": "atty-sandbox:ebpf",
-  "pid": "host",
   "privileged": true,
+  "pid": "host",
   "cap_add": ["BPF", "SYS_ADMIN", "PERFMON"],
   "security_opt": ["apparmor=unconfined"],
   "volumes": [

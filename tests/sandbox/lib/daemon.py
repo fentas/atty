@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -55,6 +56,43 @@ class Daemon:
         self._log_fd = None
 
     def __enter__(self) -> "Daemon":
+        # eBPF runs need the daemon — running as the unprivileged `atty`
+        # user — to hold CAP_BPF/CAP_PERFMON/CAP_SYS_ADMIN to load the
+        # programs. In production the systemd unit grants these via
+        # AmbientCapabilities; `runuser` drops process caps, so instead
+        # grant them as FILE capabilities on the binary (applied on exec,
+        # so the atty user gets them). Only for --ebpf-mode runs: the
+        # non-eBPF scenarios run in a non-privileged container where
+        # these caps aren't available to grant. `setcap` (libcap2-bin)
+        # knows cap_bpf; the image's `setpriv` cap table is too old to.
+        # Only file-cap the binary when setcap exists. The eBPF image
+        # ships libcap2-bin; the base image — where graceful-fallback
+        # scenarios like 50-ebpf-loader run a --ebpf-mode daemon WITHOUT
+        # the ebpf feature — does not, and there the daemon should just
+        # fall back to FeatureNotBuilt, so skipping setcap is correct.
+        wants_bpf = (
+            "--ebpf-mode" in self.extra_args
+            and "disabled" not in self.extra_args
+            and shutil.which("setcap") is not None
+        )
+        if wants_bpf:
+            # cap_bpf/perfmon/mac_admin mirror the production unit's
+            # AmbientCapabilities (CAP_BPF CAP_PERFMON CAP_MAC_ADMIN) —
+            # mac_admin is what makes a BPF-LSM hook *enforcing* (its
+            # deny is ignored without it). cap_dac_read_search is a
+            # SANDBOX-ONLY add: this host hardens tracefs to 0700 root, so
+            # the atty daemon can't read the tracepoint IDs libbpf needs
+            # to attach trace_execve / trace_fork / etc. Production hosts
+            # ship a readable tracefs, so the unit doesn't (and shouldn't)
+            # grant DAC override.
+            subprocess.run(
+                [
+                    "setcap",
+                    "cap_bpf,cap_perfmon,cap_mac_admin,cap_dac_read_search+eip",
+                    "/usr/local/bin/atty-guard",
+                ],
+                check=True,
+            )
         cmd = [
             "runuser",
             "-u",

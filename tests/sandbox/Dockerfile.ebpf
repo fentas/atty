@@ -26,10 +26,18 @@ ENV PATH=/usr/local/cargo/bin:$PATH
 
 # Rust toolchain matches Dockerfile.base's builder stage (rustup
 # stable). atty-guard rebuild needs cargo + clang for the .bpf.o.
+# `bpftool` is a virtual package on Ubuntu noble — the real binary
+# ships in `linux-tools-<abi>` (pulled by `linux-tools-generic`) at
+# /usr/lib/linux-tools/<ver>/bpftool, and the /usr/sbin/bpftool wrapper
+# dispatches by `uname -r` (which won't match the host kernel inside the
+# container). Symlink the concrete binary onto PATH so it works
+# version-agnostically — basic `btf dump` / `map dump` are stable across
+# kernel versions.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates curl build-essential pkg-config libssl-dev \
-        clang libbpf-dev linux-tools-common bpftool \
+        clang libbpf-dev linux-tools-generic \
+    && ln -sf "$(ls -1 /usr/lib/linux-tools/*/bpftool | head -1)" /usr/local/bin/bpftool \
     && rm -rf /var/lib/apt/lists/* && \
     if ! command -v cargo >/dev/null 2>&1; then \
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
@@ -96,6 +104,11 @@ COPY --from=ebpf-builder /opt/ebpf-artifact/ /usr/lib/atty-guard/
 # observation. Container is already privileged with CAP_BPF +
 # CAP_SYS_ADMIN per scenarios/5*/docker.json, so bpftool's
 # privilege requirements are met.
+# libcap2-bin provides `setcap` (whose cap table knows cap_bpf, unlike
+# the older util-linux `setpriv`) — the harness uses it to grant the
+# atty daemon file capabilities for the BPF load, mirroring the systemd
+# unit's AmbientCapabilities.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libbpf1 linux-tools-common bpftool && \
+    apt-get install -y --no-install-recommends libbpf1 libcap2-bin linux-tools-generic && \
+    ln -sf "$(ls -1 /usr/lib/linux-tools/*/bpftool | head -1)" /usr/local/bin/bpftool && \
     rm -rf /var/lib/apt/lists/*

@@ -118,6 +118,9 @@ impl EbpfState {
     pub fn set_threat(&self, _pid: u32, _level: ThreatLevel) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
+    pub fn set_enforce_cfg(&self, _mode: u8, _max_depth: u8) -> Result<(), LoadError> {
+        Err(LoadError::FeatureNotBuilt)
+    }
 }
 
 // ===========================================================================
@@ -192,6 +195,11 @@ mod with_libbpf {
         /// for one BPF object load even if they only care about
         /// the execve enforcement path.
         _tp_socket_link: libbpf_rs::Link,
+        /// sched fork/exit tracepoints. trace_fork propagates a mark only
+        /// in propagate mode; trace_exit GCs in every mode. Always
+        /// attached regardless of the configured depth.
+        _tp_fork_link: libbpf_rs::Link,
+        _tp_exit_link: libbpf_rs::Link,
         mode: LoadedMode,
         /// Detached ringbuf consumer thread (`atty-guard-ringbuf`).
         /// Held only to make the handle visible in `ps`; we never
@@ -275,6 +283,24 @@ mod with_libbpf {
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach socket tracepoint: {e}")))?;
 
+            let tp_fork_link = obj
+                .progs_mut()
+                .find(|p| p.name() == "trace_fork")
+                .ok_or_else(|| {
+                    LoadError::LoadFailed("program trace_fork missing from .o".into())
+                })?
+                .attach()
+                .map_err(|e| LoadError::LoadFailed(format!("attach fork tracepoint: {e}")))?;
+
+            let tp_exit_link = obj
+                .progs_mut()
+                .find(|p| p.name() == "trace_exit")
+                .ok_or_else(|| {
+                    LoadError::LoadFailed("program trace_exit missing from .o".into())
+                })?
+                .attach()
+                .map_err(|e| LoadError::LoadFailed(format!("attach exit tracepoint: {e}")))?;
+
             // Leak the Object so its borrows can live 'static. The
             // consumer thread holds a RingBuffer<'static> built from
             // a Map borrow off this Object; the per-connection RPC
@@ -327,6 +353,8 @@ mod with_libbpf {
                 _lsm_link: lsm_link,
                 _tp_execve_link: tp_execve_link,
                 _tp_socket_link: tp_socket_link,
+                _tp_fork_link: tp_fork_link,
+                _tp_exit_link: tp_exit_link,
                 mode,
                 _consumer: consumer,
             })
@@ -420,6 +448,18 @@ mod with_libbpf {
                 })?;
             map.update(key, value, MapFlags::ANY)
                 .map_err(|e| LoadError::LoadFailed(format!("{map_name} update: {e}")))
+        }
+
+        /// Write the enforcement-depth config the LSM hook reads on
+        /// every execve. `mode`: 0 one_level / 1 ancestry / 2
+        /// propagate-on-fork. `max_depth` only matters for ancestry
+        /// (the kernel walks at most MAX_ANCESTRY=16 hops). Single-entry ARRAY
+        /// at key 0; the value layout matches the C `struct
+        /// enforce_config` { u8 mode; u8 max_depth; u8 _pad[6] }.
+        pub fn set_enforce_cfg(&self, mode: u8, max_depth: u8) -> Result<(), LoadError> {
+            let key: u32 = 0;
+            let value = [mode, max_depth, 0, 0, 0, 0, 0, 0];
+            self.update("enforce_cfg", &key.to_ne_bytes(), &value)
         }
 
         #[allow(dead_code)]
