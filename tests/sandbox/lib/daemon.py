@@ -66,10 +66,19 @@ class Daemon:
         # knows cap_bpf; the image's `setpriv` cap table is too old to.
         wants_bpf = "--ebpf-mode" in self.extra_args and "disabled" not in self.extra_args
         if wants_bpf:
+            # cap_bpf/perfmon/mac_admin mirror the production unit's
+            # AmbientCapabilities (CAP_BPF CAP_PERFMON CAP_MAC_ADMIN) —
+            # mac_admin is what makes a BPF-LSM hook *enforcing* (its
+            # deny is ignored without it). cap_dac_read_search is a
+            # SANDBOX-ONLY add: this host hardens tracefs to 0700 root, so
+            # the atty daemon can't read the tracepoint IDs libbpf needs
+            # to attach trace_execve / trace_fork / etc. Production hosts
+            # ship a readable tracefs, so the unit doesn't (and shouldn't)
+            # grant DAC override.
             subprocess.run(
                 [
                     "setcap",
-                    "cap_bpf,cap_perfmon,cap_sys_admin+eip",
+                    "cap_bpf,cap_perfmon,cap_mac_admin,cap_dac_read_search+eip",
                     "/usr/local/bin/atty-guard",
                 ],
                 check=True,

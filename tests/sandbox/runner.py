@@ -101,7 +101,7 @@ def discover_scenarios() -> list[Path]:
     )
 
 
-_DOCKER_JSON_KEYS = {"privileged", "cap_add", "security_opt", "volumes", "image"}
+_DOCKER_JSON_KEYS = {"privileged", "cap_add", "security_opt", "volumes", "image", "pid"}
 _VOLUME_KEYS = {"src", "dst", "rw"}
 
 
@@ -175,6 +175,14 @@ def load_scenario_docker_opts(script: Path) -> list[str]:
             die(f"{meta}: privileged must be bool, got {cfg['privileged']!r}")
         if cfg["privileged"]:
             flags.append("--privileged")
+    if "pid" in cfg:
+        # eBPF scenarios need --pid=host: the kernel LSM hook reads
+        # global PIDs (bpf_get_current_pid_tgid), but a container-ns
+        # daemon would write threat_map keyed by container PIDs, so the
+        # hook's lookups would never match.
+        if not isinstance(cfg["pid"], str):
+            die(f"{meta}: pid must be a string, got {cfg['pid']!r}")
+        flags.extend(["--pid", cfg["pid"]])
     for cap in _string_list("cap_add"):
         flags.extend(["--cap-add", cap])
     for opt in _string_list("security_opt"):

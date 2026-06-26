@@ -139,7 +139,11 @@ def bpf_map_has_pid(map_name: str, pid: int) -> bool:
         key_bytes = entry.get("key", [])
         if len(key_bytes) != 4:
             continue
-        entry_pid = int.from_bytes(bytes(key_bytes), "little")
+        # bpftool emits key bytes as ints on some versions and hex
+        # strings ("0x08") on others — coerce so this works across
+        # whichever bpftool the runtime image ships.
+        key_ints = [int(b, 0) if isinstance(b, str) else b for b in key_bytes]
+        entry_pid = int.from_bytes(bytes(key_ints), "little")
         if entry_pid == pid:
             return True
     return False
