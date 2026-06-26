@@ -155,7 +155,8 @@ struct Cli {
     enforcement_depth: Option<String>,
 
     /// Ancestor-walk ceiling for `--enforcement-depth=ancestry`
-    /// (clamped to the kernel's MAX_ANCESTRY of 16). Overrides the
+    /// (the kernel walks at most 16 hops, its compiled MAX_ANCESTRY).
+    /// Overrides the
     /// `[enforcement]` max_depth config field.
     #[arg(long)]
     ancestry_max_depth: Option<u8>,

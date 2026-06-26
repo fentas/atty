@@ -42,9 +42,10 @@ pub struct EnforcementConfig {
     /// Validated at startup — an unrecognized value fails the load.
     #[serde(default = "default_enforcement_depth")]
     pub depth: String,
-    /// Ancestor-walk ceiling when `depth = "ancestry"`. The kernel
-    /// clamps this to its compiled MAX_ANCESTRY (16); 0 disables the
-    /// walk (degenerates to never-match), so keep it ≥ 1.
+    /// Ancestor-walk ceiling when `depth = "ancestry"`. The kernel walks
+    /// at most its compiled MAX_ANCESTRY (16) hops, so a larger value
+    /// just caps there; 0 disables the walk (never matches), so keep it
+    /// ≥ 1.
     #[serde(default = "default_ancestry_max_depth")]
     pub max_depth: u8,
 }
@@ -67,6 +68,8 @@ impl Default for EnforcementConfig {
 
 /// Map a `depth` string to the byte the kernel `enforce_cfg` map
 /// expects, or `None` for an unrecognized value (caller fails closed).
+/// Byte values must match the `ENFORCE_*` defines in
+/// `atty-guard/ebpf/atty_guard.bpf.c`.
 pub fn depth_mode_byte(depth: &str) -> Option<u8> {
     match depth {
         "one_level" => Some(0),

@@ -278,7 +278,10 @@ int trace_fork(struct trace_event_raw_sched_process_fork *ctx)
     __u32 parent = (__u32)ctx->parent_pid;
     __u32 child = (__u32)ctx->child_pid;
     __u8 *lvl = bpf_map_lookup_elem(&threat_map, &parent);
-    if (lvl) {
+    // Only a Critical mark is worth propagating — that's the one the LSM
+    // hook blocks on. Copying High/annotation levels would churn the map
+    // with entries critical_match never acts on.
+    if (lvl && *lvl == THREAT_CRITICAL) {
         __u8 v = *lvl;
         bpf_map_update_elem(&threat_map, &child, &v, BPF_ANY);
     }

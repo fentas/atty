@@ -454,7 +454,7 @@ mod with_libbpf {
         /// Write the enforcement-depth config the LSM hook reads on
         /// every execve. `mode`: 0 one_level / 1 ancestry / 2
         /// propagate-on-fork. `max_depth` only matters for ancestry
-        /// (the kernel clamps it to MAX_ANCESTRY). Single-entry ARRAY
+        /// (the kernel walks at most MAX_ANCESTRY=16 hops). Single-entry ARRAY
         /// at key 0; the value layout matches the C `struct
         /// enforce_config` { u8 mode; u8 max_depth; u8 _pad[6] }.
         pub fn set_enforce_cfg(&self, mode: u8, max_depth: u8) -> Result<(), LoadError> {
