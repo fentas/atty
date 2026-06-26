@@ -944,7 +944,11 @@ test "llm_chat_retry: refuses when no chat surface is open" {
     try testing.expectEqual(false, try L.onAction(&rt, &ctx, .llm_chat_retry));
 }
 
-test "llm_chat_retry: no-op (with hint) when last turn isn't a user turn" {
+test "llm_chat_retry: resend after an answer trims to the last user turn and re-fires" {
+    // Pins the regenerate path. After a successful answer the tail is
+    // an `.assistant_exec`; Alt+r drops it back to the most recent
+    // `.user` turn (so the LLM re-answers the prompt instead of
+    // continuing the agentic loop) and re-fires the worker pipeline.
     const L = configure(.{
         .provider = .{ .http = .{
             .api_base = "http://test/v1",
@@ -979,9 +983,55 @@ test "llm_chat_retry: no-op (with hint) when last turn isn't a user turn" {
     rt.dialog_state = .idle;
 
     const consumed = try L.onAction(&rt, &ctx, .llm_chat_retry);
-    // Consumed (so the binding doesn't fall through and emit `r` to
-    // the shell) but dialog_state stays idle — no request fired.
     try testing.expect(consumed);
+    // Trailing assistant turn dropped; the user prompt remains as tail.
+    try testing.expectEqual(@as(usize, 1), rt.turns_len);
+    try testing.expectEqual(dialog.TurnKind.user, rt.turns[0].kind);
+    try testing.expectEqualStrings("first", rt.turns[0].content);
+    // fireDialogRequest advanced the state machine.
+    try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .generating), rt.dialog_state);
+}
+
+test "llm_chat_retry: no-op (with hint) when the ring holds no user turn" {
+    // trimToLastUserTurn's false path — a ring with only an
+    // assistant/observation tail (e.g. a corrupted recall) has nothing
+    // to resend. Consumed so `r` doesn't leak to the shell, but no
+    // request fires.
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+    });
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+    };
+
+    try helpers.pushTurn(&rt, .assistant_exec, try testing.allocator.dupe(u8, "echo ok"));
+    rt.chat_inline_open = true;
+    rt.dialog_state = .idle;
+
+    const consumed = try L.onAction(&rt, &ctx, .llm_chat_retry);
+    try testing.expect(consumed);
+    try testing.expectEqual(@as(usize, 1), rt.turns_len);
     try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .idle), rt.dialog_state);
 }
 

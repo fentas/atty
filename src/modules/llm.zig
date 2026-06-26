@@ -503,14 +503,15 @@ pub fn configure(comptime cfg: Config) type {
             // encoded: kitty kbd CSI-u + legacy Alt+T.
             .{ .bytes = keymap.key("Alt+t"), .action = .llm_chat_toggle_auto, .label = "Alt+T", .description = "chat: toggle auto-exec" },
             .{ .bytes = "\x1b[116;3u", .action = .llm_chat_toggle_auto },
-            // Retry the last in-flight dialog request after a soft
-            // failure (timeout, transport blip). The committed
-            // chat_recall binding above uses `\x1bR` (Alt+Shift+R on
-            // most terminals) so retry takes the lowercase byte
-            // `\x1br` — paired with the kitty kbd CSI-u sibling for
-            // terminals that disambiguate. Same dual-encoding
-            // rationale as every other Alt+letter binding here.
-            .{ .bytes = keymap.key("Alt+r"), .action = .llm_chat_retry, .label = "Alt+r", .description = "chat: retry the last failed request (preserves turns)" },
+            // Resend the most recent user prompt — re-runs it after a
+            // soft failure (timeout, transport blip) AND regenerates
+            // after a successful answer. The committed chat_recall
+            // binding above uses `\x1bR` (Alt+Shift+R on most
+            // terminals) so resend takes the lowercase byte `\x1br` —
+            // paired with the kitty kbd CSI-u sibling for terminals
+            // that disambiguate. Same dual-encoding rationale as every
+            // other Alt+letter binding here.
+            .{ .bytes = keymap.key("Alt+r"), .action = .llm_chat_retry, .label = "Alt+r", .description = "chat: resend the last prompt (retry on failure / regenerate after an answer)" },
             .{ .bytes = "\x1b[114;3u", .action = .llm_chat_retry },
         };
 
@@ -1566,7 +1567,8 @@ pub fn configure(comptime cfg: Config) type {
         /// with the panel divider's column budget.
         const chat_open_hint = Wrap.icon("\u{2728}") ++ " " ++
             Wrap.key("Alt+T") ++ " auto \u{00B7} " ++
-            Wrap.key("Alt+M") ++ " model";
+            Wrap.key("Alt+M") ++ " model \u{00B7} " ++
+            Wrap.key("Alt+r") ++ " resend";
 
         /// Reports whether the full chat overlay (Alt+Shift+C)
         /// currently owns atty's alt-screen on the user's outer
