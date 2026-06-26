@@ -19,6 +19,16 @@ from pathlib import Path
 
 
 _LSM_FILE = Path("/sys/kernel/security/lsm")
+BPF_OBJECT = Path("/usr/lib/atty-guard/atty_guard.bpf.o")
+
+
+def skip_if_no_bpf_object(scenario_name: str) -> None:
+    """Clean SKIP when the .bpf.o isn't baked into the image (host had no
+    BTF at build time). Shared by the ebpf scenarios."""
+    if not BPF_OBJECT.is_file():
+        print(f"SKIP: {scenario_name} — {BPF_OBJECT} not baked. Build "
+              "Dockerfile.ebpf on a host with /sys/kernel/btf/vmlinux.")
+        sys.exit(0)
 
 
 def securityfs_available() -> bool:

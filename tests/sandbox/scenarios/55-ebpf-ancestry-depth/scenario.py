@@ -19,15 +19,12 @@ cleanly when BPF LSM / the baked .bpf.o aren't available.
 from __future__ import annotations
 
 import sys
-import time  # noqa: F401  (imported for parity / future settle tweaks)
-from pathlib import Path
 
 sys.path.insert(0, "/sandbox")
-from lib.bpf import skip_if_no_bpf_lsm  # noqa: E402
+from lib.bpf import skip_if_no_bpf_lsm, skip_if_no_bpf_object  # noqa: E402
 from lib.pty import execve_blocked, mark_and_run  # noqa: E402
 
 NAME = "55-ebpf-ancestry-depth"
-BPF_OBJ = Path("/usr/lib/atty-guard/atty_guard.bpf.o")
 
 # Grandchild of the marked bash: `( )` forks a subshell (no exec), then
 # `/bin/true &` forks+execs /bin/true as a child of the SUBSHELL. `wait`
@@ -42,15 +39,9 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
-def skip_if_no_bpf_object() -> None:
-    if not BPF_OBJ.is_file():
-        print(f"SKIP: {NAME} — {BPF_OBJ} not baked.")
-        sys.exit(0)
-
-
 def main() -> None:
     skip_if_no_bpf_lsm(NAME)
-    skip_if_no_bpf_object()
+    skip_if_no_bpf_object(NAME)
 
     # Baseline: one_level must NOT block the grandchild (it only gates
     # direct children) — this is the gap ancestry exists to close.
