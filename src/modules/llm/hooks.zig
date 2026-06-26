@@ -260,6 +260,35 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             return false;
         }
 
+        /// Re-fire the most recent user prompt. The trim keeps the ring
+        /// in the same shape as a freshly-typed prompt, so this both
+        /// retries a soft failure (tail already the user turn — no-op
+        /// trim) and regenerates after an answer (drops the trailing
+        /// assistant/observation turns). Shared by the Alt+r action and
+        /// the post-failure retry banner's Enter so the gate, the fire,
+        /// and the user-facing vocabulary stay in one place. Latches a
+        /// hint when a request is already running or nothing is left to
+        /// resend; arms the open surface's repaint either way.
+        fn resendLastPrompt(rt: *Runtime, ctx: *m.Context) void {
+            if (rt.in_flight or rt.dialog_state != .idle) {
+                latchHint(rt, "resend: a request is already in flight");
+                return;
+            }
+            if (!trimToLastUserTurn(rt)) {
+                latchHint(rt, "resend: no previous prompt to resend");
+                return;
+            }
+            fireDialogRequest(rt, ctx) catch |err| {
+                latchErr(rt, switch (err) {
+                    error.BodyTooLarge => "resend: request body too large",
+                    error.OutOfMemory => "resend: out of memory",
+                    else => "resend: internal error",
+                });
+            };
+            if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
+            if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+        }
+
         /// dialogReset wrapper — flushes the captured conclusion to
         /// the current session file (the `.done` path sets
         /// `conclusion_formatted` BEFORE calling dialogReset), then
@@ -767,17 +796,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                         switch (key) {
                             .enter => {
                                 rt.chat_retry_pending = false;
-                                if (rt.turns_len > 0 and rt.turns[rt.turns_len - 1].kind == .user and
-                                    !rt.in_flight and rt.dialog_state == .idle)
-                                {
-                                    fireDialogRequest(rt, ctx) catch |err| {
-                                        latchErr(rt, switch (err) {
-                                            error.BodyTooLarge => "retry: request body too large",
-                                            error.OutOfMemory => "retry: out of memory",
-                                            else => "retry: internal error",
-                                        });
-                                    };
-                                }
+                                resendLastPrompt(rt, ctx);
                                 rt.chat_inline_paint_pending = true;
                                 continue;
                             },
@@ -1862,35 +1881,11 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                     return true;
                 },
                 .llm_chat_retry => {
-                    // Resend the most recent user prompt. Works both
-                    // after a soft-reset failure (the last turn is the
-                    // unanswered `.user` turn — a no-op trim) AND after
-                    // a successful answer (trim the trailing assistant/
-                    // observation turns so the LLM regenerates rather
-                    // than continuing the agentic loop off a stale
-                    // `.assistant_exec`). Gated on a chat surface being
-                    // open with nothing currently in flight; a hint
-                    // surfaces why the binding did nothing otherwise.
+                    // Pass through to the shell when no chat surface
+                    // owns the key; otherwise resend the last prompt.
                     if (!(rt.chat_inline_open or rt.chat_overlay_open)) return false;
-                    if (rt.in_flight or rt.dialog_state != .idle) {
-                        latchHint(rt, "resend: a request is already in flight");
-                        return true;
-                    }
-                    if (!trimToLastUserTurn(rt)) {
-                        latchHint(rt, "resend: no previous prompt to resend");
-                        return true;
-                    }
-                    fireDialogRequest(rt, ctx) catch |err| {
-                        latchErr(rt, switch (err) {
-                            error.BodyTooLarge => "resend: request body too large",
-                            error.OutOfMemory => "resend: out of memory",
-                            else => "resend: internal error",
-                        });
-                        return true;
-                    };
                     rt.chat_retry_pending = false;
-                    if (rt.chat_inline_open) rt.chat_inline_paint_pending = true;
-                    if (rt.chat_overlay_open) rt.chat_overlay_paint_pending = true;
+                    resendLastPrompt(rt, ctx);
                     return true;
                 },
                 .llm_chat_inline_grow, .llm_chat_inline_shrink => {

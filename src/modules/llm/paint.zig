@@ -1730,16 +1730,15 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 // inline panel. Its paint is deferred to the NEXT cycle
                 // so it lands after this `?1049l` alt-screen exit —
                 // painting it first lets the exit restore the
-                // pre-picker screen and wipe it. The open path
-                // (`chat_recall_open == true`) and an Esc cancel
-                // (`chat_inline_open == false`) both fall through here
-                // without arming anything.
-                const deferred_inline_paint = rt.chat_inline_open and !rt.chat_recall_open;
+                // pre-picker screen and wipe it. Arm it BEFORE the
+                // close paint: even if that paint fails (OOM), the
+                // panel still gets a repaint rather than being stranded
+                // open-but-blank. The open path (`chat_recall_open ==
+                // true`) and an Esc cancel (`chat_inline_open == false`)
+                // both fall through here without arming anything.
+                if (rt.chat_inline_open and !rt.chat_recall_open) rt.chat_inline_paint_pending = true;
                 if (paintChatRecall(rt, ctx)) {
-                    if (rt.chat_recall_buf) |slice| {
-                        if (deferred_inline_paint) rt.chat_inline_paint_pending = true;
-                        return slice;
-                    }
+                    if (rt.chat_recall_buf) |slice| return slice;
                 }
                 // Paint failed — free the items list (would otherwise
                 // leak until detach), reset open state, and arm a

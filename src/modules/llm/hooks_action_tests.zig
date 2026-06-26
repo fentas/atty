@@ -1031,6 +1031,8 @@ test "llm_chat_retry: no-op (with hint) when the ring holds no user turn" {
 
     const consumed = try L.onAction(&rt, &ctx, .llm_chat_retry);
     try testing.expect(consumed);
+    // Surfaces a hint explaining why nothing fired.
+    try testing.expect(rt.hint_pending);
     try testing.expectEqual(@as(usize, 1), rt.turns_len);
     try testing.expectEqual(@as(@TypeOf(rt.dialog_state), .idle), rt.dialog_state);
 }
