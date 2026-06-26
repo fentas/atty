@@ -6,9 +6,10 @@ permalink: /benchmarking/
 
 # atty — benchmarking
 
-> **Status (2026-06): plan-of-record + in-progress.** Phase 1 (the
-> `zig build bench` harness) is the first deliverable; the eBPF
-> enforcement-depth modes (Phase 2) are measured by it.
+> **Status (2026-06): all three phases landed.** Phase 1 (the
+> `zig build bench` harness), Phase 2 (the three configurable eBPF
+> enforcement-depth modes), and Phase 3 (the per-mode overhead
+> measurement + decision matrix). The measured default is `one_level`.
 
 ## Why
 
@@ -70,17 +71,51 @@ zig build bench -- --filter dispatch
 ### Tier B — system / kernel benchmarks (sandbox, not CI)
 
 eBPF and full PTY round-trips need a real kernel and a PTY, so they run
-under the existing eBPF sandbox (`make sandbox-ebpf`), not GitHub CI:
+under the existing eBPF sandbox, not GitHub CI:
 
-| Benchmark | Measures |
-|---|---|
-| `execve_block_<mode>` | added `execve` latency under each enforcement depth (fork+exec `/bin/true` ×N under a marked shell) |
-| `fork_overhead` | added `fork` latency from the `sched_process_fork` hook (propagate mode only) |
-| `map_pressure` | `threat_map` growth + lookup cost under a deep/wide descendant tree |
-| `pty_roundtrip` | end-to-end keystroke→echo latency through the proxy |
+| Benchmark | Status | Measures |
+|---|---|---|
+| `57-ebpf-overhead` | ✅ | per-mode ns **per BPF-program invocation** (`check_execve` / `trace_fork` / `trace_exit`) via the kernel's `bpf_stats_enabled` run-time accounting |
+| `map_pressure` | planned | `threat_map` growth + lookup cost under a deep/wide descendant tree |
+| `pty_roundtrip` | planned | end-to-end keystroke→echo latency through the proxy |
 
-These emit the same table/JSON shape as Tier A so results compose into
-one report.
+Run it: `python3 tests/sandbox/runner.py --no-build 57-ebpf-overhead`
+(it's a measurement, not a gate, so it's out of the `make sandbox-ebpf`
+pass/fail target).
+
+**Why kernel stats, not userspace timing.** A fork+execve+wait is
+hundreds of µs of process creation; the hook cost is sub-µs, so a
+userspace before/after delta drowns in container noise. With
+`bpf_stats_enabled` the kernel records each program's cumulative
+`run_time_ns` / `run_cnt`, so `Δrun_time_ns / Δrun_cnt` over a fixed
+fork+exec workload is the precise mean ns *per program invocation* — the
+actual quantity we care about.
+
+#### Results (Phase 3, 6.x x86_64, fork+execve ×4000/mode, median of 3 runs)
+
+| mode | `check_execve` (per execve) | `trace_fork` (per fork) | `trace_exit` (per exit) |
+|---|---|---|---|
+| `one_level` | ~322 ns | ~85 ns (early-return) | ~330 ns |
+| `ancestry(8)` | ~425 ns (**+~100 ns**) | ~84 ns (early-return) | ~325 ns |
+| `propagate_on_fork` | ~309 ns | ~129 ns (**+~44 ns**) | ~261 ns |
+
+What the numbers say:
+
+- **The "cost of a full tree-shake" — the question that motivated making
+  this configurable — is negligible.** `ancestry(8)` adds **~100 ns per
+  execve** (the 8-hop `real_parent` walk, ~12 ns/hop); `propagate` adds
+  **~44 ns per fork** (the mark-copy) and is otherwise as cheap as
+  `one_level` on execve (an own-PID lookup ≈ a parent lookup). Against a
+  real fork+execve (hundreds of µs) every mode is **<0.5%** overhead.
+- `trace_exit` (~300 ns) is the priciest common-path hook — it runs the
+  GC `map_delete` on *every* process exit in *every* mode (the
+  leak-safe, mode-independent reclaim). One cheap hash op; aggregate
+  cost is ~0.03% CPU even at thousands of exits/s, so the leak-safety is
+  the right trade.
+
+These emit a plain table; per-mode JSON can follow if a baseline gate is
+added (numbers are kernel-specific, so a committed baseline needs a
+pinned runner first — same caveat as Tier A).
 
 ## eBPF enforcement depth — the configurable feature
 
@@ -92,9 +127,9 @@ two deeper modes and make the active mode runtime-selectable.
 
 | Mode | Mechanism | Closes | Cost |
 |---|---|---|---|
-| `one_level` *(today)* | check immediate parent in `threat_map` | direct children of a marked PID | 1 map lookup / execve |
-| `ancestry(N)` | walk `real_parent` up to N hops (verifier-safe unroll, runtime `break` at configured depth), block if any ancestor is Critical | deeper descendants **while the process chain is intact** | ≤ N map lookups + CO-RE reads / execve. Does **not** catch double-fork/daemonize (reparent to PID 1 severs the chain) |
-| `propagate_on_fork` | `sched_process_fork` copies the parent's mark to the child; `sched_process_exit` GCs the entry; LSM checks the process's own (inherited) mark | **all** descendants incl. double-fork/daemonize (mark is copied before any reparenting) | per-fork map write + per-exit delete; map-pressure under fork bombs |
+| `one_level` *(default)* | check immediate parent in `threat_map` | direct children of a marked PID | 1 lookup / execve — **~322 ns** (measured) |
+| `ancestry(N)` | walk `real_parent` up to N hops (bounded loop, runtime `break` at configured depth), block if any ancestor is Critical | deeper descendants **while the process chain is intact** | ≤ N lookups + CO-RE reads / execve — **~+100 ns/execve at N=8** (measured). Does **not** catch double-fork/daemonize (reparent to PID 1 severs the chain) |
+| `propagate_on_fork` | `sched_process_fork` copies the parent's mark to the child; `sched_process_exit` GCs the entry; LSM checks the process's own (inherited) mark | **all** descendants incl. double-fork/daemonize (mark is copied before any reparenting) | per-fork mark-copy — **~+44 ns/fork** (measured); map-pressure under fork bombs |
 
 ### Mechanism — one `.bpf.o`, runtime-switchable
 
@@ -152,24 +187,34 @@ depth = "one_level"   # "one_level" | "ancestry" | "propagate"
 ancestry_max_depth = 8
 ```
 
-Plumbed as a Rust `EnforcementDepth` enum → written to `enforce_cfg_map`
-on startup and `--reload`. Surfaced by `atty-guard --print-features` and
-`atty doctor` so the active mode is visible. Defaults to the
-**benchmark-chosen** value once Phase 2 lands (provisionally
-`one_level`, the zero-overhead floor).
+Plumbed as a Rust config (`[enforcement] depth` / `--enforcement-depth`)
+→ written to `enforce_cfg` on startup. Default is `one_level` — the
+**benchmark-confirmed** choice (Phase 3 showed the deeper modes are
+near-free, so the default is picked on coverage/precision, not speed; see
+the decision framework). `atty doctor` surfacing of the active mode is a
+tracked follow-up.
 
 ## Decision framework
 
-The suite produces a per-mode overhead table on representative kernels;
-from it we publish a recommendation matrix, e.g.:
+Filled from the Phase-3 measurements above. The headline: **per-mode
+overhead is not a performance differentiator** (every mode is <0.5% of a
+real fork+execve), so the choice is about *coverage vs. blast-radius*,
+not speed.
 
-| Use-case | Suggested mode | Rationale (filled from measurements) |
+| Use-case | Suggested mode | Rationale (from measurements) |
 |---|---|---|
-| Latency-sensitive interactive shell | `one_level` | floor overhead; blocks the flagged command itself |
-| Defense-in-depth dev box | `ancestry(8)` | catches deep descendants; bounded per-execve cost |
-| High-security / CI runner | `propagate_on_fork` | full containment incl. detach; accepts fork-time cost |
+| Latency-sensitive / default | `one_level` | floor (~322 ns/execve); blocks the flagged command itself (a direct child of the marked shell); precise — won't sweep in the shell's unrelated descendants during the sticky window |
+| Defense-in-depth dev box | `ancestry(8)` | +~100 ns/execve — negligible — to also catch the flagged command's descendants while the chain is intact |
+| High-security / CI runner | `propagate_on_fork` | +~44 ns/fork; full containment incl. double-fork/daemonize. Opt-in/experimental until the proxy marks the command PID (see the marking-model note) |
 
-The operator picks; atty ships the measured default.
+**Measured default: `one_level`.** Not because the deeper modes are
+costly — they aren't — but because it's the zero-overhead floor, it's
+backward-compatible, and it's the *precise* match for the current
+shell-marking model (block exactly the flagged commands, not their whole
+subtree while the mark is sticky). The data's real contribution is
+removing *performance* as a reason to avoid `ancestry`/`propagate`: they
+are near-free coverage upgrades an operator can opt into. The operator
+picks; atty ships `one_level`.
 
 ## Phasing
 
@@ -187,9 +232,11 @@ The operator picks; atty ships the measured default.
    the Zig command-pid marking for propagate (see the marking-model
    note), the LRU-vs-HASH map decision (Phase-3 `map_pressure`), and
    `atty doctor` surfacing of the active depth.
-3. **Phase 3 — Tier-B benches + the matrix.** Sandbox bench scenarios
-   for per-mode `execve`/`fork` overhead, then fill the decision matrix
-   and set the default.
+3. ✅ **Phase 3 — Tier-B benches + the matrix.** `57-ebpf-overhead`
+   measures per-mode ns/invocation via the kernel's BPF run-time stats;
+   the decision matrix + default are filled from it (one_level, confirmed
+   by data). Still planned: `map_pressure` (which drives the LRU-vs-HASH
+   call) and `pty_roundtrip`.
 
 ## See also
 
