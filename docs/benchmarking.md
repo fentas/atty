@@ -52,8 +52,10 @@ captured a *different* allocator at `attach` (e.g. atuin's worker
 thread) and allocated through that in `onInput` would be invisible to
 the counter; the figure is "zero alloc on the dispatched path," which is
 the property that matters for the keystroke loop. The
-`hot path makes zero heap allocations` test (in `bench/main.zig`, run by
-`zig build test`) gates this so a regression fails CI.
+`per-keystroke dispatch makes zero heap allocations` test (in
+`bench/main.zig`, run by `zig build test`) gates this so a regression
+fails CI. (The Enter/commit branch — `onLineCommit` → history record —
+is allowed to allocate and isn't the hot path.)
 
 Output is a stable table (and a `--json` mode) so CI can diff against a
 committed baseline and fail a PR that regresses the hot path past a

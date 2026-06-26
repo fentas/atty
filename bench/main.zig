@@ -275,11 +275,12 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-// CI gate for the zero-allocation-hot-path claim. Wired into
-// `zig build test` (see build.zig) so a change that makes the
-// per-keystroke path allocate (through ctx.allocator / ctx.scratch)
-// fails loudly rather than silently regressing a headline property.
-test "hot path makes zero heap allocations" {
+// CI gate for the zero-allocation claim on the per-keystroke dispatch
+// path. Wired into `zig build test` (see build.zig) so a change that
+// makes that path allocate (through ctx.allocator / ctx.scratch) fails
+// loudly. Scope is deliberate: the Enter/commit branch (onLineCommit
+// → history record) is allowed to allocate and is not the hot path.
+test "per-keystroke dispatch makes zero heap allocations" {
     const gpa = std.testing.allocator;
     var counting: Counting = .{ .backing = gpa };
     const alloc = counting.allocator();
