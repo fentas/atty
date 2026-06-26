@@ -96,13 +96,17 @@ def baseline_ns(iters: int, reps: int) -> float:
     return median(samples)
 
 
-def prog_stats() -> dict[str, tuple[int, int]]:
-    """name → (run_time_ns, run_cnt) for our programs, via bpftool."""
+def prog_stats() -> dict[tuple[str, int], tuple[int, int]]:
+    """(name, prog_id) → (run_time_ns, run_cnt) for our programs, via
+    bpftool. Keyed by id too: bpftool can list several programs with the
+    same name (a stale instance from a prior load, or an unrelated host
+    program), so the delta step picks the id whose count actually grew
+    rather than letting a same-name entry shadow the live one."""
     res = subprocess.run(
         ["bpftool", "prog", "show", "--json"],
         capture_output=True, timeout=10,
     )
-    out: dict[str, tuple[int, int]] = {}
+    out: dict[tuple[str, int], tuple[int, int]] = {}
     if res.returncode != 0:
         return out
     try:
@@ -112,7 +116,8 @@ def prog_stats() -> dict[str, tuple[int, int]]:
     for p in progs:
         name = p.get("name", "")
         if name in PROGS:
-            out[name] = (int(p.get("run_time_ns", 0)), int(p.get("run_cnt", 0)))
+            key = (name, int(p.get("id", 0)))
+            out[key] = (int(p.get("run_time_ns", 0)), int(p.get("run_cnt", 0)))
     return out
 
 
@@ -133,11 +138,19 @@ def measure_mode(idx: int, extra: list[str]) -> dict[str, float]:
             fork_exec_workload(WORKLOAD)
             after = prog_stats()
             for name in PROGS:
-                rt0, c0 = before.get(name, (0, 0))
-                rt1, c1 = after.get(name, (0, 0))
-                dc = c1 - c0
-                if dc > 0:
-                    per_call[name].append((rt1 - rt0) / dc)
+                # Among all programs sharing this name, take the instance
+                # whose run_cnt grew most over the workload — that's the
+                # live one driving our forks (ignores stale dups).
+                best_dc, best_drt = 0, 0
+                for (n, pid), (rt1, c1) in after.items():
+                    if n != name:
+                        continue
+                    rt0, c0 = before.get((n, pid), (0, 0))
+                    dc = c1 - c0
+                    if dc > best_dc:
+                        best_dc, best_drt = dc, rt1 - rt0
+                if best_dc > 0:
+                    per_call[name].append(best_drt / best_dc)
     return {name: (median(v) if v else float("nan")) for name, v in per_call.items()}
 
 
