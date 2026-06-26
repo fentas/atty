@@ -288,20 +288,17 @@ int trace_fork(struct trace_event_raw_sched_process_fork *ctx)
     return 0;
 }
 
-// Exit GC — only in ENFORCE_PROPAGATE, where the kernel (not
-// userspace) owns the propagated entries. Drop a process's entry when
-// its thread-group leader exits so the map doesn't accumulate stale
-// PIDs (and so a reused PID doesn't inherit a dead mark). one_level /
-// ancestry don't GC here: their entries are userspace-owned and
-// userspace already evicts on PID reuse (threat_map.rs).
+// Exit GC — drop a process's threat_map entry when its thread-group
+// leader exits, in EVERY mode. propagate mode NEEDS it (the kernel owns
+// the fork-propagated entries); one_level / ancestry entries are
+// userspace-owned, but deleting on exit is still correct (the PID is
+// gone) and means propagated entries can't leak if the operator ever
+// switches modes. Cost is one hash delete per process exit — usually a
+// miss, negligible. Not gated on enforce_cfg so it stays correct
+// independent of the active depth.
 SEC("tracepoint/sched/sched_process_exit")
 int trace_exit(struct trace_event_raw_sched_process_template *ctx)
 {
-    __u32 k = 0;
-    struct enforce_config *cfg = bpf_map_lookup_elem(&enforce_cfg, &k);
-    if (!cfg || cfg->mode != ENFORCE_PROPAGATE)
-        return 0;
-
     __u64 pt = bpf_get_current_pid_tgid();
     __u32 tgid = (__u32)(pt >> 32);
     __u32 tid = (__u32)pt;

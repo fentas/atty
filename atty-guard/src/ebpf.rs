@@ -195,10 +195,9 @@ mod with_libbpf {
         /// for one BPF object load even if they only care about
         /// the execve enforcement path.
         _tp_socket_link: libbpf_rs::Link,
-        /// sched fork/exit tracepoints for propagate-on-fork mode. They
-        /// early-return in the other modes but stay attached so the
-        /// enforcement depth can change via the `enforce_cfg` map alone,
-        /// no reload.
+        /// sched fork/exit tracepoints. trace_fork propagates a mark only
+        /// in propagate mode; trace_exit GCs in every mode. Always
+        /// attached regardless of the configured depth.
         _tp_fork_link: libbpf_rs::Link,
         _tp_exit_link: libbpf_rs::Link,
         mode: LoadedMode,

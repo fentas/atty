@@ -951,6 +951,19 @@ fn main() -> std::io::Result<()> {
                 let max_depth = cli
                     .ancestry_max_depth
                     .unwrap_or(file_cfg.enforcement.max_depth);
+                // ancestry with max_depth=0 walks zero hops → matches
+                // nothing → silently disables enforcement. Clamp to 1
+                // (at least the direct parent) with a warning rather than
+                // shipping a no-op policy.
+                let max_depth = if depth == "ancestry" && max_depth == 0 {
+                    eprintln!(
+                        "atty-guard: ancestry max_depth=0 walks zero hops \
+                         (no enforcement) — using 1"
+                    );
+                    1
+                } else {
+                    max_depth
+                };
                 let mode_byte = match config::depth_mode_byte(&depth) {
                     Some(b) => b,
                     None => {
