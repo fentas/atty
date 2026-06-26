@@ -177,10 +177,13 @@ The operator picks; atty ships the measured default.
    human table + `--json`. CI-safe. A committed baseline + a CI
    regression gate follow once a stable perf runner is picked (numbers
    are machine-specific, so a naive committed baseline would be noise).
-2. **Phase 2 — eBPF modes + config (in progress).** `enforce_cfg` map,
-   the three-mode LSM branch, `sched_process_fork`/`_exit` hooks, Rust
-   `[enforcement]` config + `--enforcement-depth` CLI → the map.
-   Validated under `make sandbox-ebpf` (not CI). Deferred to follow-ups:
+2. ✅ **Phase 2 — eBPF modes + config.** `enforce_cfg` map, the
+   three-mode LSM branch, `sched_process_fork`/`_exit` hooks, Rust
+   `[enforcement]` config + `--enforcement-depth` CLI → the map. All
+   three modes are behavior-validated under `make sandbox-ebpf` (not
+   CI): `51` (one_level blocks a direct child), `55` (one_level allows a
+   grandchild, ancestry blocks it), `56` (ancestry(2) allows a 4-deep
+   descendant, propagate_on_fork blocks it). Deferred to follow-ups:
    the Zig command-pid marking for propagate (see the marking-model
    note), the LRU-vs-HASH map decision (Phase-3 `map_pressure`), and
    `atty doctor` surfacing of the active depth.

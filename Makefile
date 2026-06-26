@@ -438,4 +438,6 @@ sandbox-ebpf-image: sandbox-base-image
 	    $(CURDIR)
 
 sandbox-ebpf: sandbox-ebpf-image
-	python3 tests/sandbox/runner.py --no-build 51-ebpf-threat-map-roundtrip 52-ebpf-af-alg-tracepoint
+	python3 tests/sandbox/runner.py --no-build \
+	    51-ebpf-threat-map-roundtrip 52-ebpf-af-alg-tracepoint \
+	    55-ebpf-ancestry-depth 56-ebpf-propagate-fork
