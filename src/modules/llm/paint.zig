@@ -336,7 +336,7 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
                 const ind = std.fmt.bufPrint(&sb, "\x1B[2m[\u{2191} {d} below]\x1B[0m ", .{overlay_offset}) catch "";
                 w.writeAll(ind) catch return false;
             }
-            w.writeAll("\x1B[2m[Alt+T auto \u{00B7} Alt+M model \u{00B7} Alt+Shift+C close \u{00B7} Enter send \u{00B7} Shift\u{2191}\u{2193}/PgUp/PgDn]\x1B[0m") catch return false;
+            w.writeAll("\x1B[2m[Alt+T auto \u{00B7} Alt+M model \u{00B7} Alt+r resend \u{00B7} Alt+Shift+C close \u{00B7} Enter send \u{00B7} Shift\u{2191}\u{2193}/PgUp/PgDn]\x1B[0m") catch return false;
             // Transfer ownership of the formatted buffer to the
             // Runtime so the provideTermBytes consumer gets a
             // stable slice that survives until the next paint.
@@ -1726,6 +1726,17 @@ pub fn Module(comptime cfg: types.Config, comptime Runtime: type) type {
             // when any chat surface is active).
             if (rt.chat_recall_paint_pending) {
                 rt.chat_recall_paint_pending = false;
+                // A picker Enter loaded a dialog into the (now-open)
+                // inline panel. Its paint is deferred to the NEXT cycle
+                // so it lands after this `?1049l` alt-screen exit —
+                // painting it first lets the exit restore the
+                // pre-picker screen and wipe it. Arm it BEFORE the
+                // close paint: even if that paint fails (OOM), the
+                // panel still gets a repaint rather than being stranded
+                // open-but-blank. The open path (`chat_recall_open ==
+                // true`) and an Esc cancel (`chat_inline_open == false`)
+                // both fall through here without arming anything.
+                if (rt.chat_inline_open and !rt.chat_recall_open) rt.chat_inline_paint_pending = true;
                 if (paintChatRecall(rt, ctx)) {
                     if (rt.chat_recall_buf) |slice| return slice;
                 }

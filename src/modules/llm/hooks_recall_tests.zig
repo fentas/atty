@@ -425,6 +425,86 @@ test "chat_recall: loads a pre-existing dialog file end-to-end" {
     }
 }
 
+test "chat_recall: Enter defers the inline paint until after the alt-screen exit" {
+    // Regression pin: selecting a dialog used to set both
+    // chat_inline_paint_pending AND chat_recall_paint_pending, so the
+    // panel painted first and the picker's `?1049l` alt-screen exit
+    // immediately restored the pre-picker screen and wiped it —
+    // visible as "press Alt+C twice to see the recalled dialog". The
+    // panel paint must be deferred until provideTermBytes has emitted
+    // the alt-screen exit.
+    const dir: []const u8 = "/tmp/atty-recall-order-test";
+    const dz = try testing.allocator.dupeZ(u8, dir);
+    defer testing.allocator.free(dz);
+    const dialog_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/20260101T000000-bbbbbb.jsonl",
+        .{dir},
+    );
+    const pre_dpz = try testing.allocator.dupeZ(u8, dialog_path);
+    _ = std.c.unlink(pre_dpz.ptr);
+    testing.allocator.free(pre_dpz);
+    _ = std.c.rmdir(dz.ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(dz.ptr, 0o700));
+    defer testing.allocator.free(dialog_path);
+    const dpz = try testing.allocator.dupeZ(u8, dialog_path);
+    defer testing.allocator.free(dpz);
+    const fd = std.c.open(dpz.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o600));
+    try testing.expect(fd >= 0);
+    const payload = "{\"kind\":\"user\",\"content\":\"list files\"}\n";
+    _ = std.c.write(fd, payload.ptr, payload.len);
+    _ = std.c.close(fd);
+    defer _ = std.c.rmdir(dz.ptr);
+    defer _ = std.c.unlink(dpz.ptr);
+
+    const L = configure(.{
+        .provider = .{ .http = .{
+            .api_base = "http://test/v1",
+            .api_base_env = "ATTY_TEST_NEVER",
+            .api_base_fallback_env = "ATTY_TEST_NEVER",
+            .api_key_env = "ATTY_TEST_NEVER",
+        } },
+        .chat_persist_enabled = true,
+        .chat_persist_dir = dir,
+    });
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const real_io = threaded.io();
+    var rt = try L.attach(testing.allocator, real_io);
+    defer shutdownAndFree(L, &rt, real_io);
+    const helpers = dialog.Module(L.config, L.Runtime);
+    defer helpers.freeTurns(&rt);
+
+    var line: @import("../../line_state.zig").LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx: m.Context = .{
+        .allocator = testing.allocator,
+        .io = real_io,
+        .line = &line,
+        .scratch = &scratch,
+        .is_tty = false,
+        .statusbar_reserve = 2,
+    };
+
+    _ = try L.onAction(&rt, &ctx, .chat_recall);
+    try testing.expect(rt.chat_recall_open);
+
+    _ = try L.onInput(&rt, &ctx, "\r");
+    // Panel is logically open, but its paint is held off and the
+    // picker's close paint is queued.
+    try testing.expect(rt.chat_inline_open);
+    try testing.expect(!rt.chat_inline_paint_pending);
+    try testing.expect(rt.chat_recall_paint_pending);
+
+    // First drain emits the alt-screen exit and arms the panel paint.
+    const exit_bytes = try L.provideTermBytes(&rt, &ctx);
+    try testing.expect(exit_bytes != null);
+    try testing.expect(std.mem.indexOf(u8, exit_bytes.?, "\x1B[?1049l") != null);
+    try testing.expect(rt.chat_inline_paint_pending);
+}
+
 test "chat_recall: loaded assistant_exec envelope renders with the timeline-rail box" {
     // Pins the contract that a recalled dialog's historical
     // assistant_exec turns flow through the SAME paint path as
