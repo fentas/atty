@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -64,7 +65,16 @@ class Daemon:
         # non-eBPF scenarios run in a non-privileged container where
         # these caps aren't available to grant. `setcap` (libcap2-bin)
         # knows cap_bpf; the image's `setpriv` cap table is too old to.
-        wants_bpf = "--ebpf-mode" in self.extra_args and "disabled" not in self.extra_args
+        # Only file-cap the binary when setcap exists. The eBPF image
+        # ships libcap2-bin; the base image — where graceful-fallback
+        # scenarios like 50-ebpf-loader run a --ebpf-mode daemon WITHOUT
+        # the ebpf feature — does not, and there the daemon should just
+        # fall back to FeatureNotBuilt, so skipping setcap is correct.
+        wants_bpf = (
+            "--ebpf-mode" in self.extra_args
+            and "disabled" not in self.extra_args
+            and shutil.which("setcap") is not None
+        )
         if wants_bpf:
             # cap_bpf/perfmon/mac_admin mirror the production unit's
             # AmbientCapabilities (CAP_BPF CAP_PERFMON CAP_MAC_ADMIN) —
