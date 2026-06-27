@@ -246,6 +246,18 @@ reactive fallback, never a replacement for it. `strict` ⊋ `session`.
   closing `session`'s reactive race for those shapes. A further layer on
   top of basename.
 
+  *A+ basename limitations (accepted, defense-in-depth):* (1) the basename
+  build uses per-CPU scratch across a non-preempt-disabled window (this LSM
+  hook is non-sleepable → `migrate_disable`, not `preempt_disable`), so on a
+  PREEMPT/RT kernel a concurrent same-CPU watched execve can race the
+  scratch — narrow, and the exact-path layer + the `session` fallback are
+  unaffected; `bpf_preempt_disable` (6.10+) is the eventual close. (2) the
+  path read caps at 256 B, so a basename sitting past offset 255 of a very
+  long path is truncated (false-negative) — same bound as the `deny_bins`
+  key. (3) `basename_is_denied` currently runs on every watched exec even
+  under `audit`/`session` (where `deny_basenames` is empty) — a follow-up
+  gate (a userspace-set flag) will skip it when no basenames are configured.
+
 **Honesty contract.** A `strict` deny is **prevention** (sync `-EPERM`,
 the exec never runs — surfaced to the user as the failed command) vs
 `session`'s **kill** (reactive, post-exec); the two are never conflated,

@@ -355,6 +355,18 @@ static long copy_basename(__u32 j, void *ctx)
 // the path into per-CPU scratch, finds the basename, builds the key in the
 // per-CPU bname_scratch (zeroed first so stale bytes from a prior call
 // can't corrupt the exact-match key), looks it up.
+//
+// Per-CPU scratch race (accepted): this hook is NON-sleepable, so it runs
+// under migrate_disable() (CPU pinned) but NOT preempt_disable(). On a
+// PREEMPT/RT kernel a higher-priority *watched* execve on the same CPU can
+// preempt this read→2×bpf_loop→lookup window and overwrite the shared
+// scratch, so the final lookup could key off the other task's basename
+// (probabilistic false-negative/positive). Narrow (PREEMPT/RT + concurrent
+// same-CPU watched execs + timing) and accepted as defense-in-depth: the
+// exact-path layer (deny_bins, stack-local key) is race-free, and `strict`
+// is a sync layer ON TOP of session, never the sole control. A stack key
+// would close it but a 256 B path buffer doesn't fit the 512 B BPF stack;
+// bpf_preempt_disable (6.10+) is the eventual fix. Tracked.
 static __always_inline int basename_is_denied(const char *fname)
 {
     if (!fname)
