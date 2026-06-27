@@ -85,6 +85,20 @@ struct {
     __type(value, __u8);
 } warn_pids SEC(".maps");
 
+// PID → in the atty-session subtree (value byte unused, presence is the
+// signal). Owned by userspace when a profile that scopes the session is
+// active; trace_fork propagates it to descendants. The LSM hook emits a
+// VERDICT_CLASSIFY event for a watched execve so the daemon classifies it
+// out-of-band — the scoping that keeps profile detection bounded to the
+// terminal's subtree instead of every execve system-wide. A separate
+// single-primitive map for the same no-struct-drift reason as warn_pids.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, __u32);
+    __type(value, __u8);
+} watch_pids SEC(".maps");
+
 // Enforcement config — single-entry array written by userspace at
 // startup / reload. CO-RE doesn't relocate map *values*, so the layout
 // is hand-fixed (matches the Rust writer's byte order: mode, max_depth,
@@ -128,6 +142,8 @@ struct {
                              // allowed the execve.
 #define VERDICT_BLOCK      2 // LSM hook saw threat_map=Critical;
                              // returned -EPERM.
+#define VERDICT_CLASSIFY   3 // watch-scoped execve; daemon classifies
+                             // it out-of-band (security profiles).
 
 struct execve_event {
     __u8  kind;           // EVENT_EXECVE / EVENT_AF_ALG
@@ -259,6 +275,30 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
         // No EPERM — warn logs the would-have-blocked event but allows.
     }
 
+    // Watch scope: a security profile is classifying this session
+    // subtree. Emit a scoped classify event carrying the resolved binary
+    // path from bprm (a kernel read — TOCTOU-safe, unlike reading the
+    // userspace argv) for the daemon to act on out-of-band, then ALLOW.
+    // Gated on watch_pids by OWN pid (propagated at fork), so this is NOT
+    // a system-wide execve firehose — only the marked session subtree.
+    if (bpf_map_lookup_elem(&watch_pids, &child_pid)) {
+        struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (e) {
+            e->kind = EVENT_EXECVE;
+            e->verdict = VERDICT_CLASSIFY;
+            e->pid = child_pid;
+            e->ppid = parent_pid;
+            bpf_get_current_comm(e->comm, sizeof(e->comm));
+            const char *fname = NULL;
+            bpf_core_read(&fname, sizeof(fname), &bprm->filename);
+            if (fname)
+                bpf_core_read_str(e->argv0, sizeof(e->argv0), fname);
+            else
+                e->argv0[0] = '\0';
+            bpf_ringbuf_submit(e, 0);
+        }
+    }
+
     return 0;
 }
 
@@ -272,20 +312,31 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
 SEC("tracepoint/sched/sched_process_fork")
 int trace_fork(struct trace_event_raw_sched_process_fork *ctx)
 {
-    __u32 k = 0;
-    struct enforce_config *cfg = bpf_map_lookup_elem(&enforce_cfg, &k);
-    if (!cfg || cfg->mode != ENFORCE_PROPAGATE)
-        return 0;
-
     __u32 parent = (__u32)ctx->parent_pid;
     __u32 child = (__u32)ctx->child_pid;
-    __u8 *lvl = bpf_map_lookup_elem(&threat_map, &parent);
-    // Only a Critical mark is worth propagating — that's the one the LSM
-    // hook blocks on. Copying High/annotation levels would churn the map
-    // with entries critical_match never acts on.
-    if (lvl && *lvl == THREAT_CRITICAL) {
-        __u8 v = *lvl;
-        bpf_map_update_elem(&threat_map, &child, &v, BPF_ANY);
+
+    // WATCH scope propagates on EVERY fork, independent of enforce mode —
+    // it's session scoping (which subtree to classify), not block
+    // enforcement. A watched parent's children stay watched so the whole
+    // subtree's execs surface to the daemon.
+    if (bpf_map_lookup_elem(&watch_pids, &parent)) {
+        __u8 one = 1;
+        bpf_map_update_elem(&watch_pids, &child, &one, BPF_ANY);
+    }
+
+    // Critical propagation — only in ENFORCE_PROPAGATE (the block path).
+    // Only a Critical mark is worth propagating: that's the one the LSM
+    // hook blocks on; copying High/annotation churns the map with entries
+    // critical_match never acts on. The copy happens at fork, BEFORE any
+    // double-fork/daemonize can reparent the descendant away.
+    __u32 k = 0;
+    struct enforce_config *cfg = bpf_map_lookup_elem(&enforce_cfg, &k);
+    if (cfg && cfg->mode == ENFORCE_PROPAGATE) {
+        __u8 *lvl = bpf_map_lookup_elem(&threat_map, &parent);
+        if (lvl && *lvl == THREAT_CRITICAL) {
+            __u8 v = *lvl;
+            bpf_map_update_elem(&threat_map, &child, &v, BPF_ANY);
+        }
     }
     return 0;
 }
@@ -304,8 +355,10 @@ int trace_exit(struct trace_event_raw_sched_process_template *ctx)
     __u64 pt = bpf_get_current_pid_tgid();
     __u32 tgid = (__u32)(pt >> 32);
     __u32 tid = (__u32)pt;
-    if (tgid == tid) // process (leader) exit, not a bare thread
+    if (tgid == tid) { // process (leader) exit, not a bare thread
         bpf_map_delete_elem(&threat_map, &tgid);
+        bpf_map_delete_elem(&watch_pids, &tgid);
+    }
     return 0;
 }
 

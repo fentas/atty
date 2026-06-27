@@ -118,6 +118,10 @@ impl EbpfState {
     pub fn set_threat(&self, _pid: u32, _level: ThreatLevel) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
+    #[allow(dead_code)]
+    pub fn set_watch(&self, _pid: u32) -> Result<(), LoadError> {
+        Err(LoadError::FeatureNotBuilt)
+    }
     pub fn set_enforce_cfg(&self, _mode: u8, _max_depth: u8) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
@@ -409,6 +413,15 @@ mod with_libbpf {
                 (_, ThreatLevel::High) => self.update("threat_map", &key, &[1u8]),
                 _ => Ok(()),
             }
+        }
+
+        /// Mark `pid` as in the watched atty-session subtree (security
+        /// profiles). The fork hook propagates the mark to descendants;
+        /// the LSM hook emits a VERDICT_CLASSIFY event for watched execs.
+        /// Clearing is handled kernel-side by trace_exit on process exit.
+        #[allow(dead_code)]
+        pub fn set_watch(&self, pid: u32) -> Result<(), LoadError> {
+            self.update("watch_pids", &pid.to_ne_bytes(), &[1u8])
         }
 
         /// Clear the PID from BOTH maps in a single sweep. Map

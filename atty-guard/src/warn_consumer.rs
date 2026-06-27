@@ -195,6 +195,7 @@ const VERDICT_TRACE: u8 = 0;
 const VERDICT_WARN: u8 = 1;
 #[allow(dead_code)]
 const VERDICT_BLOCK: u8 = 2;
+const VERDICT_CLASSIFY: u8 = 3;
 
 /// Byte-for-byte mirror of the C struct (156 bytes). Hand-padded
 /// so `#[repr(C)]` matches the kernel-side layout regardless of
@@ -247,6 +248,13 @@ impl ExecveEvent {
     /// (tracepoint logging / set_threat banner respectively).
     pub fn is_warn(&self) -> bool {
         self.kind == EVENT_EXECVE && self.verdict == VERDICT_WARN
+    }
+
+    /// A watch-scoped execve the daemon should classify out-of-band
+    /// (security profiles). Distinct from `is_warn` (block-mode pilot).
+    #[allow(dead_code)]
+    pub fn is_classify(&self) -> bool {
+        self.kind == EVENT_EXECVE && self.verdict == VERDICT_CLASSIFY
     }
 
     /// Convert to a wire-format ResponseBody for subscribers.
