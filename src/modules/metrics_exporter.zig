@@ -85,9 +85,11 @@ pub fn incognitoRedact(incognito: bool, policy: IncognitoPolicy) bool {
     return incognito and policy == .security_only;
 }
 
-/// Whether a committed command should be counted at all. Incognito
-/// sessions under a non-`normal` policy aren't counted (the session
-/// reports existence + security only — productivity stays private).
+/// Whether a committed command should be counted at all. Counting is gated
+/// at INGEST: a command typed while incognito under a non-`normal` policy
+/// is never counted. This complements `redactedCounters`, which suppresses
+/// already-counted productivity at REPORT time — together, incognito
+/// productivity never leaks by either path.
 pub fn shouldCount(incognito: bool, policy: IncognitoPolicy) bool {
     return !(incognito and policy != .normal);
 }
