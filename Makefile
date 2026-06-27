@@ -440,7 +440,8 @@ sandbox-ebpf-image: sandbox-base-image
 sandbox-ebpf: sandbox-ebpf-image
 	python3 tests/sandbox/runner.py --no-build \
 	    51-ebpf-threat-map-roundtrip 52-ebpf-af-alg-tracepoint \
-	    55-ebpf-ancestry-depth 56-ebpf-propagate-fork
+	    55-ebpf-ancestry-depth 56-ebpf-propagate-fork \
+	    58-ebpf-detection-gap
 
 # Tier-B per-mode overhead measurement (not a pass/fail gate — prints a
 # ns/invocation table; see docs/benchmarking.md).

@@ -123,7 +123,7 @@ Per external review (2026-05-18): the system is **three** cooperating pieces wit
               │            ▼                                │            │
               │   ┌─────────────────────────────────────────┴────────┐   │
               │   │           lsm/bprm_check_security             │   │
-              │   │             tracepoint sys_enter_execve           │   │
+              │   │        tracepoints: AF_ALG + sched fork/exit       │   │
               │   ╞══════════════════════════════════════════════════╡   │
               ├───┤             KERNEL SPACE (eBPF)                  ├───┤
               │   │                                                  │   │
@@ -388,7 +388,7 @@ Separate repo / binary, NOT bundled with atty. **Two new pieces ship together** 
   - `classify(payload: str) → { label, confidence }`
   - `set_threat_level(pid: u32, level: enum) → ok`
   - `subscribe_ringbuf() → stream of execve events`
-- **eBPF object** — shipped with `atty-guard`. Loads at daemon start via libbpf. Pins to `lsm/bprm_check_security` + `tracepoint:syscalls:sys_enter_execve`. Maps:
+- **eBPF object** — shipped with `atty-guard`. Loads at daemon start via libbpf. Pins to `lsm/bprm_check_security` (enforcement + Warn/Block events) + the `sys_enter_socket` (AF_ALG) and `sched_process_fork`/`_exit` (propagate-on-fork) tracepoints. (An every-execve `sys_enter_execve` log program was removed — its events were unconsumed; see git log.) Maps:
   - `BPF_MAP_TYPE_HASH` keyed by PID → threat level (written by atty via UDS, read by eBPF on every execve).
   - `BPF_MAP_TYPE_RINGBUF` → execve events to user space.
 - **atty's role unchanged from V1** — Tier 1 pattern matchers stay in atty proper. atty queries `atty-guard` over UDS for Tier 2 (the existing query path) AND for setting PID threat level when high-risk commands fire.

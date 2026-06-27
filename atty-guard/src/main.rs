@@ -17,7 +17,7 @@
 //!
 //! What V2-B will fill in:
 //! - libbpf-rs loader pinned to `lsm/bprm_check_security` +
-//!   `tracepoint:syscalls:sys_enter_execve`.
+//!   the AF_ALG / sched_process_fork / sched_process_exit tracepoints.
 //! - Real ringbuf consumer feeding the classifier asynchronously.
 //! - Ownership of the BPF hash map (this in-memory map becomes a
 //!   passthrough to the kernel side).
@@ -106,7 +106,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Load the V2-B eBPF programs (lsm/bprm_check_security hook
-    /// + sys_enter_execve tracepoint) at startup. Requires the
+    /// + AF_ALG / sched fork+exit tracepoints) at startup. Requires the
     /// daemon to have been built with `--features ebpf` AND to be
     /// running with CAP_BPF. Without the feature this flag errors
     /// out at startup; without the capability the loader errors
