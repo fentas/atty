@@ -6,10 +6,11 @@ permalink: /security-profiles/
 
 # atty-guard — security profiles
 
-> **Status (2026-06): design of record + Phase 1 landed.** The profile
+> **Status (2026-06): design of record + Phases 1–2 landed.** The profile
 > taxonomy, the routing policy (`smart`), and the primitive analysis
-> below are settled. Phase 1 ships the decision core (`profile.rs`) +
-> config + tests; the kernel-side *effectors* land in later phases (see
+> below are settled. Phase 1 = the decision core (`profile.rs`) + config;
+> Phase 2 = the WATCH scope + `audit`/`session` effectors (kernel +
+> daemon). `strict` / `lockdown` / `smart`-dispatch are later phases (see
 > Phasing). Don't re-derive the primitive trade-offs — they're here.
 
 ## The problem this solves
@@ -94,6 +95,13 @@ execs are allowed and Tier-1 known-bad is blocked in-kernel; only the
 *only* those, never every exec). The config knob `smart_allow_lockdown`
 maps to the policy's `smart_can_freeze` ceiling.
 
+**Capability note:** `session` (and `lockdown`) SIGKILL watched processes
+that may belong to *other* users (the daemon runs as `atty`), which needs
+**`CAP_KILL`** to bypass the same-uid signal check. Grant it via the
+systemd unit (or a drop-in) when enabling those profiles — `audit` /
+`prompt` don't need it (least privilege). Without it the kill is a no-op
+and the daemon logs `session SIGKILL pid N failed … (need CAP_KILL?)`.
+
 ### Scope: the WATCH mark (reuses `propagate_on_fork`)
 
 All non-`prompt` profiles bound their cost to the **atty-session
@@ -171,12 +179,17 @@ the use-case matrix below.
    / `Mechanism` / `ExecContext` + `RoutingPolicy::decide` + config plumbing +
    exhaustive routing unit tests (the use-cases). No kernel effectors yet
    — `decide` returns the mechanism; dispatch is phased.
-2. **Phase 2 — WATCH scope + `audit`/`session` effectors.** Carry WATCH on
-   the fork hook; emit a scoped, `bprm`-read classify event from
-   `check_execve` for WATCH'd execs; daemon classifies → log (`audit`) /
-   fast-kill (`session`). Sandbox: 58 (gap, `prompt`) vs new
-   audit/session scenarios (detected / killed). Bench: per-profile
-   overhead (extend `57-ebpf-overhead`).
+2. ✅ **Phase 2 — WATCH scope + `audit`/`session` effectors.** `watch_pids`
+   map carries WATCH (propagated on every fork); `check_execve` emits a
+   scoped, `bprm->filename`-read `VERDICT_CLASSIFY` event for WATCH'd
+   execs only (not the deleted system-wide firehose); the daemon's
+   ringbuf consumer fans out to `/proc/<pid>/cmdline`, classifies, and
+   routes via `RoutingPolicy::decide` — `audit` surfaces a warn event,
+   `session` reactively SIGKILLs. Marked via the `SetWatch` RPC
+   (SO_PEERCRED-gated). Profiles need eBPF attached, so run the daemon
+   with `--ebpf-mode observe` (or warn/block) + `[profile]`. Sandbox: `58`
+   (gap, `prompt`) vs `59` (audit detects) vs `60` (session kills) on the
+   same non-proxy chain.
 3. **Phase 3 — `strict`.** Curated Tier-1 atom match in `check_execve` →
    sync `EPERM`. Sandbox + bench.
 4. **Phase 4 — `lockdown`.** `bpf_send_signal(SIGSTOP)` post-exec for

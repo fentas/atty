@@ -546,7 +546,12 @@ mod with_libbpf {
     ) {
         use crate::profile::{ExecContext, LoadPressure, Mechanism, Tier1Verdict};
 
-        let cmd = crate::warn_consumer::cstr_trim(&evt.argv0);
+        // The kernel event carries only bprm->filename (the binary); the
+        // Tier-1 atoms match full command patterns (e.g. curl|sh), so fan
+        // out to /proc/<pid>/cmdline for the real command. Racy (the pid
+        // may have moved on) — fall back to the binary on any miss.
+        let cmd = read_proc_cmdline(evt.pid)
+            .unwrap_or_else(|| crate::warn_consumer::cstr_trim(&evt.argv0));
         let tier1 = match classifier.classify(&cmd).verdict {
             crate::protocol::Verdict::Block => Tier1Verdict::KnownBad,
             crate::protocol::Verdict::Warn => Tier1Verdict::Suspicious,
@@ -578,10 +583,15 @@ mod with_libbpf {
                 crate::warn_consumer::pid_in_tree_root,
             ),
             // session: reactive SIGKILL if the deeper verdict isn't clean.
-            // SIGKILL is terminal + clean (no SIGSTOP limbo).
+            // SIGKILL is terminal + clean (no SIGSTOP limbo). The exec
+            // already started; this is the reactive response. Signalling
+            // another user's process needs CAP_KILL — log a failure rather
+            // than swallow it (without the cap `session` would otherwise be
+            // a silent no-op).
             Mechanism::ClassifyAsyncThenKill => {
-                if tier1 != Tier1Verdict::Safe {
-                    unsafe { kill(evt.pid as i32, 9) };
+                if tier1 != Tier1Verdict::Safe && unsafe { kill(evt.pid as i32, 9) } != 0 {
+                    let e = std::io::Error::last_os_error();
+                    eprintln!("atty-guard: session SIGKILL pid {} failed: {e} (need CAP_KILL?)", evt.pid);
                 }
             }
             // P3 (strict) / P4 (lockdown) effectors aren't driven from the
@@ -590,6 +600,35 @@ mod with_libbpf {
                 eprintln!("atty-guard: profile would {mech:?} pid {} (effector not in this build)", evt.pid);
             }
         }
+    }
+
+    /// Best-effort full command line from /proc/<pid>/cmdline (NUL-
+    /// separated argv → space-joined). The classify event carries only
+    /// the binary path; the full command is what the Tier-1 pattern atoms
+    /// need. The event is submitted DURING check_execve (before the exec
+    /// finishes populating the new /proc/<pid>/cmdline) and libbpf's
+    /// epoll wakes us almost immediately, so the first read often races
+    /// the still-empty cmdline — retry briefly until it's populated.
+    /// Returns None if it never populates (caller falls back to argv0).
+    fn read_proc_cmdline(pid: u32) -> Option<String> {
+        let path = format!("/proc/{pid}/cmdline");
+        for attempt in 0..12 {
+            if let Ok(raw) = std::fs::read(&path) {
+                let joined = raw
+                    .split(|&b| b == 0)
+                    .filter(|seg| !seg.is_empty())
+                    .map(String::from_utf8_lossy)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !joined.is_empty() {
+                    return Some(joined);
+                }
+            }
+            if attempt < 11 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        None
     }
 
     // Hand-rolled FFI — the crate intentionally avoids the libc crate

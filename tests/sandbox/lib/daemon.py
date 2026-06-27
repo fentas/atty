@@ -88,7 +88,12 @@ class Daemon:
             subprocess.run(
                 [
                     "setcap",
-                    "cap_bpf,cap_perfmon,cap_mac_admin,cap_dac_read_search+eip",
+                    # cap_kill: the `session`/`lockdown` profiles SIGKILL
+                    # watched processes that belong to OTHER users (the
+                    # daemon runs as `atty`), which needs CAP_KILL to
+                    # bypass the same-uid signal check. Production grants
+                    # it via the unit's AmbientCapabilities.
+                    "cap_bpf,cap_perfmon,cap_mac_admin,cap_dac_read_search,cap_kill+eip",
                     "/usr/local/bin/atty-guard",
                 ],
                 check=True,
