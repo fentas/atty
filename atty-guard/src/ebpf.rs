@@ -123,7 +123,7 @@ impl EbpfState {
     pub fn set_watch(&self, _pid: u32) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
-    pub fn set_deny_bin(&self, _name: &str) -> Result<(), LoadError> {
+    pub fn set_deny_bin(&self, _path: &str) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
     pub fn set_enforce_cfg(&self, _mode: u8, _max_depth: u8) -> Result<(), LoadError> {

@@ -55,9 +55,11 @@ pub struct ProfileConfig {
     /// kernel deny-map on startup when `mode = "strict"`; ignored by other
     /// profiles. Full ABSOLUTE paths, e.g. `["/usr/bin/nc"]` — matched
     /// against the kernel's literal exec path (`bprm->filename`, exact
-    /// string), so a bare `nc` or a symlink to the target won't match (A+
-    /// adds basename matching). The full Tier-1 command patterns stay on
-    /// `session`'s reactive path (see docs/security-profiles.md).
+    /// string). A bare `nc` still matches (the shell PATH-resolves it to
+    /// the absolute path before execve), but a binary reached via a symlink
+    /// or run as `./relative` has a different exec path and won't (A+ adds
+    /// basename matching). Full Tier-1 command patterns stay on `session`'s
+    /// reactive path (see docs/security-profiles.md).
     #[serde(default)]
     pub deny_binaries: Vec<String>,
 }

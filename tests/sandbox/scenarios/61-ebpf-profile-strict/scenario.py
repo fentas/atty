@@ -103,6 +103,17 @@ def main() -> None:
                 fail(f"rc {rc} without the LSM EPERM ({EPERM_MSG!r}) isn't a "
                      f"confirmed strict block (could be EACCES/missing).\n"
                      f"output: {out!r}")
+
+            # Negative control: a NON-denied binary in the same watched
+            # shell must still run (rc 0). Pins that strict blocks the
+            # specific path, not everything in the subtree (a broken deny
+            # check that EPERM'd all watched execs would pass the above).
+            rc_ok, out_ok = run_in_bash(proc, "/bin/true", settle=6.0)
+            if rc_ok != 0:
+                d.dump_log()
+                fail(f"non-denied /bin/true did NOT run in the watched shell "
+                     f"(rc={rc_ok}) — strict is over-blocking, not path-"
+                     f"specific.\noutput: {out_ok!r}")
     finally:
         try:
             proc.kill(9)

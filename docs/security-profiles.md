@@ -75,7 +75,7 @@ never oversold.
 | **`prompt`** *(default)* | proxy pre-Enter only | typed-command **tripwire** | none |
 | **`audit`** | WATCH-scoped async classify → log/warn | **detection** only, zero intervention | low; safe first rollout |
 | **`session`** | WATCH-scoped async classify → **fast-kill** | **detect + rapid response** (reactive — kills *after* the exec started) | low; circuit-breaks to permissive under load |
-| **`strict`** | **in-kernel** LSM Tier-1 match on `bprm` → `EPERM` | **sync prevention of known shapes**, no wedge | low; misses novel / SLM-only payloads |
+| **`strict`** | **in-kernel** exact-path deny-map on `bprm->filename` → `EPERM` (A); `bpf_loop` basename + argv-substring (A+) | **sync prevention** of the in-kernel-matchable subset (exact paths today), reactive fallback (= `session`) for the rest | low; full command patterns stay reactive until A+ |
 | **`lockdown`** | WATCH-scoped `SIGSTOP` post-exec → full Tier-1+2 → `CONT`/`KILL`, **fail-closed** | **sync prevention, full classification, TOCTOU-safe** | **freezes/kills legit processes; fail-closed by design** |
 | **`smart`** | per-exec routing (below) | the lightest sufficient guarantee per context | adaptive; degrades under load |
 
