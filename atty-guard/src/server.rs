@@ -1100,16 +1100,25 @@ fn handle_get_profile(state: &State) -> ResponseBody {
     }
 }
 
-/// Switch the live active profile. The profile is daemon-GLOBAL, so a
-/// non-root caller is allowed only when `[profile] allow_user_switch` is
-/// set; root always. The eBPF worker picks up the new value on its next
-/// exec; GetMetrics/GetProfile reflect it immediately.
 /// Who may switch the (daemon-global) profile: root always; a non-root
 /// caller only when the operator enabled `[profile] allow_user_switch`.
 fn may_switch_profile(is_root: bool, allow_user_switch: bool) -> bool {
     is_root || allow_user_switch
 }
 
+/// Switch the live active profile. The profile is daemon-GLOBAL, so a
+/// non-root caller is allowed only when `[profile] allow_user_switch` is
+/// set; root always. The eBPF worker picks up the new value on its next
+/// exec; GetMetrics/GetProfile reflect it immediately.
+///
+/// LIMITATION: this drives the REACTIVE ladder (prompt/audit/session/
+/// lockdown-decide + smart) live. `strict`'s EXTRA in-kernel deny-map
+/// (the synchronous `-EPERM` of curated `deny_binaries`/`deny_basenames`)
+/// is armed at STARTUP from the load-time profile, decoupled from runtime
+/// switches: a live switch TO strict enforces reactively (session-grade)
+/// until a restart arms the deny-map; switching AWAY from a startup-strict
+/// daemon leaves the deny-map armed (fail-closed). Arming the deny-map on
+/// switch is a follow-up.
 fn handle_set_profile(
     state: &State,
     peer: PeerCred,
@@ -1126,6 +1135,16 @@ fn handle_set_profile(
     state
         .active_profile
         .store(profile.to_u8(), std::sync::atomic::Ordering::Relaxed);
+    // Honest about strict's startup-bound deny-map (see the doc above) so
+    // an operator isn't surprised that a live switch to strict enforces
+    // reactively rather than via the synchronous kernel deny-list.
+    if profile == crate::profile::SecurityProfile::Strict && state.verbosity >= 1 {
+        eprintln!(
+            "atty-guard: switched to strict — reactive layer is live; the \
+             in-kernel deny-map reflects the startup config (restart to \
+             arm/disarm the synchronous deny-list)"
+        );
+    }
     ResponseBody::Profile { profile }
 }
 
