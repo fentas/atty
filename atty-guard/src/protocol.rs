@@ -236,6 +236,97 @@ pub enum Request {
         #[serde(default)]
         parent_pid_tree: u32,
     },
+
+    /// Dashboard (P1): an instance's `metrics_exporter` reports its
+    /// monotonic per-session counters. Stored per (peer-UID, pid) — the
+    /// peer's UID is the owner via SO_PEERCRED, so an instance can only
+    /// report as itself. Privacy: incognito sessions report existence +
+    /// the guard_* security counters only (the exporter zeroes the rest).
+    ReportMetrics {
+        pid: u32,
+        #[serde(default)]
+        cwd: String,
+        #[serde(default)]
+        shell: String,
+        #[serde(default)]
+        incognito: bool,
+        #[serde(default)]
+        counters: MetricsCounters,
+        #[serde(default)]
+        ts_ms: u64,
+    },
+
+    /// Dashboard: the caller's live instances (root sees all UIDs).
+    ListInstances,
+
+    /// Dashboard: aggregate counters across the caller's instances +
+    /// the current guard posture (for the Home/Guard panels).
+    GetMetrics,
+}
+
+/// Monotonic per-session counters reported by the `metrics_exporter`
+/// module (dashboard P1). All `#[serde(default)]` so the wire stays
+/// forward-compatible as counters are added.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricsCounters {
+    #[serde(default)]
+    pub commands: u64,
+    #[serde(default)]
+    pub ghost_accepted: u64,
+    #[serde(default)]
+    pub ghost_shown: u64,
+    #[serde(default)]
+    pub keystrokes_saved: u64,
+    #[serde(default)]
+    pub llm_calls: u64,
+    #[serde(default)]
+    pub guard_warn: u64,
+    #[serde(default)]
+    pub guard_block: u64,
+    #[serde(default)]
+    pub guard_refused: u64,
+}
+
+impl MetricsCounters {
+    /// Field-wise sum, for the cross-instance aggregate. Saturating so a
+    /// hostile near-`u64::MAX` report can't panic the daemon (debug
+    /// overflow) and poison the metrics lock.
+    pub fn add(&mut self, o: &MetricsCounters) {
+        self.commands = self.commands.saturating_add(o.commands);
+        self.ghost_accepted = self.ghost_accepted.saturating_add(o.ghost_accepted);
+        self.ghost_shown = self.ghost_shown.saturating_add(o.ghost_shown);
+        self.keystrokes_saved = self.keystrokes_saved.saturating_add(o.keystrokes_saved);
+        self.llm_calls = self.llm_calls.saturating_add(o.llm_calls);
+        self.guard_warn = self.guard_warn.saturating_add(o.guard_warn);
+        self.guard_block = self.guard_block.saturating_add(o.guard_block);
+        self.guard_refused = self.guard_refused.saturating_add(o.guard_refused);
+    }
+}
+
+/// A live atty instance as the dashboard sees it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceInfo {
+    /// Owning UID — disambiguates the root fleet view (two users can have
+    /// the same pid). For a non-root caller this is always its own UID.
+    pub uid: u32,
+    pub pid: u32,
+    pub cwd: String,
+    pub shell: String,
+    pub incognito: bool,
+    pub last_seen_ms: u64,
+    pub counters: MetricsCounters,
+}
+
+/// Current guard posture for the Home/Guard panels (daemon-side state,
+/// not instance-reported).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GuardPosture {
+    pub profile: String,
+    pub ebpf: String,
+    pub enforcement: String,
+    pub atoms_version: String,
+    pub deny_path: u32,
+    pub deny_basename: u32,
 }
 
 /// Scope selector for `AtomsList`. The matcher serves the union of
@@ -351,6 +442,17 @@ pub enum ResponseBody {
     },
     Error {
         message: String,
+    },
+    /// Reply to GetMetrics (dashboard P1): aggregate counters across the
+    /// caller's instances + the current guard posture.
+    Metrics {
+        aggregate: MetricsCounters,
+        guard: GuardPosture,
+        instances: usize,
+    },
+    /// Reply to ListInstances (dashboard P1): the caller's live instances.
+    Instances {
+        instances: Vec<InstanceInfo>,
     },
     /// Reply to AtomsList. Each entry is the atom string verbatim
     /// (no metadata) — CLI renders them one per line.
