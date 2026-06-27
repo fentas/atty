@@ -1007,6 +1007,14 @@ fn main() -> std::io::Result<()> {
                             ),
                         }
                     }
+                    for name in &file_cfg.profile.deny_basenames {
+                        match state.set_deny_basename(name) {
+                            Ok(()) => denied += 1,
+                            Err(e) => eprintln!(
+                                "atty-guard: strict deny_basenames: skipping {name:?} — {e}"
+                            ),
+                        }
+                    }
                     if cli.verbosity >= 1 {
                         eprintln!(
                             "atty-guard: strict profile — {denied} binary deny-rule(s) loaded"

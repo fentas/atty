@@ -62,6 +62,12 @@ pub struct ProfileConfig {
     /// reactive path (see docs/security-profiles.md).
     #[serde(default)]
     pub deny_binaries: Vec<String>,
+    /// Binary BASENAMES `strict` synchronously blocks (-EPERM) in a watched
+    /// subtree (Phase 3 "A+") — catches the target at ANY path (symlink /
+    /// copy-to-/tmp / `./relative`), unlike `deny_binaries` (exact path).
+    /// e.g. `["nc", "ncat"]`. Must not contain `/`.
+    #[serde(default)]
+    pub deny_basenames: Vec<String>,
 }
 
 /// How far the eBPF LSM hook looks for a Critical mark on each execve.
