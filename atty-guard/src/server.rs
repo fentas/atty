@@ -46,6 +46,10 @@ pub fn serve(
     // thread (#347 PR 2b — drives broadcast() per kernel event).
     warn_broadcast: Arc<crate::warn_consumer::Broadcast>,
     server_cfg: crate::config::ServerConfig,
+    // Dashboard P1 — guard posture built by main.rs at startup (where the
+    // profile/enforcement config + the eBPF attach result + deny counts all
+    // live). Returned verbatim by GetMetrics.
+    guard_posture: crate::protocol::GuardPosture,
 ) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // Socket perms: owner (the daemon's `atty` user) read+write, group
@@ -81,6 +85,8 @@ pub fn serve(
         osv,
         warn_broadcast,
         subscribers: Arc::new(SubscriberSlots::new()),
+        metrics: Arc::new(crate::metrics::MetricsStore::new()),
+        guard_posture,
     });
 
     // Bounded-resources gate: shared atomic counter ticks up on
@@ -213,6 +219,14 @@ struct State {
     /// subscribers, exempt from the request connection cap so a
     /// flood of subscribers can't starve classify (and vice versa).
     subscribers: Arc<SubscriberSlots>,
+    /// Dashboard P1 — per-UID instance metrics the `metrics_exporter`
+    /// reports and `attop` queries. Ephemeral; gated per-UID by the same
+    /// SO_PEERCRED `PeerCred` as the mutating arms.
+    metrics: Arc<crate::metrics::MetricsStore>,
+    /// Dashboard P1 — guard posture snapshot built at startup (profile,
+    /// enforcement, eBPF status, deny-rule counts) for `GetMetrics`.
+    /// Static for the daemon's lifetime (config is load-time).
+    guard_posture: crate::protocol::GuardPosture,
 }
 
 /// Caps for `SubscribeWarnEvents` connections. Kept separate from
@@ -525,6 +539,18 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
         Request::SetThreatLevel { pid, level } => handle_set_threat_level(state, peer, pid, level),
         Request::SetWatch { pid } => handle_set_watch(state, peer, pid),
         Request::GetThreatLevel { pid } => handle_get_threat_level(state, peer, pid),
+
+        // --- dashboard P1 metrics ---
+        Request::ReportMetrics {
+            pid,
+            cwd,
+            shell,
+            incognito,
+            counters,
+            ts_ms: _,
+        } => handle_report_metrics(state, peer, pid, cwd, shell, incognito, counters),
+        Request::ListInstances => handle_list_instances(state, peer),
+        Request::GetMetrics => handle_get_metrics(state, peer),
 
         // --- PR #141 mediated trust-state ops ---
         Request::AtomsAdd {
@@ -987,6 +1013,45 @@ fn caller_owns_pid(peer: &PeerCred, pid: u32) -> bool {
         return true;
     }
     matches!(pid_owner_uid(pid), OwnerLookup::Owner(u) if u == peer.uid)
+}
+
+// --- dashboard P1 metrics handlers ---
+
+/// An instance reports its counters. The peer's UID (SO_PEERCRED) owns the
+/// record — an instance can only report as itself, never cross-UID.
+fn handle_report_metrics(
+    state: &State,
+    peer: PeerCred,
+    pid: u32,
+    cwd: String,
+    shell: String,
+    incognito: bool,
+    counters: crate::protocol::MetricsCounters,
+) -> ResponseBody {
+    state
+        .metrics
+        .report(peer.uid, pid, cwd, shell, incognito, counters);
+    ResponseBody::Ok
+}
+
+/// List live instances — root sees every UID's (fleet/operator view); a
+/// non-root caller sees only its own, mirroring the per-UID gate the
+/// mutating arms use.
+fn handle_list_instances(state: &State, peer: PeerCred) -> ResponseBody {
+    ResponseBody::Instances {
+        instances: state.metrics.instances(peer.uid, peer.is_root),
+    }
+}
+
+/// Aggregate counters across the caller's instances (root: all) + the
+/// startup guard posture.
+fn handle_get_metrics(state: &State, peer: PeerCred) -> ResponseBody {
+    let (aggregate, instances) = state.metrics.aggregate(peer.uid, peer.is_root);
+    ResponseBody::Metrics {
+        aggregate,
+        guard: state.guard_posture.clone(),
+        instances,
+    }
 }
 
 /// Truncate `s` in place to at most `max` bytes, backing up to a UTF-8
@@ -1930,6 +1995,7 @@ mod tests {
                 trust_store,
                 bcast_for_thread,
                 cfg,
+                crate::protocol::GuardPosture::default(),
             );
         });
         for _ in 0..500 {
@@ -1974,6 +2040,7 @@ mod tests {
                 trust_store,
                 bcast,
                 crate::config::ServerConfig::default(),
+                crate::protocol::GuardPosture::default(),
             );
         });
         for _ in 0..500 {
@@ -2009,6 +2076,7 @@ mod tests {
                 trust_store,
                 bcast,
                 crate::config::ServerConfig::default(),
+                crate::protocol::GuardPosture::default(),
             );
         });
         // Wait for the bind to actually accept connections. The
@@ -2392,6 +2460,44 @@ mod tests {
             msg.contains("no longer exists"),
             "expected vanished-pid rejection, got: {msg}"
         );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn metrics_report_then_query_roundtrip() {
+        // Dashboard P1 wire path: an instance reports counters, then
+        // get_metrics aggregates them + list_instances lists it. Same UID
+        // (the test process) reports + queries, so the per-UID gate lets
+        // the query see the report.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+
+        let r = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"report_metrics","pid":4242,"cwd":"/proj","shell":"bash","incognito":false,"counters":{"commands":5,"guard_block":1},"ts_ms":0}"#,
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&r).unwrap()["type"],
+            "ok"
+        );
+
+        let m = round_trip(&mut stream, r#"{"id":2,"method":"get_metrics"}"#);
+        let mv: serde_json::Value = serde_json::from_str(&m).unwrap();
+        assert_eq!(mv["type"], "metrics");
+        assert_eq!(mv["aggregate"]["commands"], 5);
+        assert_eq!(mv["aggregate"]["guard_block"], 1);
+        assert_eq!(mv["instances"], 1);
+        // guard posture is present (default in tests, but the field exists).
+        assert!(mv["guard"]["profile"].is_string());
+
+        let l = round_trip(&mut stream, r#"{"id":3,"method":"list_instances"}"#);
+        let lv: serde_json::Value = serde_json::from_str(&l).unwrap();
+        assert_eq!(lv["type"], "instances");
+        let arr = lv["instances"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["pid"], 4242);
+        assert_eq!(arr[0]["cwd"], "/proj");
+
         let _ = std::fs::remove_file(socket);
     }
 
