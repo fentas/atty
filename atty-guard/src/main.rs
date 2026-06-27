@@ -932,6 +932,14 @@ fn main() -> std::io::Result<()> {
     // broadcast() per VERDICT_WARN event).
     let warn_broadcast = std::sync::Arc::new(warn_consumer::Broadcast::new());
 
+    // Live, runtime-switchable active profile. The SetProfile RPC writes
+    // it; the eBPF classify worker reads it per-event and GetMetrics/
+    // GetProfile read it for the posture — so a switch takes effect without
+    // a daemon restart. Seeded from the config's load-time profile.
+    let active_profile = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+        file_cfg.profile.mode.to_u8(),
+    ));
+
     let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode
         != EbpfMode::Disabled
     {
@@ -941,15 +949,12 @@ fn main() -> std::io::Result<()> {
             EbpfMode::Block => ebpf::LoadedMode::Block,
             EbpfMode::Disabled => unreachable!("guarded by the if above"),
         };
-        let policy = profile::RoutingPolicy {
-            profile: file_cfg.profile.mode,
-            smart_can_freeze: file_cfg.profile.smart_allow_lockdown,
-        };
         match ebpf::EbpfState::attach(
             loaded_mode,
             warn_broadcast.clone(),
             classifier.clone(),
-            policy,
+            active_profile.clone(),
+            file_cfg.profile.smart_allow_lockdown,
         ) {
             Ok(state) => {
                 // Push the enforcement depth into the kernel `enforce_cfg`
@@ -1243,6 +1248,8 @@ fn main() -> std::io::Result<()> {
         warn_broadcast,
         file_cfg.server.clone(),
         guard_posture,
+        active_profile,
+        file_cfg.profile.allow_user_switch,
     )
 }
 

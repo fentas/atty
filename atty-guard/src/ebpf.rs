@@ -190,7 +190,8 @@ impl EbpfState {
         _mode: LoadedMode,
         _broadcast: std::sync::Arc<crate::warn_consumer::Broadcast>,
         _classifier: std::sync::Arc<crate::classifier::Classifier>,
-        _policy: crate::profile::RoutingPolicy,
+        _active_profile: std::sync::Arc<std::sync::atomic::AtomicU8>,
+        _smart_can_freeze: bool,
     ) -> Result<Self, LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
@@ -351,7 +352,12 @@ mod with_libbpf {
             mode: LoadedMode,
             broadcast: std::sync::Arc<crate::warn_consumer::Broadcast>,
             classifier: std::sync::Arc<crate::classifier::Classifier>,
-            policy: crate::profile::RoutingPolicy,
+            // Live profile: the runtime-switchable AtomicU8 (the SetProfile
+            // RPC writes it; the worker reads it per-event so a switch takes
+            // effect on the next exec). `smart_can_freeze` is the static
+            // consent knob — not switchable, so passed by value.
+            active_profile: std::sync::Arc<std::sync::atomic::AtomicU8>,
+            smart_can_freeze: bool,
         ) -> Result<Self, LoadError> {
             let path = locate_bpf_object()?;
             let mut obj_builder = libbpf_rs::ObjectBuilder::default();
@@ -432,11 +438,21 @@ mod with_libbpf {
             let classify_worker = {
                 let classifier = classifier.clone();
                 let broadcast = broadcast.clone();
+                let active_profile = active_profile.clone();
                 std::thread::Builder::new()
                     .name("atty-guard-classify".into())
                     .spawn(move || {
                         while let Ok(evt) = classify_rx.recv() {
                             let now_ms = DAEMON_START.elapsed().as_millis() as u64;
+                            // Read the LIVE profile per event so a SetProfile
+                            // switch takes effect on the next exec; the
+                            // consent knob is static.
+                            let policy = crate::profile::RoutingPolicy {
+                                profile: crate::profile::SecurityProfile::from_u8(
+                                    active_profile.load(std::sync::atomic::Ordering::Relaxed),
+                                ),
+                                smart_can_freeze,
+                            };
                             // Isolate a per-event panic so one bad event
                             // can't permanently kill the effector thread.
                             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -874,10 +890,8 @@ mod tests {
             LoadedMode::Block,
             std::sync::Arc::new(crate::warn_consumer::Broadcast::new()),
             std::sync::Arc::new(crate::classifier::Classifier::new()),
-            crate::profile::RoutingPolicy {
-                profile: crate::profile::SecurityProfile::Prompt,
-                smart_can_freeze: false,
-            },
+            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            false,
         ) {
             Err(LoadError::FeatureNotBuilt) => {}
             Err(other) => panic!("expected FeatureNotBuilt, got {other:?}"),
