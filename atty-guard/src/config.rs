@@ -6,6 +6,7 @@
 //! of the config; the rest of the daemon never touches the raw
 //! `toml` parser.
 
+use crate::profile::SecurityProfile;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -29,6 +30,26 @@ pub struct Config {
     /// running `--ebpf-mode=block`.
     #[serde(default)]
     pub enforcement: EnforcementConfig,
+    /// Security posture for non-proxy execs in the atty-session subtree.
+    /// Optional; defaults to `prompt` (the historical tripwire). See
+    /// docs/security-profiles.md for the ladder + the `smart` router.
+    #[serde(default)]
+    pub profile: ProfileConfig,
+}
+
+/// `[profile]` table — the security posture + its consent knobs.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileConfig {
+    /// `prompt` | `audit` | `session` | `strict` | `lockdown` | `smart`.
+    #[serde(default)]
+    pub mode: SecurityProfile,
+    /// Allow `smart` to escalate to lockdown-grade (SIGSTOP
+    /// freeze-and-frisk) for risky-ambiguous execs. Off by default —
+    /// `smart` never exceeds the operator's consented ceiling, so without
+    /// this it tops out at async-kill.
+    #[serde(default)]
+    pub smart_allow_lockdown: bool,
 }
 
 /// How far the eBPF LSM hook looks for a Critical mark on each execve.
@@ -375,6 +396,40 @@ max_depth = 12
         tmp.write_all(b"[enforcement]\ndeapth = \"ancestry\"\n").unwrap();
         let err = load(tmp.path()).expect_err("unknown enforcement field must fail");
         assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parses_profile_table() {
+        let src = r#"
+[profile]
+mode = "smart"
+smart_allow_lockdown = true
+"#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.profile.mode, crate::profile::SecurityProfile::Smart);
+        assert!(cfg.profile.smart_allow_lockdown);
+    }
+
+    #[test]
+    fn profile_defaults_to_prompt() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.profile.mode, crate::profile::SecurityProfile::Prompt);
+        assert!(!cfg.profile.smart_allow_lockdown);
+    }
+
+    #[test]
+    fn load_rejects_unknown_key_in_profile_table() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        tmp.write_all(b"[profile]\nmdoe = \"smart\"\n").unwrap();
+        let err = load(tmp.path()).expect_err("unknown profile field must fail");
+        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_unknown_profile_mode() {
+        toml::from_str::<Config>("[profile]\nmode = \"paranoid\"\n")
+            .expect_err("unknown profile mode must fail");
     }
 
     #[test]
