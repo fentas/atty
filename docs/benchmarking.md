@@ -117,6 +117,27 @@ biggest per-execve eBPF win — with zero behavioral change (the non-proxy
 detection gap it was *supposed* to address never worked anyway; pinned by
 `58-ebpf-detection-gap`).
 
+**Security-profile (audit/session) watch scope (Phase 2).** The
+`one_level+watch` row `SetWatch`'s the bench parent, so every workload
+execve is a watched descendant and `check_execve` emits a scoped
+`VERDICT_CLASSIFY` event (the daemon's classify runs on a worker thread,
+off the BPF time). Same run:
+
+| mode | `trace_fork` | `check_execve` | `trace_exit` | sum/cmd | % base |
+|---|---|---|---|---|---|
+| `one_level` | 142 | 354 | 319 | 815 ns | 0.07 % |
+| `one_level+watch` | 427 *(+285)* | 2603 *(+2249)* | 587 *(+268)* | **3616 ns** | **0.32 %** |
+
+The emit costs ~2.25 µs on `check_execve` (ringbuf reserve + `bprm`
+filename read + submit), plus ~285 ns on `trace_fork` (watch propagation)
+and ~268 ns on `trace_exit` (the per-task GC delete) — ~4.4× the eBPF
+program time, still **0.32 % of the fork+exec baseline**. Note the
+symmetry with the removed `trace_execve` (~2600 ns): the emit cost is
+comparable, but it's now **scoped to a watched subtree and actually
+consumed** (audit logs / session kills) rather than a system-wide
+firehose of unconsumed events — paid only where a profile is watching,
+and it buys real non-proxy detection.
+
 What the numbers say (lead with the absolute ns — the percentage's
 denominator is a Python fork on one loaded host; a C/shell exec is
 faster, so treat the % as order-of-magnitude, the per-program ns as the

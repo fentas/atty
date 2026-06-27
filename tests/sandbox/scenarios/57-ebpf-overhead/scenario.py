@@ -43,6 +43,7 @@ from pathlib import Path
 sys.path.insert(0, "/sandbox")
 from lib.bpf import skip_if_no_bpf_lsm, skip_if_no_bpf_object  # noqa: E402
 from lib.daemon import Daemon  # noqa: E402
+from lib.uds import call  # noqa: E402
 
 NAME = "57-ebpf-overhead"
 STATS_SYSCTL = Path("/proc/sys/kernel/bpf_stats_enabled")
@@ -125,9 +126,12 @@ def prog_stats() -> dict[tuple[str, int], tuple[int, int]]:
     return out
 
 
-def measure_mode(idx: int, extra: list[str]) -> dict[str, float]:
+def measure_mode(idx: int, extra: list[str], watch: bool = False) -> dict[str, float]:
     """Median ns/call per program for one mode over REPS workloads inside
-    a single daemon lifetime."""
+    a single daemon lifetime. When `watch` is set, the bench parent is
+    SetWatch'd so every workload execve is a watched descendant and
+    check_execve emits a VERDICT_CLASSIFY event — isolating the security-
+    profile (audit/session) per-exec kernel cost vs the unwatched row."""
     # Unique socket per mode: a prior daemon's socket file can linger
     # after SIGTERM and cause a false-positive readiness / bind clash.
     sock = f"/run/atty-guard/bench-{idx}.sock"
@@ -137,6 +141,13 @@ def measure_mode(idx: int, extra: list[str]) -> dict[str, float]:
         if "eBPF attached" not in d.read_log():
             d.dump_log()
             raise RuntimeError("daemon didn't attach eBPF")
+        if watch:
+            # trace_fork propagates the watch to every forked child, so
+            # the workload's execs hit check_execve's classify-emit path.
+            resp = call("set_watch", pid=os.getpid(), socket_path=sock)
+            if resp.get("type") == "error":
+                raise RuntimeError(f"set_watch rejected: {resp}")
+            time.sleep(0.3)
         for _ in range(REPS):
             before = prog_stats()
             fork_exec_workload(WORKLOAD)
@@ -169,16 +180,21 @@ def main() -> None:
         sys.exit(0)
 
     modes = [
-        ("one_level", ["--enforcement-depth", "one_level"]),
-        ("ancestry(8)", ["--enforcement-depth", "ancestry", "--ancestry-max-depth", "8"]),
-        ("propagate_on_fork", ["--enforcement-depth", "propagate_on_fork"]),
+        ("one_level", ["--enforcement-depth", "one_level"], False),
+        ("ancestry(8)", ["--enforcement-depth", "ancestry", "--ancestry-max-depth", "8"], False),
+        ("propagate_on_fork", ["--enforcement-depth", "propagate_on_fork"], False),
+        # Security-profile watch scope (audit/session): one_level + the
+        # bench parent SetWatch'd, so check_execve emits a classify event
+        # per exec. The delta vs the `one_level` row is the per-exec kernel
+        # cost a profile adds (the userspace classify is off on a worker).
+        ("one_level+watch", ["--enforcement-depth", "one_level"], True),
     ]
     try:
         base = baseline_ns(WORKLOAD, REPS)
         results = []
-        for idx, (label, extra) in enumerate(modes):
+        for idx, (label, extra, watch) in enumerate(modes):
             try:
-                results.append((label, measure_mode(idx, extra)))
+                results.append((label, measure_mode(idx, extra, watch)))
             except RuntimeError as e:
                 print(f"FAIL: {NAME}: {label}: {e}", file=sys.stderr)
                 sys.exit(1)
