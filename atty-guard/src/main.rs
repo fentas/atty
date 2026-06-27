@@ -1017,8 +1017,16 @@ fn main() -> std::io::Result<()> {
                         }
                     }
                     // Gate the per-exec basename scan on whether any basename
-                    // rule loaded — off → audit/session skip A+'s cost.
-                    let _ = state.set_basename_gate(bn_n > 0);
+                    // rule loaded — off → audit/session skip A+'s cost. Log
+                    // on failure rather than swallow: a stuck gate with
+                    // basenames loaded would silently disable them (fail-open
+                    // on a security control).
+                    if let Err(e) = state.set_basename_gate(bn_n > 0) {
+                        eprintln!(
+                            "atty-guard: strict basename_gate set failed — {e}; \
+                             {bn_n} basename rule(s) inert"
+                        );
+                    }
                     if cli.verbosity >= 1 {
                         eprintln!(
                             "atty-guard: strict profile — {path_n} path + {bn_n} basename deny-rule(s) loaded"
