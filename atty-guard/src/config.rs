@@ -50,6 +50,13 @@ pub struct ProfileConfig {
     /// this it tops out at async-kill.
     #[serde(default)]
     pub smart_allow_lockdown: bool,
+    /// Binary basenames `strict` synchronously blocks (-EPERM) in a watched
+    /// subtree, BEFORE the exec runs (Phase 3 "A"). Populated into the
+    /// kernel deny-map on startup when `mode = "strict"`; ignored by other
+    /// profiles. e.g. `["nc", "ncat", "socat"]`. The full Tier-1 command
+    /// patterns stay on `session`'s reactive path (see security-profiles).
+    #[serde(default)]
+    pub deny_binaries: Vec<String>,
 }
 
 /// How far the eBPF LSM hook looks for a Critical mark on each execve.
