@@ -10,8 +10,9 @@
 //!
 //! Hot-path discipline: counters are bumped on `onLineCommit` (cheap,
 //! integer add — never `onInput`), and the only I/O (the UDS report) runs
-//! on `onTick`, batched to `report_interval_ms`, with a short recv timeout
-//! so a stuck daemon can't wedge the session. Reporting is best-effort:
+//! on `onTick`, batched to `report_interval_ms`, over a fully non-blocking
+//! socket (connect polled at most `timeout_ms`, then a non-blocking write)
+//! so a stuck daemon can't wedge the tick thread. Reporting is best-effort:
 //! a connect/write failure is swallowed (the daemon is optional).
 //!
 //! Privacy: counts only, never command content. Incognito is governed by
@@ -44,14 +45,23 @@ pub const Config = struct {
     daemon_socket_path: []const u8 = "/run/atty-guard/atty-guard.sock",
     /// Minimum gap between reports; the flush is batched on `onTick`.
     report_interval_ms: u64 = 5_000,
-    /// recv timeout on the report round-trip — keep it small, the report
-    /// runs on the (less-hot but still latency-sensitive) tick path.
+    /// Poll budget (ms) for the non-blocking connect when the daemon's
+    /// listen backlog is momentarily full — keep it small; the report runs
+    /// on the latency-sensitive tick thread.
     timeout_ms: u32 = 30,
     incognito_policy: IncognitoPolicy = .security_only,
 };
 
 /// Monotonic per-session counters. Field names + JSON shape match the
 /// daemon's `MetricsCounters` (atty-guard/src/protocol.rs).
+///
+/// STUB STATUS (P1b): only `commands` is wired today (incremented on
+/// `onLineCommit`). The other seven are reserved — they always report 0
+/// until the producing events are exposed: ghost_* via atuin/history,
+/// keystrokes_saved via ghost acceptance, llm_calls via the llm module,
+/// and guard_* (ideally daemon-sourced — the daemon issues the verdicts).
+/// Wiring them is a follow-up; the wire shape is stable so adding a
+/// producer needs no protocol change.
 pub const Counters = struct {
     commands: u64 = 0,
     ghost_accepted: u64 = 0,
@@ -73,6 +83,13 @@ pub fn incognitoSkip(incognito: bool, policy: IncognitoPolicy) bool {
 /// (incognito + `security_only`): suppress productivity counters + cwd.
 pub fn incognitoRedact(incognito: bool, policy: IncognitoPolicy) bool {
     return incognito and policy == .security_only;
+}
+
+/// Whether a committed command should be counted at all. Incognito
+/// sessions under a non-`normal` policy aren't counted (the session
+/// reports existence + security only — productivity stays private).
+pub fn shouldCount(incognito: bool, policy: IncognitoPolicy) bool {
+    return !(incognito and policy != .normal);
 }
 
 /// Drop the productivity counters, keep the guard_* security counters.
@@ -110,7 +127,9 @@ pub fn jsonEscapeInto(dst: []u8, src: []const u8) []const u8 {
 }
 
 /// Build the `report_metrics` JSON line (newline-framed) into `out`. The
-/// string fields must already be JSON-escaped.
+/// string fields must already be JSON-escaped. `ts_ms` is sent as 0 — the
+/// daemon stamps its own receipt time for staleness (immune to client
+/// clock skew), so a client timestamp would be informational and unused.
 pub fn buildReportJson(
     out: []u8,
     pid: u32,
@@ -135,12 +154,14 @@ pub fn buildReportJson(
     );
 }
 
-/// Fire-and-forget the report line over the daemon UDS. Best-effort: any
-/// failure (daemon down, path too long, write error) returns an error the
-/// caller swallows. A short recv timeout keeps a stuck daemon from
-/// wedging the tick.
+/// Fire-and-forget the report line over the daemon UDS, FULLY BOUNDED so it
+/// can run on the proxy's tick thread without wedging the terminal: a
+/// NON-BLOCKING connect (polled for at most `timeout_ms` if the listen
+/// backlog is full) followed by a non-blocking write. Best-effort — any
+/// failure (daemon down/wedged, path too long, partial write) returns an
+/// error the caller swallows; the daemon is optional.
 fn sendUds(socket_path: []const u8, line: []const u8, timeout_ms: u32) !void {
-    const fd = std.c.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    const fd = std.c.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK, 0);
     if (fd < 0) return error.Unavailable;
     defer _ = std.c.close(fd);
 
@@ -151,14 +172,22 @@ fn sendUds(socket_path: []const u8, line: []const u8, timeout_ms: u32) !void {
     addr.path[socket_path.len] = 0;
 
     const addr_len: std.posix.socklen_t = @intCast(@sizeOf(@TypeOf(addr)));
-    if (std.c.connect(fd, @ptrCast(&addr), addr_len) != 0) return error.Unavailable;
+    const crc = std.c.connect(fd, @ptrCast(&addr), addr_len);
+    if (crc != 0) {
+        // A non-blocking UDS connect normally succeeds immediately;
+        // EAGAIN/EINPROGRESS means the listen backlog is momentarily full
+        // — poll briefly for writability rather than block the tick.
+        // Anything else means no reachable daemon.
+        const e = std.posix.errno(crc);
+        if (e != .AGAIN and e != .INPROGRESS) return error.Unavailable;
+        var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+        if (std.c.poll(&pfd, 1, @intCast(timeout_ms)) <= 0) return error.Timeout;
+        if (pfd[0].revents & std.posix.POLL.OUT == 0) return error.Unavailable;
+    }
 
-    var tv: std.posix.timeval = .{
-        .sec = @intCast(timeout_ms / 1000),
-        .usec = @intCast((timeout_ms % 1000) * 1000),
-    };
-    _ = std.c.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, @ptrCast(&tv), @sizeOf(@TypeOf(tv)));
-
+    // Non-blocking write — the line is small (< 1 KiB) and the send buffer
+    // is empty on a fresh connection, so one write suffices; a partial /
+    // EAGAIN is a dropped report (best-effort).
     var off: usize = 0;
     while (off < line.len) {
         const n = std.c.write(fd, line.ptr + off, line.len - off);
@@ -184,6 +213,8 @@ pub fn configure(comptime cfg: Config) type {
 
         pub const Runtime = struct {
             allocator: Allocator,
+            /// The proxy's own pid — used only as the session-id fallback
+            /// when `ctx.shell_pid` isn't known yet (see `report`).
             pid: u32,
             shell: []const u8,
             counters: Counters = .{},
@@ -209,7 +240,7 @@ pub fn configure(comptime cfg: Config) type {
         pub fn onLineCommit(rt: *Runtime, ctx: *m.Context, line: []const u8) m.Error!void {
             _ = line;
             if (!cfg.enabled) return;
-            if (ctx.incognito and cfg.incognito_policy != .normal) return;
+            if (!shouldCount(ctx.incognito, cfg.incognito_policy)) return;
             rt.counters.commands +%= 1;
         }
 
@@ -238,8 +269,14 @@ pub fn configure(comptime cfg: Config) type {
             const cwd_esc = jsonEscapeInto(&cwd_esc_buf, cwd);
             const shell_esc = jsonEscapeInto(&shell_esc_buf, rt.shell);
 
+            // Identify the session by shell_pid — that's the key the rest
+            // of the system joins on (security_guard threat marking, the
+            // eBPF tree-mark). Fall back to the proxy's own pid only when
+            // the shell pid isn't known yet.
+            const pid = ctx.shell_pid orelse rt.pid;
+
             var json_buf: [1024]u8 = undefined;
-            const line = buildReportJson(&json_buf, rt.pid, cwd_esc, shell_esc, ctx.incognito, counters) catch return;
+            const line = buildReportJson(&json_buf, pid, cwd_esc, shell_esc, ctx.incognito, counters) catch return;
 
             // Best-effort. TODO(P1b.1): file fallback to
             // $XDG_RUNTIME_DIR/atty/<pid>.json when the daemon is absent

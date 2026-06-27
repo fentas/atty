@@ -6,6 +6,7 @@ const IncognitoPolicy = mod.IncognitoPolicy;
 const Counters = mod.Counters;
 const incognitoSkip = mod.incognitoSkip;
 const incognitoRedact = mod.incognitoRedact;
+const shouldCount = mod.shouldCount;
 const redactedCounters = mod.redactedCounters;
 const jsonEscapeInto = mod.jsonEscapeInto;
 const buildReportJson = mod.buildReportJson;
@@ -21,10 +22,11 @@ test "configured module type compiles" {
 }
 
 test "incognito policy matrix" {
-    // Not incognito → never skip / redact, whatever the policy.
+    // Not incognito → never skip / redact + always count, whatever the policy.
     for ([_]IncognitoPolicy{ .nothing, .security_only, .normal }) |p| {
         try testing.expect(!incognitoSkip(false, p));
         try testing.expect(!incognitoRedact(false, p));
+        try testing.expect(shouldCount(false, p));
     }
     // Incognito: nothing→skip, security_only→redact, normal→neither.
     try testing.expect(incognitoSkip(true, .nothing));
@@ -33,6 +35,10 @@ test "incognito policy matrix" {
     try testing.expect(incognitoRedact(true, .security_only));
     try testing.expect(!incognitoSkip(true, .normal));
     try testing.expect(!incognitoRedact(true, .normal));
+    // Counting: incognito under a non-normal policy is not counted.
+    try testing.expect(!shouldCount(true, .nothing));
+    try testing.expect(!shouldCount(true, .security_only));
+    try testing.expect(shouldCount(true, .normal));
 }
 
 test "redactedCounters keeps guard_*, drops productivity" {
