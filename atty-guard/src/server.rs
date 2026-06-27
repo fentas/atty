@@ -1028,6 +1028,12 @@ fn handle_report_metrics(
     incognito: bool,
     counters: crate::protocol::MetricsCounters,
 ) -> ResponseBody {
+    // Trust model: `pid` is caller-supplied and NOT verified to belong to
+    // peer.uid — a same-UID process can report a forged pid, but only
+    // within its OWN UID's view (the key is the SO_PEERCRED uid, never
+    // cross-UID). The root fleet view therefore shows user-reported,
+    // not per-pid-authenticated, data — advisory by design.
+    //
     // Bound caller-supplied strings — a same-group process shouldn't be
     // able to bloat the shared daemon. Incognito redaction is the
     // EXPORTER's job (it applies the user's configurable policy); the

@@ -250,6 +250,7 @@ pub enum Request {
         shell: String,
         #[serde(default)]
         incognito: bool,
+        #[serde(default)]
         counters: MetricsCounters,
         #[serde(default)]
         ts_ms: u64,
@@ -305,6 +306,9 @@ impl MetricsCounters {
 /// A live atty instance as the dashboard sees it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceInfo {
+    /// Owning UID — disambiguates the root fleet view (two users can have
+    /// the same pid). For a non-root caller this is always its own UID.
+    pub uid: u32,
     pub pid: u32,
     pub cwd: String,
     pub shell: String,

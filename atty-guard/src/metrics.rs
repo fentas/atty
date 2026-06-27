@@ -103,17 +103,18 @@ impl MetricsStore {
         let g = self.inner.lock().expect("metrics store poisoned");
         let mut out = Vec::new();
         // Non-root indexes straight to its own bucket; root scans all.
-        let buckets: Vec<&HashMap<u32, Record>> = if all {
-            g.values().collect()
+        let buckets: Vec<(u32, &HashMap<u32, Record>)> = if all {
+            g.iter().map(|(&u, per)| (u, per)).collect()
         } else {
-            g.get(&uid).into_iter().collect()
+            g.get(&uid).map(|per| (uid, per)).into_iter().collect()
         };
-        for per in buckets {
+        for (u, per) in buckets {
             for (&pid, r) in per {
                 if now.saturating_sub(r.last_seen_ms) >= STALE_MS {
                     continue;
                 }
                 out.push(InstanceInfo {
+                    uid: u,
                     pid,
                     cwd: r.cwd.clone(),
                     shell: r.shell.clone(),
