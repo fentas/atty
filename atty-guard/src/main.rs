@@ -248,6 +248,24 @@ enum Subcommand {
         #[command(subcommand)]
         op: TrustOp,
     },
+    /// Read or switch the live security profile. The profile is
+    /// daemon-global; `set` requires sudo unless `[profile]
+    /// allow_user_switch` is enabled.
+    Profile {
+        #[command(subcommand)]
+        op: ProfileOp,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum ProfileOp {
+    /// Print the live active profile.
+    Get,
+    /// Switch the live active profile (daemon-global; affects every
+    /// session). Requires sudo unless `[profile] allow_user_switch` is set.
+    Set {
+        profile: crate::profile::SecurityProfile,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]

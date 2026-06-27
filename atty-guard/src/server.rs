@@ -1104,12 +1104,18 @@ fn handle_get_profile(state: &State) -> ResponseBody {
 /// non-root caller is allowed only when `[profile] allow_user_switch` is
 /// set; root always. The eBPF worker picks up the new value on its next
 /// exec; GetMetrics/GetProfile reflect it immediately.
+/// Who may switch the (daemon-global) profile: root always; a non-root
+/// caller only when the operator enabled `[profile] allow_user_switch`.
+fn may_switch_profile(is_root: bool, allow_user_switch: bool) -> bool {
+    is_root || allow_user_switch
+}
+
 fn handle_set_profile(
     state: &State,
     peer: PeerCred,
     profile: crate::profile::SecurityProfile,
 ) -> ResponseBody {
-    if !peer.is_root && !state.allow_user_switch {
+    if !may_switch_profile(peer.is_root, state.allow_user_switch) {
         return ResponseBody::Error {
             message: "profile is daemon-global; switching needs root \
                       (sudo atty-guard profile set <profile>) or \
@@ -2536,6 +2542,14 @@ mod tests {
             "expected vanished-pid rejection, got: {msg}"
         );
         let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn may_switch_profile_gate() {
+        assert!(may_switch_profile(true, false)); // root always
+        assert!(may_switch_profile(true, true));
+        assert!(may_switch_profile(false, true)); // non-root only when enabled
+        assert!(!may_switch_profile(false, false)); // non-root blocked by default
     }
 
     #[test]

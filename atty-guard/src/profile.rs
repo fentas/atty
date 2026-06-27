@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// User-chosen posture. Presets over the underlying knobs; see the design
 /// note for the guarantee each one actually provides (detection vs
 /// prevention — never conflated).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum SecurityProfile {
     /// Proxy pre-Enter only. The typed-command tripwire. No background
