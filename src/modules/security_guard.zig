@@ -354,6 +354,10 @@ pub fn configure(comptime cfg: Config) type {
                     return true;
                 },
                 .security_guard_cycle_profile => {
+                    // When the switch is off the binding is INERT — return
+                    // false (don't consume) so Alt+P keeps its readline
+                    // meaning (M-p), rather than shadowing it with a hint.
+                    if (!cfg.allow_profile_switch) return false;
                     cycleProfile(rt);
                     return true;
                 },
@@ -384,12 +388,6 @@ pub fn configure(comptime cfg: Config) type {
         /// (the profile is daemon-global). Renders the outcome to
         /// scrollback + refreshes the cached status segment.
         fn cycleProfile(rt: *Runtime) void {
-            if (!cfg.allow_profile_switch) {
-                writeSink(rt, "\r\natty security_guard: profile switch is off — " ++
-                    "set security_guard.allow_profile_switch = true (and the " ++
-                    "daemon's [profile] allow_user_switch).\r\n");
-                return;
-            }
             const client = profileClient(rt) orelse {
                 writeSink(rt, "\r\natty security_guard: no daemon configured for profile switch.\r\n");
                 return;

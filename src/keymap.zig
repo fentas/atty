@@ -253,10 +253,10 @@ pub const Action = union(enum) {
     /// vim/htop/etc., and warn events are append-only audit data,
     /// not a workflow that needs in-place mutation.
     security_guard_show_warnings,
-    /// Cycle the live atty-guard security profile (prompt → audit →
-    /// session → strict → lockdown → smart → wrap) via the daemon's
-    /// SetProfile RPC. Opt-in (security_guard.allow_profile_switch); the
-    /// daemon enforces who may switch (the profile is daemon-global).
+    /// Cycle the live atty-guard security profile through prompt → audit →
+    /// session → strict → lockdown → smart, then back to prompt, via the
+    /// daemon's SetProfile RPC. Opt-in (security_guard.allow_profile_switch);
+    /// the daemon enforces who may switch (the profile is daemon-global).
     security_guard_cycle_profile,
 };
 

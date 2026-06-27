@@ -263,6 +263,10 @@ pub const Client = struct {
     /// profile is daemon-global), so a refusal carries the daemon's message
     /// for the UX. `out` backs the returned name/message slice.
     pub fn setProfile(self: *Client, name: []const u8, out: []u8) SwitchResult {
+        // Guard the JSON interpolation: a profile name is [a-z]+, so reject
+        // anything else rather than emit malformed / injectable JSON. (The
+        // in-tree caller only passes PROFILES literals, but this is pub.)
+        if (!isValidProfileName(name)) return .unavailable;
         self.ensureConnected() catch return .unavailable;
         var w: std.Io.Writer = .fixed(&self.write_buf);
         const id = self.next_id;
@@ -745,6 +749,14 @@ fn onlyTrailingWs(buf: []const u8, close: usize) bool {
 /// `Error.DaemonError` on anything that isn't a well-formed object, that
 /// carries more than `max_object_members` fields, or that has trailing
 /// non-whitespace bytes after the top-level `}`.
+/// A profile name is `[a-z]+` (bounded) — used to guard the set_profile
+/// JSON interpolation against malformed / injectable input.
+fn isValidProfileName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 16) return false;
+    for (name) |c| if (c < 'a' or c > 'z') return false;
+    return true;
+}
+
 /// Copy a JSON string value into `out`, returning the copied slice (null
 /// if absent or too long). Decouples the result from the reused read_buf.
 fn copyField(value: ?[]const u8, out: []u8) ?[]const u8 {
