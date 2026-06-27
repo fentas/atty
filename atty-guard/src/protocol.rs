@@ -29,6 +29,10 @@ pub enum Request {
     /// In V2-A this is in-memory only; V2-B will mirror to the eBPF
     /// hash map.
     SetThreatLevel { pid: u32, level: ThreatLevel },
+    /// Mark a PID as watched (security profiles) — the daemon classifies
+    /// execs in its subtree per the active profile. SO_PEERCRED-gated
+    /// (a caller may watch its own PIDs; root any).
+    SetWatch { pid: u32 },
 
     /// Read back the current threat level for a PID. Returns
     /// `ThreatLevel::Low` for unmapped PIDs.

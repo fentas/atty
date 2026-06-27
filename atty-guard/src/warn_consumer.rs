@@ -272,7 +272,7 @@ impl ExecveEvent {
     }
 }
 
-fn cstr_trim(buf: &[u8]) -> String {
+pub(crate) fn cstr_trim(buf: &[u8]) -> String {
     let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..len]).into_owned()
 }

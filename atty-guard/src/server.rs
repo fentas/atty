@@ -36,7 +36,7 @@ pub fn serve(
     // construction into main.rs so it can choose between fail-loud
     // (operator explicitly requested ONNX) and fall-back-to-stub
     // (default path) per BackendSource. serve() stays agnostic.
-    classifier: Classifier,
+    classifier: Arc<Classifier>,
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
     osv: Option<Arc<crate::osv::OsvClient>>,
     trust_store: Arc<crate::trust_store::TrustStore>,
@@ -189,7 +189,7 @@ impl Drop for ConnGuard {
 }
 
 struct State {
-    classifier: Classifier,
+    classifier: Arc<Classifier>,
     threat: ThreatMap,
     verbosity: u8,
     /// Optional V2-F live OSV.dev client. When present, the
@@ -523,6 +523,7 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
         Request::Health => handle_health(),
         Request::Classify { command, context } => handle_classify(state, peer, command, context),
         Request::SetThreatLevel { pid, level } => handle_set_threat_level(state, peer, pid, level),
+        Request::SetWatch { pid } => handle_set_watch(state, peer, pid),
         Request::GetThreatLevel { pid } => handle_get_threat_level(state, peer, pid),
 
         // --- PR #141 mediated trust-state ops ---
@@ -1000,6 +1001,30 @@ fn truncate_to_bytes(s: &mut String, max: usize) {
         end -= 1;
     }
     s.truncate(end);
+}
+
+fn handle_set_watch(state: &State, peer: PeerCred, pid: u32) -> ResponseBody {
+    // The socket is group-accessible, so gate cross-user watch (a minor
+    // info-leak / DoS: classifying another user's subtree). Root may
+    // watch any PID; a non-root caller only PIDs owned by its own UID.
+    // Watch is benign (classify-only, no block, GC'd on exit), so it
+    // doesn't need set_threat's starttime lock-step TOCTOU defense.
+    if !peer.is_root {
+        match pid_owner_uid(pid) {
+            OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+                return ResponseBody::Error {
+                    message: format!(
+                        "non-root caller (uid {}) cannot watch pid {pid} (owned by uid {owner_uid})",
+                        peer.uid
+                    ),
+                };
+            }
+            OwnerLookup::Error(msg) => return ResponseBody::Error { message: msg },
+            OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
+        }
+    }
+    state.threat.set_watch(pid);
+    ResponseBody::Ok
 }
 
 fn handle_set_threat_level(
@@ -1855,7 +1880,7 @@ mod tests {
         let trust_tmp = tempfile::tempdir().expect("tempdir");
         let trust_root = trust_tmp.path().to_path_buf();
         let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
-        let classifier = Classifier::new();
+        let classifier = std::sync::Arc::new(Classifier::new());
         let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
         let bcast_for_thread = bcast.clone();
         let handle = thread::spawn(move || {
@@ -1901,7 +1926,7 @@ mod tests {
     ) -> (std::path::PathBuf, thread::JoinHandle<()>) {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
-        let classifier = Classifier::new();
+        let classifier = std::sync::Arc::new(Classifier::new());
         let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
         let handle = thread::spawn(move || {
             let _ = serve(
@@ -1935,7 +1960,7 @@ mod tests {
         let trust_tmp = tempfile::tempdir().expect("tempdir");
         let trust_root = trust_tmp.path().to_path_buf();
         let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
-        let classifier = Classifier::new();
+        let classifier = std::sync::Arc::new(Classifier::new());
         let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
         let handle = thread::spawn(move || {
             let _trust_tmp_owned = trust_tmp; // moved-in, Drop on exit

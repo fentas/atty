@@ -99,6 +99,8 @@ impl EbpfState {
     pub fn attach(
         _mode: LoadedMode,
         _broadcast: std::sync::Arc<crate::warn_consumer::Broadcast>,
+        _classifier: std::sync::Arc<crate::classifier::Classifier>,
+        _policy: crate::profile::RoutingPolicy,
     ) -> Result<Self, LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
@@ -118,7 +120,6 @@ impl EbpfState {
     pub fn set_threat(&self, _pid: u32, _level: ThreatLevel) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
-    #[allow(dead_code)]
     pub fn set_watch(&self, _pid: u32) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
@@ -246,6 +247,8 @@ mod with_libbpf {
         pub fn attach(
             mode: LoadedMode,
             broadcast: std::sync::Arc<crate::warn_consumer::Broadcast>,
+            classifier: std::sync::Arc<crate::classifier::Classifier>,
+            policy: crate::profile::RoutingPolicy,
         ) -> Result<Self, LoadError> {
             let path = locate_bpf_object()?;
             let mut obj_builder = libbpf_rs::ObjectBuilder::default();
@@ -316,10 +319,11 @@ mod with_libbpf {
                     LoadError::LoadFailed("events ringbuf missing".into())
                 })?;
             let bcast_for_cb = broadcast.clone();
+            let classifier_for_cb = classifier.clone();
             let mut rb_builder = libbpf_rs::RingBufferBuilder::new();
             rb_builder
                 .add(&events_map, move |data| {
-                    ringbuf_callback(data, &bcast_for_cb);
+                    ringbuf_callback(data, &bcast_for_cb, &classifier_for_cb, policy);
                     0
                 })
                 .map_err(|e| {
@@ -419,7 +423,6 @@ mod with_libbpf {
         /// profiles). The fork hook propagates the mark to descendants;
         /// the LSM hook emits a VERDICT_CLASSIFY event for watched execs.
         /// Clearing is handled kernel-side by trace_exit on process exit.
-        #[allow(dead_code)]
         pub fn set_watch(&self, pid: u32) -> Result<(), LoadError> {
             self.update("watch_pids", &pid.to_ne_bytes(), &[1u8])
         }
@@ -506,19 +509,93 @@ mod with_libbpf {
     fn ringbuf_callback(
         data: &[u8],
         broadcast: &std::sync::Arc<crate::warn_consumer::Broadcast>,
+        classifier: &crate::classifier::Classifier,
+        policy: crate::profile::RoutingPolicy,
     ) {
         let Some(evt) = crate::warn_consumer::ExecveEvent::from_bytes(data) else {
             return;
         };
-        if !evt.is_warn() {
+        let now_ms = DAEMON_START.elapsed().as_millis() as u64;
+
+        // Block-mode warn pilot (existing path): surface VERDICT_WARN.
+        if evt.is_warn() {
+            broadcast.broadcast(
+                evt.pid,
+                evt.to_warn_event(now_ms),
+                crate::warn_consumer::pid_in_tree_root,
+            );
             return;
         }
-        let now_ms = DAEMON_START.elapsed().as_millis() as u64;
-        broadcast.broadcast(
-            evt.pid,
-            evt.to_warn_event(now_ms),
-            crate::warn_consumer::pid_in_tree_root,
+
+        // Security-profile path: a watch-scoped execve to route per profile.
+        if evt.is_classify() {
+            dispatch_classify(&evt, now_ms, broadcast, classifier, policy);
+        }
+    }
+
+    /// Route a watch-scoped execve: classify → `RoutingPolicy::decide` →
+    /// act. Runs in the ringbuf consumer thread (off the syscall path),
+    /// so a kill here is the reactive `session` response (the exec has
+    /// already started).
+    fn dispatch_classify(
+        evt: &crate::warn_consumer::ExecveEvent,
+        now_ms: u64,
+        broadcast: &std::sync::Arc<crate::warn_consumer::Broadcast>,
+        classifier: &crate::classifier::Classifier,
+        policy: crate::profile::RoutingPolicy,
+    ) {
+        use crate::profile::{ExecContext, LoadPressure, Mechanism, Tier1Verdict};
+
+        let cmd = crate::warn_consumer::cstr_trim(&evt.argv0);
+        let tier1 = match classifier.classify(&cmd).verdict {
+            crate::protocol::Verdict::Block => Tier1Verdict::KnownBad,
+            crate::protocol::Verdict::Warn => Tier1Verdict::Suspicious,
+            crate::protocol::Verdict::Safe => Tier1Verdict::Safe,
+        };
+        let comm = crate::warn_consumer::cstr_trim(&evt.comm);
+        let is_interpreter = matches!(
+            comm.as_str(),
+            "python" | "python3" | "node" | "sh" | "bash" | "dash" | "zsh" | "ruby"
+                | "perl" | "php" | "lua"
         );
+        let ctx = ExecContext {
+            tier1,
+            is_interpreter,
+            // Only the `smart` profile (P5) reads this; audit/session
+            // ignore it. Conservative false until the proxy reports the
+            // session shell pid.
+            parent_is_interactive_shell: false,
+            in_watch_scope: true,
+            load: LoadPressure::Normal,
+        };
+        let mech = policy.decide(&ctx);
+        match mech {
+            Mechanism::Allow => {}
+            // audit: surface it (reuse the warn-event broadcast/scrollback).
+            Mechanism::WarnAsync => broadcast.broadcast(
+                evt.pid,
+                evt.to_warn_event(now_ms),
+                crate::warn_consumer::pid_in_tree_root,
+            ),
+            // session: reactive SIGKILL if the deeper verdict isn't clean.
+            // SIGKILL is terminal + clean (no SIGSTOP limbo).
+            Mechanism::ClassifyAsyncThenKill => {
+                if tier1 != Tier1Verdict::Safe {
+                    unsafe { kill(evt.pid as i32, 9) };
+                }
+            }
+            // P3 (strict) / P4 (lockdown) effectors aren't driven from the
+            // async consumer; log intent until those phases land.
+            Mechanism::BlockInKernel | Mechanism::FreezeAndFrisk => {
+                eprintln!("atty-guard: profile would {mech:?} pid {} (effector not in this build)", evt.pid);
+            }
+        }
+    }
+
+    // Hand-rolled FFI — the crate intentionally avoids the libc crate
+    // (matches shutdown.rs / cli_client.rs). SIGKILL = 9.
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
     }
 }
 
@@ -562,6 +639,11 @@ mod tests {
         match EbpfState::attach(
             LoadedMode::Block,
             std::sync::Arc::new(crate::warn_consumer::Broadcast::new()),
+            std::sync::Arc::new(crate::classifier::Classifier::new()),
+            crate::profile::RoutingPolicy {
+                profile: crate::profile::SecurityProfile::Prompt,
+                smart_can_freeze: false,
+            },
         ) {
             Err(LoadError::FeatureNotBuilt) => {}
             Err(other) => panic!("expected FeatureNotBuilt, got {other:?}"),

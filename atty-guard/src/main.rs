@@ -818,6 +818,9 @@ fn main() -> std::io::Result<()> {
         }
     }
     .with_block_threshold(file_cfg.accumulator.block_threshold);
+    // Shared between the server (RPC classify path) and the eBPF ringbuf
+    // consumer (security-profile classify dispatch).
+    let classifier = std::sync::Arc::new(classifier);
     if cli.verbosity >= 1 {
         // Log BOTH requested + effective so the operator can spot a
         // silent default-path fallback (the Cli/Config paths above
@@ -938,7 +941,16 @@ fn main() -> std::io::Result<()> {
             EbpfMode::Block => ebpf::LoadedMode::Block,
             EbpfMode::Disabled => unreachable!("guarded by the if above"),
         };
-        match ebpf::EbpfState::attach(loaded_mode, warn_broadcast.clone()) {
+        let policy = profile::RoutingPolicy {
+            profile: file_cfg.profile.mode,
+            smart_can_freeze: file_cfg.profile.smart_allow_lockdown,
+        };
+        match ebpf::EbpfState::attach(
+            loaded_mode,
+            warn_broadcast.clone(),
+            classifier.clone(),
+            policy,
+        ) {
             Ok(state) => {
                 // Push the enforcement depth into the kernel `enforce_cfg`
                 // map. CLI wins over the [enforcement] table; both fall
