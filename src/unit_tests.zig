@@ -44,6 +44,7 @@ test {
     _ = @import("modules/llm/sys_context.zig");
     _ = @import("modules/guardrail.zig");
     _ = @import("modules/history.zig");
+    _ = @import("modules/metrics_exporter.zig");
     _ = @import("modules/mouse_links.zig");
     _ = @import("modules/mouse_links/inject.zig");
     _ = @import("modules/mouse_links/path_detect.zig");

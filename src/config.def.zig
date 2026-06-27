@@ -219,6 +219,29 @@ const atty = @import("atty");
 // //     .daemon_timeout_ms = 50,        // per-classify keystroke budget
 // // }),
 
+// ───── Dashboard metrics (metrics_exporter) ─────────────────────────────
+//
+// Opt-in telemetry for the `attop` dashboard (docs/dashboard.md). Bumps
+// per-session counters (commands committed today, …) and flushes them to
+// the atty-guard daemon's `report_metrics` UDS on a batched tick, so the
+// dashboard can show "what is atty doing for me" + a fleet view. Counts
+// only — never command content. Best-effort: with no daemon it's a no-op.
+//
+// Incognito policy (default `.security_only`): while incognito the session
+// reports its existence + the guard_* security counters but suppresses the
+// productivity counters + its cwd. `.nothing` reports nothing at all;
+// `.normal` reports as usual.
+//
+// pub const modules = .{
+//     atty.modules.metrics_exporter.configure(.{
+//         // .daemon_socket_path = "/run/atty-guard/atty-guard.sock",
+//         // .report_interval_ms = 5000,
+//         // .incognito_policy = .security_only,  // .nothing | .normal
+//     }),
+//     atty.modules.guardrail.configure(.{}),
+//     atty.modules.history.configure(.{}),
+// };
+
 // ───── Mouse-click → editor (mouse_links) ───────────────────────────────
 //
 // Click any path token in compiler/grep/ls/git output to inject
