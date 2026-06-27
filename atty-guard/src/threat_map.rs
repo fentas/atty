@@ -118,12 +118,13 @@ impl ThreatMap {
     /// attached eBPF state. Clearing is kernel-side (trace_exit GC).
     pub fn set_watch(&self, pid: u32) -> bool {
         match &self.ebpf {
-            Some(state) => {
-                if let Err(e) = state.set_watch(pid) {
+            Some(state) => match state.set_watch(pid) {
+                Ok(()) => true,
+                Err(e) => {
                     eprintln!("atty-guard: watch_pids update failed (pid {pid}): {e}");
+                    false
                 }
-                true
-            }
+            },
             None => false,
         }
     }

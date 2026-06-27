@@ -1004,15 +1004,26 @@ fn truncate_to_bytes(s: &mut String, max: usize) {
 }
 
 fn handle_set_watch(state: &State, peer: PeerCred, pid: u32) -> ResponseBody {
-    // The socket is group-accessible, so gate cross-user watch (a minor
-    // info-leak / DoS: classifying another user's subtree). Root may
-    // watch any PID; a non-root caller only PIDs owned by its own UID.
-    // No starttime lock-step here (unlike set_threat): a watch mark only
-    // classifies, and the one consequential action it can trigger
-    // (`session` SIGKILL) re-reads /proc and acts on the live exec event's
-    // PID — not this root PID — so a stale mark can't by itself kill a
-    // recycled PID. GC'd on exit.
+    // The socket is group-accessible, so gate cross-user watch (a same-
+    // group client could otherwise classify — and under `session` get
+    // killed — another user's subtree). Root may watch any PID; a non-root
+    // caller only PIDs owned by its own UID, with the same (pid, starttime)
+    // lock-step set_threat uses to defeat PID-reuse: read starttime before
+    // AND after the ownership check, reject a recycled/vanished PID. (The
+    // kill path additionally re-reads /proc, so even a slipped stale mark
+    // can't kill a recycled PID — this is defense in depth + parity.)
     if !peer.is_root {
+        let start1 = match crate::threat_map::pid_starttime(pid) {
+            crate::threat_map::ProcRead::Found(t) => t,
+            crate::threat_map::ProcRead::NotFound => {
+                return ResponseBody::Error {
+                    message: format!("pid {pid} no longer exists — cannot watch"),
+                };
+            }
+            crate::threat_map::ProcRead::Error(msg) => {
+                return ResponseBody::Error { message: msg };
+            }
+        };
         match pid_owner_uid(pid) {
             OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
                 return ResponseBody::Error {
@@ -1022,12 +1033,32 @@ fn handle_set_watch(state: &State, peer: PeerCred, pid: u32) -> ResponseBody {
                     ),
                 };
             }
+            OwnerLookup::NotFound => {
+                return ResponseBody::Error {
+                    message: format!("pid {pid} no longer exists — cannot watch"),
+                };
+            }
             OwnerLookup::Error(msg) => return ResponseBody::Error { message: msg },
-            OwnerLookup::Owner(_) | OwnerLookup::NotFound => {}
+            OwnerLookup::Owner(_) => {}
+        }
+        match crate::threat_map::pid_starttime(pid) {
+            crate::threat_map::ProcRead::Found(t) if t == start1 => {}
+            _ => {
+                return ResponseBody::Error {
+                    message: format!("pid {pid} was recycled mid-request — refusing to watch"),
+                };
+            }
         }
     }
-    state.threat.set_watch(pid);
-    ResponseBody::Ok
+    if state.threat.set_watch(pid) {
+        ResponseBody::Ok
+    } else {
+        ResponseBody::Error {
+            message: format!(
+                "failed to set watch on pid {pid} (eBPF unavailable or map write failed)"
+            ),
+        }
+    }
 }
 
 fn handle_set_threat_level(
@@ -2326,6 +2357,22 @@ mod tests {
             &mut stream,
             &format!(r#"{{"id":10,"method":"set_watch","pid":{other_pid}}}"#),
         );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn set_watch_rejects_nonexistent_pid_from_non_root() {
+        // The (pid, starttime) lock-step rejects a vanished PID for a
+        // non-root caller, so a race can't redirect the watch onto a
+        // recycled PID. PID 0 is a kernel sentinel; /proc/0 doesn't exist.
+        if skip_if_root("set_watch_rejects_nonexistent_pid_from_non_root") {
+            return;
+        }
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(&mut stream, r#"{"id":11,"method":"set_watch","pid":0}"#);
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
         let _ = std::fs::remove_file(socket);
