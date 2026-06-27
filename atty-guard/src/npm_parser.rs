@@ -166,7 +166,10 @@ mod tests {
 
     #[test]
     fn single_package_unversioned() {
-        assert_eq!(extract_npm_install_pkgs("npm install lodash"), vec!["lodash"]);
+        assert_eq!(
+            extract_npm_install_pkgs("npm install lodash"),
+            vec!["lodash"]
+        );
         assert_eq!(extract_npm_install_pkgs("npm i lodash"), vec!["lodash"]);
         assert_eq!(extract_npm_install_pkgs("npm add lodash"), vec!["lodash"]);
     }
@@ -238,10 +241,7 @@ mod tests {
     fn leading_separators_anchor_the_install_verb() {
         // The verb must be at start-of-line OR after one of
         // space/tab/;/&/|, so `xnpm install` is NOT a match.
-        assert_eq!(
-            extract_npm_install_pkgs("ls; npm install pkg"),
-            vec!["pkg"],
-        );
+        assert_eq!(extract_npm_install_pkgs("ls; npm install pkg"), vec!["pkg"],);
         assert_eq!(
             extract_npm_install_pkgs("true && npm install pkg"),
             vec!["pkg"],
@@ -273,22 +273,10 @@ mod tests {
         // `"npm\tinstall pkg"` (tab) being rejected by the old
         // single-` `-separator code path. The new parser uses
         // skip_ws so both render as the canonical form.
-        assert_eq!(
-            extract_npm_install_pkgs("npm  install pkg"),
-            vec!["pkg"],
-        );
-        assert_eq!(
-            extract_npm_install_pkgs("npm\tinstall pkg"),
-            vec!["pkg"],
-        );
-        assert_eq!(
-            extract_npm_install_pkgs("npm install   pkg"),
-            vec!["pkg"],
-        );
-        assert_eq!(
-            extract_npm_install_pkgs("pnpm  add\treact"),
-            vec!["react"],
-        );
+        assert_eq!(extract_npm_install_pkgs("npm  install pkg"), vec!["pkg"],);
+        assert_eq!(extract_npm_install_pkgs("npm\tinstall pkg"), vec!["pkg"],);
+        assert_eq!(extract_npm_install_pkgs("npm install   pkg"), vec!["pkg"],);
+        assert_eq!(extract_npm_install_pkgs("pnpm  add\treact"), vec!["react"],);
     }
 
     #[test]
@@ -304,10 +292,7 @@ mod tests {
         // `pkg@` is degenerate npm input; rfind returns the trailing
         // `@`, so we strip to `pkg`. OSV will be queried for `pkg`,
         // which is harmless.
-        assert_eq!(
-            extract_npm_install_pkgs("npm install pkg@"),
-            vec!["pkg"],
-        );
+        assert_eq!(extract_npm_install_pkgs("npm install pkg@"), vec!["pkg"],);
     }
 
     #[test]

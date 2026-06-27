@@ -209,6 +209,10 @@ mod with_libbpf {
         /// Held only to make the handle visible in `ps`; we never
         /// join — the thread runs until process exit.
         _consumer: std::thread::JoinHandle<()>,
+        /// Detached classify worker (`atty-guard-classify`) — runs the
+        /// slow /proc + Tier-1/2 + kill path off the ringbuf poll. Same
+        /// lifetime as the consumer; never joined.
+        _classify_worker: std::thread::JoinHandle<()>,
     }
 
     /// Sync wrapper around the leaked `&'static Object`. libbpf-rs
@@ -283,18 +287,14 @@ mod with_libbpf {
             let tp_fork_link = obj
                 .progs_mut()
                 .find(|p| p.name() == "trace_fork")
-                .ok_or_else(|| {
-                    LoadError::LoadFailed("program trace_fork missing from .o".into())
-                })?
+                .ok_or_else(|| LoadError::LoadFailed("program trace_fork missing from .o".into()))?
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach fork tracepoint: {e}")))?;
 
             let tp_exit_link = obj
                 .progs_mut()
                 .find(|p| p.name() == "trace_exit")
-                .ok_or_else(|| {
-                    LoadError::LoadFailed("program trace_exit missing from .o".into())
-                })?
+                .ok_or_else(|| LoadError::LoadFailed("program trace_exit missing from .o".into()))?
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach exit tracepoint: {e}")))?;
 
@@ -304,8 +304,7 @@ mod with_libbpf {
             // threads also borrow Map handles for set_threat. Both
             // need the same Object alive forever — daemon lifetime
             // is process lifetime so the leak is the natural fit.
-            let obj_static: &'static libbpf_rs::Object =
-                Box::leak(Box::new(obj));
+            let obj_static: &'static libbpf_rs::Object = Box::leak(Box::new(obj));
             let obj_handle = ObjectHandle(obj_static);
 
             // Build the ringbuf consumer + spawn its thread before
@@ -315,25 +314,40 @@ mod with_libbpf {
             let events_map = obj_static
                 .maps()
                 .find(|m| m.name() == "events")
-                .ok_or_else(|| {
-                    LoadError::LoadFailed("events ringbuf missing".into())
-                })?;
+                .ok_or_else(|| LoadError::LoadFailed("events ringbuf missing".into()))?;
+            // Slow per-event work (the /proc/cmdline fan-out + Tier-1/2
+            // classify + kill) runs on a dedicated WORKER thread, not
+            // inline in the ringbuf callback: the callback runs under
+            // rb.poll(), and blocking it (the /proc read retries for ms)
+            // would back the ringbuf up under a fork storm and drop events
+            // — a silent detection bypass. Warn events are a cheap
+            // broadcast (no /proc) and stay inline.
             let bcast_for_cb = broadcast.clone();
-            let classifier_for_cb = classifier.clone();
+            let (classify_tx, classify_rx) =
+                std::sync::mpsc::channel::<crate::warn_consumer::ExecveEvent>();
+            let classify_worker = {
+                let classifier = classifier.clone();
+                let broadcast = broadcast.clone();
+                std::thread::Builder::new()
+                    .name("atty-guard-classify".into())
+                    .spawn(move || {
+                        while let Ok(evt) = classify_rx.recv() {
+                            let now_ms = DAEMON_START.elapsed().as_millis() as u64;
+                            dispatch_classify(&evt, now_ms, &broadcast, &classifier, policy);
+                        }
+                    })
+                    .map_err(|e| LoadError::LoadFailed(format!("spawn classify worker: {e}")))?
+            };
             let mut rb_builder = libbpf_rs::RingBufferBuilder::new();
             rb_builder
                 .add(&events_map, move |data| {
-                    ringbuf_callback(data, &bcast_for_cb, &classifier_for_cb, policy);
+                    ringbuf_callback(data, &bcast_for_cb, &classify_tx);
                     0
                 })
-                .map_err(|e| {
-                    LoadError::LoadFailed(format!("ringbuf add: {e}"))
-                })?;
+                .map_err(|e| LoadError::LoadFailed(format!("ringbuf add: {e}")))?;
             let rb = rb_builder
                 .build()
-                .map_err(|e| {
-                    LoadError::LoadFailed(format!("ringbuf build: {e}"))
-                })?;
+                .map_err(|e| LoadError::LoadFailed(format!("ringbuf build: {e}")))?;
             // Drop the explicit map binding so the implicit borrow
             // ends; the RingBuffer holds its own reference via
             // libbpf-rs internals.
@@ -342,9 +356,7 @@ mod with_libbpf {
             let consumer = std::thread::Builder::new()
                 .name("atty-guard-ringbuf".into())
                 .spawn(move || consumer_loop(rb))
-                .map_err(|e| {
-                    LoadError::LoadFailed(format!("spawn ringbuf consumer: {e}"))
-                })?;
+                .map_err(|e| LoadError::LoadFailed(format!("spawn ringbuf consumer: {e}")))?;
 
             Ok(Self {
                 obj: obj_handle,
@@ -354,6 +366,7 @@ mod with_libbpf {
                 _tp_exit_link: tp_exit_link,
                 mode,
                 _consumer: consumer,
+                _classify_worker: classify_worker,
             })
         }
 
@@ -408,9 +421,7 @@ mod with_libbpf {
                 return Ok(());
             }
             match (self.mode, level) {
-                (LoadedMode::Warn, ThreatLevel::Critical) => {
-                    self.update("warn_pids", &key, &[1u8])
-                }
+                (LoadedMode::Warn, ThreatLevel::Critical) => self.update("warn_pids", &key, &[1u8]),
                 (LoadedMode::Block, ThreatLevel::Critical) => {
                     self.update("threat_map", &key, &[2u8])
                 }
@@ -502,23 +513,23 @@ mod with_libbpf {
         }
     }
 
-    /// Per-event callback inside the libbpf poll. Parses the raw
-    /// bytes as ExecveEvent, filters to VERDICT_WARN, broadcasts.
-    /// Trace + block events are ignored (they belong to other
-    /// paths — daemon logs / atty banner respectively).
+    /// Per-event callback inside the libbpf poll — kept FAST: parse, then
+    /// broadcast warn events inline (cheap, no I/O) and hand classify
+    /// events to the worker thread (the slow /proc + classify + kill
+    /// path). Block events are ignored (atty renders the banner from the
+    /// EPERM).
     fn ringbuf_callback(
         data: &[u8],
         broadcast: &std::sync::Arc<crate::warn_consumer::Broadcast>,
-        classifier: &crate::classifier::Classifier,
-        policy: crate::profile::RoutingPolicy,
+        classify_tx: &std::sync::mpsc::Sender<crate::warn_consumer::ExecveEvent>,
     ) {
         let Some(evt) = crate::warn_consumer::ExecveEvent::from_bytes(data) else {
             return;
         };
-        let now_ms = DAEMON_START.elapsed().as_millis() as u64;
 
         // Block-mode warn pilot (existing path): surface VERDICT_WARN.
         if evt.is_warn() {
+            let now_ms = DAEMON_START.elapsed().as_millis() as u64;
             broadcast.broadcast(
                 evt.pid,
                 evt.to_warn_event(now_ms),
@@ -527,9 +538,11 @@ mod with_libbpf {
             return;
         }
 
-        // Security-profile path: a watch-scoped execve to route per profile.
+        // Security-profile path: hand off to the worker — never block the
+        // poll. A send failure (worker gone) is the same fail-open as a
+        // ringbuf overflow; nothing to do here.
         if evt.is_classify() {
-            dispatch_classify(&evt, now_ms, broadcast, classifier, policy);
+            let _ = classify_tx.send(evt);
         }
     }
 
@@ -548,9 +561,12 @@ mod with_libbpf {
 
         // The kernel event carries only bprm->filename (the binary); the
         // Tier-1 atoms match full command patterns (e.g. curl|sh), so fan
-        // out to /proc/<pid>/cmdline for the real command. Racy (the pid
-        // may have moved on) — fall back to the binary on any miss.
-        let cmd = read_proc_cmdline(evt.pid)
+        // out to /proc/<pid>/cmdline for the real command. A live read
+        // also proves the PID still refers to the process we're about to
+        // act on — `session` won't kill on the fallback (see below).
+        let live_cmd = read_proc_cmdline(evt.pid);
+        let cmd = live_cmd
+            .clone()
             .unwrap_or_else(|| crate::warn_consumer::cstr_trim(&evt.argv0));
         let tier1 = match classifier.classify(&cmd).verdict {
             crate::protocol::Verdict::Block => Tier1Verdict::KnownBad,
@@ -560,8 +576,17 @@ mod with_libbpf {
         let comm = crate::warn_consumer::cstr_trim(&evt.comm);
         let is_interpreter = matches!(
             comm.as_str(),
-            "python" | "python3" | "node" | "sh" | "bash" | "dash" | "zsh" | "ruby"
-                | "perl" | "php" | "lua"
+            "python"
+                | "python3"
+                | "node"
+                | "sh"
+                | "bash"
+                | "dash"
+                | "zsh"
+                | "ruby"
+                | "perl"
+                | "php"
+                | "lua"
         );
         let ctx = ExecContext {
             tier1,
@@ -584,20 +609,42 @@ mod with_libbpf {
             ),
             // session: reactive SIGKILL if the deeper verdict isn't clean.
             // SIGKILL is terminal + clean (no SIGSTOP limbo). The exec
-            // already started; this is the reactive response. Signalling
-            // another user's process needs CAP_KILL — log a failure rather
-            // than swallow it (without the cap `session` would otherwise be
-            // a silent no-op).
+            // already started; this is the reactive response.
             Mechanism::ClassifyAsyncThenKill => {
-                if tier1 != Tier1Verdict::Safe && unsafe { kill(evt.pid as i32, 9) } != 0 {
-                    let e = std::io::Error::last_os_error();
-                    eprintln!("atty-guard: session SIGKILL pid {} failed: {e} (need CAP_KILL?)", evt.pid);
+                if tier1 != Tier1Verdict::Safe {
+                    if live_cmd.is_none() {
+                        // The /proc read failed → the process has likely
+                        // already exited; killing evt.pid now could hit a
+                        // recycled PID (with CAP_KILL, any user's process).
+                        // Don't act on a stale identity.
+                        eprintln!(
+                            "atty-guard: session skipping kill of pid {} — cmdline unreadable (exited?)",
+                            evt.pid
+                        );
+                    } else if unsafe { kill(evt.pid as i32, 9) } != 0 {
+                        // Signalling another user's process needs CAP_KILL;
+                        // log + degrade to audit-visible rather than a silent
+                        // no-op so a missing cap still surfaces the threat.
+                        let e = std::io::Error::last_os_error();
+                        eprintln!(
+                            "atty-guard: session SIGKILL pid {} failed: {e} (need CAP_KILL?)",
+                            evt.pid
+                        );
+                        broadcast.broadcast(
+                            evt.pid,
+                            evt.to_warn_event(now_ms),
+                            crate::warn_consumer::pid_in_tree_root,
+                        );
+                    }
                 }
             }
             // P3 (strict) / P4 (lockdown) effectors aren't driven from the
             // async consumer; log intent until those phases land.
             Mechanism::BlockInKernel | Mechanism::FreezeAndFrisk => {
-                eprintln!("atty-guard: profile would {mech:?} pid {} (effector not in this build)", evt.pid);
+                eprintln!(
+                    "atty-guard: profile would {mech:?} pid {} (effector not in this build)",
+                    evt.pid
+                );
             }
         }
     }

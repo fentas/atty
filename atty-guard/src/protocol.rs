@@ -342,17 +342,27 @@ pub struct ClassifyResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseBody {
     Ok,
-    Health { version: String },
+    Health {
+        version: String,
+    },
     Classify(ClassifyResult),
-    ThreatLevel { level: ThreatLevel },
-    Error { message: String },
+    ThreatLevel {
+        level: ThreatLevel,
+    },
+    Error {
+        message: String,
+    },
     /// Reply to AtomsList. Each entry is the atom string verbatim
     /// (no metadata) — CLI renders them one per line.
-    AtomsList { atoms: Vec<String> },
+    AtomsList {
+        atoms: Vec<String>,
+    },
     /// Reply to UrlsList. Pairs of (host, decision) where decision
     /// is `"allow"`, `"block"`, or `"session-allow"` /
     /// `"session-block"` for entries that are session-only.
-    UrlsList { entries: Vec<UrlDecisionEntry> },
+    UrlsList {
+        entries: Vec<UrlDecisionEntry>,
+    },
     /// Reply to SessionList. Lists pending atoms/url-decisions held
     /// in the caller's in-memory session. `trust` holds the
     /// SHA-256 hashes of (category, matched) pairs that the
@@ -367,7 +377,9 @@ pub enum ResponseBody {
     },
     /// Reply to TrustList. Sorted list of hex SHA-256 hashes
     /// from the caller's persistent `commands.trusted.txt`.
-    TrustList { trust: Vec<String> },
+    TrustList {
+        trust: Vec<String>,
+    },
     /// Reply to AtomsDrift. `available` is false when the cron has
     /// not yet written a snapshot (fresh daemon, the `atoms-fetch`
     /// build feature is disabled, etc.); `sources` is the
@@ -406,7 +418,9 @@ pub enum ResponseBody {
     /// Best-effort notice that the ringbuf consumer's broadcast
     /// dropped events for this subscriber (slow consumer / buffer
     /// full). Carries the count since the last drop notice.
-    WarnDropped { count: u32 },
+    WarnDropped {
+        count: u32,
+    },
 }
 
 /// Per-source drift entry. Mirrors `atom_drift::DriftSource` but

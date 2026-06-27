@@ -210,7 +210,10 @@ mod tests {
     }
 
     fn policy(profile: SecurityProfile, smart_can_freeze: bool) -> RoutingPolicy {
-        RoutingPolicy { profile, smart_can_freeze }
+        RoutingPolicy {
+            profile,
+            smart_can_freeze,
+        }
     }
 
     #[test]
@@ -245,8 +248,15 @@ mod tests {
 
     #[test]
     fn prompt_never_acts_in_background() {
-        for v in [Tier1Verdict::Safe, Tier1Verdict::Unknown, Tier1Verdict::KnownBad] {
-            assert_eq!(policy(SecurityProfile::Prompt, true).decide(&ctx(v)), Mechanism::Allow);
+        for v in [
+            Tier1Verdict::Safe,
+            Tier1Verdict::Unknown,
+            Tier1Verdict::KnownBad,
+        ] {
+            assert_eq!(
+                policy(SecurityProfile::Prompt, true).decide(&ctx(v)),
+                Mechanism::Allow
+            );
         }
     }
 
@@ -262,14 +272,23 @@ mod tests {
     fn session_kills_async_for_anything_not_clearly_safe() {
         let p = policy(SecurityProfile::Session, true);
         assert_eq!(p.decide(&ctx(Tier1Verdict::Safe)), Mechanism::Allow);
-        assert_eq!(p.decide(&ctx(Tier1Verdict::Suspicious)), Mechanism::ClassifyAsyncThenKill);
-        assert_eq!(p.decide(&ctx(Tier1Verdict::KnownBad)), Mechanism::ClassifyAsyncThenKill);
+        assert_eq!(
+            p.decide(&ctx(Tier1Verdict::Suspicious)),
+            Mechanism::ClassifyAsyncThenKill
+        );
+        assert_eq!(
+            p.decide(&ctx(Tier1Verdict::KnownBad)),
+            Mechanism::ClassifyAsyncThenKill
+        );
     }
 
     #[test]
     fn strict_blocks_only_known_bad_synchronously() {
         let p = policy(SecurityProfile::Strict, true);
-        assert_eq!(p.decide(&ctx(Tier1Verdict::KnownBad)), Mechanism::BlockInKernel);
+        assert_eq!(
+            p.decide(&ctx(Tier1Verdict::KnownBad)),
+            Mechanism::BlockInKernel
+        );
         // Strict has no SLM/async path — ambiguous is allowed (its honest limit).
         assert_eq!(p.decide(&ctx(Tier1Verdict::Suspicious)), Mechanism::Allow);
         assert_eq!(p.decide(&ctx(Tier1Verdict::Unknown)), Mechanism::Allow);
@@ -280,9 +299,18 @@ mod tests {
     fn lockdown_freezes_ambiguous_blocks_known_allows_safe() {
         let p = policy(SecurityProfile::Lockdown, true);
         assert_eq!(p.decide(&ctx(Tier1Verdict::Safe)), Mechanism::Allow);
-        assert_eq!(p.decide(&ctx(Tier1Verdict::KnownBad)), Mechanism::BlockInKernel);
-        assert_eq!(p.decide(&ctx(Tier1Verdict::Suspicious)), Mechanism::FreezeAndFrisk);
-        assert_eq!(p.decide(&ctx(Tier1Verdict::Unknown)), Mechanism::FreezeAndFrisk);
+        assert_eq!(
+            p.decide(&ctx(Tier1Verdict::KnownBad)),
+            Mechanism::BlockInKernel
+        );
+        assert_eq!(
+            p.decide(&ctx(Tier1Verdict::Suspicious)),
+            Mechanism::FreezeAndFrisk
+        );
+        assert_eq!(
+            p.decide(&ctx(Tier1Verdict::Unknown)),
+            Mechanism::FreezeAndFrisk
+        );
     }
 
     // ── smart routing — the use-case matrix ────────────────────────────
@@ -311,11 +339,17 @@ mod tests {
         // interpreter the user typed at the prompt): don't pay.
         let mut typed = ctx(Tier1Verdict::Unknown);
         typed.parent_is_interactive_shell = true; // user typed it
-        assert_eq!(policy(SecurityProfile::Smart, true).decide(&typed), Mechanism::Allow);
+        assert_eq!(
+            policy(SecurityProfile::Smart, true).decide(&typed),
+            Mechanism::Allow
+        );
 
         let mut not_interp = ctx(Tier1Verdict::Suspicious);
         not_interp.is_interpreter = false;
-        assert_eq!(policy(SecurityProfile::Smart, true).decide(&not_interp), Mechanism::Allow);
+        assert_eq!(
+            policy(SecurityProfile::Smart, true).decide(&not_interp),
+            Mechanism::Allow
+        );
     }
 
     #[test]
@@ -338,7 +372,13 @@ mod tests {
         // consent.
         let mut busy = risky;
         busy.load = LoadPressure::High;
-        assert_eq!(policy(SecurityProfile::Smart, true).decide(&busy), Mechanism::WarnAsync);
-        assert_eq!(policy(SecurityProfile::Smart, false).decide(&busy), Mechanism::WarnAsync);
+        assert_eq!(
+            policy(SecurityProfile::Smart, true).decide(&busy),
+            Mechanism::WarnAsync
+        );
+        assert_eq!(
+            policy(SecurityProfile::Smart, false).decide(&busy),
+            Mechanism::WarnAsync
+        );
     }
 }

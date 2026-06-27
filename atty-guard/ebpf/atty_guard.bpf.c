@@ -355,10 +355,14 @@ int trace_exit(struct trace_event_raw_sched_process_template *ctx)
     __u64 pt = bpf_get_current_pid_tgid();
     __u32 tgid = (__u32)(pt >> 32);
     __u32 tid = (__u32)pt;
-    if (tgid == tid) { // process (leader) exit, not a bare thread
+    // watch_pids is marked per-task by trace_fork (the child's pid/tid),
+    // so GC on EVERY task exit — a thread create also fires
+    // sched_process_fork, so a leader-only delete would leak thread tids
+    // until the map fills (16384) and fails open. threat_map is
+    // process-level: reclaim on leader exit only.
+    bpf_map_delete_elem(&watch_pids, &tid);
+    if (tgid == tid) // process (leader) exit, not a bare thread
         bpf_map_delete_elem(&threat_map, &tgid);
-        bpf_map_delete_elem(&watch_pids, &tgid);
-    }
     return 0;
 }
 

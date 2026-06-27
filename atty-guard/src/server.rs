@@ -1007,8 +1007,11 @@ fn handle_set_watch(state: &State, peer: PeerCred, pid: u32) -> ResponseBody {
     // The socket is group-accessible, so gate cross-user watch (a minor
     // info-leak / DoS: classifying another user's subtree). Root may
     // watch any PID; a non-root caller only PIDs owned by its own UID.
-    // Watch is benign (classify-only, no block, GC'd on exit), so it
-    // doesn't need set_threat's starttime lock-step TOCTOU defense.
+    // No starttime lock-step here (unlike set_threat): a watch mark only
+    // classifies, and the one consequential action it can trigger
+    // (`session` SIGKILL) re-reads /proc and acts on the live exec event's
+    // PID — not this root PID — so a stale mark can't by itself kill a
+    // recycled PID. GC'd on exit.
     if !peer.is_root {
         match pid_owner_uid(pid) {
             OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
@@ -2176,7 +2179,10 @@ mod tests {
             r#"{"id":1,"method":"classify","command":"echo zzqq-overlay-marker please"}"#,
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(v["verdict"], "warn", "overlay atom hit must upgrade Safe→Warn");
+        assert_eq!(
+            v["verdict"], "warn",
+            "overlay atom hit must upgrade Safe→Warn"
+        );
         let reason = v["reason"].as_str().unwrap_or("");
         // Pin the persistent-overlay scope specifically (vs system-fetched
         // / session), and that the matched atom is cited.
@@ -2300,6 +2306,28 @@ mod tests {
         );
         let lv: serde_json::Value = serde_json::from_str(&level_reply).unwrap();
         assert_eq!(lv["type"], "error");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn set_watch_rejects_pid_owned_by_other_uid() {
+        // Same cross-UID gate as set_threat: a non-root caller must not be
+        // able to watch (classify the subtree of) another user's PID.
+        if skip_if_root("set_watch_rejects_pid_owned_by_other_uid") {
+            return;
+        }
+        let other_pid = match find_pid_owned_by_other_uid() {
+            Some(p) => p,
+            None => return,
+        };
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            &format!(r#"{{"id":10,"method":"set_watch","pid":{other_pid}}}"#),
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
         let _ = std::fs::remove_file(socket);
     }
 

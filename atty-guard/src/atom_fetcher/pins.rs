@@ -23,7 +23,10 @@ pub fn load_pins(_path: &Path) -> Result<Option<AtomPins>, FetchError> {
 /// The parse + validate logic exercised here is identical; only
 /// the owner check changes.
 #[cfg(feature = "atoms-fetch")]
-pub fn load_pins_with_owner(path: &Path, expected_uid: u32) -> Result<Option<AtomPins>, FetchError> {
+pub fn load_pins_with_owner(
+    path: &Path,
+    expected_uid: u32,
+) -> Result<Option<AtomPins>, FetchError> {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -43,9 +46,8 @@ pub fn load_pins_with_owner(path: &Path, expected_uid: u32) -> Result<Option<Ato
         )));
     }
     check_pin_file_perms(path, &meta, expected_uid)?;
-    let bytes = std::fs::read(path).map_err(|e| {
-        FetchError::ParseError(format!("read {}: {}", path.display(), e))
-    })?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| FetchError::ParseError(format!("read {}: {}", path.display(), e)))?;
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return Err(FetchError::ParseError(format!(
             "pin file {} is empty — remove the file to opt out of pinning, \
@@ -171,8 +173,8 @@ mod tests {
 
     #[test]
     fn pin_file_round_trips() {
-        let dir = std::env::temp_dir()
-            .join(format!("atty-guard-pin-roundtrip-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-roundtrip-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         let body = r#"
@@ -199,8 +201,8 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
         // Bad commit, valid sha256 — proves the commit-length
         // check fires independently. Operators who paste an
         // abbreviated SHA need to learn this is a hard error.
-        let dir = std::env::temp_dir()
-            .join(format!("atty-guard-pin-shortsha-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-shortsha-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         std::fs::write(
@@ -232,7 +234,10 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
             "[gtfobins]\ncommit = \"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\nsha256 = \"3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca\"\n",
         )
         .unwrap();
-        assert!(matches!(load_pins_with_owner(&path, current_uid()), Err(FetchError::ParseError(_))));
+        assert!(matches!(
+            load_pins_with_owner(&path, current_uid()),
+            Err(FetchError::ParseError(_))
+        ));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -241,8 +246,8 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
         // Valid commit, bad sha256 — independent of the commit
         // check. Confirms BOTH validators fire, not just the
         // first one in evaluation order.
-        let dir = std::env::temp_dir()
-            .join(format!("atty-guard-pin-shortsha256-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-shortsha256-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         std::fs::write(
@@ -264,12 +269,15 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
 
     #[test]
     fn pin_file_rejects_malformed_toml() {
-        let dir = std::env::temp_dir()
-            .join(format!("atty-guard-pin-malformed-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-malformed-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         std::fs::write(&path, "this is = not [ toml\n").unwrap();
-        assert!(matches!(load_pins_with_owner(&path, current_uid()), Err(FetchError::ParseError(_))));
+        assert!(matches!(
+            load_pins_with_owner(&path, current_uid()),
+            Err(FetchError::ParseError(_))
+        ));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -294,10 +302,8 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
         // live tracking silently — defeating the whole point
         // of opting in. The reject path is the security
         // guarantee, not a nicety.
-        let dir = std::env::temp_dir().join(format!(
-            "atty-guard-pin-unknownsec-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-unknownsec-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         let body = r#"
@@ -323,10 +329,8 @@ sha256 = "3121cb8f46b90ba663dbd9b7b4177cacba32589fc55221ac0874dccbfc3ffaca"
         // would be silently violated. We keep BOTH required
         // fields valid so the test fails for the right reason
         // — the `branch` key — not because `commit` was missing.
-        let dir = std::env::temp_dir().join(format!(
-            "atty-guard-pin-unknownkey-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-unknownkey-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         let body = r#"
@@ -354,8 +358,7 @@ branch = "main"
         // Without this check it parses to AtomPins{None,None}
         // and silently disables pinning. Hard error matches the
         // rest of the pin-file parse posture.
-        let dir = std::env::temp_dir()
-            .join(format!("atty-guard-pin-empty-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("atty-guard-pin-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         std::fs::write(&path, "").unwrap();
@@ -374,10 +377,8 @@ branch = "main"
         // pasted the example template but never uncommented a
         // section. Without this check, all-comment TOML parses
         // to AtomPins{None,None} which we treat as opt-out.
-        let dir = std::env::temp_dir().join(format!(
-            "atty-guard-pin-comments-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-comments-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         std::fs::write(&path, "   \n  \n\t\n").unwrap();
@@ -396,10 +397,8 @@ branch = "main"
         // else means a local attacker (or a fat-finger
         // `chown $user`) could swap pins to point at attacker-
         // controlled commits. Refuse to load.
-        let dir = std::env::temp_dir().join(format!(
-            "atty-guard-pin-badowner-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-badowner-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         // Valid content — only the owner check should fire.
@@ -414,10 +413,7 @@ branch = "main"
         let bad_uid = current_uid().wrapping_add(1);
         match load_pins_with_owner(&path, bad_uid) {
             Err(FetchError::ParseError(msg)) => {
-                assert!(
-                    msg.contains("owner uid"),
-                    "msg should mention owner: {msg}"
-                );
+                assert!(msg.contains("owner uid"), "msg should mention owner: {msg}");
             }
             other => panic!("expected ParseError, got {other:?}"),
         }
@@ -429,10 +425,8 @@ branch = "main"
         // 0666 means anyone on the box can edit pins. Trust
         // model says "admin-managed via sudo only" — refuse.
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "atty-guard-pin-worldwrite-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-pin-worldwrite-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atoms.pins.toml");
         std::fs::write(

@@ -47,10 +47,7 @@ pub fn install() {
     // safety (atomic stores are signal-safe).
     unsafe {
         extern "C" {
-            fn signal(
-                signum: i32,
-                handler: extern "C" fn(i32),
-            ) -> extern "C" fn(i32);
+            fn signal(signum: i32, handler: extern "C" fn(i32)) -> extern "C" fn(i32);
         }
         // SIGTERM=15, SIGINT=2, SIGHUP=1 on every Linux ABI we
         // build for — hardcoding the integers avoids a libc-crate

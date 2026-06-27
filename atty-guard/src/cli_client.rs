@@ -65,14 +65,12 @@ pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
             AtomsOp::PinInit { force } => handle_pin_init(force),
         },
         Subcommand::Urls { op } => match op {
-            UrlsOp::Allow { host } => send_and_check(
-                socket,
-                Request::UrlsAllow { host, target_uid },
-            ),
-            UrlsOp::Block { host } => send_and_check(
-                socket,
-                Request::UrlsBlock { host, target_uid },
-            ),
+            UrlsOp::Allow { host } => {
+                send_and_check(socket, Request::UrlsAllow { host, target_uid })
+            }
+            UrlsOp::Block { host } => {
+                send_and_check(socket, Request::UrlsBlock { host, target_uid })
+            }
             UrlsOp::List => handle_urls_list(socket, target_uid),
         },
         Subcommand::Session { op } => match op {
@@ -82,10 +80,7 @@ pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
         },
         Subcommand::Trust { op } => match op {
             TrustOp::List => handle_trust_list(socket, target_uid),
-            TrustOp::Add { hash } => send_and_check(
-                socket,
-                Request::TrustAdd { hash, target_uid },
-            ),
+            TrustOp::Add { hash } => send_and_check(socket, Request::TrustAdd { hash, target_uid }),
         },
     }
 }
@@ -386,9 +381,8 @@ fn handle_atoms_drift(socket: &Path, json: bool) -> std::io::Result<()> {
                     updated_at: &updated_at,
                     sources: &sources,
                 };
-                let s = serde_json::to_string_pretty(&payload).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::Other, e)
-                })?;
+                let s = serde_json::to_string_pretty(&payload)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
                 println!("{s}");
                 if behind_count > 0 {
                     // Explicit stdout flush before exit — `println!`
@@ -509,10 +503,7 @@ fn handle_pin_init(force: bool) -> std::io::Result<()> {
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("create {}: {}", parent.display(), e),
-            )
+            std::io::Error::new(e.kind(), format!("create {}: {}", parent.display(), e))
         })?;
     }
     // PID-suffixed tmp + create_new closes the symlink-pre-create

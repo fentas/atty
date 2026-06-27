@@ -797,10 +797,7 @@ fn main() -> std::io::Result<()> {
             classifier::Classifier::new_with_backend(backend, &file_cfg.tier2.onnx)
         }
         classifier::BackendSource::Cli | classifier::BackendSource::Config => {
-            match classifier::Classifier::try_new_with_backend(
-                backend,
-                &file_cfg.tier2.onnx,
-            ) {
+            match classifier::Classifier::try_new_with_backend(backend, &file_cfg.tier2.onnx) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!(
@@ -934,7 +931,9 @@ fn main() -> std::io::Result<()> {
     // broadcast() per VERDICT_WARN event).
     let warn_broadcast = std::sync::Arc::new(warn_consumer::Broadcast::new());
 
-    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode != EbpfMode::Disabled {
+    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode
+        != EbpfMode::Disabled
+    {
         let loaded_mode = match effective_mode {
             EbpfMode::Observe => ebpf::LoadedMode::Observe,
             EbpfMode::Warn => ebpf::LoadedMode::Warn,

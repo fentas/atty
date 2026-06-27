@@ -188,10 +188,7 @@ impl TrustStore {
     /// lock, so `strong_count == 1` reliably means "no live writer."
     fn acquire_write_lock(&self, uid: u32) -> Arc<Mutex<()>> {
         const SOFT_CAP: usize = 1024;
-        let mut map = self
-            .write_locks
-            .lock()
-            .expect("write_locks poisoned");
+        let mut map = self.write_locks.lock().expect("write_locks poisoned");
         if map.len() > SOFT_CAP {
             map.retain(|_, arc| Arc::strong_count(arc) > 1);
         }
@@ -292,10 +289,7 @@ impl TrustStore {
         entry.persistent_urls_block = block;
         entry.persistent_trust = trust;
         drop(state);
-        self.loaded
-            .lock()
-            .expect("loaded poisoned")
-            .insert(uid);
+        self.loaded.lock().expect("loaded poisoned").insert(uid);
         Ok(())
     }
 
@@ -305,12 +299,7 @@ impl TrustStore {
     /// directly after writing — keeps the in-memory layer fresh
     /// without a per-classify disk read.
     pub fn ensure_loaded(&self, uid: u32) -> std::io::Result<()> {
-        if self
-            .loaded
-            .lock()
-            .expect("loaded poisoned")
-            .contains(&uid)
-        {
+        if self.loaded.lock().expect("loaded poisoned").contains(&uid) {
             return Ok(());
         }
         self.load_persistent(uid)
@@ -388,8 +377,7 @@ impl TrustStore {
         validate_trust_hash(hash)?;
         let mut state = self.state.lock().expect("trust_store poisoned");
         let entry = state.entry(uid).or_default();
-        if entry.session_trust.len() >= SESSION_PER_KIND_CAP
-            && !entry.session_trust.contains(hash)
+        if entry.session_trust.len() >= SESSION_PER_KIND_CAP && !entry.session_trust.contains(hash)
         {
             return Err(format!(
                 "session trust set full ({} entries) — run `sudo atty-guard session write` to persist + clear, or `atty-guard session clear`",
@@ -671,27 +659,21 @@ impl TrustStore {
         {
             let mut state = self.state.lock().expect("trust_store poisoned");
             if let Some(entry) = state.get_mut(&uid) {
-                entry
-                    .session_atoms
-                    .retain(|a| !persisted_atoms.contains(a));
+                entry.session_atoms.retain(|a| !persisted_atoms.contains(a));
                 entry
                     .session_urls_allow
                     .retain(|h| !persisted_urls_allow.contains(h));
                 entry
                     .session_urls_block
                     .retain(|h| !persisted_urls_block.contains(h));
-                entry
-                    .session_trust
-                    .retain(|h| !persisted_trust.contains(h));
+                entry.session_trust.retain(|h| !persisted_trust.contains(h));
             }
         }
         Ok(report)
     }
 
     fn user_atoms_path(&self, uid: u32) -> PathBuf {
-        self.data_root
-            .join(uid.to_string())
-            .join("atoms.user.txt")
+        self.data_root.join(uid.to_string()).join("atoms.user.txt")
     }
     fn user_urls_path(&self, uid: u32) -> PathBuf {
         self.data_root
@@ -862,12 +844,10 @@ fn validate_atom(atom: &str) -> Result<(), String> {
     // too — adding `/path/to/foo` or `<user>` as an atom would
     // never match real input (Aho-Corasick has no wildcards).
     if is_placeholder_atom_public(atom) {
-        return Err(
-            "atom looks like a Sigma/LOLBAS-style placeholder \
+        return Err("atom looks like a Sigma/LOLBAS-style placeholder \
              (`/path/to/...`, `{PATH:...}`, or `<identifier>`) — \
              these match no real input"
-                .into(),
-        );
+            .into());
     }
     Ok(())
 }
@@ -881,7 +861,10 @@ fn validate_trust_hash(hash: &str) -> Result<(), String> {
     if hash.len() != 64 {
         return Err(format!("trust hash length {} (expected 64)", hash.len()));
     }
-    if !hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if !hash
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err("trust hash contains non-lowercase-hex chars".into());
     }
     Ok(())
@@ -1095,11 +1078,7 @@ fn strip_inline_comment(line: &str) -> &str {
     line
 }
 
-fn write_atoms_file(
-    path: &Path,
-    atoms: &HashSet<String>,
-    source: &str,
-) -> std::io::Result<()> {
+fn write_atoms_file(path: &Path, atoms: &HashSet<String>, source: &str) -> std::io::Result<()> {
     let mut sorted: Vec<&String> = atoms.iter().collect();
     sorted.sort();
     let mut content = String::with_capacity(64 + atoms.len() * 50);
