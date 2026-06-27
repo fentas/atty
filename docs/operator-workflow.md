@@ -569,17 +569,45 @@ does and doesn't stop:
   passes through atty's prompt (a cron job, a compromised dotfile, a
   background daemon). atty-guard raises the cost and catches the
   obvious shapes; it does not contain a hostile process.
-- **eBPF Block is one level deep.** The LSM hook gates the `execve()`
-  of a flagged process's *direct* children — **not** deeper
-  descendants. `npm`(flagged) → `node`(gated) → `sh`(NOT gated: its
-  parent `node` isn't flagged), and any double-fork / `nohup … &` /
-  daemonize reparents the descendant to PID 1 and drops the mark
-  entirely (see `atty-guard/ebpf/atty_guard.bpf.c`). It backstops a
-  payload that execs *directly* from the flagged process; it does
-  **not** contain one that deliberately detaches. Separately, a
-  *fresh* login (new SSH session, separate terminal, systemd service)
-  starts an unclassified tree that isn't covered until its own
-  command trips a verdict.
+- **eBPF enforcement depth is configurable; the default (`one_level`)
+  gates a flagged process's *direct* children.** Why that's the default
+  is a deliberate decision worth not re-litigating — the full analysis +
+  measurements are in [`benchmarking.md`](benchmarking.md):
+  - **Detection is per-execve, not per-tree.** The `sys_enter_execve`
+    tracepoint reports *every* execve to the daemon, which classifies
+    each and may mark the PID; the LSM then gates that PID's next child.
+    So a *linear* deep chain is still covered — `npm`→`node`→`sh` is
+    inspected at every link, and whichever link trips a verdict has its
+    direct child blocked. You don't need a tree-walk to catch a chain
+    that execs straight down. (This corrects an earlier doc that claimed
+    `npm → node → sh` was simply uncovered.)
+  - **What `one_level` genuinely misses is *detachment*.** A flagged
+    process that **double-forks / `nohup … &` / daemonizes** reparents
+    its payload to PID 1 *before* the payload's execve, severing the
+    parent link the hook checks. That — not "deep descendants" in
+    general — is the real gap.
+  - **The deeper modes exist for exactly that, and cost is not the
+    blocker.** `ancestry(N)` walks N `real_parent` hops; `propagate_on
+    _fork` copies the mark across every fork so a detached descendant
+    still carries it. Both are runtime-selectable (`[enforcement]
+    depth`); measured overhead is negligible — ancestry(8) **+~111 ns/
+    execve**, propagate **+~49 ns/fork** (the dominant per-execve eBPF
+    cost is `trace_execve`'s arg-capture, ~2600 ns, and it's
+    mode-independent). So **cost is *not* why the default is shallow.**
+  - **`one_level` is the default for *precision*, not cost.** atty marks
+    the long-lived *shell* PID, sticky until the next clean line. Under
+    `one_level` that blocks exactly the commands typed in that window;
+    under `ancestry`/`propagate` it would block the shell's *entire*
+    descendant subtree for the window, false-blocking legitimate deep
+    processes for little gain over the per-execve detection net above.
+    The deeper modes become a *precise* default only once the proxy
+    marks the **command's** PID instead of the shell's (a tracked
+    follow-up). Until then: capability shipped + opt-in; default stays
+    `one_level`. Turn it up (`[enforcement] depth = "propagate_on_fork"`)
+    on high-security/CI hosts where over-blocking is acceptable.
+  - A *fresh* login (new SSH session, separate terminal, systemd
+    service) starts an unclassified tree not covered until its own
+    command trips a verdict.
 - **Tier-1 + atoms are signature-based.** Regex and the IOC atom
   corpus catch *known* shapes. A novel payload that matches nothing
   is Safe at Tier-1 — that's what Tier-2 (the SLM) and the eBPF

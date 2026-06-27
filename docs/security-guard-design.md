@@ -415,7 +415,7 @@ Why NOT bundled:
 - **`notify-send`** integration for desktop alerts.
 - **Telemetry knob** (off by default) for the community to crowdsource bad patterns.
 - **Tier 3 → subsumed by eBPF backstop** (V2). The eBPF LSM hook does what SIGSTOP-on-`;C` was meant to do, more cleanly, before the syscall completes. Keep the V1 SIGSTOP fallback as the "atty-guard is down" degradation mode.
-- **Process-group threat propagation**: when atty marks a PID high-threat, automatically propagate to its `setpgid` group so even daemonised escapes (double-fork to PPID=1) stay flagged via the eBPF map.
+- **Process-group threat propagation** *(kernel half shipped)*: the `propagate_on_fork` enforcement depth copies a Critical mark across every fork (`sched_process_fork`), so daemonised escapes (double-fork to PPID=1) keep the mark in the eBPF map. It's opt-in (`[enforcement] depth`), not the default — see the enforcement-depth analysis in `docs/benchmarking.md` + `operator-workflow.md`. The remaining piece is proxy-side: mark the **command's** PID (not the long-lived shell) so the propagated subtree is scoped to the flagged command, which would let propagate become a precise default.
 - **MFA / hardware-key confirmation** on `Critical`-tier blocks — couple atty's overlay confirm with a yubikey touch for the highest-stakes cases.
 
 ## Anti-patterns (things to NOT build)

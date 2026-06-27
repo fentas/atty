@@ -236,6 +236,18 @@ removing *performance* as a reason to avoid `ancestry`/`propagate`: they
 are near-free coverage upgrades an operator can opt into. The operator
 picks; atty ships `one_level`.
 
+There's a second, non-cost reason a shallow default is sound: **detection
+is per-execve, not per-tree.** The `sys_enter_execve` tracepoint reports
+*every* execve to the daemon, which classifies each link and may mark it;
+the LSM then gates that link's direct child. So a *linear* deep chain
+(`npm → node → sh`) is caught at whichever link trips a verdict —
+`one_level` only ever needs to reach one hop. The case a tree-walk
+genuinely adds is **detachment** (double-fork / daemonize reparents the
+payload to PID 1 before its execve, severing the parent link) — that's
+what `propagate_on_fork` closes. See the enforcement-depth bullet in
+[`operator-workflow.md`](operator-workflow.md) (Threat model) for the
+full reasoning.
+
 ## Phasing
 
 1. ✅ **Phase 1 — harness.** `bench/` + `zig build bench` (Tier A),
