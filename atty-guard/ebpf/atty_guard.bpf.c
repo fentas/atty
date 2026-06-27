@@ -321,6 +321,10 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
             struct deny_key key = {};
             bpf_core_read_str(key.path, sizeof(key.path), fname);
             if (bpf_map_lookup_elem(&deny_bins, &key)) {
+                // BLOCK breadcrumb (same as the critical path): the consumer
+                // drops BLOCK today — the user sees the -EPERM directly —
+                // but it's emitted for the future prevented-event telemetry
+                // (the metrics/dashboard follow-up), then we refuse.
                 struct execve_event *e =
                     bpf_ringbuf_reserve(&events, sizeof(*e), 0);
                 if (e) {

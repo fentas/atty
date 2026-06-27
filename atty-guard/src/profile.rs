@@ -143,14 +143,9 @@ impl RoutingPolicy {
                 Safe => Allow,
                 _ => ClassifyAsyncThenKill,
             },
-            // strict = session's reactive fallback PLUS the kernel deny-map
-            // (A). decide() runs on classify EVENTS — execs the kernel
-            // deny-map already let through (a deny-map hit is -EPERM'd at
-            // check_execve and never produces an event), so a flagged event
-            // here is a pattern shape the in-kernel layer can't match: fall
-            // back to the reactive kill. The sync prevention is the deny-map
-            // itself, populated out-of-band when profile=strict. strict ⊋
-            // session.
+            // The kernel deny-map (A) is strict's sync block, out-of-band;
+            // a classify event here already passed it, so the only useful
+            // userspace action is session's reactive kill. strict ⊋ session.
             Strict => match ctx.tier1 {
                 Safe => Allow,
                 _ => ClassifyAsyncThenKill,
