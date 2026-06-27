@@ -78,6 +78,22 @@ never oversold.
 | **`lockdown`** | WATCH-scoped `SIGSTOP` post-exec → full Tier-1+2 → `CONT`/`KILL`, **fail-closed** | **sync prevention, full classification, TOCTOU-safe** | **freezes/kills legit processes; fail-closed by design** |
 | **`smart`** | per-exec routing (below) | the lightest sufficient guarantee per context | adaptive; degrades under load |
 
+### Config
+
+```toml
+# /etc/atty-guard/config.toml
+[profile]
+mode = "smart"               # prompt | audit | session | strict | lockdown | smart
+smart_allow_lockdown = false # let `smart` escalate to lockdown-grade freeze
+```
+
+Defaults: `mode = "prompt"`, `smart_allow_lockdown = false`. Every
+non-`prompt` profile **fast-paths the certain cases** — clearly-safe
+execs are allowed and Tier-1 known-bad is blocked in-kernel; only the
+*ambiguous* execs pay the profile's heavier mechanism (`lockdown` freezes
+*only* those, never every exec). The config knob `smart_allow_lockdown`
+maps to the policy's `smart_can_freeze` ceiling.
+
 ### Scope: the WATCH mark (reuses `propagate_on_fork`)
 
 All non-`prompt` profiles bound their cost to the **atty-session
@@ -124,7 +140,7 @@ exec-based prevention, not omniscience.
 classification verdict × context × load budget:
 
 ```
-route(ctx) -> Mechanism:
+RoutingPolicy::decide(ctx) -> Mechanism:
   if not ctx.in_watch_scope:        Allow          # out of session scope
   match ctx.tier1:
     KnownBad   ->                   BlockInKernel   # sync, free, TOCTOU-safe
@@ -145,16 +161,16 @@ is a routing input). `smart` never silently *upgrades* past the operator's
 ceiling — a `smart` daemon configured without `lockdown` consent won't
 freeze; it tops out at `ClassifyAsyncThenKill`.
 
-The routing is a pure function (`atty-guard/src/profile.rs::route`),
+The routing is a pure function (`atty-guard/src/profile.rs::RoutingPolicy::decide`),
 branch-only, allocation-free, called per in-scope exec — unit-tested over
 the use-case matrix below.
 
 ## Phasing
 
 1. ✅ **Phase 1 — decision core + config + docs (this).** `SecurityProfile`
-   / `Mechanism` / `ExecContext` + `route()` + config plumbing +
+   / `Mechanism` / `ExecContext` + `RoutingPolicy::decide` + config plumbing +
    exhaustive routing unit tests (the use-cases). No kernel effectors yet
-   — `route()` returns the mechanism; dispatch is phased.
+   — `decide` returns the mechanism; dispatch is phased.
 2. **Phase 2 — WATCH scope + `audit`/`session` effectors.** Carry WATCH on
    the fork hook; emit a scoped, `bprm`-read classify event from
    `check_execve` for WATCH'd execs; daemon classifies → log (`audit`) /
@@ -166,7 +182,7 @@ the use-case matrix below.
 4. **Phase 4 — `lockdown`.** `bpf_send_signal(SIGSTOP)` post-exec for
    WATCH'd ambiguous execs + the fail-closed watchdog + reconciliation.
    Sandbox (incl. daemon-death-leaves-frozen) + bench (freeze latency).
-5. **Phase 5 — `smart` dispatch + comparison.** Wire `route()` to the
+5. **Phase 5 — `smart` dispatch + comparison.** Wire `decide` to the
    effectors; a sandbox matrix scenario + bench comparing all profiles on
    the same workload (the use-case comparison).
 
@@ -178,7 +194,7 @@ the use-case matrix below.
   minimal supervisor that survives daemon restarts?
 - `smart` load signal source: classify-queue depth, run-queue, or a
   configured budget? (Decide by Phase-5 measurement.)
-- Whether `smart` should learn (ML) the route or stay a heuristic policy
+- Whether `smart` should learn (ML) the routing or stay a heuristic policy
   (start heuristic — predictable + testable).
 
 ## See also

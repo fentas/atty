@@ -44,21 +44,6 @@ pub enum SecurityProfile {
 }
 
 impl SecurityProfile {
-    /// Map a config/CLI string to a profile, or `None` for an
-    /// unrecognized value (caller fails closed). Keep in sync with the
-    /// `#[serde(rename_all = "lowercase")]` variants above.
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "prompt" => Self::Prompt,
-            "audit" => Self::Audit,
-            "session" => Self::Session,
-            "strict" => Self::Strict,
-            "lockdown" => Self::Lockdown,
-            "smart" => Self::Smart,
-            _ => return None,
-        })
-    }
-
     /// Whether the proxy should mark its shell `WATCH` so the session
     /// subtree is scoped in. Only `prompt` opts out (it does nothing
     /// beyond the prompt path).
@@ -229,23 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_roundtrips_all_and_rejects_garbage() {
-        for (s, p) in [
-            ("prompt", SecurityProfile::Prompt),
-            ("audit", SecurityProfile::Audit),
-            ("session", SecurityProfile::Session),
-            ("strict", SecurityProfile::Strict),
-            ("lockdown", SecurityProfile::Lockdown),
-            ("smart", SecurityProfile::Smart),
-        ] {
-            assert_eq!(SecurityProfile::parse(s), Some(p));
-        }
-        assert_eq!(SecurityProfile::parse("paranoid"), None);
-        assert_eq!(SecurityProfile::default(), SecurityProfile::Prompt);
-    }
-
-    #[test]
     fn only_prompt_skips_watch_scope() {
+        assert_eq!(SecurityProfile::default(), SecurityProfile::Prompt);
         assert!(!SecurityProfile::Prompt.marks_watch_scope());
         for p in [
             SecurityProfile::Audit,
