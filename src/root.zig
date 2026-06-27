@@ -45,6 +45,7 @@ pub const modules = struct {
     pub const guardrail = @import("modules/guardrail.zig");
     pub const history = @import("modules/history.zig");
     pub const llm = @import("modules/llm.zig");
+    pub const metrics_exporter = @import("modules/metrics_exporter.zig");
     pub const mouse_links = @import("modules/mouse_links.zig");
     pub const mouse_urls = @import("modules/mouse_urls.zig");
     pub const security_guard = @import("modules/security_guard.zig");
