@@ -1176,12 +1176,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             swallow_after_binding = true;
                         },
                         .security_guard_cycle_profile => {
-                            // security_guard cycles the live daemon profile
-                            // + renders the result/hint to scrollback.
-                            // Swallow regardless of consumption so a bare
-                            // `p` never echoes when the module is absent.
-                            _ = D.dispatchAction(&runtimes, &ctx, act);
-                            swallow_after_binding = true;
+                            // Swallow ONLY when security_guard consumes it.
+                            // Unlike show_warnings, Alt+P (M-p) is a real
+                            // readline binding (history-search-backward), so
+                            // when the module is absent let the bytes pass
+                            // through rather than shadowing it.
+                            if (D.dispatchAction(&runtimes, &ctx, act)) {
+                                swallow_after_binding = true;
+                            }
                         },
                         .llm_exec_toggle_help => {
                             // Hand to the LLM module first (it has

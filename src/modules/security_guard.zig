@@ -210,8 +210,10 @@ pub fn configure(comptime cfg: Config) type {
             profile_name: [16]u8 = undefined,
             profile_name_len: usize = 0,
             profile_last_poll_ms: i64 = 0,
-            /// Pre-formatted status segment (style + glyph + name).
-            profile_seg: [64]u8 = undefined,
+            /// Consecutive poll failures — backs off the poll interval so a
+            /// down/wedged daemon isn't re-probed every tick (the connect
+            /// can block on a wedged-but-listening daemon).
+            profile_poll_fails: u32 = 0,
             /// Set when the LAST armed banner came from the daemon
             /// instead of an in-proc pattern. The category may not
             /// have a `patterns_mod.Category` equivalent (the
@@ -393,7 +395,17 @@ pub fn configure(comptime cfg: Config) type {
                 return;
             };
             var cur_buf: [16]u8 = undefined;
-            const cur = client.getProfile(&cur_buf);
+            // CURRENT rung: live read, else the last-known cache. NEVER
+            // advance from a failed read — `nextProfile(null)` is `prompt`,
+            // so a transient timeout would silently DOWNGRADE the posture
+            // to the weakest rung. Abort instead.
+            const cur: ?[]const u8 = client.getProfile(&cur_buf) orelse
+                (if (rt.profile_name_len > 0) rt.profile_name[0..rt.profile_name_len] else null);
+            if (cur == null) {
+                writeSink(rt, "\r\natty security_guard: can't read the current " ++
+                    "profile (daemon unreachable) — switch aborted.\r\n");
+                return;
+            }
             const next = nextProfile(cur);
             var out_buf: [192]u8 = undefined;
             var line: [256]u8 = undefined;
@@ -419,15 +431,21 @@ pub fn configure(comptime cfg: Config) type {
             _ = elapsed_ms;
             if (!cfg.show_profile) return;
             const now = lib.nowMs();
-            if (now - rt.profile_last_poll_ms < @as(i64, @intCast(cfg.profile_poll_ms))) return;
+            // Exponential backoff after failures (capped at 16× ≈ 48s) so a
+            // down/wedged daemon isn't probed every interval.
+            const shift: u5 = @intCast(@min(rt.profile_poll_fails, 4));
+            const interval = @as(i64, @intCast(cfg.profile_poll_ms)) * (@as(i64, 1) << shift);
+            if (now - rt.profile_last_poll_ms < interval) return;
             rt.profile_last_poll_ms = now;
             const client = profileClient(rt) orelse return;
             var buf: [16]u8 = undefined;
             if (client.getProfile(&buf)) |p| {
                 setCachedProfile(rt, p);
+                rt.profile_poll_fails = 0;
             } else {
                 // Daemon unreachable → hide the segment rather than show stale.
                 rt.profile_name_len = 0;
+                rt.profile_poll_fails +|= 1;
             }
         }
 

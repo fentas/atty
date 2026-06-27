@@ -239,7 +239,13 @@ pub const Client = struct {
             self.close();
             return null;
         };
-        checkId(&obj, id) catch return null;
+        // Close on id desync so the next call reconnects clean (matches
+        // the classify path); a well-formed non-"profile" reply is a real
+        // answer, not a desync, so it doesn't force a reconnect.
+        checkId(&obj, id) catch {
+            self.close();
+            return null;
+        };
         const type_s = obj.get("type") orelse return null;
         if (!std.mem.eql(u8, type_s, "profile")) return null;
         return copyField(obj.get("profile"), out);
@@ -277,7 +283,10 @@ pub const Client = struct {
             self.close();
             return .unavailable;
         };
-        checkId(&obj, id) catch return .unavailable;
+        checkId(&obj, id) catch {
+            self.close();
+            return .unavailable;
+        };
         const type_s = obj.get("type") orelse return .unavailable;
         if (std.mem.eql(u8, type_s, "profile")) {
             return .{ .ok = copyField(obj.get("profile"), out) orelse return .unavailable };
