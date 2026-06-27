@@ -74,12 +74,14 @@ def main() -> None:
             time.sleep(0.3)  # let the watch_pids write land
 
             # Baseline: under audit the flagged exec is only logged — it
-            # runs to completion (rc 0), NOT killed.
+            # runs to completion (rc 0), NOT killed. Assert the clean rc so
+            # the contrast with the killed (137) session run is exact.
             rc, out = run_in_bash(proc, FLAGGED, settle=10.0)
-            if rc == SIGKILL_RC:
+            if rc != 0:
                 d.dump_log()
-                fail(f"flagged exec was KILLED under audit (rc={rc}) — audit "
-                     f"should only log.\noutput: {out!r}")
+                fail(f"flagged exec did NOT complete cleanly under audit "
+                     f"(rc={rc}, expected 0) — audit should only log, never "
+                     f"block or kill.\noutput: {out!r}")
 
             # The live switch: flip the active profile to session.
             sp = call("set_profile", profile="session")
