@@ -37,6 +37,7 @@ mod fsutil;
 mod npm_parser;
 mod onnx_backend;
 mod osv;
+mod profile;
 mod protocol;
 mod sanitize;
 mod server;
