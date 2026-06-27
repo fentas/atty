@@ -104,9 +104,12 @@ config + recompiling — same contract as the rest of atty.
 ## Theming + i18n [locked]
 
 - **Themes.** A theme = a named palette + glyph set (nerd-font vs ASCII)
-  defined in config, dwm-style. Ship a few (dark/light/high-contrast);
-  honor terminal background where detectable; respect `NO_COLOR`. All color
-  goes through the theme — no hardcoded SGR in panels (reuse
+  defined in config, dwm-style. Ship a few (dark/light/high-contrast).
+  **Auto-detect by default, configurable** [locked]: detect the terminal
+  background / `COLORFGBG` / `NO_COLOR` and pick a fitting theme
+  automatically, with one sane default when detection is inconclusive; the
+  user can pin a fixed theme in config to override. All color goes through
+  the theme — no hardcoded SGR in panels (reuse
   `atty.style`/`atty.style.presets`).
 - **i18n.** All user-facing strings come from a string table keyed by a
   locale (default `en`); `$LANG`/config selects it. Strings are
@@ -117,15 +120,20 @@ config + recompiling — same contract as the rest of atty.
 ## Alerting / notify channels [locked]
 
 The daemon (where fleet events converge) can push **alerts** on notable
-events (a guard block/refusal, a fleet threshold). Channels, configurable:
+events (a guard block/refusal, a fleet threshold). Channels are an
+**extensible, Suckless-style hook system** — not a fixed enum: a channel is
+a small handler composed from config the same comptime/tuple way modules +
+panels are, so users add their own (a custom script, a different chat
+service) by editing config + recompiling, not via a runtime plugin API.
+Shipped presets:
 - **System notification** — desktop notification (`notify-send` / the
   portal) so a block surfaces even when `attop` isn't focused.
-- **Webhooks** — POST a JSON payload to a configured URL (Slack/Discord/
-  custom), opt-in, rate-limited, redaction-aware (counts + shapes, never
+- **Webhook** — POST a JSON payload to a configured URL (Slack/Discord/
+  generic), opt-in, rate-limited, redaction-aware (counts + shapes, never
   raw command content — same privacy stance as metrics).
 Alert rules + channels live in atty-guard config; `attop` has an Alerts
-panel to configure + test them. (Phase P6-area; the hook points land with
-the metrics API.)
+panel to configure + test them. (Phase P6; the hook points land with the
+metrics API.)
 
 ## Screens (information architecture)
 
@@ -279,16 +287,24 @@ panel inherits them); alerting is P6 (hooks land with P1's API).
   doctor.
 - Language → **Zig**; evaluate/vendor `zigzag`.
 - Keys → **vim + arrows**. Responsive → **yes**. Extensible → **Suckless,
-  comptime-composed**. Themes + i18n → **yes**. Alerts → **system
-  notification + webhooks**. Testing → **e2e screenshot goldens**.
+  comptime-composed**. Themes + i18n → **yes**. Testing → **e2e screenshot
+  goldens**.
+- Retention → **configurable: ephemeral + persistent, one default**
+  [locked]. Default = **ephemeral** (daemon memory); **persistent** (a
+  small on-disk ring for history graphs) is opt-in via config. Lives in the
+  daemon/TUI, never the proxy.
+- Alert channels → **extensible Suckless-style hooks** [locked] (presets:
+  system notification + webhook; users add their own by config+recompile).
+- Theme auto-detect → **auto + configurable, one default** [locked]
+  (detect terminal bg/`COLORFGBG`/`NO_COLOR`; pin a fixed theme to
+  override).
 
 ## Open questions
 
-- Metrics retention: ephemeral (daemon memory) vs a small on-disk ring for
-  history graphs? (Start ephemeral; history later, in daemon/TUI not proxy.)
-- Webhook payload schema + which presets (Slack/Discord/generic)? (Decide
-  at P6.)
-- Theme auto-detection depth (terminal bg query vs config-only)?
+- Persistent-retention store format (on-disk ring vs sqlite/redb) + default
+  window — decide when persistence is built (post-P4).
+- Webhook payload schema specifics per preset (Slack vs Discord vs generic)
+  — decide at P6.
 
 ## See also
 
