@@ -112,9 +112,36 @@ pub(crate) fn encode_deny_key(path: &str) -> Result<[u8; DENY_PATH_LEN], LoadErr
     Ok(key)
 }
 
+/// Byte length of `struct bname_key.name` — the basename deny-map key (A+).
+pub(crate) const DENY_NAME_LEN: usize = 64;
+
+/// Encode a `strict` deny-BASENAME into the 64-byte null-padded key that
+/// matches `struct bname_key` (the kernel builds it from the basename of
+/// bprm->filename via bpf_loop). Rejects empty / over-length / NUL / and a
+/// '/': a basename has no slash (the kernel keys the segment AFTER the last
+/// '/'), so a slashed entry could never match — reject rather than load a
+/// dead rule.
+pub(crate) fn encode_basename_key(name: &str) -> Result<[u8; DENY_NAME_LEN], LoadError> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() >= DENY_NAME_LEN {
+        return Err(LoadError::LoadFailed(format!(
+            "deny basename {name:?} must be 1..={} bytes",
+            DENY_NAME_LEN - 1
+        )));
+    }
+    if bytes.contains(&0) || bytes.contains(&b'/') {
+        return Err(LoadError::LoadFailed(format!(
+            "deny basename {name:?} must not contain NUL or '/'"
+        )));
+    }
+    let mut key = [0u8; DENY_NAME_LEN];
+    key[..bytes.len()].copy_from_slice(bytes);
+    Ok(key)
+}
+
 #[cfg(test)]
 mod deny_key_tests {
-    use super::{encode_deny_key, DENY_PATH_LEN};
+    use super::{encode_basename_key, encode_deny_key, DENY_NAME_LEN, DENY_PATH_LEN};
 
     #[test]
     fn rejects_empty_overlong_and_nul() {
@@ -130,6 +157,17 @@ mod deny_key_tests {
         // Everything past the path is zero — byte-matches the kernel's
         // zeroed key + bpf_core_read_str (path + NUL, rest 0).
         assert!(key["/usr/bin/nc".len()..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn basename_key_rejects_slash_nul_empty_overlong() {
+        assert!(encode_basename_key("").is_err());
+        assert!(encode_basename_key(&"x".repeat(DENY_NAME_LEN)).is_err());
+        assert!(encode_basename_key("n\0c").is_err());
+        assert!(encode_basename_key("usr/bin/nc").is_err()); // has '/'
+        let key = encode_basename_key("nc").unwrap();
+        assert_eq!(&key[..2], b"nc");
+        assert!(key[2..].iter().all(|&b| b == 0));
     }
 }
 
@@ -176,6 +214,12 @@ impl EbpfState {
         Err(LoadError::FeatureNotBuilt)
     }
     pub fn set_deny_bin(&self, _path: &str) -> Result<(), LoadError> {
+        Err(LoadError::FeatureNotBuilt)
+    }
+    pub fn set_deny_basename(&self, _name: &str) -> Result<(), LoadError> {
+        Err(LoadError::FeatureNotBuilt)
+    }
+    pub fn set_basename_gate(&self, _active: bool) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
     pub fn set_enforce_cfg(&self, _mode: u8, _max_depth: u8) -> Result<(), LoadError> {
@@ -521,6 +565,22 @@ mod with_libbpf {
         pub fn set_deny_bin(&self, path: &str) -> Result<(), LoadError> {
             let key = super::encode_deny_key(path)?;
             self.update("deny_bins", &key, &[1u8])
+        }
+
+        /// Add a binary BASENAME to the kernel deny-map (`strict`, A+): a
+        /// watched exec whose basename matches is -EPERM'd synchronously,
+        /// catching the target at any path (the kernel extracts the
+        /// basename of bprm->filename via bpf_loop).
+        pub fn set_deny_basename(&self, name: &str) -> Result<(), LoadError> {
+            let key = super::encode_basename_key(name)?;
+            self.update("deny_basenames", &key, &[1u8])
+        }
+
+        /// Flip the kernel `basename_gate` so the LSM hook only runs the
+        /// (expensive) per-exec basename scan when deny_basenames is
+        /// non-empty — audit/session leave it off.
+        pub fn set_basename_gate(&self, active: bool) -> Result<(), LoadError> {
+            self.update("basename_gate", &0u32.to_ne_bytes(), &[active as u8])
         }
 
         /// Clear the PID from BOTH maps in a single sweep. Map

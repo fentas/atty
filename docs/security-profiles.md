@@ -231,13 +231,35 @@ reactive fallback, never a replacement for it. `strict` ⊋ `session`.
   `bprm->filename` (not realpath-canonicalized), so a symlink to a denied
   target or a `./relative` invocation evades the A layer — basename
   matching in A+ closes that. Use absolute paths in `deny_binaries`.
-- **A+ — `bpf_loop` matching (the evolution).** Use `bpf_loop` (verifies
-  the callback once — no per-iteration state explosion, unlike an unrolled
-  scan) to (1) extract the **basename** so a deny rule catches the binary
-  at any path, and (2) read a bounded prefix (~256 B) of **argv** from
-  `bprm` + bounded-substring match a *small curated* deny-token set (e.g.
-  `curl…|sh` shapes) → sync `-EPERM`, closing `session`'s reactive race
-  for those shapes. Curated (not the full corpus), lands on top of A.
+- **A+ — `bpf_loop` matching.** Uses `bpf_loop` (verifies the callback once
+  — no per-iteration state explosion, unlike an unrolled scan). **Shipped:
+  basename matching** (`deny_basenames`) so a deny rule catches the binary
+  in **any directory** under the denied name (the copy-to-/tmp, same-name
+  symlink, and `./relative` evasions A misses) — the kernel extracts the
+  basename of `bprm->filename` into a per-CPU scratch and looks it up. It
+  keys off the *invoked* name, so a **rename** to a different basename
+  still evades (that needs argv/content matching, not a name lookup). Getting it past the verifier needed the
+  per-CPU scratch (a cross-frame variable-offset stack write is rejected)
+  plus `barrier_var` + power-of-two masking on every variable index (the
+  compiler elides a mask it can prove redundant from a preceding bound
+  check, leaving the access reg unbounded). **Deferred: argv-substring** —
+  read a bounded ~256 B prefix of **argv** from `bprm` + bounded-substring
+  match a small curated deny-token set (e.g. `curl…|sh`) → sync `-EPERM`,
+  closing `session`'s reactive race for those shapes. A further layer on
+  top of basename.
+
+  *A+ basename limitations (accepted, defense-in-depth):* (1) the basename
+  build uses per-CPU scratch across a non-preempt-disabled window (this LSM
+  hook is non-sleepable → `migrate_disable`, not `preempt_disable`), so on a
+  PREEMPT/RT kernel a concurrent same-CPU watched execve can race the
+  scratch — narrow, and the exact-path layer + the `session` fallback are
+  unaffected; `bpf_preempt_disable` (6.10+) is the eventual close. (2) the
+  path read caps at 256 B, so a basename sitting past offset 255 of a very
+  long path is truncated (false-negative) — same bound as the `deny_bins`
+  key. (3) the per-exec basename scan is **gated** (`basename_gate`, set by
+  the daemon only when `deny_basenames` is non-empty), so `audit`/`session`
+  (and `strict` with no basenames) skip it entirely — they don't pay A+'s
+  cost for an always-empty lookup.
 
 **Honesty contract.** A `strict` deny is **prevention** (sync `-EPERM`,
 the exec never runs — surfaced to the user as the failed command) vs

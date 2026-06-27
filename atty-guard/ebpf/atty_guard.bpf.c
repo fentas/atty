@@ -126,6 +126,60 @@ struct {
     __type(value, __u8);
 } deny_bins SEC(".maps");
 
+// deny_basenames (Phase 3 A+) — binary BASENAMES, so a deny rule catches
+// the target at ANY path (the symlink / `./relative` / copied-to-/tmp
+// evasions the exact-path layer misses). check_execve extracts the
+// basename of bprm->filename via bpf_loop (which verifies the callback
+// ONCE — the unrolled scan that blew the verifier as -E2BIG is why this is
+// A+, not A) and looks it up here. Empty unless profile=strict.
+#define DENY_NAME_LEN 64
+struct bname_key {
+    char name[DENY_NAME_LEN];
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct bname_key);
+    __type(value, __u8);
+} deny_basenames SEC(".maps");
+
+// Set to 1 by userspace iff deny_basenames is non-empty (strict). Gates the
+// expensive per-exec basename scan: under audit/session (and strict with no
+// basenames) it stays 0, so every watched exec skips basename_is_denied's
+// path read + 2× bpf_loop instead of paying ~n+64 iterations for a
+// guaranteed-empty lookup.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u8);
+} basename_gate SEC(".maps");
+
+// Per-CPU scratch for the full path read — the basename can sit at the end
+// of a long path, so we need the whole thing, and a 256 B buffer won't fit
+// the 512 B BPF stack alongside check_execve's frame.
+struct path_scratch {
+    char data[DENY_PATH_LEN];
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct path_scratch);
+} deny_scratch SEC(".maps");
+
+// Per-CPU scratch for the basename key the bpf_loop builds. The callback
+// writes the key HERE (a map value) not the caller's stack: a cross-frame
+// variable-offset write to the parent stack frame is rejected by the
+// verifier ("invalid unbounded variable-offset write to stack"), but a
+// bounded write into a map value is allowed.
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct bname_key);
+} bname_scratch SEC(".maps");
+
 // Enforcement config — single-entry array written by userspace at
 // startup / reload. CO-RE doesn't relocate map *values*, so the layout
 // is hand-fixed (matches the Rust writer's byte order: mode, max_depth,
@@ -247,6 +301,104 @@ static __always_inline __u32 critical_match(struct task_struct *task)
     return 0;
 }
 
+// A+ basename extraction via bpf_loop (the callback is verified ONCE, so
+// the 256-byte scan + variable-offset copy that blow the verifier as
+// -E2BIG when unrolled are fine here). The scratch map is re-looked-up
+// INSIDE each callback rather than passed through the ctx: a map-value
+// pointer threaded through the callback ctx loses its bounds provenance
+// and the verifier rejects the indexed read.
+struct slash_ctx {
+    __u32 n;    // path length (incl. NUL) from bpf_core_read_str
+    __u32 last; // out: index just past the last '/'
+};
+static long find_last_slash(__u32 i, void *ctx)
+{
+    struct slash_ctx *c = ctx;
+    if (i >= c->n || i >= DENY_PATH_LEN)
+        return 1;
+    __u32 zero = 0;
+    struct path_scratch *pb = bpf_map_lookup_elem(&deny_scratch, &zero);
+    if (!pb)
+        return 1;
+    // barrier_var + mask on the EXACT access value — the `i < DENY_PATH_LEN`
+    // check above lets the compiler prove the mask redundant and elide it,
+    // leaving the access reg unbounded (-EACCES). The barrier forces the
+    // mask (power-of-two size) to survive so the verifier sees it bounded.
+    __u32 bi = i;
+    barrier_var(bi);
+    if (pb->data[bi & (DENY_PATH_LEN - 1)] == '/')
+        c->last = i + 1;
+    return 0;
+}
+
+struct bname_copy_ctx {
+    __u32 start; // basename start (index past the last '/')
+};
+static long copy_basename(__u32 j, void *ctx)
+{
+    struct bname_copy_ctx *c = ctx;
+    if (j >= DENY_NAME_LEN - 1)
+        return 1;
+    __u32 idx = c->start + j;
+    if (idx >= DENY_PATH_LEN)
+        return 1;
+    __u32 zero = 0;
+    struct path_scratch *pb = bpf_map_lookup_elem(&deny_scratch, &zero);
+    struct bname_key *bk = bpf_map_lookup_elem(&bname_scratch, &zero);
+    if (!pb || !bk)
+        return 1;
+    // barrier_var defeats the compiler's "idx < DENY_PATH_LEN so the mask
+    // is redundant" elision — without it the access reg stays unbounded
+    // (-EACCES). The forced mask (power-of-two size) pins it for the
+    // verifier; the check above keeps it correct. The key is written into a
+    // map value (not the caller's stack — a cross-frame variable-offset
+    // stack write is rejected).
+    barrier_var(idx);
+    char ch = pb->data[idx & (DENY_PATH_LEN - 1)];
+    if (ch == '\0')
+        return 1;
+    __u32 oj = j;
+    barrier_var(oj);
+    bk->name[oj & (DENY_NAME_LEN - 1)] = ch;
+    return 0;
+}
+
+// True if the exec'd binary's basename is in deny_basenames (A+). Reads
+// the path into per-CPU scratch, finds the basename, builds the key in the
+// per-CPU bname_scratch (zeroed first so stale bytes from a prior call
+// can't corrupt the exact-match key), looks it up.
+//
+// Per-CPU scratch race (accepted): this hook is NON-sleepable, so it runs
+// under migrate_disable() (CPU pinned) but NOT preempt_disable(). On a
+// PREEMPT/RT kernel a higher-priority *watched* execve on the same CPU can
+// preempt this read→2×bpf_loop→lookup window and overwrite the shared
+// scratch, so the final lookup could key off the other task's basename
+// (probabilistic false-negative/positive). Narrow (PREEMPT/RT + concurrent
+// same-CPU watched execs + timing) and accepted as defense-in-depth: the
+// exact-path layer (deny_bins, stack-local key) is race-free, and `strict`
+// is a sync layer ON TOP of session, never the sole control. A stack key
+// would close it but a 256 B path buffer doesn't fit the 512 B BPF stack;
+// bpf_preempt_disable (6.10+) is the eventual fix. Tracked.
+static __always_inline int basename_is_denied(const char *fname)
+{
+    if (!fname)
+        return 0;
+    __u32 zero = 0;
+    struct path_scratch *pb = bpf_map_lookup_elem(&deny_scratch, &zero);
+    struct bname_key *bk = bpf_map_lookup_elem(&bname_scratch, &zero);
+    if (!pb || !bk)
+        return 0;
+    long n = bpf_core_read_str(pb->data, sizeof(pb->data), fname);
+    if (n <= 0)
+        return 0;
+    struct slash_ctx sc = {.n = (__u32)n, .last = 0};
+    bpf_loop((__u32)n, find_last_slash, &sc, 0);
+    __builtin_memset(bk->name, 0, sizeof(bk->name));
+    struct bname_copy_ctx cc = {.start = sc.last};
+    bpf_loop(DENY_NAME_LEN, copy_basename, &cc, 0);
+    return bpf_map_lookup_elem(&deny_basenames, bk) != NULL;
+}
+
 // LSM hook — fires after the kernel resolves the new program but
 // before execve() succeeds. A non-zero return rejects the syscall.
 // `critical_match` decides, per the configured depth, whether this
@@ -312,15 +464,25 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
         const char *fname = NULL;
         bpf_core_read(&fname, sizeof(fname), &bprm->filename);
 
-        // strict (Phase 3 A): SYNC-block a watched exec whose binary PATH
-        // is in deny_bins, BEFORE it runs (-EPERM). One bounded string read
-        // into the key, then an exact-match lookup — no loop (the verifier
-        // rejects an unrolled basename scan as -E2BIG). deny_bins is empty
-        // unless profile=strict, so this is a no-op lookup otherwise.
+        // strict — SYNC-block a watched exec BEFORE it runs (-EPERM) when
+        // its binary PATH is in deny_bins (A: exact path, one bounded read)
+        // OR its BASENAME is in deny_basenames (A+: bpf_loop scan, catches
+        // the binary at any path). Both maps are empty unless
+        // profile=strict, so these are no-op lookups otherwise.
         if (fname) {
             struct deny_key key = {};
             bpf_core_read_str(key.path, sizeof(key.path), fname);
-            if (bpf_map_lookup_elem(&deny_bins, &key)) {
+            int denied = bpf_map_lookup_elem(&deny_bins, &key) != NULL;
+            if (!denied) {
+                // Gate the expensive basename scan: skip it entirely unless
+                // userspace flagged deny_basenames non-empty (so audit/
+                // session don't pay A+'s cost for an always-empty lookup).
+                __u32 gz = 0;
+                __u8 *bg = bpf_map_lookup_elem(&basename_gate, &gz);
+                if (bg && *bg)
+                    denied = basename_is_denied(fname);
+            }
+            if (denied) {
                 // BLOCK breadcrumb (same as the critical path): the consumer
                 // drops BLOCK today — the user sees the -EPERM directly —
                 // but it's emitted for the future prevented-event telemetry
