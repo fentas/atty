@@ -312,14 +312,21 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
 SEC("tracepoint/sched/sched_process_fork")
 int trace_fork(struct trace_event_raw_sched_process_fork *ctx)
 {
-    __u32 parent = (__u32)ctx->parent_pid;
     __u32 child = (__u32)ctx->child_pid;
+    // Key off the parent's TGID, not ctx->parent_pid (a TID): SetWatch and
+    // set_threat both mark the process tgid, so a fork from a NON-MAIN
+    // thread of a watched/marked process (whose ctx->parent_pid is that
+    // thread's tid, != tgid) would otherwise miss the lookup and fail to
+    // propagate. sched_process_fork fires in the forking task's context,
+    // so current's tgid is the parent process id. (Equal to parent_pid for
+    // a single-threaded parent — the common shell-session case.)
+    __u32 parent_tgid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 
     // WATCH scope propagates on EVERY fork, independent of enforce mode —
     // it's session scoping (which subtree to classify), not block
     // enforcement. A watched parent's children stay watched so the whole
     // subtree's execs surface to the daemon.
-    if (bpf_map_lookup_elem(&watch_pids, &parent)) {
+    if (bpf_map_lookup_elem(&watch_pids, &parent_tgid)) {
         __u8 one = 1;
         bpf_map_update_elem(&watch_pids, &child, &one, BPF_ANY);
     }
@@ -332,7 +339,7 @@ int trace_fork(struct trace_event_raw_sched_process_fork *ctx)
     __u32 k = 0;
     struct enforce_config *cfg = bpf_map_lookup_elem(&enforce_cfg, &k);
     if (cfg && cfg->mode == ENFORCE_PROPAGATE) {
-        __u8 *lvl = bpf_map_lookup_elem(&threat_map, &parent);
+        __u8 *lvl = bpf_map_lookup_elem(&threat_map, &parent_tgid);
         if (lvl && *lvl == THREAT_CRITICAL) {
             __u8 v = *lvl;
             bpf_map_update_elem(&threat_map, &child, &v, BPF_ANY);

@@ -564,9 +564,9 @@ mod with_libbpf {
     }
 
     /// Route a watch-scoped execve: classify → `RoutingPolicy::decide` →
-    /// act. Runs in the ringbuf consumer thread (off the syscall path),
-    /// so a kill here is the reactive `session` response (the exec has
-    /// already started).
+    /// act. Runs on the `atty-guard-classify` worker thread (off both the
+    /// syscall path and the ringbuf poll), so a kill here is the reactive
+    /// `session` response — the exec has already started.
     fn dispatch_classify(
         evt: &crate::warn_consumer::ExecveEvent,
         now_ms: u64,
