@@ -143,9 +143,12 @@ impl RoutingPolicy {
                 Safe => Allow,
                 _ => ClassifyAsyncThenKill,
             },
+            // The kernel deny-map (A) is strict's sync block, out-of-band;
+            // a classify event here already passed it, so the only useful
+            // userspace action is session's reactive kill. strict ⊋ session.
             Strict => match ctx.tier1 {
-                KnownBad => BlockInKernel,
-                _ => Allow, // strict prevents only known shapes, synchronously
+                Safe => Allow,
+                _ => ClassifyAsyncThenKill,
             },
             Lockdown => match ctx.tier1 {
                 Safe => Allow,
@@ -283,16 +286,25 @@ mod tests {
     }
 
     #[test]
-    fn strict_blocks_only_known_bad_synchronously() {
+    fn strict_reactive_fallback_mirrors_session() {
+        // strict's sync prevention is the kernel deny-map (out-of-band);
+        // decide() handles the classify events that passed it, falling back
+        // to session's reactive kill for every non-Safe shape. strict ⊋
+        // session: same reactive routing here, plus the in-kernel layer.
         let p = policy(SecurityProfile::Strict, true);
+        assert_eq!(p.decide(&ctx(Tier1Verdict::Safe)), Mechanism::Allow);
         assert_eq!(
             p.decide(&ctx(Tier1Verdict::KnownBad)),
-            Mechanism::BlockInKernel
+            Mechanism::ClassifyAsyncThenKill
         );
-        // Strict has no SLM/async path — ambiguous is allowed (its honest limit).
-        assert_eq!(p.decide(&ctx(Tier1Verdict::Suspicious)), Mechanism::Allow);
-        assert_eq!(p.decide(&ctx(Tier1Verdict::Unknown)), Mechanism::Allow);
-        assert_eq!(p.decide(&ctx(Tier1Verdict::Safe)), Mechanism::Allow);
+        assert_eq!(
+            p.decide(&ctx(Tier1Verdict::Suspicious)),
+            Mechanism::ClassifyAsyncThenKill
+        );
+        assert_eq!(
+            p.decide(&ctx(Tier1Verdict::Unknown)),
+            Mechanism::ClassifyAsyncThenKill
+        );
     }
 
     #[test]

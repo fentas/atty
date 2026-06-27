@@ -50,6 +50,18 @@ pub struct ProfileConfig {
     /// this it tops out at async-kill.
     #[serde(default)]
     pub smart_allow_lockdown: bool,
+    /// Binary PATHS `strict` synchronously blocks (-EPERM) in a watched
+    /// subtree, BEFORE the exec runs (Phase 3 "A"). Populated into the
+    /// kernel deny-map on startup when `mode = "strict"`; ignored by other
+    /// profiles. Full ABSOLUTE paths, e.g. `["/usr/bin/nc"]` — matched
+    /// against the kernel's literal exec path (`bprm->filename`, exact
+    /// string). A bare `nc` still matches (the shell PATH-resolves it to
+    /// the absolute path before execve), but a binary reached via a symlink
+    /// or run as `./relative` has a different exec path and won't (A+ adds
+    /// basename matching). Full Tier-1 command patterns stay on `session`'s
+    /// reactive path (see docs/security-profiles.md).
+    #[serde(default)]
+    pub deny_binaries: Vec<String>,
 }
 
 /// How far the eBPF LSM hook looks for a Critical mark on each execve.
