@@ -189,7 +189,6 @@ mod with_libbpf {
     pub struct EbpfState {
         obj: ObjectHandle,
         _lsm_link: libbpf_rs::Link,
-        _tp_execve_link: libbpf_rs::Link,
         /// AF_ALG socket() tracepoint — copy.fail-class kernel-LPE
         /// signal. Loaded as part of the same .o so the user pays
         /// for one BPF object load even if they only care about
@@ -254,7 +253,7 @@ mod with_libbpf {
                 .map_err(|e| LoadError::LoadFailed(format!("load: {e}")))?;
 
             // Auto-attach uses the SEC() annotations on each program
-            // (lsm/bprm_check_security, tracepoint/syscalls/sys_enter_execve)
+            // (lsm/bprm_check_security, the sched + AF_ALG tracepoints)
             // to pick the right hook + attach helper.
             let lsm_link = obj
                 .progs_mut()
@@ -264,15 +263,6 @@ mod with_libbpf {
                 })?
                 .attach()
                 .map_err(|e| LoadError::LoadFailed(format!("attach lsm: {e}")))?;
-
-            let tp_execve_link = obj
-                .progs_mut()
-                .find(|p| p.name() == "trace_execve")
-                .ok_or_else(|| {
-                    LoadError::LoadFailed("program trace_execve missing from .o".into())
-                })?
-                .attach()
-                .map_err(|e| LoadError::LoadFailed(format!("attach execve tracepoint: {e}")))?;
 
             let tp_socket_link = obj
                 .progs_mut()
@@ -351,7 +341,6 @@ mod with_libbpf {
             Ok(Self {
                 obj: obj_handle,
                 _lsm_link: lsm_link,
-                _tp_execve_link: tp_execve_link,
                 _tp_socket_link: tp_socket_link,
                 _tp_fork_link: tp_fork_link,
                 _tp_exit_link: tp_exit_link,

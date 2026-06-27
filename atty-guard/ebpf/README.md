@@ -4,11 +4,13 @@ Status: **shipped, opt-in.** Build the daemon with `--features ebpf` (or `make i
 
 ## What this does
 
-Three BPF programs cooperating with the userspace daemon over two maps:
+BPF programs cooperating with the userspace daemon over its maps:
 
-- `lsm/bprm_check_security` — sync execve gating against the threat map.
-- `tracepoint:syscalls:sys_enter_execve` — async execve log.
+- `lsm/bprm_check_security` — sync execve gating against the threat map; also emits the Warn/Block events the daemon consumes.
 - `tracepoint:syscalls:sys_enter_socket` — **AF_ALG socket() detector**, kernel-side signal for copy.fail-class LPEs (CVE-2026-31431 + adjacent algif_aead misuse). Interactive shells essentially never open AF_ALG sockets; any hit is worth surfacing.
+- `tracepoint:sched:sched_process_fork` / `sched_process_exit` — propagate-on-fork mark maintenance (copy a Critical mark onto children; GC on exit) for the `propagate` enforcement depth.
+
+(A former every-execve `sys_enter_execve` log program was removed — its per-execve events were unconsumed; see git log.)
 
 ```
                   ┌─────────────────────────────────────┐
@@ -30,12 +32,12 @@ Three BPF programs cooperating with the userspace daemon over two maps:
                   │     ↳ if Critical: return -EPERM     │
                   │     ↳ emit blocked event on ringbuf  │
                   │                                     │
-                  │  tracepoint:syscalls:sys_enter_execve│
-                  │     ↳ emit event on ringbuf (async)  │
+                  │  tracepoint: AF_ALG socket + sched   │
+                  │     ↳ fork: copy mark; exit: GC      │
                   └─────────────────────────────────────┘
 ```
 
-The LSM hook is the **sync** path: kernel blocks the execve() syscall and waits for our verdict. The tracepoint is the **async** path: every execve is logged for Tier-2 classification, may later upgrade the PID's threat level (which the LSM hook honours on the next execve).
+The LSM hook is the **sync** path: the kernel blocks the execve() syscall and waits for our verdict, and the hook emits the Warn/Block events the daemon's ringbuf consumer reads. The sched fork/exit tracepoints maintain the propagate-on-fork mark; the AF_ALG tracepoint is a standalone detector. (A former every-execve `sys_enter_execve` log program was removed — its events were unconsumed.)
 
 ## Why eBPF / why an LSM hook
 
@@ -79,7 +81,7 @@ atty-guard --enable-ebpf
 # atty-guard: listening on /run/atty-guard/atty-guard.sock (tier2=stub)
 # atty-guard: eBPF: loaded atty_guard.bpf.o
 # atty-guard: eBPF: attached lsm/bprm_check_security
-# atty-guard: eBPF: attached tracepoint:syscalls:sys_enter_execve
+# atty-guard: eBPF: attached tracepoint:syscalls:sys_enter_socket (AF_ALG)
 ```
 
 Without `--enable-ebpf`, the daemon behaves exactly as in V2-A — in-memory threat map, no kernel-side enforcement, but the UDS protocol stays the same. atty doesn't need to know whether the eBPF path is active.

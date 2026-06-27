@@ -12,11 +12,12 @@ Two quantities, each measured (nothing assumed):
 2. **Numerators** — with `bpf_stats_enabled`, the kernel records each BPF
    program's cumulative `run_time_ns` / `run_cnt`, so
    `Δrun_time_ns / Δrun_cnt` over a fixed fork+exec workload is the
-   precise mean ns *per invocation*. A fork+execve+exit fires four of
-   our programs once each — trace_fork (fork), check_execve +
-   trace_execve (execve), trace_exit (exit) — so their sum is the eBPF
-   cost added per command, and `sum / denominator` is the honest
-   percentage overhead.
+   precise mean ns *per invocation*. A fork+execve+exit fires three of
+   our programs once each — trace_fork (fork), check_execve (execve),
+   trace_exit (exit) — so their sum is the eBPF cost added per command,
+   and `sum / denominator` is the honest percentage overhead. (The
+   former every-execve `trace_execve` arg-capture tracepoint — once the
+   dominant cost — was removed; its output went unconsumed.)
 
 The benchmarked process is UNMARKED, so these are the *always-paid*
 costs on normal processes (the common case). The mark-copy path
@@ -49,7 +50,7 @@ STATS_SYSCTL = Path("/proc/sys/kernel/bpf_stats_enabled")
 WORKLOAD = 4000  # fork+exec iterations driving the hooks per rep
 REPS = 3
 # Programs that fire once per fork+execve+exit, in firing order.
-PROGS = ("trace_fork", "check_execve", "trace_execve", "trace_exit")
+PROGS = ("trace_fork", "check_execve", "trace_exit")
 
 
 def read_stats_sysctl() -> str | None:

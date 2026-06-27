@@ -7,10 +7,11 @@
 //      atty-guard writes to over UDS) is Critical — returns -EPERM,
 //      blocking the syscall.
 //
-//   2. A tracepoint on `sys_enter_execve` that copies metadata
-//      (pid, ppid, comm[16], argv[0..127]) into a BPF ringbuf for
-//      the userspace daemon to consume. Async signal — does NOT
-//      block. Used for log-only / Warn flows.
+//   2. Tracepoints on `socket(AF_ALG)` (a copy.fail-class LPE signal)
+//      and `sched_process_fork` / `_exit` (propagate-on-fork mark
+//      maintenance). The LSM hook above emits the Warn/Block events the
+//      daemon consumes; there is no every-execve trace program — its
+//      output went unconsumed, so it was removed (see git log).
 //
 // Build (V2-B; this PR ships the skeleton, build wiring follows):
 //
@@ -305,49 +306,6 @@ int trace_exit(struct trace_event_raw_sched_process_template *ctx)
     __u32 tid = (__u32)pt;
     if (tgid == tid) // process (leader) exit, not a bare thread
         bpf_map_delete_elem(&threat_map, &tgid);
-    return 0;
-}
-
-// Tracepoint — async log of every execve. Userspace runs Tier-2
-// classification on the event and may later upgrade the PID's
-// threat level via `set_threat_level`, which the LSM hook above
-// will honour on the NEXT execve.
-SEC("tracepoint/syscalls/sys_enter_execve")
-int trace_execve(struct trace_event_raw_sys_enter *ctx)
-{
-    struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        return 0;
-
-    // sys_enter_execve args:
-    //   args[0] = const char __user *filename
-    //   args[1] = const char __user *const __user *argv
-    //   args[2] = const char __user *const __user *envp
-    // The previous comment was misleading; argv is args[1].
-    e->kind = EVENT_EXECVE;
-    e->verdict = VERDICT_TRACE;
-    e->pid = bpf_get_current_pid_tgid() >> 32;
-
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    struct task_struct *parent = NULL;
-    bpf_core_read(&parent, sizeof(parent), &task->real_parent);
-    e->ppid = 0;
-    if (parent)
-        bpf_core_read(&e->ppid, sizeof(e->ppid), &parent->tgid);
-
-    bpf_get_current_comm(e->comm, sizeof(e->comm));
-
-    // First argv element — best-effort copy. Userspace fans out to
-    // /proc/<pid>/cmdline for the full vector.
-    const char *const *argv = (const char *const *)ctx->args[1];
-    const char *arg0 = NULL;
-    bpf_probe_read_user(&arg0, sizeof(arg0), argv);
-    if (arg0)
-        bpf_probe_read_user_str(e->argv0, sizeof(e->argv0), arg0);
-    else
-        e->argv0[0] = '\0';
-
-    bpf_ringbuf_submit(e, 0);
     return 0;
 }
 

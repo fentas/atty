@@ -75,7 +75,7 @@ under the existing eBPF sandbox, not GitHub CI:
 
 | Benchmark | Status | Measures |
 |---|---|---|
-| `57-ebpf-overhead` | ✅ | per-mode ns **per BPF-program invocation** (`trace_fork` / `check_execve` / `trace_execve` / `trace_exit`) via the kernel's `bpf_stats_enabled` run-time accounting |
+| `57-ebpf-overhead` | ✅ | per-mode ns **per BPF-program invocation** (`trace_fork` / `check_execve` / `trace_exit`) via the kernel's `bpf_stats_enabled` run-time accounting |
 | `map_pressure` | planned | `threat_map` growth + lookup cost under a deep/wide descendant tree |
 | `pty_roundtrip` | planned | end-to-end keystroke→echo latency through the proxy |
 
@@ -91,47 +91,53 @@ userspace before/after delta drowns in container noise. With
 fork+exec workload is the precise mean ns *per program invocation* — the
 actual quantity we care about.
 
-#### Results (Phase 3, x86_64, fork+execve ×4000/mode, median of 3)
+#### Results (x86_64, fork+execve ×4000/mode, median of 3)
 
 ns **per BPF-program invocation** (kernel `run_time_ns/run_cnt`). A
-fork+execve+exit fires four of our programs once each, so `sum/cmd` is
-the eBPF cost added per command:
+fork+execve+exit fires three programs once each, so `sum/cmd` is the eBPF
+cost added per command:
 
-| mode | `trace_fork` | `check_execve` | `trace_execve` | `trace_exit` | sum/cmd |
-|---|---|---|---|---|---|
-| `one_level` | 80 | 328 | 2596 | 327 | **3331 ns** |
-| `ancestry(8)` | 83 | 439 *(+111)* | 2613 | 343 | **3478 ns** |
-| `propagate_on_fork` | 129 *(+49)* | 333 | 2610 | 258 | **3330 ns** |
+| mode | `trace_fork` | `check_execve` | `trace_exit` | sum/cmd |
+|---|---|---|---|---|
+| `one_level` | 77 | 321 | 334 | **732 ns** |
+| `ancestry(8)` | 79 | 449 *(+~120)* | 324 | **852 ns** |
+| `propagate_on_fork` | 130 *(+~50)* | 298 | 272 | **700 ns** |
 
 Measured baseline: one Python `fork+execve(/bin/true)+wait` with eBPF
-off ≈ **1.13 ms/op** on this (loaded) box → sum/cmd is ≈ **0.3 %**.
+off ≈ **1.12 ms/op** on this (loaded) box → sum/cmd is ≈ **0.07 %**.
+
+**Before/after the `trace_execve` removal.** The first Phase-3 run found
+a *fourth* program — `trace_execve`, an every-execve user-memory
+arg-capture tracepoint — costing **~2600 ns/execve, ~78 % of sum/cmd**
+and identical across modes. Its per-execve events were going
+**unconsumed** (the daemon classifies only proxy-delivered commands; the
+kernel-side detection they were meant to feed was never wired), so it was
+removed. That dropped **sum/cmd from ~3331 ns to ~732 ns** — the single
+biggest per-execve eBPF win — with zero behavioral change (the non-proxy
+detection gap it was *supposed* to address never worked anyway; pinned by
+`58-ebpf-detection-gap`).
 
 What the numbers say (lead with the absolute ns — the percentage's
 denominator is a Python fork on one loaded host; a C/shell exec is
-faster, so treat ~0.3 % as order-of-magnitude, the per-program ns as the
+faster, so treat the % as order-of-magnitude, the per-program ns as the
 portable figure):
 
 - **The enforcement-depth choice is not a perf differentiator.** The
-  only depth-dependent program is `check_execve`: 328 ns (one_level) →
-  439 ns (`ancestry(8)`, **+111 ns** for the 8-hop walk) → 333 ns
+  only depth-dependent program is `check_execve`: ~321 ns (one_level) →
+  ~449 ns (`ancestry(8)`, **+~120 ns** for the 8-hop walk) → ~298 ns
   (propagate, an own-PID lookup ≈ a parent lookup). `propagate` adds
-  **+49 ns/fork** in `trace_fork`. Single-digit-to-low-hundreds of
-  nanoseconds — negligible against any real command's process creation.
-  So the **"cost of a full tree-shake" that motivated making this
-  configurable is, empirically, nothing to worry about.**
-- **The dominant eBPF cost is `trace_execve` (~2600 ns/execve), and it's
-  identical across modes** — the existing execve-argument-capture
-  tracepoint that feeds the Tier-1/2 classifier, unrelated to the depth
-  feature. ~78 % of sum/cmd. If per-execve eBPF cost ever matters, *that*
-  is the program to optimize, not the enforcement-depth branch.
-- `propagate`'s +49 ns is the per-fork `threat_map` **gating lookup**
+  **+~50 ns/fork** in `trace_fork`. Low-hundreds of nanoseconds —
+  negligible against any real command's process creation. So the **"cost
+  of a full tree-shake" that motivated making this configurable is,
+  empirically, nothing to worry about.**
+- `propagate`'s +~50 ns is the per-fork `threat_map` **gating lookup**
   paid by every fork in propagate mode — not the mark-*copy*, which
   only runs for descendants of a flagged command (rare, and strictly
   costlier; out of scope for this always-paid measurement).
-- `trace_exit` (~300 ns) runs the GC `map_delete` on every process exit
-  in every mode (the leak-safe, mode-independent reclaim from Phase 2).
-  Aggregate ~0.03 % CPU even at thousands of exits/s — the leak-safety
-  is the right trade.
+- `trace_exit` (~300 ns, now the largest single per-command program)
+  runs the GC `map_delete` on every process exit in every mode (the
+  leak-safe, mode-independent reclaim from Phase 2). Aggregate ~0.03 %
+  CPU even at thousands of exits/s — the leak-safety is the right trade.
 
 Numbers are kernel/host-specific; a committed baseline + CI gate needs a
 pinned runner first (same caveat as Tier A).
@@ -237,14 +243,17 @@ are near-free coverage upgrades an operator can opt into. The operator
 picks; atty ships `one_level`.
 
 There's a second, non-cost reason a shallow default is sound: **detection
-is per-execve, not per-tree.** The `sys_enter_execve` tracepoint reports
-*every* execve to the daemon, which classifies each link and may mark it;
-the LSM then gates that link's direct child. So a *linear* deep chain
-(`npm → node → sh`) is caught at whichever link trips a verdict —
-`one_level` only ever needs to reach one hop. The case a tree-walk
-genuinely adds is **detachment** (double-fork / daemonize reparents the
-payload to PID 1 before its execve, severing the parent link) — that's
-what `propagate_on_fork` closes. See the enforcement-depth bullet in
+is proxy-only.** atty marks the *shell* when the prompt flags a *typed*
+command, and that command is the shell's direct child — so `one_level`
+blocks it at the root and its subtree never spawns. The kernel does
+**not** autonomously classify execves (the every-execve `trace_execve`
+program was unconsumed and was removed). The deeper modes therefore close
+no *current* gap — they're infrastructure for a future command-PID
+policy. The genuine current gap is **detection of non-proxy chains**
+(`python → node → exploit` from a compromised dep, which never touches
+the prompt) — *no* enforcement depth catches it (nothing gets marked);
+it's pinned by `tests/sandbox/scenarios/58-ebpf-detection-gap`. See the
+enforcement-depth bullet in
 [`operator-workflow.md`](operator-workflow.md) (Threat model) for the
 full reasoning.
 
