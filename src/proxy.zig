@@ -1179,10 +1179,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             // Swallow ONLY when security_guard consumes it.
                             // Unlike show_warnings, Alt+P (M-p) is a real
                             // readline binding (history-search-backward), so
-                            // when the module is absent let the bytes pass
-                            // through rather than shadowing it.
+                            // when NOT consumed (module absent OR switch
+                            // disabled) let it fall through — clearing
+                            // matched_binding so the kitty CSI-u form
+                            // (`\x1b[112;3u`) is translated back to legacy
+                            // `\x1bp` by the CSI-u cleanup below, instead of
+                            // leaking as raw mojibake on kitty-kbd terminals.
                             if (D.dispatchAction(&runtimes, &ctx, act)) {
                                 swallow_after_binding = true;
+                            } else {
+                                matched_binding = false;
                             }
                         },
                         .llm_exec_toggle_help => {
