@@ -81,6 +81,58 @@ impl From<LoadError> for std::io::Error {
     }
 }
 
+/// Byte length of `struct deny_key.path` in the BPF object — the deny-map
+/// key is a fixed null-padded buffer of this size.
+pub(crate) const DENY_PATH_LEN: usize = 256;
+
+/// Encode a `strict` deny-binary path into the kernel deny-map key: a
+/// fixed [DENY_PATH_LEN] null-padded buffer that byte-matches what the LSM
+/// hook builds (`bpf_core_read_str(bprm->filename)` into a zeroed key).
+/// Rejects empty, over-length, OR NUL-containing paths rather than
+/// silently producing a key the kernel can never match — an exec path is a
+/// NUL-terminated C string, so a `\0` in the daemon key would diverge from
+/// the kernel's (which stops at the NUL), i.e. a deny that wouldn't deny.
+/// Free function (not a method) so the encoding is unit-testable without a
+/// loaded BPF object.
+pub(crate) fn encode_deny_key(path: &str) -> Result<[u8; DENY_PATH_LEN], LoadError> {
+    let bytes = path.as_bytes();
+    if bytes.is_empty() || bytes.len() >= DENY_PATH_LEN {
+        return Err(LoadError::LoadFailed(format!(
+            "deny binary path {path:?} must be 1..={} bytes",
+            DENY_PATH_LEN - 1
+        )));
+    }
+    if bytes.contains(&0) {
+        return Err(LoadError::LoadFailed(format!(
+            "deny binary path {path:?} contains a NUL byte"
+        )));
+    }
+    let mut key = [0u8; DENY_PATH_LEN];
+    key[..bytes.len()].copy_from_slice(bytes);
+    Ok(key)
+}
+
+#[cfg(test)]
+mod deny_key_tests {
+    use super::{encode_deny_key, DENY_PATH_LEN};
+
+    #[test]
+    fn rejects_empty_overlong_and_nul() {
+        assert!(encode_deny_key("").is_err());
+        assert!(encode_deny_key(&"x".repeat(DENY_PATH_LEN)).is_err());
+        assert!(encode_deny_key("/usr/bin/n\0c").is_err());
+    }
+
+    #[test]
+    fn encodes_null_padded_exact() {
+        let key = encode_deny_key("/usr/bin/nc").unwrap();
+        assert_eq!(&key[.."/usr/bin/nc".len()], b"/usr/bin/nc");
+        // Everything past the path is zero — byte-matches the kernel's
+        // zeroed key + bpf_core_read_str (path + NUL, rest 0).
+        assert!(key["/usr/bin/nc".len()..].iter().all(|&b| b == 0));
+    }
+}
+
 // ===========================================================================
 // Feature-OFF stub.
 //
@@ -467,16 +519,7 @@ mod with_libbpf {
         /// different key. (Basename matching is the A+ layer — it needs an
         /// in-kernel scan the verifier only accepts via bpf_loop.)
         pub fn set_deny_bin(&self, path: &str) -> Result<(), LoadError> {
-            const DENY_PATH_LEN: usize = 256;
-            let bytes = path.as_bytes();
-            if bytes.is_empty() || bytes.len() >= DENY_PATH_LEN {
-                return Err(LoadError::LoadFailed(format!(
-                    "deny binary path {path:?} must be 1..={} bytes",
-                    DENY_PATH_LEN - 1
-                )));
-            }
-            let mut key = [0u8; DENY_PATH_LEN];
-            key[..bytes.len()].copy_from_slice(bytes);
+            let key = super::encode_deny_key(path)?;
             self.update("deny_bins", &key, &[1u8])
         }
 
