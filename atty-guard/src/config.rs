@@ -63,9 +63,11 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub deny_binaries: Vec<String>,
     /// Binary BASENAMES `strict` synchronously blocks (-EPERM) in a watched
-    /// subtree (Phase 3 "A+") — catches the target at ANY path (symlink /
-    /// copy-to-/tmp / `./relative`), unlike `deny_binaries` (exact path).
-    /// e.g. `["nc", "ncat"]`. Must not contain `/`.
+    /// subtree (Phase 3 "A+") — catches the target in any DIRECTORY under
+    /// the denied name (copy-to-/tmp, same-name symlink, `./relative`),
+    /// unlike `deny_binaries` (exact path). Keys off the invoked
+    /// `bprm->filename` basename, so a RENAME to a different name still
+    /// evades. e.g. `["nc", "ncat"]`. Must not contain `/`.
     #[serde(default)]
     pub deny_basenames: Vec<String>,
 }
