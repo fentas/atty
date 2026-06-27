@@ -100,17 +100,21 @@ struct {
 } watch_pids SEC(".maps");
 
 // deny_bins (security profile `strict`, Phase 3 A) — binary PATHS the
-// daemon marks always-deny in a watched subtree. check_execve reads the
-// exec'd binary's resolved path (bprm->filename) and returns -EPERM
-// SYNCHRONOUSLY (before the exec runs) for a WATCH'd task — true
-// prevention, vs `session`'s reactive post-exec kill. Empty unless
-// profile=strict, so the lookup is a no-op otherwise.
+// daemon marks always-deny in a watched subtree. check_execve matches the
+// exec PATH STRING (bprm->filename — the literal path passed to execve,
+// NOT realpath-canonicalized) and returns -EPERM SYNCHRONOUSLY (before the
+// exec runs) for a WATCH'd task — true prevention, vs `session`'s reactive
+// post-exec kill. Empty unless profile=strict, so the lookup is a no-op
+// otherwise.
 //
-// A-first matches the FULL path: a single bpf_core_read_str into the key,
-// no loop. In-kernel basename extraction needs a bounded scan + a
+// A-first matches the FULL path EXACTLY: a single bpf_core_read_str into
+// the key, no loop. In-kernel basename extraction needs a bounded scan + a
 // variable-offset copy that blows the verifier's complexity budget
 // (-E2BIG) when unrolled — that lands in A+ via bpf_loop (alongside the
 // argv read), so basename/substring matching is the documented next layer.
+// Caveat (until A+): exact-string only, so a symlink to a denied target or
+// a `./relative` invocation has a different bprm->filename and evades —
+// honest limit of the binary-path layer.
 #define DENY_PATH_LEN 256
 struct deny_key {
     char path[DENY_PATH_LEN];

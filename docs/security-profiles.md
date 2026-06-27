@@ -227,7 +227,10 @@ reactive fallback, never a replacement for it. `strict` ⊋ `session`.
   path; basename/substring matching moves to A+ (via `bpf_loop`).
   Everything pattern-shaped still falls through to `session`'s reactive
   kill. Result: sync **prevention** for the exact-path set, reactive
-  **detection+kill** for the rest.
+  **detection+kill** for the rest. *Honest limit:* the key is the literal
+  `bprm->filename` (not realpath-canonicalized), so a symlink to a denied
+  target or a `./relative` invocation evades the A layer — basename
+  matching in A+ closes that. Use absolute paths in `deny_binaries`.
 - **A+ — `bpf_loop` matching (the evolution).** Use `bpf_loop` (verifies
   the callback once — no per-iteration state explosion, unlike an unrolled
   scan) to (1) extract the **basename** so a deny rule catches the binary
@@ -236,11 +239,16 @@ reactive fallback, never a replacement for it. `strict` ⊋ `session`.
   `curl…|sh` shapes) → sync `-EPERM`, closing `session`'s reactive race
   for those shapes. Curated (not the full corpus), lands on top of A.
 
-**Honesty contract.** `strict` reports **prevented** (sync, A/A+) vs
-**killed** (reactive, `session` fallback) distinctly — it never claims to
-synchronously block what it actually catches reactively. The layering is
-expected to keep evolving (A → A+ → …) as more shapes become
-kernel-matchable; the guarantee label is always per-rung, never blanket.
+**Honesty contract.** A `strict` deny is **prevention** (sync `-EPERM`,
+the exec never runs — surfaced to the user as the failed command) vs
+`session`'s **kill** (reactive, post-exec); the two are never conflated,
+and the guarantee label is always per-rung as the layering evolves
+(A → A+ → …). *Wiring note:* the in-kernel block IS enforced + the user
+sees the failed exec, but the daemon doesn't yet surface a "prevented"
+**event** to subscribers the way warn/kill events surface (the
+`VERDICT_BLOCK` ringbuf event is currently informational) — rich
+prevented-vs-killed **telemetry** is folded into the metrics/dashboard
+follow-up, not this rung.
 
 Sandbox: `61-ebpf-profile-strict` (A: a watched flagged **binary** is
 `-EPERM`'d **before** it runs — rc 126 — vs `60`'s kill-after) and, with

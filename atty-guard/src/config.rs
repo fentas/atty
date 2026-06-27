@@ -53,10 +53,11 @@ pub struct ProfileConfig {
     /// Binary PATHS `strict` synchronously blocks (-EPERM) in a watched
     /// subtree, BEFORE the exec runs (Phase 3 "A"). Populated into the
     /// kernel deny-map on startup when `mode = "strict"`; ignored by other
-    /// profiles. Full paths, e.g. `["/usr/bin/nc", "/usr/bin/ncat"]`
-    /// (A matches the exact path; basename/substring matching is the A+
-    /// layer). The full Tier-1 command patterns stay on `session`'s
-    /// reactive path (see docs/security-profiles.md).
+    /// profiles. Full ABSOLUTE paths, e.g. `["/usr/bin/nc"]` — matched
+    /// against the kernel's literal exec path (`bprm->filename`, exact
+    /// string), so a bare `nc` or a symlink to the target won't match (A+
+    /// adds basename matching). The full Tier-1 command patterns stay on
+    /// `session`'s reactive path (see docs/security-profiles.md).
     #[serde(default)]
     pub deny_binaries: Vec<String>,
 }
