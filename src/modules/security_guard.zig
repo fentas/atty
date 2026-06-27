@@ -410,11 +410,15 @@ pub fn configure(comptime cfg: Config) type {
             switch (client.setProfile(next, &out_buf)) {
                 .ok => |p| {
                     setCachedProfile(rt, p);
-                    const s = std.fmt.bufPrint(&line, "\r\natty security_guard: profile \u{2192} {s}\r\n", .{p}) catch return;
+                    // Fall back to a fixed notice if formatting overflows so
+                    // a switch is never silently unacknowledged.
+                    const s = std.fmt.bufPrint(&line, "\r\natty security_guard: profile \u{2192} {s}\r\n", .{p}) catch
+                        "\r\natty security_guard: profile switched.\r\n";
                     writeSink(rt, s);
                 },
                 .refused => |msg| {
-                    const s = std.fmt.bufPrint(&line, "\r\natty security_guard: {s}\r\n", .{msg}) catch return;
+                    const s = std.fmt.bufPrint(&line, "\r\natty security_guard: {s}\r\n", .{msg}) catch
+                        "\r\natty security_guard: profile switch refused.\r\n";
                     writeSink(rt, s);
                 },
                 .unavailable => writeSink(rt, "\r\natty security_guard: daemon unreachable — profile unchanged.\r\n"),
@@ -1066,14 +1070,14 @@ pub fn configure(comptime cfg: Config) type {
         /// null at idle so the segment disappears (rather than
         /// staying as dead chrome).
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
-            // Two independent signals:
-            // 1. `active_threat` — sticky in-flight warning from a
+            // Segment layout: `🛡 <profile> | <N> warns | <threat>`. The
+            // live profile (polled on onTick) is the baseline posture and
+            // leads; the event signals follow —
+            // 1. `warn_sub.count()` — kernel-side warn events the daemon's
+            //    ringbuf consumer pushed our way (post #347 PR 2b).
+            // 2. `active_threat` — sticky in-flight warning from a
             //    recently-typed flagged command.
-            // 2. `warn_sub.count()` — kernel-side warn events the
-            //    daemon's ringbuf consumer pushed our way (post
-            //    #347 PR 2b). Surface both; the warn count comes
-            //    first because it's the more time-sensitive
-            //    signal (recent kernel observation).
+            // Any subset present renders; all absent → null (no dead chrome).
             _ = ctx;
             const warn_count: usize = if (rt.warn_sub) |sub| sub.count() else 0;
             const lvl = rt.active_threat;

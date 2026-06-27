@@ -219,8 +219,9 @@ pub const Client = struct {
 
     /// Read the live security profile (one of prompt/audit/session/strict/
     /// lockdown/smart) into `out`. null on any failure (daemon down /
-    /// parse error / unexpected shape). Read-only; never blocks past the
-    /// recv timeout.
+    /// parse error / unexpected shape). The read is bounded by the recv
+    /// timeout, but `ensureConnected`'s `connect()` is blocking (same model
+    /// as the classify path) — callers poll this off the hot path.
     pub fn getProfile(self: *Client, out: []u8) ?[]const u8 {
         self.ensureConnected() catch return null;
         var w: std.Io.Writer = .fixed(&self.write_buf);
