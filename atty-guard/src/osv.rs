@@ -290,7 +290,12 @@ mod with_ureq {
                 c.cache_set(&key, OsvVerdict::None);
             }
             let len = c.cache.lock().unwrap().len();
-            assert!(len <= MAX_CACHE_ENTRIES, "cache size {} > cap {}", len, MAX_CACHE_ENTRIES);
+            assert!(
+                len <= MAX_CACHE_ENTRIES,
+                "cache size {} > cap {}",
+                len,
+                MAX_CACHE_ENTRIES
+            );
         }
 
         #[test]
@@ -325,7 +330,11 @@ mod with_ureq {
             std::thread::sleep(Duration::from_millis(20));
             c.cache_set("fresh", OsvVerdict::None);
             let len = c.cache.lock().unwrap().len();
-            assert!(len < MAX_CACHE_ENTRIES, "expected prune; got {} entries", len);
+            assert!(
+                len < MAX_CACHE_ENTRIES,
+                "expected prune; got {} entries",
+                len
+            );
         }
     }
 }
@@ -511,4 +520,3 @@ mod tests {
         assert!(s.contains("timed out"));
     }
 }
-

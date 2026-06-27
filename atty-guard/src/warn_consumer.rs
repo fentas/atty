@@ -195,6 +195,7 @@ const VERDICT_TRACE: u8 = 0;
 const VERDICT_WARN: u8 = 1;
 #[allow(dead_code)]
 const VERDICT_BLOCK: u8 = 2;
+const VERDICT_CLASSIFY: u8 = 3;
 
 /// Byte-for-byte mirror of the C struct (156 bytes). Hand-padded
 /// so `#[repr(C)]` matches the kernel-side layout regardless of
@@ -249,6 +250,13 @@ impl ExecveEvent {
         self.kind == EVENT_EXECVE && self.verdict == VERDICT_WARN
     }
 
+    /// A watch-scoped execve the daemon should classify out-of-band
+    /// (security profiles). Distinct from `is_warn` (block-mode pilot).
+    #[allow(dead_code)]
+    pub fn is_classify(&self) -> bool {
+        self.kind == EVENT_EXECVE && self.verdict == VERDICT_CLASSIFY
+    }
+
     /// Convert to a wire-format ResponseBody for subscribers.
     /// `now_ms` is the daemon-side timestamp the consumer thread
     /// passes in (monotonic when available, system time as the
@@ -264,7 +272,7 @@ impl ExecveEvent {
     }
 }
 
-fn cstr_trim(buf: &[u8]) -> String {
+pub(crate) fn cstr_trim(buf: &[u8]) -> String {
     let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..len]).into_owned()
 }

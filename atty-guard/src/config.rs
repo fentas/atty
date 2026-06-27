@@ -393,7 +393,8 @@ max_depth = 12
     fn load_rejects_unknown_key_in_enforcement_table() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         use std::io::Write as _;
-        tmp.write_all(b"[enforcement]\ndeapth = \"ancestry\"\n").unwrap();
+        tmp.write_all(b"[enforcement]\ndeapth = \"ancestry\"\n")
+            .unwrap();
         let err = load(tmp.path()).expect_err("unknown enforcement field must fail");
         assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
     }

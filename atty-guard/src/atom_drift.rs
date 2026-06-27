@@ -191,7 +191,11 @@ pub fn diff_step(
         (Some(p), Some(u)) if p == u => None,
         (Some(_), Some(_)) => {
             // Pinned + drifted: preserve, else stamp.
-            Some(prev_behind_since.map(str::to_owned).unwrap_or_else(|| now.to_owned()))
+            Some(
+                prev_behind_since
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| now.to_owned()),
+            )
         }
         (Some(_), None) => {
             // Probe failure while pinned: preserve UNCHANGED. Do
@@ -350,9 +354,7 @@ pub fn write_snapshot(path: &Path, snapshot: &DriftSnapshot) -> std::io::Result<
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(e) =
-                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640))
-            {
+            if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640)) {
                 eprintln!(
                     "atty-guard: drift snapshot chmod 0640 failed on {} — {e}",
                     tmp.display()
@@ -447,7 +449,12 @@ mod tests {
     fn diff_step_in_sync_clears_anchor() {
         assert_eq!(diff_step(None, Some("abc"), Some("abc"), "now"), None);
         assert_eq!(
-            diff_step(Some("2026-01-01T00:00:00Z"), Some("abc"), Some("abc"), "now"),
+            diff_step(
+                Some("2026-01-01T00:00:00Z"),
+                Some("abc"),
+                Some("abc"),
+                "now"
+            ),
             None,
             "operator caught up → clear anchor"
         );

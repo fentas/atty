@@ -797,10 +797,7 @@ fn main() -> std::io::Result<()> {
             classifier::Classifier::new_with_backend(backend, &file_cfg.tier2.onnx)
         }
         classifier::BackendSource::Cli | classifier::BackendSource::Config => {
-            match classifier::Classifier::try_new_with_backend(
-                backend,
-                &file_cfg.tier2.onnx,
-            ) {
+            match classifier::Classifier::try_new_with_backend(backend, &file_cfg.tier2.onnx) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!(
@@ -818,6 +815,9 @@ fn main() -> std::io::Result<()> {
         }
     }
     .with_block_threshold(file_cfg.accumulator.block_threshold);
+    // Shared between the server (RPC classify path) and the eBPF ringbuf
+    // consumer (security-profile classify dispatch).
+    let classifier = std::sync::Arc::new(classifier);
     if cli.verbosity >= 1 {
         // Log BOTH requested + effective so the operator can spot a
         // silent default-path fallback (the Cli/Config paths above
@@ -931,14 +931,25 @@ fn main() -> std::io::Result<()> {
     // broadcast() per VERDICT_WARN event).
     let warn_broadcast = std::sync::Arc::new(warn_consumer::Broadcast::new());
 
-    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode != EbpfMode::Disabled {
+    let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode
+        != EbpfMode::Disabled
+    {
         let loaded_mode = match effective_mode {
             EbpfMode::Observe => ebpf::LoadedMode::Observe,
             EbpfMode::Warn => ebpf::LoadedMode::Warn,
             EbpfMode::Block => ebpf::LoadedMode::Block,
             EbpfMode::Disabled => unreachable!("guarded by the if above"),
         };
-        match ebpf::EbpfState::attach(loaded_mode, warn_broadcast.clone()) {
+        let policy = profile::RoutingPolicy {
+            profile: file_cfg.profile.mode,
+            smart_can_freeze: file_cfg.profile.smart_allow_lockdown,
+        };
+        match ebpf::EbpfState::attach(
+            loaded_mode,
+            warn_broadcast.clone(),
+            classifier.clone(),
+            policy,
+        ) {
             Ok(state) => {
                 // Push the enforcement depth into the kernel `enforce_cfg`
                 // map. CLI wins over the [enforcement] table; both fall

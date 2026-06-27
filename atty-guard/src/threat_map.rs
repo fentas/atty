@@ -112,6 +112,23 @@ impl ThreatMap {
         }
     }
 
+    /// Mark `pid` as watched (security profiles) in the kernel
+    /// `watch_pids` map so its execve subtree surfaces classify events.
+    /// Best-effort write-through; no-op (returns false) without an
+    /// attached eBPF state. Clearing is kernel-side (trace_exit GC).
+    pub fn set_watch(&self, pid: u32) -> bool {
+        match &self.ebpf {
+            Some(state) => match state.set_watch(pid) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("atty-guard: watch_pids update failed (pid {pid}): {e}");
+                    false
+                }
+            },
+            None => false,
+        }
+    }
+
     /// Look up the threat level for `pid`. When a non-Low entry
     /// exists, verify the PID still has the same starttime — if
     /// the PID was recycled (NotFound or starttime mismatch),

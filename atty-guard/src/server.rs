@@ -36,7 +36,7 @@ pub fn serve(
     // construction into main.rs so it can choose between fail-loud
     // (operator explicitly requested ONNX) and fall-back-to-stub
     // (default path) per BackendSource. serve() stays agnostic.
-    classifier: Classifier,
+    classifier: Arc<Classifier>,
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
     osv: Option<Arc<crate::osv::OsvClient>>,
     trust_store: Arc<crate::trust_store::TrustStore>,
@@ -189,7 +189,7 @@ impl Drop for ConnGuard {
 }
 
 struct State {
-    classifier: Classifier,
+    classifier: Arc<Classifier>,
     threat: ThreatMap,
     verbosity: u8,
     /// Optional V2-F live OSV.dev client. When present, the
@@ -523,6 +523,7 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
         Request::Health => handle_health(),
         Request::Classify { command, context } => handle_classify(state, peer, command, context),
         Request::SetThreatLevel { pid, level } => handle_set_threat_level(state, peer, pid, level),
+        Request::SetWatch { pid } => handle_set_watch(state, peer, pid),
         Request::GetThreatLevel { pid } => handle_get_threat_level(state, peer, pid),
 
         // --- PR #141 mediated trust-state ops ---
@@ -1000,6 +1001,66 @@ fn truncate_to_bytes(s: &mut String, max: usize) {
         end -= 1;
     }
     s.truncate(end);
+}
+
+fn handle_set_watch(state: &State, peer: PeerCred, pid: u32) -> ResponseBody {
+    // The socket is group-accessible, so gate cross-user watch (a same-
+    // group client could otherwise classify — and under `session` get
+    // killed — another user's subtree). Root may watch any PID; a non-root
+    // caller only PIDs owned by its own UID, with the same (pid, starttime)
+    // lock-step set_threat uses to defeat PID-reuse: read starttime before
+    // AND after the ownership check, reject a recycled/vanished PID. This
+    // narrows but doesn't fully close the window — watch_pids carries no
+    // starttime, so a recycle in the gate→kernel-write gap isn't
+    // re-validated at kill time (the kill path only re-reads /proc for the
+    // cmdline). A pidfd-based kill would close it; tracked as a follow-up.
+    if !peer.is_root {
+        let start1 = match crate::threat_map::pid_starttime(pid) {
+            crate::threat_map::ProcRead::Found(t) => t,
+            crate::threat_map::ProcRead::NotFound => {
+                return ResponseBody::Error {
+                    message: format!("pid {pid} no longer exists — cannot watch"),
+                };
+            }
+            crate::threat_map::ProcRead::Error(msg) => {
+                return ResponseBody::Error { message: msg };
+            }
+        };
+        match pid_owner_uid(pid) {
+            OwnerLookup::Owner(owner_uid) if owner_uid != peer.uid => {
+                return ResponseBody::Error {
+                    message: format!(
+                        "non-root caller (uid {}) cannot watch pid {pid} (owned by uid {owner_uid})",
+                        peer.uid
+                    ),
+                };
+            }
+            OwnerLookup::NotFound => {
+                return ResponseBody::Error {
+                    message: format!("pid {pid} no longer exists — cannot watch"),
+                };
+            }
+            OwnerLookup::Error(msg) => return ResponseBody::Error { message: msg },
+            OwnerLookup::Owner(_) => {}
+        }
+        match crate::threat_map::pid_starttime(pid) {
+            crate::threat_map::ProcRead::Found(t) if t == start1 => {}
+            _ => {
+                return ResponseBody::Error {
+                    message: format!("pid {pid} was recycled mid-request — refusing to watch"),
+                };
+            }
+        }
+    }
+    if state.threat.set_watch(pid) {
+        ResponseBody::Ok
+    } else {
+        ResponseBody::Error {
+            message: format!(
+                "failed to set watch on pid {pid} (eBPF unavailable or map write failed)"
+            ),
+        }
+    }
 }
 
 fn handle_set_threat_level(
@@ -1855,7 +1916,7 @@ mod tests {
         let trust_tmp = tempfile::tempdir().expect("tempdir");
         let trust_root = trust_tmp.path().to_path_buf();
         let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
-        let classifier = Classifier::new();
+        let classifier = std::sync::Arc::new(Classifier::new());
         let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
         let bcast_for_thread = bcast.clone();
         let handle = thread::spawn(move || {
@@ -1901,7 +1962,7 @@ mod tests {
     ) -> (std::path::PathBuf, thread::JoinHandle<()>) {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
-        let classifier = Classifier::new();
+        let classifier = std::sync::Arc::new(Classifier::new());
         let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
         let handle = thread::spawn(move || {
             let _ = serve(
@@ -1935,7 +1996,7 @@ mod tests {
         let trust_tmp = tempfile::tempdir().expect("tempdir");
         let trust_root = trust_tmp.path().to_path_buf();
         let trust_store = Arc::new(crate::trust_store::TrustStore::new(trust_root));
-        let classifier = Classifier::new();
+        let classifier = std::sync::Arc::new(Classifier::new());
         let bcast = Arc::new(crate::warn_consumer::Broadcast::new());
         let handle = thread::spawn(move || {
             let _trust_tmp_owned = trust_tmp; // moved-in, Drop on exit
@@ -2151,7 +2212,10 @@ mod tests {
             r#"{"id":1,"method":"classify","command":"echo zzqq-overlay-marker please"}"#,
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(v["verdict"], "warn", "overlay atom hit must upgrade Safe→Warn");
+        assert_eq!(
+            v["verdict"], "warn",
+            "overlay atom hit must upgrade Safe→Warn"
+        );
         let reason = v["reason"].as_str().unwrap_or("");
         // Pin the persistent-overlay scope specifically (vs system-fetched
         // / session), and that the matched atom is cited.
@@ -2275,6 +2339,59 @@ mod tests {
         );
         let lv: serde_json::Value = serde_json::from_str(&level_reply).unwrap();
         assert_eq!(lv["type"], "error");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn set_watch_rejects_pid_owned_by_other_uid() {
+        // Same cross-UID gate as set_threat: a non-root caller must not be
+        // able to watch (classify the subtree of) another user's PID.
+        if skip_if_root("set_watch_rejects_pid_owned_by_other_uid") {
+            return;
+        }
+        let other_pid = match find_pid_owned_by_other_uid() {
+            Some(p) => p,
+            None => return,
+        };
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(
+            &mut stream,
+            &format!(r#"{{"id":10,"method":"set_watch","pid":{other_pid}}}"#),
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        // Assert the GATE rejected it, not the no-eBPF set_watch failure —
+        // otherwise removing the gate would still pass this test (the test
+        // daemon attaches no eBPF, so a gate-passing call errors anyway).
+        let msg = v["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("cannot watch pid"),
+            "expected cross-uid gate rejection, got: {msg}"
+        );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn set_watch_rejects_nonexistent_pid_from_non_root() {
+        // The (pid, starttime) lock-step rejects a vanished PID for a
+        // non-root caller, so a race can't redirect the watch onto a
+        // recycled PID. PID 0 is a kernel sentinel; /proc/0 doesn't exist.
+        if skip_if_root("set_watch_rejects_nonexistent_pid_from_non_root") {
+            return;
+        }
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let reply = round_trip(&mut stream, r#"{"id":11,"method":"set_watch","pid":0}"#);
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["type"], "error");
+        // Pin the lock-step rejection (not the no-eBPF failure): the
+        // starttime read of a vanished PID is what produces this message.
+        let msg = v["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("no longer exists"),
+            "expected vanished-pid rejection, got: {msg}"
+        );
         let _ = std::fs::remove_file(socket);
     }
 

@@ -69,6 +69,8 @@ to edit `src/config.zig` and rebuild in place.
 
 The supply-chain protection lives in `atty-guard`, a Rust sidecar daemon that runs as a system service and (optionally) attaches eBPF LSM hooks for kernel-level enforcement. Without it you still get `guardrail` and `security_guard`'s in-proc Tier-1 patterns; with it you get per-PID threat tracking, atom corpus updates, OSV live npm lookup, and (with eBPF) the kernel can refuse the `execve` itself.
 
+By default detection is *proxy-only* — the daemon classifies the commands you type at the prompt. To also watch the terminal's whole process subtree (catching runtime execs that bypass the prompt — a compromised dependency spawning `… → exploit`), set a **security profile** in the daemon config (`[profile] mode = "audit"` to detect, `"session"` to also kill). See [security profiles](security-profiles.md) for the full ladder + trade-offs (`session`/`lockdown` need `CAP_KILL`).
+
 One command does the whole install:
 
 ```sh

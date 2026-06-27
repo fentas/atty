@@ -229,11 +229,7 @@ fn download_tarball(
 /// flag never flips for a tampered source and the existing
 /// atoms.system.txt stays untouched.
 #[cfg(feature = "atoms-fetch")]
-pub(super) fn verify_digest(
-    url: &str,
-    bytes: &[u8],
-    expected_hex: &str,
-) -> Result<(), FetchError> {
+pub(super) fn verify_digest(url: &str, bytes: &[u8], expected_hex: &str) -> Result<(), FetchError> {
     let actual = Sha256::digest(bytes);
     let actual_hex = hex_encode(&actual);
     if actual_hex.eq_ignore_ascii_case(expected_hex) {
@@ -268,8 +264,8 @@ mod tests {
         // fetch_all returns an error and DOES NOT call
         // write_atoms. Belt-and-braces against silently
         // wiping the last-good corpus.
-        let dir = std::env::temp_dir()
-            .join(format!("atty-guard-fetcher-empty-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("atty-guard-fetcher-empty-{}", std::process::id()));
         let path = dir.join("atoms.system.txt");
         let cfg = FetcherConfig {
             output_path: path.clone(),

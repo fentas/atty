@@ -21,7 +21,9 @@ fn empty_dir_loads_cleanly() {
 fn persistent_add_then_list() {
     let (store, _tmp) = fresh_store();
     store.persistent_add_atom(1000, "nc -e /bin/sh").unwrap();
-    store.persistent_add_atom(1000, "bash -i >& /dev/tcp/").unwrap();
+    store
+        .persistent_add_atom(1000, "bash -i >& /dev/tcp/")
+        .unwrap();
     let listed = store.list_atoms(1000, ListScope::Persistent);
     assert_eq!(listed.len(), 2);
     // sorted output
@@ -258,7 +260,7 @@ fn file_parser_skips_unknown_url_verbs_forward_compat() {
     let path = tmp.path().join("urls.decisions.txt");
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(f, "allow good.io").unwrap();
-    writeln!(f, "audit example.com").unwrap();  // future verb
+    writeln!(f, "audit example.com").unwrap(); // future verb
     writeln!(f, "block bad.io").unwrap();
     drop(f);
     let (allow, block) = read_urls_file(&path).unwrap();
@@ -424,7 +426,10 @@ fn system_fetched_loads_when_perms_ok() {
     let listed = store.list_system_fetched();
     // reload_system_fetched stores a pre-sorted snapshot; iterate
     // the Arc'd Vec directly without resorting.
-    assert_eq!(listed.as_ref(), &vec!["bash -i >&".to_string(), "nc -e".to_string()]);
+    assert_eq!(
+        listed.as_ref(),
+        &vec!["bash -i >&".to_string(), "nc -e".to_string()]
+    );
 }
 
 #[test]
@@ -514,10 +519,7 @@ fn civil_from_days_known_values() {
 fn write_includes_metadata_stamp() {
     let (store, _tmp) = fresh_store();
     store.persistent_add_atom(1000, "stamp test").unwrap();
-    let path = store
-        .data_root
-        .join("1000")
-        .join("atoms.user.txt");
+    let path = store.data_root.join("1000").join("atoms.user.txt");
     let content = std::fs::read_to_string(&path).unwrap();
     // Metadata format: `<atom> # added <YYYY-MM-DD> via atoms add`.
     assert!(content.contains("stamp test"));
@@ -611,8 +613,7 @@ fn session_write_retains_cap_blocked_trust_for_retry() {
 
     // Now add a fresh session trust hash that would push the
     // file past the cap.
-    let extra =
-        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned();
+    let extra = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned();
     store.session_add_trust(uid, &extra).unwrap();
 
     let report = store.session_write(uid).unwrap();
