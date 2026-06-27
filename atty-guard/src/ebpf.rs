@@ -219,6 +219,9 @@ impl EbpfState {
     pub fn set_deny_basename(&self, _name: &str) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
+    pub fn set_basename_gate(&self, _active: bool) -> Result<(), LoadError> {
+        Err(LoadError::FeatureNotBuilt)
+    }
     pub fn set_enforce_cfg(&self, _mode: u8, _max_depth: u8) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
@@ -571,6 +574,13 @@ mod with_libbpf {
         pub fn set_deny_basename(&self, name: &str) -> Result<(), LoadError> {
             let key = super::encode_basename_key(name)?;
             self.update("deny_basenames", &key, &[1u8])
+        }
+
+        /// Flip the kernel `basename_gate` so the LSM hook only runs the
+        /// (expensive) per-exec basename scan when deny_basenames is
+        /// non-empty — audit/session leave it off.
+        pub fn set_basename_gate(&self, active: bool) -> Result<(), LoadError> {
+            self.update("basename_gate", &0u32.to_ne_bytes(), &[active as u8])
         }
 
         /// Clear the PID from BOTH maps in a single sweep. Map

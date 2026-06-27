@@ -143,6 +143,18 @@ struct {
     __type(value, __u8);
 } deny_basenames SEC(".maps");
 
+// Set to 1 by userspace iff deny_basenames is non-empty (strict). Gates the
+// expensive per-exec basename scan: under audit/session (and strict with no
+// basenames) it stays 0, so every watched exec skips basename_is_denied's
+// path read + 2× bpf_loop instead of paying ~n+64 iterations for a
+// guaranteed-empty lookup.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u8);
+} basename_gate SEC(".maps");
+
 // Per-CPU scratch for the full path read — the basename can sit at the end
 // of a long path, so we need the whole thing, and a 256 B buffer won't fit
 // the 512 B BPF stack alongside check_execve's frame.
@@ -460,8 +472,16 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
         if (fname) {
             struct deny_key key = {};
             bpf_core_read_str(key.path, sizeof(key.path), fname);
-            int denied = bpf_map_lookup_elem(&deny_bins, &key) != NULL
-                || basename_is_denied(fname);
+            int denied = bpf_map_lookup_elem(&deny_bins, &key) != NULL;
+            if (!denied) {
+                // Gate the expensive basename scan: skip it entirely unless
+                // userspace flagged deny_basenames non-empty (so audit/
+                // session don't pay A+'s cost for an always-empty lookup).
+                __u32 gz = 0;
+                __u8 *bg = bpf_map_lookup_elem(&basename_gate, &gz);
+                if (bg && *bg)
+                    denied = basename_is_denied(fname);
+            }
             if (denied) {
                 // BLOCK breadcrumb (same as the critical path): the consumer
                 // drops BLOCK today — the user sees the -EPERM directly —

@@ -71,10 +71,10 @@ def main() -> None:
             if "eBPF attached" not in log:
                 d.dump_log()
                 fail("daemon didn't attach eBPF")
-            if "1 binary deny-rule(s) loaded" not in log:
+            if "0 path + 1 basename deny-rule(s) loaded" not in log:
                 d.dump_log()
                 fail("strict profile didn't load the basename deny-rule "
-                     "(expected '1 binary deny-rule(s) loaded')")
+                     "(expected '0 path + 1 basename deny-rule(s) loaded')")
 
             resp = call("set_watch", pid=alice_pid)
             if resp.get("type") == "error":

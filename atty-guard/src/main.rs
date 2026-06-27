@@ -998,26 +998,30 @@ fn main() -> std::io::Result<()> {
                 // lookup no-ops. A bad path is logged + skipped, not fatal
                 // (the rest of the deny-list still loads).
                 if file_cfg.profile.mode == profile::SecurityProfile::Strict {
-                    let mut denied = 0usize;
+                    let mut path_n = 0usize;
                     for path in &file_cfg.profile.deny_binaries {
                         match state.set_deny_bin(path) {
-                            Ok(()) => denied += 1,
+                            Ok(()) => path_n += 1,
                             Err(e) => eprintln!(
                                 "atty-guard: strict deny_binaries: skipping {path:?} — {e}"
                             ),
                         }
                     }
+                    let mut bn_n = 0usize;
                     for name in &file_cfg.profile.deny_basenames {
                         match state.set_deny_basename(name) {
-                            Ok(()) => denied += 1,
+                            Ok(()) => bn_n += 1,
                             Err(e) => eprintln!(
                                 "atty-guard: strict deny_basenames: skipping {name:?} — {e}"
                             ),
                         }
                     }
+                    // Gate the per-exec basename scan on whether any basename
+                    // rule loaded — off → audit/session skip A+'s cost.
+                    let _ = state.set_basename_gate(bn_n > 0);
                     if cli.verbosity >= 1 {
                         eprintln!(
-                            "atty-guard: strict profile — {denied} binary deny-rule(s) loaded"
+                            "atty-guard: strict profile — {path_n} path + {bn_n} basename deny-rule(s) loaded"
                         );
                     }
                 }

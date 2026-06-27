@@ -234,9 +234,11 @@ reactive fallback, never a replacement for it. `strict` ⊋ `session`.
 - **A+ — `bpf_loop` matching.** Uses `bpf_loop` (verifies the callback once
   — no per-iteration state explosion, unlike an unrolled scan). **Shipped:
   basename matching** (`deny_basenames`) so a deny rule catches the binary
-  at **any path** (the symlink / copy-to-/tmp / `./relative` evasions A
-  misses) — the kernel extracts the basename of `bprm->filename` into a
-  per-CPU scratch and looks it up. Getting it past the verifier needed the
+  in **any directory** under the denied name (the copy-to-/tmp, same-name
+  symlink, and `./relative` evasions A misses) — the kernel extracts the
+  basename of `bprm->filename` into a per-CPU scratch and looks it up. It
+  keys off the *invoked* name, so a **rename** to a different basename
+  still evades (that needs argv/content matching, not a name lookup). Getting it past the verifier needed the
   per-CPU scratch (a cross-frame variable-offset stack write is rejected)
   plus `barrier_var` + power-of-two masking on every variable index (the
   compiler elides a mask it can prove redundant from a preceding bound
@@ -254,9 +256,10 @@ reactive fallback, never a replacement for it. `strict` ⊋ `session`.
   unaffected; `bpf_preempt_disable` (6.10+) is the eventual close. (2) the
   path read caps at 256 B, so a basename sitting past offset 255 of a very
   long path is truncated (false-negative) — same bound as the `deny_bins`
-  key. (3) `basename_is_denied` currently runs on every watched exec even
-  under `audit`/`session` (where `deny_basenames` is empty) — a follow-up
-  gate (a userspace-set flag) will skip it when no basenames are configured.
+  key. (3) the per-exec basename scan is **gated** (`basename_gate`, set by
+  the daemon only when `deny_basenames` is non-empty), so `audit`/`session`
+  (and `strict` with no basenames) skip it entirely — they don't pay A+'s
+  cost for an always-empty lookup.
 
 **Honesty contract.** A `strict` deny is **prevention** (sync `-EPERM`,
 the exec never runs — surfaced to the user as the failed command) vs
