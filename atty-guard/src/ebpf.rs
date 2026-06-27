@@ -323,8 +323,13 @@ mod with_libbpf {
             // — a silent detection bypass. Warn events are a cheap
             // broadcast (no /proc) and stay inline.
             let bcast_for_cb = broadcast.clone();
+            // BOUNDED channel (drop-on-full), mirroring the warn path's
+            // SyncSender: an in-session exec storm can outrun the worker
+            // (each /proc read can take ms), so an unbounded queue would
+            // grow daemon RSS without limit. Dropping when full is the
+            // same fail-open as a ringbuf overflow.
             let (classify_tx, classify_rx) =
-                std::sync::mpsc::channel::<crate::warn_consumer::ExecveEvent>();
+                std::sync::mpsc::sync_channel::<crate::warn_consumer::ExecveEvent>(1024);
             let classify_worker = {
                 let classifier = classifier.clone();
                 let broadcast = broadcast.clone();
@@ -333,8 +338,19 @@ mod with_libbpf {
                     .spawn(move || {
                         while let Ok(evt) = classify_rx.recv() {
                             let now_ms = DAEMON_START.elapsed().as_millis() as u64;
-                            dispatch_classify(&evt, now_ms, &broadcast, &classifier, policy);
+                            // Isolate a per-event panic so one bad event
+                            // can't permanently kill the effector thread.
+                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                dispatch_classify(&evt, now_ms, &broadcast, &classifier, policy);
+                            }));
+                            if r.is_err() {
+                                eprintln!(
+                                    "atty-guard: classify worker recovered from a panic (pid {})",
+                                    evt.pid
+                                );
+                            }
                         }
+                        eprintln!("atty-guard: classify worker exiting (channel closed)");
                     })
                     .map_err(|e| LoadError::LoadFailed(format!("spawn classify worker: {e}")))?
             };
@@ -521,7 +537,7 @@ mod with_libbpf {
     fn ringbuf_callback(
         data: &[u8],
         broadcast: &std::sync::Arc<crate::warn_consumer::Broadcast>,
-        classify_tx: &std::sync::mpsc::Sender<crate::warn_consumer::ExecveEvent>,
+        classify_tx: &std::sync::mpsc::SyncSender<crate::warn_consumer::ExecveEvent>,
     ) {
         let Some(evt) = crate::warn_consumer::ExecveEvent::from_bytes(data) else {
             return;
@@ -539,10 +555,11 @@ mod with_libbpf {
         }
 
         // Security-profile path: hand off to the worker — never block the
-        // poll. A send failure (worker gone) is the same fail-open as a
-        // ringbuf overflow; nothing to do here.
+        // poll. try_send so a full queue (worker behind under an exec
+        // storm) or a gone worker drops the event (fail-open, same as a
+        // ringbuf overflow) instead of blocking the poll.
         if evt.is_classify() {
-            let _ = classify_tx.send(evt);
+            let _ = classify_tx.try_send(evt);
         }
     }
 
@@ -654,22 +671,24 @@ mod with_libbpf {
     /// the binary path; the full command is what the Tier-1 pattern atoms
     /// need. The event is submitted DURING check_execve (before the exec
     /// finishes populating the new /proc/<pid>/cmdline) and libbpf's
-    /// epoll wakes us almost immediately, so the first read often races
-    /// the still-empty cmdline — retry briefly until it's populated.
-    /// Returns None if it never populates (caller falls back to argv0).
+    /// epoll wakes us almost immediately, so the first read can race the
+    /// still-empty cmdline — retry briefly while it's present-but-empty.
+    /// A read ERROR (ENOENT) means the process already exited: return at
+    /// once rather than burn the worker ~22ms retrying a gone PID (the
+    /// common case for short-lived in-session execs). None → caller falls
+    /// back to argv0 (and `session` won't kill on the fallback).
     fn read_proc_cmdline(pid: u32) -> Option<String> {
         let path = format!("/proc/{pid}/cmdline");
         for attempt in 0..12 {
-            if let Ok(raw) = std::fs::read(&path) {
-                let joined = raw
-                    .split(|&b| b == 0)
-                    .filter(|seg| !seg.is_empty())
-                    .map(String::from_utf8_lossy)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if !joined.is_empty() {
-                    return Some(joined);
-                }
+            let raw = std::fs::read(&path).ok()?;
+            let joined = raw
+                .split(|&b| b == 0)
+                .filter(|seg| !seg.is_empty())
+                .map(String::from_utf8_lossy)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !joined.is_empty() {
+                return Some(joined);
             }
             if attempt < 11 {
                 std::thread::sleep(std::time::Duration::from_millis(2));

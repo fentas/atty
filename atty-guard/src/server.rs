@@ -1009,9 +1009,11 @@ fn handle_set_watch(state: &State, peer: PeerCred, pid: u32) -> ResponseBody {
     // killed — another user's subtree). Root may watch any PID; a non-root
     // caller only PIDs owned by its own UID, with the same (pid, starttime)
     // lock-step set_threat uses to defeat PID-reuse: read starttime before
-    // AND after the ownership check, reject a recycled/vanished PID. (The
-    // kill path additionally re-reads /proc, so even a slipped stale mark
-    // can't kill a recycled PID — this is defense in depth + parity.)
+    // AND after the ownership check, reject a recycled/vanished PID. This
+    // narrows but doesn't fully close the window — watch_pids carries no
+    // starttime, so a recycle in the gate→kernel-write gap isn't
+    // re-validated at kill time (the kill path only re-reads /proc for the
+    // cmdline). A pidfd-based kill would close it; tracked as a follow-up.
     if !peer.is_root {
         let start1 = match crate::threat_map::pid_starttime(pid) {
             crate::threat_map::ProcRead::Found(t) => t,
@@ -2359,6 +2361,14 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
+        // Assert the GATE rejected it, not the no-eBPF set_watch failure —
+        // otherwise removing the gate would still pass this test (the test
+        // daemon attaches no eBPF, so a gate-passing call errors anyway).
+        let msg = v["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("cannot watch pid"),
+            "expected cross-uid gate rejection, got: {msg}"
+        );
         let _ = std::fs::remove_file(socket);
     }
 
@@ -2375,6 +2385,13 @@ mod tests {
         let reply = round_trip(&mut stream, r#"{"id":11,"method":"set_watch","pid":0}"#);
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["type"], "error");
+        // Pin the lock-step rejection (not the no-eBPF failure): the
+        // starttime read of a vanished PID is what produces this message.
+        let msg = v["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("no longer exists"),
+            "expected vanished-pid rejection, got: {msg}"
+        );
         let _ = std::fs::remove_file(socket);
     }
 

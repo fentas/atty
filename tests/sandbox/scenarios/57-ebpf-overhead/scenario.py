@@ -238,6 +238,24 @@ def main() -> None:
         else:
             print(f"  {label:<18}{cells}{'n/a':>10}{'n/a':>9}")
     print()
+
+    # Pin the emit: the whole point of the watched row is that check_execve
+    # does MORE work (the classify-emit). If the watch mark or fork
+    # propagation silently broke, the row would measure the unwatched path
+    # and the table would still look plausible — assert it's clearly higher.
+    by_label = dict(results)
+    base_ce = by_label.get("one_level", {}).get("check_execve", float("nan"))
+    watch_ce = by_label.get("one_level+watch", {}).get("check_execve", float("nan"))
+    if base_ce == base_ce and watch_ce == watch_ce:  # both measured
+        if watch_ce <= base_ce * 1.5:
+            print(
+                f"FAIL: {NAME}: watched check_execve ({watch_ce:.0f} ns) not "
+                f"meaningfully above unwatched ({base_ce:.0f} ns) — the classify "
+                "emit didn't fire (watch mark / fork propagation broken?).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     print(f"PASS: {NAME}")
 
 
