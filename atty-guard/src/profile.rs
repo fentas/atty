@@ -21,6 +21,11 @@ use serde::{Deserialize, Serialize};
 /// User-chosen posture. Presets over the underlying knobs; see the design
 /// note for the guarantee each one actually provides (detection vs
 /// prevention — never conflated).
+///
+/// The serde wire name (lowercase), `as_str`, and the clap CLI value
+/// (kebab-case) coincide ONLY because every variant is a single word. A
+/// future multi-word variant must pin all three explicitly (a `#[serde
+/// rename]` + `#[value(name=…)]` + the `as_str` arm) so they stay in sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum SecurityProfile {

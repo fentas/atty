@@ -2132,6 +2132,12 @@ mod tests {
     }
 
     fn spawn_server() -> (std::path::PathBuf, thread::JoinHandle<()>) {
+        spawn_server_allow(true)
+    }
+
+    /// Like `spawn_server` but with an explicit `allow_user_switch` so the
+    /// profile-switch refusal path (non-root + disabled) can be exercised.
+    fn spawn_server_allow(allow_user_switch: bool) -> (std::path::PathBuf, thread::JoinHandle<()>) {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
         // Trust store rooted at a tempdir so server tests can
@@ -2157,7 +2163,7 @@ mod tests {
                 crate::config::ServerConfig::default(),
                 crate::protocol::GuardPosture::default(),
                 std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
-                true,
+                allow_user_switch,
             );
         });
         // Wait for the bind to actually accept connections. The
@@ -2553,10 +2559,44 @@ mod tests {
     }
 
     #[test]
+    fn set_profile_refused_for_nonroot_when_disabled() {
+        // The security boundary: a non-root caller (the test process) is
+        // refused when allow_user_switch is off, and the live profile is
+        // NOT mutated. Skips when running as root (root always may switch).
+        if skip_if_root("set_profile_refused_for_nonroot_when_disabled") {
+            return;
+        }
+        let (socket, _h) = spawn_server_allow(false);
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let r = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"set_profile","profile":"session"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["type"], "error");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("daemon-global"),
+            "expected the daemon-global refusal, got: {}",
+            v["message"]
+        );
+        // The refusal didn't mutate the live profile.
+        let g = round_trip(&mut stream, r#"{"id":2,"method":"get_profile"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&g).unwrap()["profile"],
+            "prompt"
+        );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
     fn profile_get_then_set_roundtrip() {
-        // The shared spawn helper sets allow_user_switch=true, so a non-root
-        // caller can switch here; the root/allow gating is exercised in the
-        // sandbox (a real non-root user against the default config).
+        // spawn_server uses allow_user_switch=true, so a non-root caller can
+        // switch here (the allowed path); the refusal path is covered by
+        // set_profile_refused_for_nonroot_when_disabled, and the gate logic
+        // by may_switch_profile_gate.
         let (socket, _h) = spawn_server();
         let mut stream = UnixStream::connect(&socket).expect("connect");
 

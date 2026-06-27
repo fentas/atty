@@ -270,7 +270,9 @@ pub enum Request {
     /// Switch the live active security profile. The profile is
     /// daemon-GLOBAL (one daemon serves every session), so this is gated:
     /// root always; a non-root caller only when `[profile] allow_user_switch`
-    /// is set (single-user-workstation opt-in). Rebuilds the guard posture.
+    /// is set (single-user-workstation opt-in). The eBPF worker picks up
+    /// the new value on its next exec; GetMetrics/GetProfile reflect it
+    /// immediately (GetMetrics reads the live value into its posture).
     SetProfile {
         profile: crate::profile::SecurityProfile,
     },

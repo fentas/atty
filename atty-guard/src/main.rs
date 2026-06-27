@@ -1216,22 +1216,15 @@ fn main() -> std::io::Result<()> {
     }
 
     // Dashboard P1 — snapshot the guard posture for GetMetrics before
-    // ebpf_state is moved into serve(). Static for the daemon's lifetime
-    // (config is load-time). deny counts are the configured rule counts
-    // under strict; atoms_version is filled in a later phase.
+    // ebpf_state is moved into serve(). The `profile` here is a seed —
+    // GetMetrics overrides it with the live active_profile (so a runtime
+    // switch is reflected); the rest is load-time static. deny counts are
+    // the configured rule counts under strict; atoms_version is later.
     let guard_posture = {
         let mode = file_cfg.profile.mode;
         let is_strict = mode == profile::SecurityProfile::Strict;
-        let profile_str = match mode {
-            profile::SecurityProfile::Prompt => "prompt",
-            profile::SecurityProfile::Audit => "audit",
-            profile::SecurityProfile::Session => "session",
-            profile::SecurityProfile::Strict => "strict",
-            profile::SecurityProfile::Lockdown => "lockdown",
-            profile::SecurityProfile::Smart => "smart",
-        };
         crate::protocol::GuardPosture {
-            profile: profile_str.to_string(),
+            profile: mode.as_str().to_string(),
             ebpf: if ebpf_state.is_some() {
                 "attached"
             } else {
