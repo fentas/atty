@@ -3,8 +3,16 @@
 //!
 //! Ephemeral (in-memory) by default; persistent retention is a later,
 //! config-gated layer (see docs/dashboard.md). Stale instances (a process
-//! that stopped reporting because its atty exited) are pruned by a
-//! last-seen TTL so the map can't grow without bound.
+//! whose atty exited) are pruned by a last-seen TTL: every report sweeps
+//! ALL UIDs — dropping stale records AND emptied UID buckets — so a
+//! session that goes silent can't pin memory on the shared daemon, and a
+//! per-UID instance cap bounds a same-UID spammer within the TTL window.
+//!
+//! Privacy boundary: this store keeps what the exporter sends verbatim.
+//! Incognito redaction is the EXPORTER's job (it applies the user's
+//! configurable incognito-reporting policy — report nothing / existence +
+//! security counters / normal); the daemon can't re-derive that policy, so
+//! it trusts the reported fields. See docs/dashboard.md "Privacy".
 
 use crate::protocol::{InstanceInfo, MetricsCounters};
 use std::collections::HashMap;
@@ -15,6 +23,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// window — the exporter flushes on the proxy's tick (seconds), so a
 /// minute of silence means the session is gone.
 const STALE_MS: u64 = 60_000;
+
+/// Cap instances per UID — a real user has a handful of terminals; this
+/// bounds a same-UID / atty-group process spamming distinct pids at the
+/// shared daemon (the TTL only reclaims after its window).
+const MAX_INSTANCES_PER_UID: usize = 1024;
 
 struct Record {
     cwd: String,
@@ -59,8 +72,19 @@ impl MetricsStore {
     ) {
         let now = now_ms();
         let mut g = self.inner.lock().expect("metrics store poisoned");
+        // Sweep EVERY UID (not just the reporting one) + drop emptied
+        // buckets, so a session that went silent can't pin memory on the
+        // shared daemon — any report reclaims all stale state.
+        g.retain(|_, per| {
+            per.retain(|_, r| now.saturating_sub(r.last_seen_ms) < STALE_MS);
+            !per.is_empty()
+        });
         let per = g.entry(uid).or_default();
-        per.retain(|_, r| now.saturating_sub(r.last_seen_ms) < STALE_MS);
+        // Cap a spammer: a NEW pid beyond the per-UID cap is dropped;
+        // existing pids still update (so a real fleet keeps refreshing).
+        if per.len() >= MAX_INSTANCES_PER_UID && !per.contains_key(&pid) {
+            return;
+        }
         per.insert(
             pid,
             Record {
@@ -78,11 +102,14 @@ impl MetricsStore {
         let now = now_ms();
         let g = self.inner.lock().expect("metrics store poisoned");
         let mut out = Vec::new();
-        for (&u, per) in g.iter() {
-            if !all && u != uid {
-                continue;
-            }
-            for (&pid, r) in per.iter() {
+        // Non-root indexes straight to its own bucket; root scans all.
+        let buckets: Vec<&HashMap<u32, Record>> = if all {
+            g.values().collect()
+        } else {
+            g.get(&uid).into_iter().collect()
+        };
+        for per in buckets {
+            for (&pid, r) in per {
                 if now.saturating_sub(r.last_seen_ms) >= STALE_MS {
                     continue;
                 }
@@ -105,10 +132,12 @@ impl MetricsStore {
         let g = self.inner.lock().expect("metrics store poisoned");
         let mut agg = MetricsCounters::default();
         let mut n = 0usize;
-        for (&u, per) in g.iter() {
-            if !all && u != uid {
-                continue;
-            }
+        let buckets: Vec<&HashMap<u32, Record>> = if all {
+            g.values().collect()
+        } else {
+            g.get(&uid).into_iter().collect()
+        };
+        for per in buckets {
             for r in per.values() {
                 if now.saturating_sub(r.last_seen_ms) >= STALE_MS {
                     continue;
@@ -163,6 +192,16 @@ mod tests {
         let (agg, n) = s.aggregate(1000, false);
         assert_eq!(n, 1);
         assert_eq!(agg.commands, 12); // latest snapshot, not summed
+    }
+
+    #[test]
+    fn per_uid_cap_drops_new_pids() {
+        let s = MetricsStore::new();
+        for pid in 0..(MAX_INSTANCES_PER_UID as u32 + 50) {
+            s.report(1000, pid, "/x".into(), "bash".into(), false, counters(1, 0));
+        }
+        // New pids beyond the cap are dropped, not grown unbounded.
+        assert_eq!(s.aggregate(1000, false).1, MAX_INSTANCES_PER_UID);
     }
 
     #[test]

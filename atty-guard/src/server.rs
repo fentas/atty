@@ -1023,11 +1023,17 @@ fn handle_report_metrics(
     state: &State,
     peer: PeerCred,
     pid: u32,
-    cwd: String,
-    shell: String,
+    mut cwd: String,
+    mut shell: String,
     incognito: bool,
     counters: crate::protocol::MetricsCounters,
 ) -> ResponseBody {
+    // Bound caller-supplied strings — a same-group process shouldn't be
+    // able to bloat the shared daemon. Incognito redaction is the
+    // EXPORTER's job (it applies the user's configurable policy); the
+    // daemon trusts the reported fields and only sizes them.
+    truncate_to_bytes(&mut cwd, 512);
+    truncate_to_bytes(&mut shell, 32);
     state
         .metrics
         .report(peer.uid, pid, cwd, shell, incognito, counters);

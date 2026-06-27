@@ -287,16 +287,18 @@ pub struct MetricsCounters {
 }
 
 impl MetricsCounters {
-    /// Field-wise sum, for the cross-instance aggregate.
+    /// Field-wise sum, for the cross-instance aggregate. Saturating so a
+    /// hostile near-`u64::MAX` report can't panic the daemon (debug
+    /// overflow) and poison the metrics lock.
     pub fn add(&mut self, o: &MetricsCounters) {
-        self.commands += o.commands;
-        self.ghost_accepted += o.ghost_accepted;
-        self.ghost_shown += o.ghost_shown;
-        self.keystrokes_saved += o.keystrokes_saved;
-        self.llm_calls += o.llm_calls;
-        self.guard_warn += o.guard_warn;
-        self.guard_block += o.guard_block;
-        self.guard_refused += o.guard_refused;
+        self.commands = self.commands.saturating_add(o.commands);
+        self.ghost_accepted = self.ghost_accepted.saturating_add(o.ghost_accepted);
+        self.ghost_shown = self.ghost_shown.saturating_add(o.ghost_shown);
+        self.keystrokes_saved = self.keystrokes_saved.saturating_add(o.keystrokes_saved);
+        self.llm_calls = self.llm_calls.saturating_add(o.llm_calls);
+        self.guard_warn = self.guard_warn.saturating_add(o.guard_warn);
+        self.guard_block = self.guard_block.saturating_add(o.guard_block);
+        self.guard_refused = self.guard_refused.saturating_add(o.guard_refused);
     }
 }
 
