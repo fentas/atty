@@ -70,6 +70,14 @@ pub struct ProfileConfig {
     /// evades. e.g. `["nc", "ncat"]`. Must not contain `/`.
     #[serde(default)]
     pub deny_basenames: Vec<String>,
+    /// Allow a NON-root caller to switch the live profile via the
+    /// SetProfile RPC (the in-atty Alt+P shortcut). The profile is
+    /// daemon-GLOBAL — one daemon serves every session — so this lets any
+    /// `atty`-group user change the whole host's posture. Off by default
+    /// (root-only via `sudo atty-guard profile set`); turn it on for a
+    /// single-user workstation where the in-atty switch is wanted.
+    #[serde(default)]
+    pub allow_user_switch: bool,
 }
 
 /// How far the eBPF LSM hook looks for a Critical mark on each execve.

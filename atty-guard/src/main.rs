@@ -248,6 +248,24 @@ enum Subcommand {
         #[command(subcommand)]
         op: TrustOp,
     },
+    /// Read or switch the live security profile. The profile is
+    /// daemon-global; `set` requires sudo unless `[profile]
+    /// allow_user_switch` is enabled.
+    Profile {
+        #[command(subcommand)]
+        op: ProfileOp,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum ProfileOp {
+    /// Print the live active profile.
+    Get,
+    /// Switch the live active profile (daemon-global; affects every
+    /// session). Requires sudo unless `[profile] allow_user_switch` is set.
+    Set {
+        profile: crate::profile::SecurityProfile,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -932,6 +950,14 @@ fn main() -> std::io::Result<()> {
     // broadcast() per VERDICT_WARN event).
     let warn_broadcast = std::sync::Arc::new(warn_consumer::Broadcast::new());
 
+    // Live, runtime-switchable active profile. The SetProfile RPC writes
+    // it; the eBPF classify worker reads it per-event and GetMetrics/
+    // GetProfile read it for the posture — so a switch takes effect without
+    // a daemon restart. Seeded from the config's load-time profile.
+    let active_profile = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+        file_cfg.profile.mode.to_u8(),
+    ));
+
     let ebpf_state: Option<std::sync::Arc<ebpf::EbpfState>> = if effective_mode
         != EbpfMode::Disabled
     {
@@ -941,15 +967,12 @@ fn main() -> std::io::Result<()> {
             EbpfMode::Block => ebpf::LoadedMode::Block,
             EbpfMode::Disabled => unreachable!("guarded by the if above"),
         };
-        let policy = profile::RoutingPolicy {
-            profile: file_cfg.profile.mode,
-            smart_can_freeze: file_cfg.profile.smart_allow_lockdown,
-        };
         match ebpf::EbpfState::attach(
             loaded_mode,
             warn_broadcast.clone(),
             classifier.clone(),
-            policy,
+            active_profile.clone(),
+            file_cfg.profile.smart_allow_lockdown,
         ) {
             Ok(state) => {
                 // Push the enforcement depth into the kernel `enforce_cfg`
@@ -1193,22 +1216,15 @@ fn main() -> std::io::Result<()> {
     }
 
     // Dashboard P1 — snapshot the guard posture for GetMetrics before
-    // ebpf_state is moved into serve(). Static for the daemon's lifetime
-    // (config is load-time). deny counts are the configured rule counts
-    // under strict; atoms_version is filled in a later phase.
+    // ebpf_state is moved into serve(). The `profile` here is a seed —
+    // GetMetrics overrides it with the live active_profile (so a runtime
+    // switch is reflected); the rest is load-time static. deny counts are
+    // the configured rule counts under strict; atoms_version is later.
     let guard_posture = {
         let mode = file_cfg.profile.mode;
         let is_strict = mode == profile::SecurityProfile::Strict;
-        let profile_str = match mode {
-            profile::SecurityProfile::Prompt => "prompt",
-            profile::SecurityProfile::Audit => "audit",
-            profile::SecurityProfile::Session => "session",
-            profile::SecurityProfile::Strict => "strict",
-            profile::SecurityProfile::Lockdown => "lockdown",
-            profile::SecurityProfile::Smart => "smart",
-        };
         crate::protocol::GuardPosture {
-            profile: profile_str.to_string(),
+            profile: mode.as_str().to_string(),
             ebpf: if ebpf_state.is_some() {
                 "attached"
             } else {
@@ -1243,6 +1259,8 @@ fn main() -> std::io::Result<()> {
         warn_broadcast,
         file_cfg.server.clone(),
         guard_posture,
+        active_profile,
+        file_cfg.profile.allow_user_switch,
     )
 }
 

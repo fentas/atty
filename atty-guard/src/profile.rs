@@ -16,12 +16,17 @@
 // attributes.
 #![allow(dead_code)]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// User-chosen posture. Presets over the underlying knobs; see the design
 /// note for the guarantee each one actually provides (detection vs
 /// prevention — never conflated).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+///
+/// The serde wire name (lowercase), `as_str`, and the clap CLI value
+/// (kebab-case) coincide ONLY because every variant is a single word. A
+/// future multi-word variant must pin all three explicitly (a `#[serde
+/// rename]` + `#[value(name=…)]` + the `as_str` arm) so they stay in sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum SecurityProfile {
     /// Proxy pre-Enter only. The typed-command tripwire. No background
@@ -49,6 +54,43 @@ impl SecurityProfile {
     /// beyond the prompt path).
     pub fn marks_watch_scope(self) -> bool {
         !matches!(self, Self::Prompt)
+    }
+
+    /// Stable u8 encoding for the runtime-switchable `AtomicU8` that holds
+    /// the live profile (the eBPF classify worker reads it per-event).
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Prompt => 0,
+            Self::Audit => 1,
+            Self::Session => 2,
+            Self::Strict => 3,
+            Self::Lockdown => 4,
+            Self::Smart => 5,
+        }
+    }
+
+    /// Inverse of `to_u8`. Unknown values fall back to `Prompt` (the
+    /// inert default — fail safe, never silently escalate).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Audit,
+            2 => Self::Session,
+            3 => Self::Strict,
+            4 => Self::Lockdown,
+            5 => Self::Smart,
+            _ => Self::Prompt,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Audit => "audit",
+            Self::Session => "session",
+            Self::Strict => "strict",
+            Self::Lockdown => "lockdown",
+            Self::Smart => "smart",
+        }
     }
 }
 
@@ -217,6 +259,24 @@ mod tests {
             profile,
             smart_can_freeze,
         }
+    }
+
+    #[test]
+    fn profile_u8_roundtrips_all_variants() {
+        for p in [
+            SecurityProfile::Prompt,
+            SecurityProfile::Audit,
+            SecurityProfile::Session,
+            SecurityProfile::Strict,
+            SecurityProfile::Lockdown,
+            SecurityProfile::Smart,
+        ] {
+            assert_eq!(SecurityProfile::from_u8(p.to_u8()), p);
+        }
+        // Unknown encodings fail safe to the inert default.
+        assert_eq!(SecurityProfile::from_u8(200), SecurityProfile::Prompt);
+        // as_str matches the serde lowercase rename (wire-consistent).
+        assert_eq!(SecurityProfile::Session.as_str(), "session");
     }
 
     #[test]

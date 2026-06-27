@@ -48,8 +48,12 @@ pub fn serve(
     server_cfg: crate::config::ServerConfig,
     // Dashboard P1 — guard posture built by main.rs at startup (where the
     // profile/enforcement config + the eBPF attach result + deny counts all
-    // live). Returned verbatim by GetMetrics.
+    // live). GetMetrics overrides its `profile` with the live value below.
     guard_posture: crate::protocol::GuardPosture,
+    // The live, runtime-switchable active profile (shared with the eBPF
+    // worker) + whether a non-root caller may switch it.
+    active_profile: Arc<std::sync::atomic::AtomicU8>,
+    allow_user_switch: bool,
 ) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // Socket perms: owner (the daemon's `atty` user) read+write, group
@@ -87,6 +91,8 @@ pub fn serve(
         subscribers: Arc::new(SubscriberSlots::new()),
         metrics: Arc::new(crate::metrics::MetricsStore::new()),
         guard_posture,
+        active_profile,
+        allow_user_switch,
     });
 
     // Bounded-resources gate: shared atomic counter ticks up on
@@ -223,10 +229,16 @@ struct State {
     /// reports and `attop` queries. Ephemeral; gated per-UID by the same
     /// SO_PEERCRED `PeerCred` as the mutating arms.
     metrics: Arc<crate::metrics::MetricsStore>,
-    /// Dashboard P1 — guard posture snapshot built at startup (profile,
-    /// enforcement, eBPF status, deny-rule counts) for `GetMetrics`.
-    /// Static for the daemon's lifetime (config is load-time).
+    /// Dashboard P1 — guard posture snapshot built at startup (enforcement,
+    /// eBPF status, deny-rule counts) for `GetMetrics`. The `profile` field
+    /// is a SEED — GetMetrics overrides it with the live `active_profile`,
+    /// so a runtime SetProfile is never stale.
     guard_posture: crate::protocol::GuardPosture,
+    /// Live, runtime-switchable active profile (the SetProfile RPC writes
+    /// it; the eBPF worker + GetMetrics/GetProfile read it).
+    active_profile: Arc<std::sync::atomic::AtomicU8>,
+    /// Whether a NON-root caller may switch the daemon-global profile.
+    allow_user_switch: bool,
 }
 
 /// Caps for `SubscribeWarnEvents` connections. Kept separate from
@@ -551,6 +563,8 @@ fn dispatch(state: &State, req: Request, peer: PeerCred) -> ResponseBody {
         } => handle_report_metrics(state, peer, pid, cwd, shell, incognito, counters),
         Request::ListInstances => handle_list_instances(state, peer),
         Request::GetMetrics => handle_get_metrics(state, peer),
+        Request::GetProfile => handle_get_profile(state),
+        Request::SetProfile { profile } => handle_set_profile(state, peer, profile),
 
         // --- PR #141 mediated trust-state ops ---
         Request::AtomsAdd {
@@ -1056,14 +1070,82 @@ fn handle_list_instances(state: &State, peer: PeerCred) -> ResponseBody {
 }
 
 /// Aggregate counters across the caller's instances (root: all) + the
-/// startup guard posture.
+/// guard posture, with `profile` refreshed from the live `active_profile`
+/// so a runtime SetProfile is reflected (the rest of the posture is
+/// load-time static).
 fn handle_get_metrics(state: &State, peer: PeerCred) -> ResponseBody {
     let (aggregate, instances) = state.metrics.aggregate(peer.uid, peer.is_root);
+    let mut guard = state.guard_posture.clone();
+    guard.profile = live_profile(state).as_str().to_string();
     ResponseBody::Metrics {
         aggregate,
-        guard: state.guard_posture.clone(),
+        guard,
         instances,
     }
+}
+
+/// The live active profile decoded from the shared atomic.
+fn live_profile(state: &State) -> crate::profile::SecurityProfile {
+    crate::profile::SecurityProfile::from_u8(
+        state
+            .active_profile
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Read the live active profile (no privilege check — read-only).
+fn handle_get_profile(state: &State) -> ResponseBody {
+    ResponseBody::Profile {
+        profile: live_profile(state),
+    }
+}
+
+/// Who may switch the (daemon-global) profile: root always; a non-root
+/// caller only when the operator enabled `[profile] allow_user_switch`.
+fn may_switch_profile(is_root: bool, allow_user_switch: bool) -> bool {
+    is_root || allow_user_switch
+}
+
+/// Switch the live active profile. The profile is daemon-GLOBAL, so a
+/// non-root caller is allowed only when `[profile] allow_user_switch` is
+/// set; root always. The eBPF worker picks up the new value on its next
+/// exec; GetMetrics/GetProfile reflect it immediately.
+///
+/// LIMITATION: this drives the REACTIVE ladder (prompt/audit/session/
+/// lockdown-decide + smart) live. `strict`'s EXTRA in-kernel deny-map
+/// (the synchronous `-EPERM` of curated `deny_binaries`/`deny_basenames`)
+/// is armed at STARTUP from the load-time profile, decoupled from runtime
+/// switches: a live switch TO strict enforces reactively (session-grade)
+/// until a restart arms the deny-map; switching AWAY from a startup-strict
+/// daemon leaves the deny-map armed (fail-closed). Arming the deny-map on
+/// switch is a follow-up.
+fn handle_set_profile(
+    state: &State,
+    peer: PeerCred,
+    profile: crate::profile::SecurityProfile,
+) -> ResponseBody {
+    if !may_switch_profile(peer.is_root, state.allow_user_switch) {
+        return ResponseBody::Error {
+            message: "profile is daemon-global; switching needs root \
+                      (sudo atty-guard profile set <profile>) or \
+                      [profile] allow_user_switch = true"
+                .to_string(),
+        };
+    }
+    state
+        .active_profile
+        .store(profile.to_u8(), std::sync::atomic::Ordering::Relaxed);
+    // Honest about strict's startup-bound deny-map (see the doc above) so
+    // an operator isn't surprised that a live switch to strict enforces
+    // reactively rather than via the synchronous kernel deny-list.
+    if profile == crate::profile::SecurityProfile::Strict && state.verbosity >= 1 {
+        eprintln!(
+            "atty-guard: switched to strict — reactive layer is live; the \
+             in-kernel deny-map reflects the startup config (restart to \
+             arm/disarm the synchronous deny-list)"
+        );
+    }
+    ResponseBody::Profile { profile }
 }
 
 /// Truncate `s` in place to at most `max` bytes, backing up to a UTF-8
@@ -2008,6 +2090,8 @@ mod tests {
                 bcast_for_thread,
                 cfg,
                 crate::protocol::GuardPosture::default(),
+                std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                true,
             );
         });
         for _ in 0..500 {
@@ -2053,6 +2137,8 @@ mod tests {
                 bcast,
                 crate::config::ServerConfig::default(),
                 crate::protocol::GuardPosture::default(),
+                std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                true,
             );
         });
         for _ in 0..500 {
@@ -2065,6 +2151,12 @@ mod tests {
     }
 
     fn spawn_server() -> (std::path::PathBuf, thread::JoinHandle<()>) {
+        spawn_server_allow(true)
+    }
+
+    /// Like `spawn_server` but with an explicit `allow_user_switch` so the
+    /// profile-switch refusal path (non-root + disabled) can be exercised.
+    fn spawn_server_allow(allow_user_switch: bool) -> (std::path::PathBuf, thread::JoinHandle<()>) {
         let socket = unique_socket();
         let socket_for_thread = socket.clone();
         // Trust store rooted at a tempdir so server tests can
@@ -2089,6 +2181,8 @@ mod tests {
                 bcast,
                 crate::config::ServerConfig::default(),
                 crate::protocol::GuardPosture::default(),
+                std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                allow_user_switch,
             );
         });
         // Wait for the bind to actually accept connections. The
@@ -2472,6 +2566,85 @@ mod tests {
             msg.contains("no longer exists"),
             "expected vanished-pid rejection, got: {msg}"
         );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn may_switch_profile_gate() {
+        assert!(may_switch_profile(true, false)); // root always
+        assert!(may_switch_profile(true, true));
+        assert!(may_switch_profile(false, true)); // non-root only when enabled
+        assert!(!may_switch_profile(false, false)); // non-root blocked by default
+    }
+
+    #[test]
+    fn set_profile_refused_for_nonroot_when_disabled() {
+        // The security boundary: a non-root caller (the test process) is
+        // refused when allow_user_switch is off, and the live profile is
+        // NOT mutated. Skips when running as root (root always may switch).
+        if skip_if_root("set_profile_refused_for_nonroot_when_disabled") {
+            return;
+        }
+        let (socket, _h) = spawn_server_allow(false);
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let r = round_trip(
+            &mut stream,
+            r#"{"id":1,"method":"set_profile","profile":"session"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["type"], "error");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("daemon-global"),
+            "expected the daemon-global refusal, got: {}",
+            v["message"]
+        );
+        // The refusal didn't mutate the live profile.
+        let g = round_trip(&mut stream, r#"{"id":2,"method":"get_profile"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&g).unwrap()["profile"],
+            "prompt"
+        );
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn profile_get_then_set_roundtrip() {
+        // spawn_server uses allow_user_switch=true, so a non-root caller can
+        // switch here (the allowed path); the refusal path is covered by
+        // set_profile_refused_for_nonroot_when_disabled, and the gate logic
+        // by may_switch_profile_gate.
+        let (socket, _h) = spawn_server();
+        let mut stream = UnixStream::connect(&socket).expect("connect");
+
+        let g = round_trip(&mut stream, r#"{"id":1,"method":"get_profile"}"#);
+        let gv: serde_json::Value = serde_json::from_str(&g).unwrap();
+        assert_eq!(gv["type"], "profile");
+        assert_eq!(gv["profile"], "prompt"); // seeded to 0 (Prompt)
+
+        let s = round_trip(
+            &mut stream,
+            r#"{"id":2,"method":"set_profile","profile":"session"}"#,
+        );
+        let sv: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(sv["type"], "profile");
+        assert_eq!(sv["profile"], "session");
+
+        // The switch is live: a subsequent read reflects it.
+        let g2 = round_trip(&mut stream, r#"{"id":3,"method":"get_profile"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&g2).unwrap()["profile"],
+            "session"
+        );
+        // get_metrics also reports the live profile in its posture.
+        let m = round_trip(&mut stream, r#"{"id":4,"method":"get_metrics"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&m).unwrap()["guard"]["profile"],
+            "session"
+        );
+
         let _ = std::fs::remove_file(socket);
     }
 

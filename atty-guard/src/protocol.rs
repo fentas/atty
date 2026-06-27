@@ -262,6 +262,20 @@ pub enum Request {
     /// Dashboard: aggregate counters across the caller's instances +
     /// the current guard posture (for the Home/Guard panels).
     GetMetrics,
+
+    /// Read the live active security profile (the Guard panel / atty
+    /// statusbar indicator). No privilege check — read-only.
+    GetProfile,
+
+    /// Switch the live active security profile. The profile is
+    /// daemon-GLOBAL (one daemon serves every session), so this is gated:
+    /// root always; a non-root caller only when `[profile] allow_user_switch`
+    /// is set (single-user-workstation opt-in). The eBPF worker picks up
+    /// the new value on its next exec; GetMetrics/GetProfile reflect it
+    /// immediately (GetMetrics reads the live value into its posture).
+    SetProfile {
+        profile: crate::profile::SecurityProfile,
+    },
 }
 
 /// Monotonic per-session counters reported by the `metrics_exporter`
@@ -439,6 +453,11 @@ pub enum ResponseBody {
     Classify(ClassifyResult),
     ThreatLevel {
         level: ThreatLevel,
+    },
+    /// Reply to GetProfile (and the echo after a successful SetProfile):
+    /// the live active security profile.
+    Profile {
+        profile: crate::profile::SecurityProfile,
     },
     Error {
         message: String,

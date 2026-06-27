@@ -22,7 +22,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
-    use crate::{AtomsOp, SessionOp, Subcommand, TrustOp, UrlsOp};
+    use crate::{AtomsOp, ProfileOp, SessionOp, Subcommand, TrustOp, UrlsOp};
     let target_uid = sudo_target_uid();
     match sub {
         Subcommand::Atoms { op } => match op {
@@ -82,6 +82,31 @@ pub fn dispatch(socket: &Path, sub: crate::Subcommand) -> std::io::Result<()> {
             TrustOp::List => handle_trust_list(socket, target_uid),
             TrustOp::Add { hash } => send_and_check(socket, Request::TrustAdd { hash, target_uid }),
         },
+        Subcommand::Profile { op } => match op {
+            ProfileOp::Get => handle_profile(socket, Request::GetProfile, "active profile"),
+            ProfileOp::Set { profile } => {
+                handle_profile(socket, Request::SetProfile { profile }, "switched to")
+            }
+        },
+    }
+}
+
+/// Send a GetProfile/SetProfile and print the resulting profile (or the
+/// daemon's error verbatim — e.g. the daemon-global root-gating refusal).
+fn handle_profile(socket: &Path, req: Request, label: &str) -> std::io::Result<()> {
+    match send_request(socket, req)? {
+        ResponseBody::Profile { profile } => {
+            println!("{label} {}", profile.as_str());
+            Ok(())
+        }
+        ResponseBody::Error { message } => {
+            eprintln!("atty-guard: {message}");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("atty-guard: unexpected response: {other:?}");
+            std::process::exit(1);
+        }
     }
 }
 
