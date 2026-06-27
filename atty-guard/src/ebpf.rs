@@ -123,6 +123,9 @@ impl EbpfState {
     pub fn set_watch(&self, _pid: u32) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
+    pub fn set_deny_bin(&self, _name: &str) -> Result<(), LoadError> {
+        Err(LoadError::FeatureNotBuilt)
+    }
     pub fn set_enforce_cfg(&self, _mode: u8, _max_depth: u8) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
@@ -452,6 +455,29 @@ mod with_libbpf {
         /// Clearing is handled kernel-side by trace_exit on process exit.
         pub fn set_watch(&self, pid: u32) -> Result<(), LoadError> {
             self.update("watch_pids", &pid.to_ne_bytes(), &[1u8])
+        }
+
+        /// Add a binary PATH to the kernel deny-map (`strict`, Phase 3 A):
+        /// a watched exec of this exact path is -EPERM'd synchronously by
+        /// the LSM hook, before it runs. The key is a fixed 256-byte
+        /// null-padded buffer matching `struct deny_key` in the BPF object
+        /// (the kernel reads bprm->filename into the same shape, so the
+        /// trailing zeros line up for an exact hash match). A path that
+        /// wouldn't fit is rejected rather than silently truncated to a
+        /// different key. (Basename matching is the A+ layer — it needs an
+        /// in-kernel scan the verifier only accepts via bpf_loop.)
+        pub fn set_deny_bin(&self, path: &str) -> Result<(), LoadError> {
+            const DENY_PATH_LEN: usize = 256;
+            let bytes = path.as_bytes();
+            if bytes.is_empty() || bytes.len() >= DENY_PATH_LEN {
+                return Err(LoadError::LoadFailed(format!(
+                    "deny binary path {path:?} must be 1..={} bytes",
+                    DENY_PATH_LEN - 1
+                )));
+            }
+            let mut key = [0u8; DENY_PATH_LEN];
+            key[..bytes.len()].copy_from_slice(bytes);
+            self.update("deny_bins", &key, &[1u8])
         }
 
         /// Clear the PID from BOTH maps in a single sweep. Map

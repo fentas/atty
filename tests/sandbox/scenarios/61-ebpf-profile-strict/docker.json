@@ -1,0 +1,14 @@
+{
+  "_comment": "profile=strict scenario — same kernel requirements as 51 (CAP_BPF + bind mounts + tracefs + host PID ns).",
+  "image": "atty-sandbox:ebpf",
+  "privileged": true,
+  "pid": "host",
+  "cap_add": ["BPF", "SYS_ADMIN", "PERFMON"],
+  "security_opt": ["apparmor=unconfined"],
+  "volumes": [
+    {"src": "/sys/fs/bpf", "dst": "/sys/fs/bpf", "rw": true},
+    {"src": "/sys/kernel/btf", "dst": "/sys/kernel/btf", "rw": false},
+    {"src": "/sys/kernel/security", "dst": "/sys/kernel/security", "rw": false},
+    {"src": "/sys/kernel/tracing", "dst": "/sys/kernel/tracing", "rw": true}
+  ]
+}

@@ -99,6 +99,29 @@ struct {
     __type(value, __u8);
 } watch_pids SEC(".maps");
 
+// deny_bins (security profile `strict`, Phase 3 A) — binary PATHS the
+// daemon marks always-deny in a watched subtree. check_execve reads the
+// exec'd binary's resolved path (bprm->filename) and returns -EPERM
+// SYNCHRONOUSLY (before the exec runs) for a WATCH'd task — true
+// prevention, vs `session`'s reactive post-exec kill. Empty unless
+// profile=strict, so the lookup is a no-op otherwise.
+//
+// A-first matches the FULL path: a single bpf_core_read_str into the key,
+// no loop. In-kernel basename extraction needs a bounded scan + a
+// variable-offset copy that blows the verifier's complexity budget
+// (-E2BIG) when unrolled — that lands in A+ via bpf_loop (alongside the
+// argv read), so basename/substring matching is the documented next layer.
+#define DENY_PATH_LEN 256
+struct deny_key {
+    char path[DENY_PATH_LEN];
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct deny_key);
+    __type(value, __u8);
+} deny_bins SEC(".maps");
+
 // Enforcement config — single-entry array written by userspace at
 // startup / reload. CO-RE doesn't relocate map *values*, so the layout
 // is hand-fixed (matches the Rust writer's byte order: mode, max_depth,
@@ -282,6 +305,34 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
     // Gated on watch_pids by OWN pid (propagated at fork), so this is NOT
     // a system-wide execve firehose — only the marked session subtree.
     if (bpf_map_lookup_elem(&watch_pids, &child_pid)) {
+        const char *fname = NULL;
+        bpf_core_read(&fname, sizeof(fname), &bprm->filename);
+
+        // strict (Phase 3 A): SYNC-block a watched exec whose binary PATH
+        // is in deny_bins, BEFORE it runs (-EPERM). One bounded string read
+        // into the key, then an exact-match lookup — no loop (the verifier
+        // rejects an unrolled basename scan as -E2BIG). deny_bins is empty
+        // unless profile=strict, so this is a no-op lookup otherwise.
+        if (fname) {
+            struct deny_key key = {};
+            bpf_core_read_str(key.path, sizeof(key.path), fname);
+            if (bpf_map_lookup_elem(&deny_bins, &key)) {
+                struct execve_event *e =
+                    bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+                if (e) {
+                    e->kind = EVENT_EXECVE;
+                    e->verdict = VERDICT_BLOCK;
+                    e->pid = child_pid;
+                    e->ppid = parent_pid;
+                    bpf_get_current_comm(e->comm, sizeof(e->comm));
+                    bpf_core_read_str(e->argv0, sizeof(e->argv0), fname);
+                    bpf_ringbuf_submit(e, 0);
+                }
+                return -EPERM;
+            }
+        }
+
+        // Not denied — emit the classify event for the reactive path.
         struct execve_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
             e->kind = EVENT_EXECVE;
@@ -289,8 +340,6 @@ int BPF_PROG(check_execve, struct linux_binprm *bprm)
             e->pid = child_pid;
             e->ppid = parent_pid;
             bpf_get_current_comm(e->comm, sizeof(e->comm));
-            const char *fname = NULL;
-            bpf_core_read(&fname, sizeof(fname), &bprm->filename);
             if (fname)
                 bpf_core_read_str(e->argv0, sizeof(e->argv0), fname);
             else

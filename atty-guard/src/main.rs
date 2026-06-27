@@ -992,6 +992,27 @@ fn main() -> std::io::Result<()> {
                          kernel keeps its one_level default"
                     );
                 }
+                // strict (Phase 3 A): push the configured binary basenames
+                // into the kernel deny-map for synchronous -EPERM. Only
+                // strict populates it — other profiles leave it empty so the
+                // LSM lookup no-ops. A bad name is logged + skipped, not
+                // fatal (the rest of the deny-list still loads).
+                if file_cfg.profile.mode == profile::SecurityProfile::Strict {
+                    let mut denied = 0usize;
+                    for name in &file_cfg.profile.deny_binaries {
+                        match state.set_deny_bin(name) {
+                            Ok(()) => denied += 1,
+                            Err(e) => eprintln!(
+                                "atty-guard: strict deny_binaries: skipping {name:?} — {e}"
+                            ),
+                        }
+                    }
+                    if cli.verbosity >= 1 {
+                        eprintln!(
+                            "atty-guard: strict profile — {denied} binary deny-rule(s) loaded"
+                        );
+                    }
+                }
                 if cli.verbosity >= 1 {
                     eprintln!(
                         "atty-guard: eBPF attached (LSM + execve tracepoint, \

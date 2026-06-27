@@ -217,19 +217,24 @@ budget). Full-corpus *synchronous* prevention is not possible in eBPF — so
 `strict` is an evolving best-effort sync layer **on top of** `session`'s
 reactive fallback, never a replacement for it. `strict` ⊋ `session`.
 
-- **A — binary deny-map (the foundation).** A BPF map of binary
-  basenames/paths the daemon marks always-deny in a watched subtree
-  (populated from the corpus's binary-identifiable subset + operator
-  config). `check_execve` looks it up for a WATCH'd exec → sync `-EPERM`.
+- **A — binary deny-map (the foundation, shipped).** A BPF map of binary
+  **full paths** the daemon marks always-deny in a watched subtree
+  (`[profile] deny_binaries`, populated on startup when `strict`).
+  `check_execve` reads `bprm->filename` into the key and does an exact
+  lookup for a WATCH'd exec → sync `-EPERM`, before the exec runs. One
+  bounded string read, no loop — an unrolled in-kernel *basename* scan
+  blows the verifier's complexity budget (`-E2BIG`), so A matches the full
+  path; basename/substring matching moves to A+ (via `bpf_loop`).
   Everything pattern-shaped still falls through to `session`'s reactive
-  kill. Result: sync **prevention** for the binary-matchable set, reactive
+  kill. Result: sync **prevention** for the exact-path set, reactive
   **detection+kill** for the rest.
-- **A+ — bounded argv match (the evolution).** Read a bounded prefix
-  (~256 B) of argv from `bprm` in `check_execve` and bounded-substring
-  match a *small curated* deny-token set (e.g. `curl…|sh` shapes) → sync
-  `-EPERM`, closing `session`'s reactive race for those shapes. Hard
-  (verifier: arg-page reads + bounded loops), curated (not the full
-  corpus), and lands strictly on top of A.
+- **A+ — `bpf_loop` matching (the evolution).** Use `bpf_loop` (verifies
+  the callback once — no per-iteration state explosion, unlike an unrolled
+  scan) to (1) extract the **basename** so a deny rule catches the binary
+  at any path, and (2) read a bounded prefix (~256 B) of **argv** from
+  `bprm` + bounded-substring match a *small curated* deny-token set (e.g.
+  `curl…|sh` shapes) → sync `-EPERM`, closing `session`'s reactive race
+  for those shapes. Curated (not the full corpus), lands on top of A.
 
 **Honesty contract.** `strict` reports **prevented** (sync, A/A+) vs
 **killed** (reactive, `session` fallback) distinctly — it never claims to
