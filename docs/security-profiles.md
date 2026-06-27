@@ -190,14 +190,57 @@ the use-case matrix below.
    with `--ebpf-mode observe` (or warn/block) + `[profile]`. Sandbox: `58`
    (gap, `prompt`) vs `59` (audit detects) vs `60` (session kills) on the
    same non-proxy chain.
-3. **Phase 3 — `strict`.** Curated Tier-1 atom match in `check_execve` →
-   sync `EPERM`. Sandbox + bench.
+3. **Phase 3 — `strict` (synchronous in-kernel prevention; *evolving*).**
+   See [strict design](#strict-phase-3--synchronous-prevention) — it ships
+   in layers (A → A+ …) because eBPF can't run the full Tier-1 engine in
+   `check_execve`.
 4. **Phase 4 — `lockdown`.** `bpf_send_signal(SIGSTOP)` post-exec for
    WATCH'd ambiguous execs + the fail-closed watchdog + reconciliation.
    Sandbox (incl. daemon-death-leaves-frozen) + bench (freeze latency).
 5. **Phase 5 — `smart` dispatch + comparison.** Wire `decide` to the
    effectors; a sandbox matrix scenario + bench comparing all profiles on
    the same workload (the use-case comparison).
+
+## strict (Phase 3) — synchronous prevention
+
+`session` is *reactive*: the daemon reads `/proc/<pid>/cmdline`, runs the
+full Tier-1 engine (regex + Aho-Corasick over the whole atom corpus), and
+SIGKILLs — but **after** the exec already started (a ms-scale race where a
+payload could act). `strict` adds *synchronous* prevention: `-EPERM` from
+`check_execve` **before** the exec's first instruction.
+
+**The kernel constraint (why `strict` is layered, not a single drop).**
+`check_execve` (LSM `bprm_check_security`) sees `bprm->filename`
+synchronously and TOCTOU-safe, and can deny. It **cannot** run the Tier-1
+engine: no regex, no thousands-of-atoms scan (BPF's bounded instruction
+budget). Full-corpus *synchronous* prevention is not possible in eBPF — so
+`strict` is an evolving best-effort sync layer **on top of** `session`'s
+reactive fallback, never a replacement for it. `strict` ⊋ `session`.
+
+- **A — binary deny-map (the foundation).** A BPF map of binary
+  basenames/paths the daemon marks always-deny in a watched subtree
+  (populated from the corpus's binary-identifiable subset + operator
+  config). `check_execve` looks it up for a WATCH'd exec → sync `-EPERM`.
+  Everything pattern-shaped still falls through to `session`'s reactive
+  kill. Result: sync **prevention** for the binary-matchable set, reactive
+  **detection+kill** for the rest.
+- **A+ — bounded argv match (the evolution).** Read a bounded prefix
+  (~256 B) of argv from `bprm` in `check_execve` and bounded-substring
+  match a *small curated* deny-token set (e.g. `curl…|sh` shapes) → sync
+  `-EPERM`, closing `session`'s reactive race for those shapes. Hard
+  (verifier: arg-page reads + bounded loops), curated (not the full
+  corpus), and lands strictly on top of A.
+
+**Honesty contract.** `strict` reports **prevented** (sync, A/A+) vs
+**killed** (reactive, `session` fallback) distinctly — it never claims to
+synchronously block what it actually catches reactively. The layering is
+expected to keep evolving (A → A+ → …) as more shapes become
+kernel-matchable; the guarantee label is always per-rung, never blanket.
+
+Sandbox: `61-ebpf-profile-strict` (A: a watched flagged **binary** is
+`-EPERM`'d **before** it runs — rc 126 — vs `60`'s kill-after) and, with
+A+, a watched `curl|sh`-shape blocked pre-exec. Bench: a `strict` column
+in `57-ebpf-overhead` (the deny-map lookup, then the argv read).
 
 ## Open questions
 
