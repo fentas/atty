@@ -1175,6 +1175,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             _ = D.dispatchAction(&runtimes, &ctx, act);
                             swallow_after_binding = true;
                         },
+                        .security_guard_cycle_profile => {
+                            // security_guard cycles the live daemon profile
+                            // + renders the result/hint to scrollback.
+                            // Swallow regardless of consumption so a bare
+                            // `p` never echoes when the module is absent.
+                            _ = D.dispatchAction(&runtimes, &ctx, act);
+                            swallow_after_binding = true;
+                        },
                         .llm_exec_toggle_help => {
                             // Hand to the LLM module first (it has
                             // AI-mode-only help with current model +

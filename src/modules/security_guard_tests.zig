@@ -11,6 +11,19 @@ test {
     _ = @import("security_guard/warn_subscriber.zig");
 }
 
+test "nextProfile cycles the rungs and wraps" {
+    try testing.expectEqualStrings("audit", mod.nextProfile("prompt"));
+    try testing.expectEqualStrings("session", mod.nextProfile("audit"));
+    try testing.expectEqualStrings("strict", mod.nextProfile("session"));
+    try testing.expectEqualStrings("lockdown", mod.nextProfile("strict"));
+    try testing.expectEqualStrings("smart", mod.nextProfile("lockdown"));
+    // wrap
+    try testing.expectEqualStrings("prompt", mod.nextProfile("smart"));
+    // unknown / daemon-unreachable → start at the first rung
+    try testing.expectEqualStrings("prompt", mod.nextProfile(null));
+    try testing.expectEqualStrings("prompt", mod.nextProfile("bogus"));
+}
+
 const Sink = struct {
     buf: std.ArrayList(u8) = .empty,
 
