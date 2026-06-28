@@ -31,14 +31,19 @@ type "echo unique-1234\r"
 wait_for "unique-1234"
 sleep 200
 
-# Type a prefix; let the ghost render.
+# Type a prefix; wait for the async ghost worker to paint the completion:
+# "echo unique-1234" already shows once (the record command), so the 2nd
+# occurrence IS the ghost (wait_stable can settle before the worker paints).
 type "echo u"
-sleep 400
+wait_for_count "echo unique-1234" 2
+wait_stable 150
 snapshot ghost_visible
 
-# Right-arrow should be bound to ghost_accept.
+# Right-arrow should be bound to ghost_accept. The accept overwrites the dim
+# ghost with a real (un-dim) echo — a byte repaint wait_stable catches; the
+# grid text is unchanged (only the SGR), so a count wait can't see it.
 key Right
-sleep 300
+wait_stable 250
 snapshot accepted
 
 key Enter

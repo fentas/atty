@@ -13,6 +13,10 @@
 //!   key Enter|Tab|Up|Down|Left|Right|Escape|Backspace|^C|^D|^L|^[
 //!   sleep <ms>
 //!   wait_for "substring"        # block until grid contains substring (timeout_ms)
+//!   wait_for_count "substring" N  # block until substring appears >= N times
+//!                               # (for an async paint whose text also exists
+//!                               # elsewhere — e.g. a ghost completing a
+//!                               # command still shown in scrollback)
 //!   wait_stable [quiet_ms]      # block until output is quiet for quiet_ms
 //!                               # (default 150), capped at timeout_ms — a
 //!                               # deterministic alternative to sleep before
@@ -38,6 +42,7 @@ pub const Kind = enum {
     key,
     sleep,
     wait_for,
+    wait_for_count,
     wait_stable,
     expect_substr,
     expect_no_substr,
@@ -137,6 +142,15 @@ pub fn parse(allocator: Allocator, source: []const u8) ParseError!Script {
             try cmds.append(allocator, .{ .kind = .sleep, .line = line_no, .int_arg = try parseInt(tail) });
         } else if (eq(head, "wait_for")) {
             try cmds.append(allocator, .{ .kind = .wait_for, .line = line_no, .str_arg = try parseString(tail) });
+        } else if (eq(head, "wait_for_count")) {
+            // wait_for_count "substr" N — block until substr appears ≥ N times.
+            // Deterministic wait for an async paint whose text also exists
+            // elsewhere on screen (e.g. a ghost completing a command in
+            // scrollback): the count rises only when the new copy lands.
+            const close = std.mem.lastIndexOfScalar(u8, tail, '"') orelse return ParseError.BadString;
+            const needle = try parseString(tail[0 .. close + 1]);
+            const n = try parseInt(trim(tail[close + 1 ..]));
+            try cmds.append(allocator, .{ .kind = .wait_for_count, .line = line_no, .str_arg = needle, .int_arg = n });
         } else if (eq(head, "wait_stable")) {
             // Pump until the screen is quiet for `quiet_ms` (default 150) —
             // a deterministic alternative to `sleep` before a snapshot.

@@ -55,6 +55,19 @@ test "DSL parses wait_stable (default + explicit quiet_ms)" {
     try std.testing.expectEqual(@as(i64, 250), s.cmds[1].int_arg);
 }
 
+test "DSL parses wait_for_count (quoted substr with spaces + count)" {
+    const src =
+        \\wait_for_count "echo init-bash x" 2
+        \\
+    ;
+    var s = try parse(std.testing.allocator, src);
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 1), s.cmds.len);
+    try std.testing.expectEqual(Kind.wait_for_count, s.cmds[0].kind);
+    try std.testing.expectEqualStrings("echo init-bash x", s.cmds[0].str_arg);
+    try std.testing.expectEqual(@as(i64, 2), s.cmds[0].int_arg);
+}
+
 test "DSL string escapes" {
     const src = "type \"a\\tb\\nc\\x41\"\n";
     var s = try parse(std.testing.allocator, src);

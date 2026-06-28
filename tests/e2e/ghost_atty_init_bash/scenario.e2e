@@ -35,9 +35,14 @@ type "echo init-bash-record-99999\r"
 wait_for "init-bash-record-99999"
 sleep 300
 
-# Type a prefix; ghost overlay should paint.
+# Type a prefix; ghost overlay should paint. Wait for the async ghost worker
+# to actually paint the completion: "echo init-bash-record-99999" already
+# shows once (the record command), so the 2nd occurrence IS the ghost.
+# wait_stable alone can settle in the byte-quiet gap before the worker paints
+# (the observed CI flake).
 type "echo init-bash-r"
-sleep 500
+wait_for_count "echo init-bash-record-99999" 2
+wait_stable 150
 snapshot ghost_visible
 
 # Clear the ghost + line; verify the file is on disk too.
@@ -47,7 +52,7 @@ snapshot ghost_visible
 key Enter
 sleep 200
 type "clear && cat /tmp/atty-e2e-ghost-atty-init-bash\r"
-sleep 400
+wait_stable 250
 snapshot history_written
 
 type "exit\r"
