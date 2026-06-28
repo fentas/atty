@@ -6,6 +6,7 @@ const std = @import("std");
 const atty = @import("atty");
 const uds = @import("uds.zig");
 const theme = @import("theme.zig");
+const i18n = @import("i18n.zig");
 
 const reset = atty.style.reset;
 
@@ -20,25 +21,26 @@ pub fn renderFleet(buf: []u8, instances: ?[]const uds.Instance, cols: u16, rows:
 
 fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void {
     const t = theme.active;
+    const s = i18n.active;
     const compact = cols < compact_cols;
     try w.writeAll("\x1b[2J\x1b[H");
     if (compact) {
         try w.print("{f}Fleet{s}\r\n\r\n", .{ t.title, reset });
     } else {
-        try w.print("{f}Fleet{s} \u{2014} atty sessions\r\n\r\n", .{ t.title, reset });
+        try w.print("{f}Fleet{s}{s}\r\n\r\n", .{ t.title, reset, s.suffix_sessions });
     }
 
     if (instances == null) {
         // null = the round-trip failed for ANY reason (down, unreachable,
         // timeout, malformed) — say "not reachable", not "not running".
-        try w.print("  {f}atty-guard not reachable{s}\r\n", .{ t.danger, reset });
-        try w.writeAll("  is it running?  sudo systemctl start atty-guard\r\n");
+        try w.print("  {f}{s}{s}\r\n", .{ t.danger, s.not_reachable, reset });
+        try w.print("  {s}\r\n", .{s.fix_daemon_unreachable});
         return;
     }
     const list = instances.?;
     if (list.len == 0) {
-        try w.print("  {f}no atty sessions reporting{s}\r\n", .{ t.muted, reset });
-        try w.writeAll("  (enable the metrics_exporter module — see docs/dashboard.md)\r\n");
+        try w.print("  {f}{s}{s}\r\n", .{ t.muted, s.no_sessions, reset });
+        try w.print("  {s}\r\n", .{s.fleet_enable_hint});
         return;
     }
 
@@ -62,8 +64,8 @@ fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void 
         try w.writeAll("\r\n");
     }
 
-    const plural: []const u8 = if (list.len == 1) "" else "s";
-    try w.print("\r\n  {d} terminal{s}\r\n", .{ list.len, plural });
+    const term = if (list.len == 1) s.fleet_terminals_one else s.fleet_terminals_many;
+    try w.print("\r\n  {d} {s}\r\n", .{ list.len, term });
 }
 
 /// Columns available for the cwd after the pid/shell/cmds prefix, leaving

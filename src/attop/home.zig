@@ -7,6 +7,7 @@ const std = @import("std");
 const atty = @import("atty");
 const uds = @import("uds.zig");
 const theme = @import("theme.zig");
+const i18n = @import("i18n.zig");
 
 const reset = atty.style.reset;
 
@@ -31,43 +32,44 @@ pub fn renderHome(buf: []u8, m: ?uds.Metrics, cols: u16, rows: u16) []const u8 {
 fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     const t = theme.active;
     const g = t.glyph;
+    const s = i18n.active;
     const compact = cols < compact_cols;
     try w.writeAll("\x1b[2J\x1b[H"); // clear + home
 
     if (compact) {
         try w.print("{f}atty{s}\r\n\r\n", .{ t.title, reset });
     } else {
-        try w.print("{f}atty{s} — dashboard\r\n\r\n", .{ t.title, reset });
+        try w.print("{f}atty{s}{s}\r\n\r\n", .{ t.title, reset, s.suffix_dashboard });
     }
 
     if (m == null) {
-        try w.print("  {f}atty-guard not running{s}\r\n", .{ t.danger, reset });
-        try w.writeAll("  start it:  sudo systemctl start atty-guard\r\n");
+        try w.print("  {f}{s}{s}\r\n", .{ t.danger, s.not_running, reset });
+        try w.print("  {s}\r\n", .{s.fix_start_daemon});
         return;
     }
     const metrics = m.?;
 
     if (isProtected(metrics)) {
-        try w.print("  {f}{s} Protected{s}\r\n\r\n", .{ t.ok, g.protected, reset });
+        try w.print("  {f}{s} {s}{s}\r\n\r\n", .{ t.ok, g.protected, s.protected, reset });
     } else {
-        try w.print("  {f}{s} Unguarded{s}\r\n\r\n", .{ t.warn, g.unguarded, reset });
+        try w.print("  {f}{s} {s}{s}\r\n\r\n", .{ t.warn, g.unguarded, s.unguarded, reset });
     }
 
     // AI/Suggest aren't wired into the metrics yet — show an honest
     // em-dash rather than faking activity.
     const prof = if (metrics.guard.profile.len > 0) metrics.guard.profile else "\u{2014}";
     const ebpf = if (metrics.guard.ebpf.len > 0) metrics.guard.ebpf else "\u{2014}";
-    try w.print("  {s}  Guard     {s}     kernel: {s}\r\n", .{ g.shield, prof, ebpf });
+    try w.print("  {s}  Guard     {s}     {s}: {s}\r\n", .{ g.shield, prof, s.word_kernel, ebpf });
     try w.print("  {s}  AI        \u{2014}\r\n", .{g.ai});
     try w.print("  {s}  Suggest   \u{2014}\r\n\r\n", .{g.suggest});
 
     try w.print(
-        "  {f}Today{s}    {d} commands {s} {d} threats blocked\r\n",
-        .{ t.muted, reset, metrics.aggregate.commands, g.bullet, metrics.aggregate.guard_block },
+        "  {f}{s}{s}    {d} {s} {s} {d} {s}\r\n",
+        .{ t.muted, s.today, reset, metrics.aggregate.commands, s.word_commands, g.bullet, metrics.aggregate.guard_block, s.word_threats_blocked },
     );
 
-    const plural: []const u8 = if (metrics.instances == 1) "" else "s";
-    try w.print("  {d} terminal{s} active\r\n", .{ metrics.instances, plural });
+    const term = if (metrics.instances == 1) s.terminals_active_one else s.terminals_active_many;
+    try w.print("  {d} {s}\r\n", .{ metrics.instances, term });
 }
 
 test {
