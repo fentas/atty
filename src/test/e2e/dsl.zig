@@ -13,6 +13,10 @@
 //!   key Enter|Tab|Up|Down|Left|Right|Escape|Backspace|^C|^D|^L|^[
 //!   sleep <ms>
 //!   wait_for "substring"        # block until grid contains substring (timeout_ms)
+//!   wait_stable [quiet_ms]      # block until output is quiet for quiet_ms
+//!                               # (default 150), capped at timeout_ms — a
+//!                               # deterministic alternative to sleep before
+//!                               # a snapshot
 //!   expect_substr "substring"
 //!   expect_no_substr "substring"
 //!   snapshot <name>             # name must be [A-Za-z0-9_-]+
