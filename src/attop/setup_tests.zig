@@ -49,6 +49,19 @@ test "setup shell row → wired ✓; not wired → ✗ + the wire fix" {
     try testing.expect(std.mem.indexOf(u8, zsh, "atty init bash") == null);
 }
 
+test "setup lists daemon compiled features; empty → minimal build" {
+    var buf: [4096]u8 = undefined;
+    const m = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "attached", .features = &.{ "ebpf", "osv-live" } }, .instances = 1 };
+    const out = setup.renderSetup(&buf, m, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "features") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ebpf, osv-live") != null);
+
+    var buf2: [4096]u8 = undefined;
+    const m2 = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "off" }, .instances = 1 }; // no features
+    const out2 = setup.renderSetup(&buf2, m2, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out2, "minimal build") != null);
+}
+
 test "renderWire confirm shows the block + paths + prompt; done/failed messages" {
     var buf: [4096]u8 = undefined;
     const block = "# >>> atty >>>\nexport ATTY_SOURCE=\"/h/.config/atty/init.bash\"\n# <<< atty <<<\n";

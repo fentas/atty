@@ -29,6 +29,9 @@ pub const Guard = struct {
     atoms_version: []const u8 = "",
     deny_path: u32 = 0,
     deny_basename: u32 = 0,
+    /// Cargo features compiled into the daemon (ebpf/tier2-onnx/osv-live/
+    /// atoms-fetch). Defaulted so an older daemon without the field parses.
+    features: []const []const u8 = &.{},
 };
 
 /// The get_metrics reply body (the "type" tag is ignored on parse).

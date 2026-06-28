@@ -671,6 +671,26 @@ fn remove_socket_if_safe(path: &std::path::Path) -> Result<(), SocketRemoveError
     std::fs::remove_file(&resolved).map_err(SocketRemoveError::Io)
 }
 
+/// The Cargo features compiled into this daemon — surfaced in the guard
+/// posture so the dashboard can show what's available (eBPF / SLM / OSV / atom
+/// fetch) rather than inferring it from behaviour. Order = install relevance.
+fn enabled_features() -> Vec<String> {
+    let mut f = Vec::new();
+    if cfg!(feature = "ebpf") {
+        f.push("ebpf".to_string());
+    }
+    if cfg!(feature = "tier2-onnx") {
+        f.push("tier2-onnx".to_string());
+    }
+    if cfg!(feature = "osv-live") {
+        f.push("osv-live".to_string());
+    }
+    if cfg!(feature = "atoms-fetch") {
+        f.push("atoms-fetch".to_string());
+    }
+    f
+}
+
 fn main() -> std::io::Result<()> {
     let mut cli = Cli::parse();
 
@@ -1246,6 +1266,7 @@ fn main() -> std::io::Result<()> {
             } else {
                 0
             },
+            features: enabled_features(),
         }
     };
 

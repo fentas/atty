@@ -99,6 +99,20 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
             try row(w, t, .neutral, "enforce", metrics.guard.enforcement, "");
         }
 
+        // What the daemon was BUILT with (not just configured) — attop can't
+        // see this any other way. Empty = the default minimal build.
+        if (metrics.guard.features.len > 0) {
+            var fbuf: [160]u8 = undefined;
+            var fw = std.Io.Writer.fixed(&fbuf);
+            for (metrics.guard.features, 0..) |feat, i| {
+                if (i > 0) fw.writeAll(", ") catch {};
+                fw.writeAll(feat) catch {};
+            }
+            try row(w, t, .ok, "features", fbuf[0..fw.end], "");
+        } else {
+            try row(w, t, .neutral, "features", s.st_minimal, s.fix_ebpf_install);
+        }
+
         if (metrics.instances > 0) {
             var nbuf: [48]u8 = undefined;
             const word = if (metrics.instances == 1) s.session_reporting_one else s.session_reporting_many;

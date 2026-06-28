@@ -42,7 +42,7 @@ const widths = [_]u16{ 120, 80, 70 };
 fn homeMetrics(profile: []const u8) uds.Metrics {
     return .{
         .aggregate = .{ .commands = 312, .guard_block = 3 },
-        .guard = .{ .profile = profile, .ebpf = "attached", .enforcement = "one_level" },
+        .guard = .{ .profile = profile, .ebpf = "attached", .enforcement = "one_level", .features = &.{ "ebpf", "tier2-onnx" } },
         .instances = 5,
     };
 }
@@ -114,7 +114,7 @@ test "Setup renders the checklist across widths (up, neutral, down)" {
     for (widths) |cols| {
         const up = try screen(testing.allocator, setup.renderSetup(&buf, homeMetrics("strict"), .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, cols, 40), 40, cols);
         defer testing.allocator.free(up);
-        try expectOnScreen(up, &.{ "Setup", "atty-guard", "running", "strict", "enforce", "one_level", "shell", "wired", "session" });
+        try expectOnScreen(up, &.{ "Setup", "atty-guard", "running", "strict", "enforce", "one_level", "features", "tier2-onnx", "shell", "wired", "session" });
 
         // Neutral rows + their fix lines must render intact — the long eBPF
         // install fix is the wrap-prone one at 70.
