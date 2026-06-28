@@ -7,6 +7,7 @@ const atty = @import("atty");
 const uds = @import("uds.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
+const panel = @import("panel.zig");
 
 const reset = atty.style.reset;
 
@@ -15,15 +16,32 @@ pub const compact_cols: u16 = 80;
 pub fn renderFleet(buf: []u8, instances: ?[]const uds.Instance, cols: u16, rows: u16) []const u8 {
     _ = rows;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, instances, cols) catch {};
+    draw(&w, instances, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void {
+/// Fleet panel — live atty sessions. Read-only in Phase 1; selection +
+/// scrolling land with the List widget.
+pub const Panel = struct {
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator) !Runtime {
+        return .{};
+    }
+    pub fn title() []const u8 {
+        return "Fleet";
+    }
+    pub fn navKey() u8 {
+        return 'f';
+    }
+    pub fn render(_: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
+        try draw(w, ctx.instances, ctx.cols);
+    }
+};
+
+fn draw(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void {
     const t = theme.active;
     const s = i18n.active;
     const compact = cols < compact_cols;
-    try w.writeAll("\x1b[2J\x1b[H");
     if (compact) {
         try w.print("{f}Fleet{s}\r\n\r\n", .{ t.title, reset });
     } else {

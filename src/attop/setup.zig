@@ -11,6 +11,10 @@ const uds = @import("uds.zig");
 const theme = @import("theme.zig");
 const home = @import("home.zig");
 const i18n = @import("i18n.zig");
+const panel = @import("panel.zig");
+const caps = @import("caps.zig");
+const rc_writer = @import("rc_writer.zig");
+const rc_apply = @import("rc_apply.zig");
 
 const reset = atty.style.reset;
 
@@ -18,26 +22,21 @@ pub const compact_cols: u16 = 80;
 
 const Status = enum { ok, bad, neutral };
 
-/// Host-side capabilities attop detects locally (not from the daemon) — see
-/// caps.zig. Bundled so the render signature stays small as the wizard grows.
-pub const Host = struct {
-    atty_on_path: bool = false,
-    under_atty: bool = false,
-    shell_integrated: bool = false,
-    shell_name: []const u8 = "bash",
-};
+/// Host-side capabilities attop detects locally (not from the daemon).
+/// Canonical definition lives in the panel contract; re-exported here so
+/// existing call sites (`renderSetup`, setup_tests) keep `setup.Host`.
+pub const Host = panel.Host;
 
 pub fn renderSetup(buf: []u8, m: ?uds.Metrics, host: Host, cols: u16, rows: u16) []const u8 {
     _ = rows;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, m, host, cols) catch {};
+    draw(&w, m, host, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
+fn draw(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
     const t = theme.active;
     const s = i18n.active;
-    try w.writeAll("\x1b[2J\x1b[H");
     if (cols < compact_cols) {
         try w.print("{f}Setup{s}\r\n\r\n", .{ t.title, reset });
     } else {
@@ -160,7 +159,6 @@ pub fn renderWire(buf: []u8, state: WireState, init_path: []const u8, rc_path: [
 fn renderWireInner(w: *std.Io.Writer, state: WireState, init_path: []const u8, rc_path: []const u8, block: []const u8) !void {
     const t = theme.active;
     const s = i18n.active;
-    try w.writeAll("\x1b[2J\x1b[H");
     try w.print("{f}Setup{s}{s}\r\n\r\n", .{ t.title, reset, s.suffix_health });
     switch (state) {
         .confirm => {
@@ -177,6 +175,128 @@ fn renderWireInner(w: *std.Io.Writer, state: WireState, init_path: []const u8, r
         .done => try w.print("  {f}{s} {s}{s}\r\n", .{ t.ok, t.glyph.ok_mark, s.wire_done, reset }),
         .failed => try w.print("  {f}{s} {s}{s}\r\n", .{ t.danger, t.glyph.bad_mark, s.wire_failed, reset }),
     }
+}
+
+/// Setup panel — the health checklist + the consented shell-integration
+/// write. The one panel that takes a mutating action ([w] → rc write);
+/// it owns the wire state machine that used to live in main.zig.
+pub const Panel = struct {
+    pub const Runtime = struct {
+        /// Non-null while the consented write is being confirmed / shown.
+        wire: ?WireState = null,
+        /// Post-write shell-integration result. null → use the host
+        /// snapshot; set after a successful [w] so the checklist + the [w]
+        /// gate reflect the new state without a host-level re-detect.
+        wired: ?bool = null,
+    };
+
+    pub fn attach(_: std.mem.Allocator) !Runtime {
+        return .{};
+    }
+    pub fn title() []const u8 {
+        return "Setup";
+    }
+    pub fn navKey() u8 {
+        return 's';
+    }
+
+    /// Grab focus at launch when the stack isn't ready — atty not on PATH
+    /// or the daemon unreachable. Mirrors main.zig's old landing logic, now
+    /// owned by the panel that fixes those problems.
+    pub fn wantsFocusAtStart(ctx: *panel.Ctx) bool {
+        return !ctx.host.atty_on_path or ctx.metrics == null;
+    }
+
+    pub fn render(rt: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
+        if (rt.wire) |ws| {
+            // Build the exact block + paths in the per-frame arena so the
+            // confirm view shows precisely what lands on disk.
+            if (wirePaths(ctx.arena)) |wp| {
+                const block = rc_writer.buildBlock(ctx.arena, wp.init_path, wp.shell) catch "";
+                try renderWireInner(w, ws, wp.init_path, wp.rc_path, block);
+            } else {
+                try renderWireInner(w, ws, "", "", "");
+            }
+            return;
+        }
+        var host = ctx.host;
+        host.shell_integrated = rt.wired orelse ctx.host.shell_integrated;
+        try draw(w, ctx.metrics, host, ctx.cols);
+    }
+
+    pub fn onKey(rt: *Runtime, ctx: *panel.Ctx, k: panel.Key) !panel.Action {
+        if (rt.wire) |ws| {
+            switch (ws) {
+                // The consent gate: ONLY 'y' writes; anything else cancels.
+                .confirm => {
+                    const yes = switch (k) {
+                        .char => |c| c == 'y' or c == 'Y',
+                        else => false,
+                    };
+                    if (yes) {
+                        rt.wire = if (doWire()) .done else .failed;
+                        rt.wired = caps.shellIntegrated(); // re-detect post-write
+                    } else rt.wire = null;
+                },
+                // Any key dismisses the result view.
+                .done, .failed => rt.wire = null,
+            }
+            return .handled;
+        }
+        // [w] opens the consent view — only when atty is installed + the
+        // shell isn't already wired (else the write would point at an atty
+        // that isn't on PATH, or redo existing work).
+        const integrated = rt.wired orelse ctx.host.shell_integrated;
+        const is_w = switch (k) {
+            .char => |c| c == 'w',
+            else => false,
+        };
+        if (is_w and ctx.host.atty_on_path and !integrated) {
+            rt.wire = .confirm;
+            return .handled;
+        }
+        return .pass;
+    }
+
+    pub fn footerHint(rt: *Runtime, ctx: *panel.Ctx) ?[]const u8 {
+        if (rt.wire) |ws| return switch (ws) {
+            .confirm => "[y] write   any other key cancels",
+            .done, .failed => "any key dismisses",
+        };
+        const integrated = rt.wired orelse ctx.host.shell_integrated;
+        if (ctx.host.atty_on_path and !integrated) return "[w] wire atty into your shell rc";
+        return null;
+    }
+};
+
+const WirePaths = struct {
+    config_dir: []const u8,
+    init_path: []const u8,
+    rc_path: []const u8,
+    shell: []const u8,
+};
+
+/// Shell-integration paths from $HOME + the detected shell; strings
+/// allocated in `a`. null when $HOME is unset (nothing to write into).
+fn wirePaths(a: std.mem.Allocator) ?WirePaths {
+    const home_dir = std.mem.span(std.c.getenv("HOME") orelse return null);
+    const shell = caps.shellName();
+    const config_dir = std.fmt.allocPrint(a, "{s}/.config/atty", .{home_dir}) catch return null;
+    const init_path = std.fmt.allocPrint(a, "{s}/init.{s}", .{ config_dir, shell }) catch return null;
+    var rcbuf: [4096]u8 = undefined;
+    const rc = caps.rcPath(&rcbuf) orelse return null;
+    const rc_path = a.dupe(u8, rc) catch return null;
+    return .{ .config_dir = config_dir, .init_path = init_path, .rc_path = rc_path, .shell = shell };
+}
+
+/// Perform the consented write in its own arena. true on success.
+fn doWire() bool {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const wp = wirePaths(a) orelse return false;
+    rc_apply.wireShell(a, wp.config_dir, wp.shell, wp.rc_path) catch return false;
+    return true;
 }
 
 fn row(w: *std.Io.Writer, t: theme.Theme, st: Status, label: []const u8, status_text: []const u8, fix: []const u8) !void {

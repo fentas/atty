@@ -1,42 +1,55 @@
 //! attop — the atty dashboard.
 //!
-//! A standalone TUI (the "Grafana" of atty) that reads the atty-guard
-//! metrics API and answers, at a glance: am I protected, what is atty
-//! doing for me, is everything healthy. It is NOT part of the hot-path
-//! proxy — it reuses the `atty` module's style/ansi primitives but runs as
-//! its own binary, talking to the daemon over the UDS. See
-//! docs/dashboard.md for the design.
+//! A standalone interactive TUI (the "Grafana" of atty) that reads the
+//! atty-guard metrics API and answers, at a glance: am I protected, what
+//! is atty doing for me, is everything healthy. It is NOT part of the
+//! hot-path proxy — it reuses the `atty` module's style/ansi primitives but
+//! runs as its own binary, talking to the daemon over the UDS. See
+//! docs/dashboard.md.
 //!
-//! `main` drives the live loop: poll get_metrics on a cadence, render the
-//! Home screen, handle keys, and restore the terminal on every exit path.
+//! The UI is composed Suckless-style from a comptime tuple of PANELS
+//! (config.zig → `panels`), walked by `PanelHost` (panel_host.zig) — the
+//! dashboard analog of the proxy's modules + `Dispatcher`. `main` drives
+//! the live loop: fetch daemon data on a cadence + cache it, render the
+//! focused panel on every keystroke (instant), route keys (focus nav +
+//! the focused panel's `onKey`), and restore the terminal on every exit.
 
 const std = @import("std");
 const atty = @import("atty");
 const term = @import("term.zig");
 const uds = @import("uds.zig");
-const home = @import("home.zig");
-const guard = @import("guard.zig");
-const fleet = @import("fleet.zig");
-const setup = @import("setup.zig");
-const help = @import("help.zig");
 const caps = @import("caps.zig");
-const rc_writer = @import("rc_writer.zig");
-const rc_apply = @import("rc_apply.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
+const panel = @import("panel.zig");
+const key = @import("key.zig");
+const config = @import("config.zig");
+const PanelHost = @import("panel_host.zig").PanelHost;
 const posix = std.posix;
 
 // Force-analyze the atty-module reuse so the cross-binary import wiring
-// compiles (home.zig consumes atty.style).
+// compiles (the panels consume atty.style).
 comptime {
     _ = atty.Style;
     _ = atty.ansi;
 }
 
-/// Refresh cadence: poll stdin this long; on timeout, re-fetch + repaint.
+/// The dashboard, specialised on the configured panel tuple.
+const Host = PanelHost(config.panels);
+
+/// Re-fetch daemon data this often (poll timeout). Rendering happens on
+/// every keystroke regardless, off the cached data — so interactivity is
+/// instant and only the live metrics lag by at most one tick.
 const refresh_ms: i32 = 1500;
-/// Per-request budget for the get_metrics round-trip (off the UI tempo).
+/// Per-request budget for a UDS round-trip (kept off the UI tempo).
 const fetch_timeout_ms: u32 = 200;
+
+/// Synchronized-output (DECSET 2026): brackets a frame so a supporting
+/// terminal (Ghostty, kitty, foot, WezTerm) swaps it atomically — no
+/// clear-then-repaint flicker even though we render on every keystroke.
+/// Terminals that don't grok it ignore the markers harmlessly.
+const begin_sync = "\x1b[?2026h";
+const end_sync = "\x1b[?2026l";
 
 pub fn main() void {
     // attop is a full-screen TUI — it needs a real terminal. Without one
@@ -51,35 +64,105 @@ pub fn main() void {
     runLoop();
 }
 
+/// Mutable dashboard state for one run. Holds the panel runtimes, the
+/// cached daemon snapshot, focus, and the frame buffer.
+const App = struct {
+    rts: Host.Runtimes,
+    focus: usize = 0,
+    host: panel.Host,
+    sock: []const u8,
+    sz: term.Size,
+    out: i32,
+    /// Owns the current daemon snapshot; reset + refilled by `refetch`.
+    fetch_arena: std.heap.ArenaAllocator,
+    cur_metrics: ?uds.Metrics = null,
+    cur_instances: ?[]const uds.Instance = null,
+    framebuf: [65536]u8 = undefined,
+
+    fn ctx(self: *App, frame_arena: std.mem.Allocator, focused: bool) panel.Ctx {
+        return .{
+            .metrics = self.cur_metrics,
+            .instances = self.cur_instances,
+            .host = self.host,
+            .cols = self.sz.cols,
+            .rows = self.sz.rows,
+            .focused = focused,
+            .arena = frame_arena,
+        };
+    }
+
+    /// Re-poll the daemon. Resets the snapshot arena first; the parsed
+    /// values live in it until the next refetch (callers render between
+    /// fetches, so the cache stays valid).
+    fn refetch(self: *App) void {
+        _ = self.fetch_arena.reset(.retain_capacity);
+        const a = self.fetch_arena.allocator();
+        self.cur_metrics = metricsOf(uds.fetch(a, self.sock, fetch_timeout_ms));
+        self.cur_instances = instancesOf(uds.listInstances(a, self.sock, fetch_timeout_ms));
+    }
+
+    /// Paint a full frame (chrome + focused panel) into framebuf and flush.
+    fn render(self: *App) void {
+        var frame_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer frame_arena.deinit();
+        var w = std.Io.Writer.fixed(&self.framebuf);
+        self.paint(&w, frame_arena.allocator()) catch {};
+        const bytes = self.framebuf[0..w.end];
+        _ = std.c.write(self.out, bytes.ptr, bytes.len);
+    }
+
+    fn paint(self: *App, w: *std.Io.Writer, frame_arena: std.mem.Allocator) !void {
+        const t = theme.active;
+        try w.writeAll(begin_sync);
+        try w.writeAll("\x1b[2J\x1b[H");
+
+        // Tab bar: every panel as `[<key>]<title>`, the focused one in
+        // reverse video so it reads as "you are here" regardless of theme.
+        var i: usize = 0;
+        while (i < Host.count) : (i += 1) {
+            const title = Host.titleAt(i);
+            const nk = Host.navKeyAt(i);
+            if (i == self.focus) {
+                try w.print(" \x1b[7m [{c}]{s} \x1b[27m", .{ nk, title });
+            } else {
+                try w.print(" {f}[{c}]{s}{s}", .{ t.muted, nk, title, atty.style.reset });
+            }
+        }
+        try w.writeAll("\r\n\r\n");
+
+        // Focused panel content.
+        var pctx = self.ctx(frame_arena, true);
+        try Host.renderAt(&self.rts, &pctx, self.focus, w);
+
+        // Footer: the focused panel's own hint (if any) + the global legend.
+        try w.writeAll("\r\n");
+        if (Host.footerHintAt(&self.rts, &pctx, self.focus)) |hint| {
+            try w.print("  {f}{s}{s}\r\n", .{ t.muted, hint, atty.style.reset });
+        }
+        try w.print("  {f}Tab/\u{2190}\u{2192} switch \u{b7} q quit{s}\r\n", .{ t.muted, atty.style.reset });
+        try w.writeAll(end_sync);
+    }
+};
+
 fn runLoop() void {
-    // Resolve the palette/glyph set + locale once. The renders read
-    // theme.active / i18n.active.
+    // Resolve the palette/glyph set + locale once; panels read the globals.
     theme.active = theme.resolve();
     i18n.active = i18n.resolve();
     const out = posix.STDOUT_FILENO;
-    // Raw mode on stdin. If stdin isn't a tty (e.g. `echo x | attop`),
-    // say so instead of exiting silently — the stdout-tty guard alone
-    // wouldn't have caught this.
+
     var raw = term.RawMode.enter(posix.STDIN_FILENO) catch {
         const msg = "attop needs an interactive terminal (stdin is not a TTY)\n";
         _ = std.c.write(posix.STDERR_FILENO, msg.ptr, msg.len);
         return;
     };
     defer raw.deinit();
-    // Alt-screen + hide cursor; the defer restores on EVERY exit path
-    // (quit key, EOF, error), so the user's shell is never left wedged.
     _ = std.c.write(out, term.enter_screen.ptr, term.enter_screen.len);
     defer _ = std.c.write(out, term.exit_screen.ptr, term.exit_screen.len);
     term.installWinch();
 
-    // Self-pipe: SIGTERM/SIGHUP/SIGINT wake the loop so it returns on its
-    // normal path and the teardown defers run (no wedged terminal on kill /
-    // terminal-close). Best-effort — if the pipe can't be made, we just run
-    // without the trap.
+    // Self-pipe so terminating signals wake the loop → it returns on its
+    // normal path and the teardown defers run (no wedged terminal).
     var sigpipe: [2]c_int = undefined;
-    // NONBLOCK so the signal handler's write can never block (a full pipe
-    // just drops the byte — one wake suffices); CLOEXEC for hygiene.
-    // Mirrors the proxy's own signal self-pipe (proxy.zig).
     const have_sigpipe = std.c.pipe2(&sigpipe, .{ .CLOEXEC = true, .NONBLOCK = true }) == 0;
     defer if (have_sigpipe) {
         _ = std.c.close(sigpipe[0]);
@@ -88,123 +171,111 @@ fn runLoop() void {
     const quit_r: i32 = if (have_sigpipe) sigpipe[0] else -1;
     if (have_sigpipe) term.installQuitSignals(sigpipe[1]);
 
-    const sock = uds.socketPath();
-    // Fixed for the session — attop is launched once, in or out of atty.
-    const under_atty = caps.underAtty();
-    const atty_on_path = caps.attyOnPath();
-    var shell_integrated = caps.shellIntegrated();
-    // Sized to hold a full Fleet render of a large reply (matches uds's
-    // 64KiB read buffer). Per-row capping to the visible height is a future
-    // polish; for now a big fleet renders complete (the terminal scrolls).
-    var framebuf: [65536]u8 = undefined;
-    var sz = term.size(out);
-    // Land on the Setup/wizard when the stack isn't ready (atty not
-    // installed, or the daemon unreachable on a one-shot probe) — else Home.
-    var screen: Screen = blk: {
-        if (!atty_on_path) break :blk .setup;
-        var probe = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer probe.deinit();
-        break :blk if (uds.fetch(probe.allocator(), sock, fetch_timeout_ms) != null) .home else .setup;
+    // Attach the panel runtimes (tiny; heap-pinned for stable addresses).
+    const palloc = std.heap.page_allocator;
+    var rts = Host.attachAll(palloc) catch return;
+    defer Host.detachAll(palloc, &rts);
+
+    var app = App{
+        .rts = rts,
+        .host = .{
+            .atty_on_path = caps.attyOnPath(),
+            .under_atty = caps.underAtty(),
+            .shell_integrated = caps.shellIntegrated(),
+            .shell_name = caps.shellName(),
+        },
+        .sock = uds.socketPath(),
+        .sz = term.size(out),
+        .out = out,
+        .fetch_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
     };
-    // Non-null while the consented shell-integration write is being confirmed
-    // or its result shown — gates the whole rc write behind an explicit 'y'.
-    var wire: ?setup.WireState = null;
-    const footer = "\r\n  \x1b[2m[h]ome  [g]uard  [f]leet  [s]etup  [?]help  q quit\x1b[0m\r\n";
+    defer app.fetch_arena.deinit();
+
+    app.refetch();
+    // Landing focus: the first panel that votes for it (Setup, when the
+    // stack isn't ready), else panel 0.
+    {
+        var lctx = app.ctx(app.fetch_arena.allocator(), true);
+        app.focus = Host.landingIndex(&lctx);
+    }
+    app.render();
 
     while (true) {
-        if (term.resized.swap(false, .seq_cst)) sz = term.size(out);
-
-        // Fetch (best-effort) + render the active screen. A per-iteration
-        // arena owns the JSON parse; the render copies what it needs into
-        // framebuf before the arena is freed, so the writes below are safe.
-        {
-            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            // Each screen fetches only what it needs (Home/Guard →
-            // get_metrics, Fleet → list_instances). The Parsed lives in the
-            // arena; the render copies into framebuf before it's freed.
-            const frame = if (wire) |ws| wb: {
-                const wp = wirePaths(a) orelse break :wb setup.renderWire(&framebuf, ws, "", "", "", sz.cols, sz.rows);
-                const block = rc_writer.buildBlock(a, wp.init_path, wp.shell) catch "";
-                break :wb setup.renderWire(&framebuf, ws, wp.init_path, wp.rc_path, block, sz.cols, sz.rows);
-            } else switch (screen) {
-                .home => home.renderHome(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
-                .guard => guard.renderGuard(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
-                .fleet => fleet.renderFleet(&framebuf, instancesOf(uds.listInstances(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
-                .setup => setup.renderSetup(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), .{ .atty_on_path = atty_on_path, .under_atty = under_atty, .shell_integrated = shell_integrated, .shell_name = caps.shellName() }, sz.cols, sz.rows),
-                .help => help.renderHelp(&framebuf, sz.cols, sz.rows),
-            };
-            _ = std.c.write(out, frame.ptr, frame.len);
-            if (wire == null) _ = std.c.write(out, footer.ptr, footer.len);
+        if (term.resized.swap(false, .seq_cst)) {
+            app.sz = term.size(out);
+            app.render();
         }
 
-        // Wait for a key, a terminating signal, or the refresh tick. A
-        // fd of -1 (no sigpipe) is ignored by poll.
         var pfds = [_]posix.pollfd{
             .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
             .{ .fd = quit_r, .events = posix.POLL.IN, .revents = 0 },
         };
-        if (std.c.poll(&pfds, 2, refresh_ms) > 0) {
-            if (quit_r >= 0 and (pfds[1].revents & posix.POLL.IN) != 0) return; // signal → teardown
+        const pr = std.c.poll(&pfds, 2, refresh_ms);
+        if (pr > 0) {
+            if (quit_r >= 0 and (pfds[1].revents & posix.POLL.IN) != 0) return; // signal
             if ((pfds[0].revents & posix.POLL.IN) != 0) {
-                var b: [8]u8 = undefined;
+                var b: [64]u8 = undefined;
                 const n = std.c.read(posix.STDIN_FILENO, &b, b.len);
                 if (n <= 0) return; // EOF / error → restore + exit
-                const keys = b[0..@intCast(n)];
-                if (wire) |ws| switch (ws) {
-                    // The consent gate: ONLY 'y' writes; anything else cancels.
-                    .confirm => {
-                        if (keys.len == 1 and (keys[0] == 'y' or keys[0] == 'Y')) {
-                            wire = if (doWire()) .done else .failed;
-                            shell_integrated = caps.shellIntegrated(); // re-detect
-                        } else wire = null;
-                    },
-                    .done, .failed => wire = null, // any key dismisses
-                } else if (screen == .setup and atty_on_path and !shell_integrated and keys.len == 1 and keys[0] == 'w') {
-                    wire = .confirm; // open the consent view (atty installed + not wired)
-                } else switch (classifyInput(keys)) {
-                    .quit => return, // restore + exit
-                    .home => screen = .home,
-                    .guard => screen = .guard,
-                    .fleet => screen = .fleet,
-                    .setup => screen = .setup,
-                    .help => screen = .help,
-                    .none => {}, // nav (j/k, arrows) — stubs for now
-                }
+                if (handleRead(&app, b[0..@intCast(n)])) return; // quit requested
+                app.render();
             }
+        } else if (pr == 0) {
+            app.refetch();
+            var tctx = app.ctx(app.fetch_arena.allocator(), true);
+            Host.tickAll(&app.rts, &tctx, @intCast(refresh_ms)) catch {};
+            app.render();
         }
     }
 }
 
-const WirePaths = struct { config_dir: []const u8, init_path: []const u8, rc_path: []const u8, shell: []const u8 };
-
-/// Shell-integration paths from $HOME + the detected shell; strings allocated
-/// in `a`. null if $HOME is unset (nothing to write into).
-fn wirePaths(a: std.mem.Allocator) ?WirePaths {
-    const home_dir = std.mem.span(std.c.getenv("HOME") orelse return null);
-    const shell = caps.shellName();
-    const config_dir = std.fmt.allocPrint(a, "{s}/.config/atty", .{home_dir}) catch return null;
-    const init_path = std.fmt.allocPrint(a, "{s}/init.{s}", .{ config_dir, shell }) catch return null;
-    var rcbuf: [4096]u8 = undefined;
-    const rc = caps.rcPath(&rcbuf) orelse return null;
-    const rc_path = a.dupe(u8, rc) catch return null;
-    return .{ .config_dir = config_dir, .init_path = init_path, .rc_path = rc_path, .shell = shell };
+/// Decode + handle every key in one read. Returns true when the user asked
+/// to quit. The focused panel sees each key FIRST (so a panel can claim
+/// keys, e.g. Setup's wire gate); unclaimed keys fall through to global
+/// focus navigation. Ctrl-C always quits.
+fn handleRead(app: *App, bytes: []const u8) bool {
+    var i: usize = 0;
+    while (key.decode(bytes[i..])) |d| {
+        i += d.len;
+        if (handleKey(app, d.key)) return true;
+    }
+    return false;
 }
 
-/// Perform the consented write in its own arena. true on success.
-fn doWire() bool {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const wp = wirePaths(a) orelse return false;
-    rc_apply.wireShell(a, wp.config_dir, wp.shell, wp.rc_path) catch return false;
-    return true;
+fn handleKey(app: *App, k: panel.Key) bool {
+    // Universal escape hatch — never trapped by a panel.
+    switch (k) {
+        .ctrl => |c| if (c == 'c') return true,
+        else => {},
+    }
+
+    var frame_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer frame_arena.deinit();
+    var pctx = app.ctx(frame_arena.allocator(), true);
+
+    const action = Host.keyAt(&app.rts, &pctx, app.focus, k) catch panel.Action.pass;
+    switch (action) {
+        .quit => return true,
+        .handled => return false,
+        .refresh => {
+            app.refetch();
+            return false;
+        },
+        .pass => {}, // fall through to global handling
+    }
+
+    // Global handling for keys the focused panel didn't claim.
+    switch (k) {
+        .tab, .right => app.focus = (app.focus + 1) % Host.count,
+        .back_tab, .left => app.focus = (app.focus + Host.count - 1) % Host.count,
+        .char => |c| {
+            if (c == 'q') return true;
+            if (Host.indexForKey(c)) |idx| app.focus = idx;
+        },
+        else => {},
+    }
+    return false;
 }
-
-pub const Screen = enum { home, guard, fleet, setup, help };
-
-pub const Input = enum { none, quit, home, guard, fleet, setup, help };
 
 /// Extract the Metrics from a Parsed (no deinit — the caller's arena owns
 /// the allocation). null passes through.
@@ -217,31 +288,8 @@ fn instancesOf(p: ?std.json.Parsed(uds.InstancesReply)) ?[]const uds.Instance {
     return if (p) |x| x.value.instances else null;
 }
 
-/// Classify a raw-mode read into one action. Quit is `q` or Ctrl-C only —
-/// NOT Esc: a terminal can deliver an arrow key's `\x1b[A` split across
-/// reads (the bare `\x1b` first, over a slow ssh link), so quitting on a
-/// lone Esc would false-fire. A multi-byte read starting with Esc is a
-/// CSI/SS3 sequence → none (nav stub). The first recognized command byte
-/// wins, so a fast multi-key burst (read() can return >1 byte) still acts.
-pub fn classifyInput(keys: []const u8) Input {
-    if (keys.len == 0) return .none;
-    if (keys.len > 1 and keys[0] == 0x1b) return .none; // Esc-sequence → nav
-    for (keys) |k| switch (k) {
-        'q', 0x03 => return .quit,
-        'g' => return .guard,
-        'h' => return .home,
-        'f' => return .fleet,
-        's' => return .setup,
-        '?' => return .help,
-        else => {},
-    };
-    return .none;
-}
-
 /// The startup line. Pure (no I/O) so it's unit-testable without a TTY.
-/// attop is session-aware — it notes when launched beneath atty; the
-/// embedded doctor health-check + the Fleet current-session highlight
-/// build on this detection.
+/// attop is session-aware — it notes when launched beneath atty.
 pub fn banner(buf: []u8, under_atty: bool) []const u8 {
     return std.fmt.bufPrint(
         buf,
@@ -255,6 +303,9 @@ test {
     _ = @import("main_tests.zig");
     _ = @import("term.zig");
     _ = @import("uds.zig");
+    _ = @import("key.zig");
+    _ = @import("panel.zig");
+    _ = @import("panel_host.zig");
     _ = @import("home.zig");
     _ = @import("guard.zig");
     _ = @import("fleet.zig");
