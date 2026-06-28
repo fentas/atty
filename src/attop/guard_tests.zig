@@ -34,8 +34,18 @@ test "unavailable state when no daemon" {
 }
 
 test "rungs ladder matches the daemon order" {
-    // weakest → strongest; pins the copy + order in one place.
-    try testing.expectEqual(@as(usize, 6), guard.rungs.len);
-    try testing.expectEqualStrings("prompt", guard.rungs[0].name);
-    try testing.expectEqualStrings("smart", guard.rungs[5].name);
+    // weakest → strongest; pin ALL six by index — this is a hand-copy of
+    // the daemon's SecurityProfile, so a reorder/rename must trip a test.
+    const expect = [_][]const u8{ "prompt", "audit", "session", "strict", "lockdown", "smart" };
+    try testing.expectEqual(expect.len, guard.rungs.len);
+    for (expect, guard.rungs) |name, r| try testing.expectEqualStrings(name, r.name);
+}
+
+test "compact title drops the suffix below the break" {
+    var buf: [4096]u8 = undefined;
+    const full = guard.renderGuard(&buf, metrics("session"), 120, 40);
+    try testing.expect(std.mem.indexOf(u8, full, "security profile") != null);
+    var buf2: [4096]u8 = undefined;
+    const narrow = guard.renderGuard(&buf2, metrics("session"), 70, 40);
+    try testing.expect(std.mem.indexOf(u8, narrow, "security profile") == null);
 }

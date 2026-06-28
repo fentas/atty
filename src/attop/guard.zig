@@ -28,17 +28,23 @@ pub const rungs = [_]Rung{
     .{ .name = "smart", .tldr = "picks the lightest sufficient guard automatically" },
 };
 
+/// Below this width the title drops its suffix (matches home.zig's break).
+pub const compact_cols: u16 = 80;
+
 pub fn renderGuard(buf: []u8, m: ?uds.Metrics, cols: u16, rows: u16) []const u8 {
     _ = rows;
-    _ = cols;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, m) catch {};
+    render(&w, m, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, m: ?uds.Metrics) !void {
+fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     try w.writeAll("\x1b[2J\x1b[H");
-    try w.print("{f}Guard{s} \u{2014} security profile\r\n\r\n", .{ style.presets.emphasis, reset });
+    if (cols < compact_cols) {
+        try w.print("{f}Guard{s}\r\n\r\n", .{ style.presets.emphasis, reset });
+    } else {
+        try w.print("{f}Guard{s} \u{2014} security profile\r\n\r\n", .{ style.presets.emphasis, reset });
+    }
 
     if (m == null) {
         try w.print("  {f}atty-guard not running{s}\r\n", .{ style.presets.danger, reset });
