@@ -53,6 +53,16 @@ pub const WarnSubscriber = warn_subscriber_mod.Subscriber;
 /// `pub` so the sibling test can pin the re-probe cadence.
 pub const daemon_reprobe_interval: u32 = 20;
 
+/// What Alt+P does. The profile is daemon-GLOBAL; the modes differ in how
+/// (and whether) a switch is authorized:
+///   .off    — inert; Alt+P keeps its readline meaning (M-p).
+///   .daemon — switch directly over the UDS. Needs root, or the daemon's
+///             `[profile] allow_user_switch` for a non-root caller.
+///   .sudo   — stage `sudo atty-guard profile set <next>` into the prompt
+///             for you to run; your shell's sudo does the auth (per-action,
+///             no daemon flag, atty never handles the password). Default.
+pub const ProfileSwitchMode = enum { off, daemon, sudo };
+
 pub const Config = struct {
     /// Master switch. Off by default — opt-in only. When disabled
     /// the module is statically eliminated from the input path
@@ -97,11 +107,12 @@ pub const Config = struct {
     /// it's read-only and answers "am I protected, at what level?".
     show_profile: bool = true,
     /// Allow Alt+P to CYCLE the live profile from inside atty. Off by
-    /// default: the profile is daemon-global, so the daemon ALSO gates the
-    /// switch (`[profile] allow_user_switch`). Enabling this without the
-    /// daemon flag just surfaces the daemon's refusal. Single-user boxes
-    /// turn on both for the in-atty switch.
-    allow_profile_switch: bool = false,
+    /// What Alt+P does (see `ProfileSwitchMode`). Defaults to `.sudo`:
+    /// Alt+P stages `sudo atty-guard profile set <next>` into your prompt —
+    /// no daemon flag, per-action sudo auth, atty never touches the
+    /// password. `.daemon` switches directly (needs root / the daemon's
+    /// `allow_user_switch`); `.off` keeps M-p.
+    profile_switch_mode: ProfileSwitchMode = .sudo,
     /// How often (ms) to refresh the cached profile segment — the poll
     /// runs on `onTick`, NOT per status render, so the UDS isn't hammered.
     profile_poll_ms: u32 = 3_000,
@@ -214,6 +225,13 @@ pub fn configure(comptime cfg: Config) type {
             /// down/wedged daemon isn't re-probed every tick (the connect
             /// can block on a wedged-but-listening daemon).
             profile_poll_fails: u32 = 0,
+            /// One-shot staging buffer for `.sudo` profile-switch mode:
+            /// `onAction` writes `sudo atty-guard profile set <next>` here
+            /// (onAction has no return channel to the proxy), and
+            /// `pollShellInput` drains it to the shell readline. 64 B fits
+            /// the longest rung command.
+            staged_input: [64]u8 = undefined,
+            staged_input_len: usize = 0,
             /// Set when the LAST armed banner came from the daemon
             /// instead of an in-proc pattern. The category may not
             /// have a `patterns_mod.Category` equivalent (the
@@ -347,19 +365,26 @@ pub fn configure(comptime cfg: Config) type {
         /// consumed; false lets the proxy try other modules / fall
         /// through to its own switch case.
         pub fn onAction(rt: *Runtime, ctx: *m.Context, action: anytype) m.Error!bool {
-            _ = ctx;
             switch (action) {
                 .security_guard_show_warnings => {
                     renderWarnDump(rt) catch return false;
                     return true;
                 },
-                .security_guard_cycle_profile => {
-                    // When the switch is off the binding is INERT — return
-                    // false (don't consume) so Alt+P keeps its readline
-                    // meaning (M-p), rather than shadowing it with a hint.
-                    if (!cfg.allow_profile_switch) return false;
-                    cycleProfile(rt);
-                    return true;
+                .security_guard_cycle_profile => switch (cfg.profile_switch_mode) {
+                    // Inert — return false (don't consume) so Alt+P keeps its
+                    // readline meaning (M-p) rather than shadowing it.
+                    .off => return false,
+                    // Switch directly over the UDS (daemon authorizes).
+                    .daemon => {
+                        cycleProfile(rt);
+                        return true;
+                    },
+                    // Stage `sudo atty-guard profile set <next>` for the user
+                    // to run — per-action sudo auth, atty never escalates.
+                    .sudo => {
+                        stageProfileSudo(rt, ctx);
+                        return true;
+                    },
                 },
                 else => return false,
             }
@@ -383,9 +408,9 @@ pub fn configure(comptime cfg: Config) type {
             rt.profile_name_len = n;
         }
 
-        /// Cycle the live security profile via the daemon. Opt-in
-        /// (`allow_profile_switch`); the daemon enforces who may switch
-        /// (the profile is daemon-global). Renders the outcome to
+        /// Cycle the live security profile directly via the daemon
+        /// (`profile_switch_mode = .daemon`); the daemon enforces who may
+        /// switch (the profile is daemon-global). Renders the outcome to
         /// scrollback + refreshes the cached status segment.
         fn cycleProfile(rt: *Runtime) void {
             const client = profileClient(rt) orelse {
@@ -423,6 +448,44 @@ pub fn configure(comptime cfg: Config) type {
                 },
                 .unavailable => writeSink(rt, "\r\natty security_guard: daemon unreachable — profile unchanged.\r\n"),
             }
+        }
+
+        /// `.sudo` mode: stage `sudo atty-guard profile set <next>` into the
+        /// prompt (drained by `pollShellInput`) so the user's own shell runs
+        /// sudo — per-action auth, atty never handles the password. Guards on
+        /// an empty line so it can't clobber a partial command.
+        fn stageProfileSudo(rt: *Runtime, ctx: *m.Context) void {
+            if (ctx.line.current().len > 0) {
+                writeSink(rt, "\r\natty security_guard: clear the line first, then Alt+P to stage the profile switch.\r\n");
+                return;
+            }
+            const client = profileClient(rt) orelse {
+                writeSink(rt, "\r\natty security_guard: no daemon configured for profile switch.\r\n");
+                return;
+            };
+            var cur_buf: [16]u8 = undefined;
+            // Same as cycleProfile: live read, else cache; never advance from
+            // a failed read (nextProfile(null) = prompt would downgrade).
+            const cur: ?[]const u8 = client.getProfile(&cur_buf) orelse
+                (if (rt.profile_name_len > 0) rt.profile_name[0..rt.profile_name_len] else null);
+            if (cur == null) {
+                writeSink(rt, "\r\natty security_guard: can't read the current profile (daemon unreachable) — not staged.\r\n");
+                return;
+            }
+            const next = nextProfile(cur);
+            const cmd = std.fmt.bufPrint(&rt.staged_input, "sudo atty-guard profile set {s}", .{next}) catch return;
+            rt.staged_input_len = cmd.len;
+        }
+
+        /// Drain the `.sudo`-mode staged command to the shell readline (the
+        /// proxy writes it to pty.master as if typed, so the user reviews +
+        /// runs it). One-shot; no trailing newline — never auto-runs.
+        pub fn pollShellInput(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
+            _ = ctx;
+            if (rt.staged_input_len == 0) return null;
+            const n = rt.staged_input_len;
+            rt.staged_input_len = 0;
+            return rt.staged_input[0..n];
         }
 
         /// Poll the live profile on a cadence (off the status-render path)
