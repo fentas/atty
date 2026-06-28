@@ -64,7 +64,10 @@ fn runLoop() void {
     // terminal-close). Best-effort — if the pipe can't be made, we just run
     // without the trap.
     var sigpipe: [2]c_int = undefined;
-    const have_sigpipe = std.c.pipe(&sigpipe) == 0;
+    // NONBLOCK so the signal handler's write can never block (a full pipe
+    // just drops the byte — one wake suffices); CLOEXEC for hygiene.
+    // Mirrors the proxy's own signal self-pipe (proxy.zig).
+    const have_sigpipe = std.c.pipe2(&sigpipe, .{ .CLOEXEC = true, .NONBLOCK = true }) == 0;
     defer if (have_sigpipe) {
         _ = std.c.close(sigpipe[0]);
         _ = std.c.close(sigpipe[1]);
