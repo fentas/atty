@@ -49,6 +49,27 @@ test "setup shell row → wired ✓; not wired → ✗ + the wire fix" {
     try testing.expect(std.mem.indexOf(u8, zsh, "atty init bash") == null);
 }
 
+test "setup lists daemon compiled features; empty → minimal build" {
+    var buf: [4096]u8 = undefined;
+    const m = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "attached", .features = &.{ "ebpf", "osv-live" } }, .instances = 1 };
+    const out = setup.renderSetup(&buf, m, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "features") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ebpf, osv-live") != null);
+
+    // present-but-empty (a new daemon, default build) → "minimal build"
+    var buf2: [4096]u8 = undefined;
+    const m2 = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "off", .features = &.{} }, .instances = 1 };
+    const out2 = setup.renderSetup(&buf2, m2, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out2, "minimal build") != null);
+
+    // absent (older daemon, features=null) → "unknown", NOT "minimal build"
+    var buf3: [4096]u8 = undefined;
+    const m3 = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "attached" }, .instances = 1 }; // features defaults null
+    const out3 = setup.renderSetup(&buf3, m3, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out3, "minimal build") == null);
+    try testing.expect(std.mem.indexOf(u8, out3, "unknown") != null); // features row → unknown (ebpf attached, so it's the only unknown)
+}
+
 test "renderWire confirm shows the block + paths + prompt; done/failed messages" {
     var buf: [4096]u8 = undefined;
     const block = "# >>> atty >>>\nexport ATTY_SOURCE=\"/h/.config/atty/init.bash\"\n# <<< atty <<<\n";

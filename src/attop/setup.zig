@@ -99,6 +99,26 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
             try row(w, t, .neutral, "enforce", metrics.guard.enforcement, "");
         }
 
+        // What the daemon was BUILT with, distinct from what's configured.
+        // null = an older daemon that doesn't report it (unknown, not minimal).
+        if (metrics.guard.features) |feats| {
+            if (feats.len > 0) {
+                var fbuf: [160]u8 = undefined;
+                var fw = std.Io.Writer.fixed(&fbuf);
+                for (feats, 0..) |feat, i| {
+                    if (i > 0) fw.writeAll(", ") catch {};
+                    fw.writeAll(feat) catch {};
+                }
+                try row(w, t, .ok, "features", fbuf[0..fw.end], "");
+            } else {
+                // Empty = a default build; the eBPF "off" row above already
+                // carries the GUARD_FEATURES install line, so don't repeat it.
+                try row(w, t, .neutral, "features", s.st_minimal, "");
+            }
+        } else {
+            try row(w, t, .neutral, "features", s.st_unknown, "");
+        }
+
         if (metrics.instances > 0) {
             var nbuf: [48]u8 = undefined;
             const word = if (metrics.instances == 1) s.session_reporting_one else s.session_reporting_many;

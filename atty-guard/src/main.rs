@@ -432,22 +432,11 @@ fn default_socket_path() -> PathBuf {
     PathBuf::from("/run/atty-guard/atty-guard.sock")
 }
 
-/// Emit one feature name per stdout line for each Cargo feature
-/// compiled into this binary. Static — relies on `#[cfg(feature)]`
-/// at compile time so the output is exactly the set baked in (no
-/// runtime detection / kernel probing).
+/// Emit one feature name per stdout line for each Cargo feature compiled into
+/// this binary (the set baked in at compile time — no runtime/kernel probing).
+/// Shares `enabled_features()` with the guard posture so the two can't drift.
 fn print_compiled_features() {
-    let mut features: Vec<&'static str> = Vec::new();
-    #[cfg(feature = "tier2-onnx")]
-    features.push("tier2-onnx");
-    #[cfg(feature = "osv-live")]
-    features.push("osv-live");
-    #[cfg(feature = "atoms-fetch")]
-    features.push("atoms-fetch");
-    #[cfg(feature = "ebpf")]
-    features.push("ebpf");
-    features.sort();
-    for f in &features {
+    for f in enabled_features() {
         println!("{f}");
     }
 }
@@ -669,6 +658,26 @@ fn remove_socket_if_safe(path: &std::path::Path) -> Result<(), SocketRemoveError
     // socket at the same target — the canonical setup keeps
     // working across restarts.
     std::fs::remove_file(&resolved).map_err(SocketRemoveError::Io)
+}
+
+/// The Cargo features compiled into this daemon. Single source (sorted, stable
+/// order) so the two emitters of this set can't drift.
+fn enabled_features() -> Vec<String> {
+    let mut f = Vec::new();
+    if cfg!(feature = "ebpf") {
+        f.push("ebpf".to_string());
+    }
+    if cfg!(feature = "tier2-onnx") {
+        f.push("tier2-onnx".to_string());
+    }
+    if cfg!(feature = "osv-live") {
+        f.push("osv-live".to_string());
+    }
+    if cfg!(feature = "atoms-fetch") {
+        f.push("atoms-fetch".to_string());
+    }
+    f.sort();
+    f
 }
 
 fn main() -> std::io::Result<()> {
@@ -1246,6 +1255,7 @@ fn main() -> std::io::Result<()> {
             } else {
                 0
             },
+            features: enabled_features(),
         }
     };
 

@@ -57,6 +57,7 @@ pub const Strings = struct {
     st_attached: []const u8,
     st_off: []const u8,
     st_unknown: []const u8,
+    st_minimal: []const u8, // daemon built with no optional features
     daemon_down: []const u8, // "unknown (daemon down)"
     st_warn_only: []const u8,
     st_in_session: []const u8,
@@ -120,6 +121,7 @@ pub const en = Strings{
     .st_attached = "attached",
     .st_off = "off",
     .st_unknown = "unknown",
+    .st_minimal = "minimal build",
     .daemon_down = "unknown (daemon down)",
     .st_warn_only = "prompt (warn-only)",
     .st_in_session = "in an atty session",
@@ -179,6 +181,7 @@ pub const de = Strings{
     .st_attached = "aktiv",
     .st_off = "aus",
     .st_unknown = "unbekannt",
+    .st_minimal = "minimaler Build",
     .daemon_down = "unbekannt (Daemon aus)",
     .st_warn_only = "prompt (nur Warnung)",
     .st_in_session = "in einer atty-Sitzung",

@@ -341,6 +341,11 @@ pub struct GuardPosture {
     pub atoms_version: String,
     pub deny_path: u32,
     pub deny_basename: u32,
+    /// Compile-time Cargo features built into this daemon (e.g. "ebpf",
+    /// "tier2-onnx"). `#[serde(default)]` keeps a peer without the field
+    /// deserializing.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// Scope selector for `AtomsList`. The matcher serves the union of

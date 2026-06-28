@@ -29,6 +29,10 @@ pub const Guard = struct {
     atoms_version: []const u8 = "",
     deny_path: u32 = 0,
     deny_basename: u32 = 0,
+    /// Cargo features compiled into the daemon. Optional so an older daemon
+    /// (no field → null) reads as "unknown" rather than being misreported as a
+    /// minimal build; a new daemon sends the list (possibly empty = minimal).
+    features: ?[]const []const u8 = null,
 };
 
 /// The get_metrics reply body (the "type" tag is ignored on parse).
