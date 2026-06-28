@@ -317,24 +317,19 @@ jobs:
           echo "Found ${#assets[@]} assets:"
           printf '  %s\n' "${assets[@]}"
 
+          # Immutable releases (repo setting, for supply-chain integrity)
+          # REJECT post-creation asset uploads + edits — "HTTP 422: Cannot
+          # upload assets to an immutable release". So the release must be
+          # created WITH its assets + notes in a single call. A pre-existing
+          # release (a failed prior run) can't be appended to, but immutable
+          # releases CAN be deleted — so delete it (keeping the tag) and
+          # recreate atomically. This keeps re-runs idempotent.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; updating body"
-            gh release edit "$TAG" --notes-file /tmp/release_body.md
-          else
-            echo "Creating release $TAG"
-            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release_body.md
+            echo "Release $TAG exists; deleting to recreate atomically (immutable releases can't be appended to)"
+            gh release delete "$TAG" --yes --cleanup-tag=false
           fi
-
-          # `--clobber` overwrites an existing asset (idempotent
-          # re-runs are safe). One POST per file; no metadata
-          # update step that could 404.
-          #
-          # Caveat: --clobber deletes the existing asset BEFORE
-          # the re-upload. A retry that dies mid-upload leaves the
-          # release missing that asset until the next successful
-          # run. Acceptable for transient retries; if a maintainer
-          # is hand-tweaking assets between runs, expect overwrites.
-          gh release upload "$TAG" --clobber "${assets[@]}"
+          echo "Creating release $TAG with ${#assets[@]} assets"
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/release_body.md "${assets[@]}"
 
   # ---------------------------------------------------------------------------
   # Multi-arch Docker image to ghcr.io/<owner>/atty.
