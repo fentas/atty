@@ -298,6 +298,13 @@ body.home .hamburger { display: none !important; }
   align-items: center;
   gap: 0.5rem;
 }
+/* The per-module list reveals (only rendered when in the Modules section).
+   A subtle fade so it reads as a submenu opening, not a layout jump. */
+.sidebar-modules-reveal { animation: sidebar-modules-fade 200ms ease-out; }
+@keyframes sidebar-modules-fade { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-modules-reveal { animation: none; }
+}
 .module-flag {
   font-size: 0.62rem;
   letter-spacing: 0.05em;
@@ -831,7 +838,9 @@ hr { border: 0; border-top: 1px dashed var(--border); margin: 2.5em 0; }
 }
 .install-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* auto-fit so the three install paths (binary / source / dashboard) sit on
+     one row when there's room and stack cleanly on narrow screens. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
   gap: 1.5rem;
   margin-bottom: 2rem;
 }
