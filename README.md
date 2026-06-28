@@ -93,6 +93,16 @@ sudo make install GUARD_FEATURES=tier2-onnx,osv-live,atoms-fetch,ebpf
 
 That sets up the `atty:atty` system user, installs and starts the systemd unit, and drops in the eBPF override. Then `sudo usermod -aG atty $USER` and open a new shell. See [getting-started](https://atty.sh/getting-started/) for the per-flag breakdown and [operator-workflow](https://atty.sh/operator-workflow/) for verification + corpus management.
 
+#### The dashboard
+
+`attop` is the dashboard — *the Grafana of atty*: am I protected, what is atty doing for me, is everything wired up. It reads the `atty-guard` daemon over its socket and ships as its own binary, so you can install it wherever you want the view:
+
+```bash
+curl -fsSL https://tui.atty.sh | sh   # → ~/.local/bin/attop  (honors INSTALL_DIR / ATTY_VERSION)
+```
+
+It opens on a **setup wizard** that detects what's present and guides the rest — installing atty, wiring your shell, enabling the daemon — and shows what's compiled in and configured. (From source: `zig build attop` builds it; `zig build run-attop` runs it in place.)
+
 For containers:
 
 ```bash

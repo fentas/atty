@@ -109,9 +109,10 @@ pub fn build(b: *std.Build) void {
     // -------------------------------------------------------------------------
     // attop — the dashboard TUI (docs/dashboard.md). A standalone binary
     // (the "Grafana" of atty) that reads the atty-guard metrics API; reuses
-    // the atty module's style/ansi primitives. RUN-ONLY (`zig build
-    // run-attop`) — not in the default install while WIP (mirrors the bench
-    // exe: run-only, not installed).
+    // the atty module's style/ansi primitives. NOT in the default install
+    // (the proxy stays the lean default per the Suckless ethos); `zig build
+    // attop` installs it (release ships it; `tui.atty.sh` fetches it) and
+    // `zig build run-attop` runs it in place for dev.
     // -------------------------------------------------------------------------
     // The VT-grid emulator (also used by the proxy e2e harness) — exposed
     // as a module so attop's screenshot tests can feed a rendered frame
@@ -133,6 +134,11 @@ pub fn build(b: *std.Build) void {
         },
     });
     const attop_exe = b.addExecutable(.{ .name = "attop", .root_module = attop_module });
+
+    // `zig build attop` installs the binary to zig-out/bin/attop (release +
+    // the tui.atty.sh installer build this), kept off the default install.
+    const attop_step = b.step("attop", "Build + install the attop dashboard binary");
+    attop_step.dependOn(&b.addInstallArtifact(attop_exe, .{}).step);
 
     const run_attop = b.addRunArtifact(attop_exe);
     if (b.args) |args| run_attop.addArgs(args);
