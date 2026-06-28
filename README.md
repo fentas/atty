@@ -340,9 +340,9 @@ Four screens, switched by a single key (`q` quits):
 
 - **Themes** — `ATTOP_THEME` = `dark`, `light`, `high-contrast`, `mono`, or `ascii`. Auto by default: `NO_COLOR` → mono (no color, glyphs kept), a light `COLORFGBG` → light, else dark.
 - **Language** — `ATTOP_LANG` (else `$LC_ALL` / `$LANG`); ships `en` + `de`.
-- **Live data** needs the `atty-guard` daemon running; the per-session Fleet rows need the `metrics_exporter` module enabled in `config.zig`. With no daemon, attop shows a clear "not reachable" state and how to start it.
+- **Live data** needs the `atty-guard` daemon running; the per-session Fleet rows need the `metrics_exporter` module enabled in `config.zig`. With no daemon, attop shows a clear daemon-unavailable state on each screen and how to start it.
 
-attop is read-only today — profile switching is via atty's `Alt+P` or `sudo atty-guard profile set`. Design: [docs/dashboard.md](docs/dashboard.md).
+attop is read-only today — profile switching is via atty's `Alt+P` (when `security_guard.allow_profile_switch` is set) or `sudo atty-guard profile set`. Design: [docs/dashboard.md](docs/dashboard.md).
 
 &nbsp;
 

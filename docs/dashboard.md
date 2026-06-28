@@ -22,8 +22,8 @@ The rest of this doc is the plan; this section tracks what's **built** on
   + `COLORFGBG` aware), **i18n** (en + de, `$ATTOP_LANG`-driven), and
   **screenshot-verified** rendering (each screen fed through the VT grid).
 - **Profile switch.** Live `prompt → … → strict` switching from atty
-  (`Alt+P`) or `sudo atty-guard profile set`, with the kernel eBPF deny-map
-  armed/cleared on the strict boundary.
+  (`Alt+P`, when `security_guard.allow_profile_switch` is set) or
+  `sudo atty-guard profile set`.
 
 **Planned (not yet built):** the AI panel's productivity counters, Alerts
 (system notification + webhook hooks), `menuconfig` (`config.zig` scaffold),
