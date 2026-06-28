@@ -27,6 +27,15 @@ test "the active rung is marked, others are not" {
     try testing.expect(std.mem.indexOf(u8, out, "\u{25B8} prompt") == null);
 }
 
+test "unknown profile shows a cue, not a silent ladder" {
+    var buf: [4096]u8 = undefined;
+    const out = guard.renderGuard(&buf, metrics("bogus"), 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "not a listed rung") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "bogus") != null);
+    // no rung gets the active marker for an unrecognized profile
+    try testing.expect(std.mem.indexOf(u8, out, "\u{25B8}") == null);
+}
+
 test "unavailable state when no daemon" {
     var buf: [4096]u8 = undefined;
     const out = guard.renderGuard(&buf, null, 120, 40);
