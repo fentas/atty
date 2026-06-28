@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const m = @import("../module.zig");
+const lib = @import("_lib.zig");
 const style_mod = @import("../style.zig");
 const patterns_mod = @import("security_guard/patterns.zig");
 const trust_mod = @import("security_guard/trust_cache.zig");
@@ -91,7 +92,34 @@ pub const Config = struct {
     /// for a saturated CPU. Tune up if the daemon is doing heavier
     /// work or running under a slower scheduler class.
     daemon_timeout_ms: u32 = 50,
+    /// Show the live security profile as a status-bar segment (e.g.
+    /// `🛡 session`), polled from the daemon and cached. On by default —
+    /// it's read-only and answers "am I protected, at what level?".
+    show_profile: bool = true,
+    /// Allow Alt+P to CYCLE the live profile from inside atty. Off by
+    /// default: the profile is daemon-global, so the daemon ALSO gates the
+    /// switch (`[profile] allow_user_switch`). Enabling this without the
+    /// daemon flag just surfaces the daemon's refusal. Single-user boxes
+    /// turn on both for the in-atty switch.
+    allow_profile_switch: bool = false,
+    /// How often (ms) to refresh the cached profile segment — the poll
+    /// runs on `onTick`, NOT per status render, so the UDS isn't hammered.
+    profile_poll_ms: u32 = 3_000,
 };
+
+/// The profile rungs, in cycle order (matches the daemon's SecurityProfile
+/// + the docs/dashboard.md Guard slider).
+pub const PROFILES = [_][]const u8{ "prompt", "audit", "session", "strict", "lockdown", "smart" };
+
+/// Next rung after `cur` (wrapping); the first rung when `cur` is unknown
+/// (daemon unreachable) so a switch still does something sane.
+pub fn nextProfile(cur: ?[]const u8) []const u8 {
+    const c = cur orelse return PROFILES[0];
+    for (PROFILES, 0..) |p, i| {
+        if (std.mem.eql(u8, p, c)) return PROFILES[(i + 1) % PROFILES.len];
+    }
+    return PROFILES[0];
+}
 
 pub fn configure(comptime cfg: Config) type {
     return struct {
@@ -174,6 +202,18 @@ pub fn configure(comptime cfg: Config) type {
             /// back after a `daemon_disabled` re-probe) re-seeds on a
             /// later Enter rather than being silently skipped forever.
             daemon_trust_seeded: bool = false,
+            /// Cached live security profile for the status segment + the
+            /// cycle action's "current" read. Refreshed on a poll
+            /// (`profile_poll_ms`) from `onTick`, so the status render +
+            /// the hot path never block on the UDS. Empty = unknown /
+            /// daemon unreachable.
+            profile_name: [16]u8 = undefined,
+            profile_name_len: usize = 0,
+            profile_last_poll_ms: i64 = 0,
+            /// Consecutive poll failures — backs off the poll interval so a
+            /// down/wedged daemon isn't re-probed every tick (the connect
+            /// can block on a wedged-but-listening daemon).
+            profile_poll_fails: u32 = 0,
             /// Set when the LAST armed banner came from the daemon
             /// instead of an in-proc pattern. The category may not
             /// have a `patterns_mod.Category` equivalent (the
@@ -313,7 +353,101 @@ pub fn configure(comptime cfg: Config) type {
                     renderWarnDump(rt) catch return false;
                     return true;
                 },
+                .security_guard_cycle_profile => {
+                    // When the switch is off the binding is INERT — return
+                    // false (don't consume) so Alt+P keeps its readline
+                    // meaning (M-p), rather than shadowing it with a hint.
+                    if (!cfg.allow_profile_switch) return false;
+                    cycleProfile(rt);
+                    return true;
+                },
                 else => return false,
+            }
+        }
+
+        /// Lazily set up the daemon client for profile RPCs (mirrors
+        /// `queryDaemon`'s lazy open; connect itself is lazy in the client).
+        fn profileClient(rt: *Runtime) ?*UdsClient {
+            if (cfg.daemon_socket_path.len == 0) return null;
+            if (rt.daemon == null) {
+                var client = UdsClient.init(cfg.daemon_socket_path);
+                client.read_timeout_ms = cfg.daemon_timeout_ms;
+                rt.daemon = client;
+            }
+            return &rt.daemon.?;
+        }
+
+        fn setCachedProfile(rt: *Runtime, prof: []const u8) void {
+            const n = @min(prof.len, rt.profile_name.len);
+            @memcpy(rt.profile_name[0..n], prof[0..n]);
+            rt.profile_name_len = n;
+        }
+
+        /// Cycle the live security profile via the daemon. Opt-in
+        /// (`allow_profile_switch`); the daemon enforces who may switch
+        /// (the profile is daemon-global). Renders the outcome to
+        /// scrollback + refreshes the cached status segment.
+        fn cycleProfile(rt: *Runtime) void {
+            const client = profileClient(rt) orelse {
+                writeSink(rt, "\r\natty security_guard: no daemon configured for profile switch.\r\n");
+                return;
+            };
+            var cur_buf: [16]u8 = undefined;
+            // CURRENT rung: live read, else the last-known cache. NEVER
+            // advance from a failed read — `nextProfile(null)` is `prompt`,
+            // so a transient timeout would silently DOWNGRADE the posture
+            // to the weakest rung. Abort instead.
+            const cur: ?[]const u8 = client.getProfile(&cur_buf) orelse
+                (if (rt.profile_name_len > 0) rt.profile_name[0..rt.profile_name_len] else null);
+            if (cur == null) {
+                writeSink(rt, "\r\natty security_guard: can't read the current " ++
+                    "profile (daemon unreachable) — switch aborted.\r\n");
+                return;
+            }
+            const next = nextProfile(cur);
+            var out_buf: [192]u8 = undefined;
+            var line: [256]u8 = undefined;
+            switch (client.setProfile(next, &out_buf)) {
+                .ok => |p| {
+                    setCachedProfile(rt, p);
+                    // Fall back to a fixed notice if formatting overflows so
+                    // a switch is never silently unacknowledged.
+                    const s = std.fmt.bufPrint(&line, "\r\natty security_guard: profile \u{2192} {s}\r\n", .{p}) catch
+                        "\r\natty security_guard: profile switched.\r\n";
+                    writeSink(rt, s);
+                },
+                .refused => |msg| {
+                    const s = std.fmt.bufPrint(&line, "\r\natty security_guard: {s}\r\n", .{msg}) catch
+                        "\r\natty security_guard: profile switch refused.\r\n";
+                    writeSink(rt, s);
+                },
+                .unavailable => writeSink(rt, "\r\natty security_guard: daemon unreachable — profile unchanged.\r\n"),
+            }
+        }
+
+        /// Poll the live profile on a cadence (off the status-render path)
+        /// so the status segment + the cycle action's "current" read are
+        /// cheap. Batched to `profile_poll_ms`.
+        pub fn onTick(rt: *Runtime, ctx: *m.Context, elapsed_ms: u64) m.Error!void {
+            _ = ctx;
+            _ = elapsed_ms;
+            if (!cfg.show_profile) return;
+            const now = lib.nowMs();
+            // Exponential backoff after failures (capped at 16× ≈ 48s) so a
+            // down/wedged daemon isn't probed every interval.
+            const shift: u5 = @intCast(@min(rt.profile_poll_fails, 4));
+            const interval = @as(i64, @intCast(cfg.profile_poll_ms)) * (@as(i64, 1) << shift);
+            if (now - rt.profile_last_poll_ms < interval) return;
+            rt.profile_last_poll_ms = now;
+            const client = profileClient(rt) orelse return;
+            var buf: [16]u8 = undefined;
+            if (client.getProfile(&buf)) |p| {
+                setCachedProfile(rt, p);
+                rt.profile_poll_fails = 0;
+            } else {
+                // Daemon unreachable → hide the segment rather than show stale.
+                rt.profile_name_len = 0;
+                rt.profile_poll_fails +|= 1;
             }
         }
 
@@ -936,49 +1070,52 @@ pub fn configure(comptime cfg: Config) type {
         /// null at idle so the segment disappears (rather than
         /// staying as dead chrome).
         pub fn statusText(rt: *Runtime, ctx: *m.Context) m.Error!?[]const u8 {
-            // Two independent signals:
-            // 1. `active_threat` — sticky in-flight warning from a
+            // Segment layout: `🛡 <profile> | <N> warns | <threat>`. The
+            // live profile (polled on onTick) is the baseline posture and
+            // leads; the event signals follow —
+            // 1. `warn_sub.count()` — kernel-side warn events the daemon's
+            //    ringbuf consumer pushed our way (post #347 PR 2b).
+            // 2. `active_threat` — sticky in-flight warning from a
             //    recently-typed flagged command.
-            // 2. `warn_sub.count()` — kernel-side warn events the
-            //    daemon's ringbuf consumer pushed our way (post
-            //    #347 PR 2b). Surface both; the warn count comes
-            //    first because it's the more time-sensitive
-            //    signal (recent kernel observation).
+            // Any subset present renders; all absent → null (no dead chrome).
             _ = ctx;
             const warn_count: usize = if (rt.warn_sub) |sub| sub.count() else 0;
             const lvl = rt.active_threat;
-            if (warn_count == 0 and lvl == null) return null;
-
             const lvl_label: []const u8 = if (lvl) |l| switch (l) {
                 .low => "",
                 .high => "high",
                 .critical => "critical",
             } else "";
-
-            // Both signals empty (only possible when active_threat
-            // is `.low` — no producer currently emits it but the
-            // variant exists, so guard defensively rather than
-            // painting "⚠ " with a trailing space).
-            if (warn_count == 0 and lvl_label.len == 0) return null;
-
-            // Write into the per-Runtime buffer so the slice stays
-            // valid for the gatherStatus call's writer (which
-            // borrows, not copies).
-            const out = if (warn_count > 0 and lvl_label.len > 0)
-                std.fmt.bufPrint(
-                    &rt.status_buf,
-                    "\u{1F6E1} {d} warn{s} | {s}",
-                    .{ warn_count, if (warn_count == 1) "" else "s", lvl_label },
-                ) catch return null
-            else if (warn_count > 0)
-                std.fmt.bufPrint(
-                    &rt.status_buf,
-                    "\u{1F6E1} {d} warn{s}",
-                    .{ warn_count, if (warn_count == 1) "" else "s" },
-                ) catch return null
+            // The live profile (polled on onTick) is the baseline posture;
+            // warns/threat are appended events. Shield = guard.
+            const profile: []const u8 = if (cfg.show_profile and rt.profile_name_len > 0)
+                rt.profile_name[0..rt.profile_name_len]
             else
-                std.fmt.bufPrint(&rt.status_buf, "\u{1F6E1} {s}", .{lvl_label}) catch return null;
-            return out;
+                "";
+
+            if (profile.len == 0 and warn_count == 0 and lvl_label.len == 0) return null;
+
+            // Assemble into the per-Runtime buffer — the slice must outlive
+            // the gatherStatus writer (which borrows, not copies).
+            var w: std.Io.Writer = .fixed(&rt.status_buf);
+            w.writeAll("\u{1F6E1} ") catch return null;
+            var sep = false;
+            if (profile.len > 0) {
+                w.writeAll(profile) catch return null;
+                sep = true;
+            }
+            if (warn_count > 0) {
+                w.print("{s}{d} warn{s}", .{
+                    if (sep) " | " else "",
+                    warn_count,
+                    if (warn_count == 1) "" else "s",
+                }) catch return null;
+                sep = true;
+            }
+            if (lvl_label.len > 0) {
+                w.print("{s}{s}", .{ if (sep) " | " else "", lvl_label }) catch return null;
+            }
+            return rt.status_buf[0..w.end];
         }
 
         /// Daemon-`Block` refusal notice. Single red line + clears

@@ -217,6 +217,91 @@ pub const Client = struct {
         try self.readMutationResponse(id);
     }
 
+    /// Read the live security profile (one of prompt/audit/session/strict/
+    /// lockdown/smart) into `out`. null on any failure (daemon down /
+    /// parse error / unexpected shape). The read is bounded by the recv
+    /// timeout, but `ensureConnected`'s `connect()` is blocking (same model
+    /// as the classify path) — callers poll this off the hot path.
+    pub fn getProfile(self: *Client, out: []u8) ?[]const u8 {
+        self.ensureConnected() catch return null;
+        var w: std.Io.Writer = .fixed(&self.write_buf);
+        const id = self.next_id;
+        self.next_id +%= 1;
+        (w.print("{{\"id\":{d},\"method\":\"get_profile\"}}\n", .{id})) catch return null;
+        self.writeAll(self.write_buf[0..w.end]) catch {
+            self.close();
+            return null;
+        };
+        const line_len = self.readLine() catch {
+            self.close();
+            return null;
+        };
+        const obj = scanObject(self.read_buf[0..line_len]) catch {
+            self.close();
+            return null;
+        };
+        // Close on id desync so the next call reconnects clean (matches
+        // the classify path); a well-formed non-"profile" reply is a real
+        // answer, not a desync, so it doesn't force a reconnect.
+        checkId(&obj, id) catch {
+            self.close();
+            return null;
+        };
+        const type_s = obj.get("type") orelse return null;
+        if (!std.mem.eql(u8, type_s, "profile")) return null;
+        return copyField(obj.get("profile"), out);
+    }
+
+    /// Outcome of a profile switch — distinguished so the UX shows a useful
+    /// one-liner (the new profile, the daemon's refusal, or "unreachable").
+    pub const SwitchResult = union(enum) {
+        ok: []const u8, // new profile name (backed by the caller's buffer)
+        refused: []const u8, // the daemon's refusal message (in the buffer)
+        unavailable, // daemon unreachable / protocol error
+    };
+
+    /// Switch the live profile. The daemon enforces who may switch (the
+    /// profile is daemon-global), so a refusal carries the daemon's message
+    /// for the UX. `out` backs the returned name/message slice.
+    pub fn setProfile(self: *Client, name: []const u8, out: []u8) SwitchResult {
+        // Guard the JSON interpolation: a profile name is [a-z]+, so reject
+        // anything else rather than emit malformed / injectable JSON. (The
+        // in-tree caller only passes PROFILES literals, but this is pub.)
+        if (!isValidProfileName(name)) return .unavailable;
+        self.ensureConnected() catch return .unavailable;
+        var w: std.Io.Writer = .fixed(&self.write_buf);
+        const id = self.next_id;
+        self.next_id +%= 1;
+        (w.print(
+            "{{\"id\":{d},\"method\":\"set_profile\",\"profile\":\"{s}\"}}\n",
+            .{ id, name },
+        )) catch return .unavailable;
+        self.writeAll(self.write_buf[0..w.end]) catch {
+            self.close();
+            return .unavailable;
+        };
+        const line_len = self.readLine() catch {
+            self.close();
+            return .unavailable;
+        };
+        const obj = scanObject(self.read_buf[0..line_len]) catch {
+            self.close();
+            return .unavailable;
+        };
+        checkId(&obj, id) catch {
+            self.close();
+            return .unavailable;
+        };
+        const type_s = obj.get("type") orelse return .unavailable;
+        if (std.mem.eql(u8, type_s, "profile")) {
+            return .{ .ok = copyField(obj.get("profile"), out) orelse return .unavailable };
+        }
+        if (std.mem.eql(u8, type_s, "error")) {
+            return .{ .refused = copyField(obj.get("message"), out) orelse "switch refused" };
+        }
+        return .unavailable;
+    }
+
     /// Parse the daemon's `{"type":"ok"}` vs
     /// `{"type":"error","message":...}` response envelope for
     /// mutation RPCs. Pre-fix the four mutation RPCs
@@ -665,6 +750,23 @@ fn onlyTrailingWs(buf: []const u8, close: usize) bool {
 /// `Error.DaemonError` on anything that isn't a well-formed object, that
 /// carries more than `max_object_members` fields, or that has trailing
 /// non-whitespace bytes after the top-level `}`.
+/// A profile name is `[a-z]+` (bounded) — used to guard the set_profile
+/// JSON interpolation against malformed / injectable input.
+fn isValidProfileName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 16) return false;
+    for (name) |c| if (c < 'a' or c > 'z') return false;
+    return true;
+}
+
+/// Copy a JSON string value into `out`, returning the copied slice (null
+/// if absent or too long). Decouples the result from the reused read_buf.
+fn copyField(value: ?[]const u8, out: []u8) ?[]const u8 {
+    const v = value orelse return null;
+    if (v.len == 0 or v.len > out.len) return null;
+    @memcpy(out[0..v.len], v);
+    return out[0..v.len];
+}
+
 fn scanObject(buf: []const u8) Error!ParsedObject {
     var obj: ParsedObject = .{};
     var i = skipWs(buf, 0);

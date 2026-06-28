@@ -145,6 +145,11 @@ pub const Keymap = struct {
         // spelled out here.
         .{ .bytes = "\x1bW", .action = .security_guard_show_warnings, .label = "Alt+Shift+W", .description = "dump security_guard warn events to scrollback" },
         .{ .bytes = "\x1b[87;4u", .action = .security_guard_show_warnings },
+        // Alt+P cycles the live security profile (opt-in via
+        // security_guard.allow_profile_switch). Dual-encoded: legacy Esc+p
+        // + the kitty-kbd CSI-u sibling (Ghostty/kitty/foot/WezTerm).
+        .{ .bytes = "\x1bp", .action = .security_guard_cycle_profile, .label = "Alt+P", .description = "cycle the atty-guard security profile" },
+        .{ .bytes = "\x1b[112;3u", .action = .security_guard_cycle_profile },
 
         // LLM-module bindings live on the module itself (see
         // `atty.modules.llm.default_bindings`). The dispatcher's
