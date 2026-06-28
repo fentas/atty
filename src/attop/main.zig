@@ -186,4 +186,5 @@ test {
     _ = @import("home.zig");
     _ = @import("guard.zig");
     _ = @import("fleet.zig");
+    _ = @import("screenshot_tests.zig");
 }
