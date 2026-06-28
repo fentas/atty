@@ -1,10 +1,12 @@
 //! attop screenshot tests — the docs/dashboard.md "screenshots end-to-end
 //! tested" guarantee. Each pure screen render is fed through the SAME VT
 //! emulator the proxy's e2e harness uses (src/test/e2e/vt.zig), and we
-//! assert against the resulting on-screen grid — i.e. exactly what a
-//! terminal would display, not just the raw escape bytes. This catches
-//! malformed escapes, mid-word wrapping, and content dropped off-screen
-//! that a raw-byte assertion would miss, across widths.
+//! assert against the resulting on-screen grid — the actual terminal text,
+//! not the raw escape bytes. The checks are content-present-and-unwrapped
+//! (each needle appears INTACT in the grid, so it fit the width without a
+//! mid-word wrap) across widths; full pixel-exact grid goldens are a
+//! follow-up. Still catches malformed escapes, wrapping, and off-screen
+//! content that a raw-byte assertion would miss.
 
 const std = @import("std");
 const testing = std.testing;
@@ -77,6 +79,22 @@ test "Guard renders the ladder + active rung across widths" {
         const t = try screen(testing.allocator, guard.renderGuard(&buf, homeMetrics("strict"), cols, 40), 40, cols);
         defer testing.allocator.free(t);
         try expectOnScreen(t, &.{ "prompt", "audit", "session", "strict", "lockdown", "smart", "kernel" });
+        // A long TL;DR must render intact (not wrapped mid-line) at full
+        // width — the wrap the VT grid would expose.
+        if (cols >= 120) try expectOnScreen(t, &.{"freezes anything ambiguous"});
+    }
+}
+
+test "Guard renders the negative states across widths" {
+    var buf: [65536]u8 = undefined;
+    for (widths) |cols| {
+        const down = try screen(testing.allocator, guard.renderGuard(&buf, null, cols, 40), 40, cols);
+        defer testing.allocator.free(down);
+        try expectOnScreen(down, &.{"atty-guard not running"});
+
+        const unknown = try screen(testing.allocator, guard.renderGuard(&buf, homeMetrics("bogus"), cols, 40), 40, cols);
+        defer testing.allocator.free(unknown);
+        try expectOnScreen(unknown, &.{"not a listed rung"});
     }
 }
 
@@ -91,4 +109,27 @@ test "Fleet renders rows + total across widths" {
         defer testing.allocator.free(t);
         try expectOnScreen(t, &.{ "Fleet", "4242", "bash", "2 terminals" });
     }
+}
+
+test "Fleet renders the negative states across widths" {
+    var buf: [65536]u8 = undefined;
+    for (widths) |cols| {
+        const down = try screen(testing.allocator, fleet.renderFleet(&buf, null, cols, 40), 40, cols);
+        defer testing.allocator.free(down);
+        try expectOnScreen(down, &.{"atty-guard not"});
+
+        const empty = try screen(testing.allocator, fleet.renderFleet(&buf, &.{}, cols, 40), 40, cols);
+        defer testing.allocator.free(empty);
+        try expectOnScreen(empty, &.{"no atty sessions reporting"});
+    }
+}
+
+test "Fleet truncates a long cwd intact (tail visible, head dropped)" {
+    var buf: [65536]u8 = undefined;
+    var list = [_]uds.Instance{.{ .pid = 1, .shell = "bash", .cwd = "/very/deeply/nested/that/will/overflow/the/column/budget/tail-marker" }};
+    // At full width the cwd still overflows the column → tail-truncated; the
+    // tail must land on screen intact (not split by a wrap).
+    const t = try screen(testing.allocator, fleet.renderFleet(&buf, &list, 120, 40), 40, 120);
+    defer testing.allocator.free(t);
+    try expectOnScreen(t, &.{"tail-marker"});
 }
