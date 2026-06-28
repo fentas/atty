@@ -116,6 +116,25 @@ git clone https://github.com/fentas/atty && cd atty
 ./scripts/install.sh    # → ./dist/atty
 ```
 
+### The dashboard (attop)
+
+`attop` is the dashboard — *the Grafana of atty*: am I protected? what is atty
+doing for me? is everything wired up? It's a separate binary, installed the
+same way:
+
+```sh
+curl -fsSL https://tui.atty.sh | sh    # → ~/.local/bin/attop
+```
+
+Like the atty installer, it honors `INSTALL_DIR=…` and `ATTY_VERSION=…`.
+
+Run `attop`. It opens on a **setup wizard** that detects what's installed and
+walks you through the rest — installing atty, wiring your shell (with your
+consent), enabling the `atty-guard` daemon — and shows what's compiled in and
+configured. From a clone: `zig build attop` builds it, `zig build run-attop`
+runs it in place. See [the dashboard design](https://github.com/fentas/atty/blob/master/docs/dashboard.md)
+for the full screen tour.
+
 ## Wire it into your shell
 
 ### Option A — shell-rc snippet (recommended)

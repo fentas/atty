@@ -17,19 +17,31 @@ The rest of this doc is the plan; this section tracks what's **built** on
   atty-guard metrics API (`report_metrics` / `get_metrics` / `list_instances`,
   per-UID gated).
 - **P2 — `attop` + the UI foundation.** The standalone binary (`zig build
-  run-attop`) with **Home / Guard / Fleet / Setup** screens, responsive
+  attop` to install, `run-attop` to run in place) with **Home / Guard / Fleet
+  / Setup** screens, responsive
   layout, **theming** (dark / light / high-contrast / mono / ascii; `NO_COLOR`
   + `COLORFGBG` aware), **i18n** (en + de, `$ATTOP_LANG`-driven), and
   **screenshot-verified** rendering (each screen fed through the VT grid).
 - **Profile switch.** Live `prompt → … → strict` switching: atty's `Alt+P`
   (per `security_guard.profile_switch_mode` — default `.sudo` stages the
   `sudo atty-guard profile set` command) or that command directly.
+- **Capability wizard + UI install.** `attop` ships as its own installable
+  binary — `curl -fsSL https://tui.atty.sh | sh` (or `zig build attop` from
+  source). It opens **capability-aware**: the Setup/wizard when atty isn't
+  installed or the daemon is unreachable, else Home. **Setup** is a live
+  checklist — atty installed, shell wired, atty-guard running, security
+  profile, eBPF + enforcement depth, the daemon's compiled-in features,
+  sessions reporting, in-atty — each failing/optional row with a one-line fix.
+  Pressing **`[w]`** on a not-wired shell does a **consented** integration
+  write (see "First-run wizard"). **Home** is honest when no session reports
+  metrics (says so rather than showing zeros).
 
 **Planned (not yet built):** the AI panel's productivity counters, Alerts
-(system notification + webhook hooks), `menuconfig` (`config.zig` scaffold),
-and the first-run wizard. The Guard/Fleet/Setup screens are **read-only**
-today — profile switching is via atty's `Alt+P` or the daemon CLI (wiring it
-into the Guard panel is a future step).
+(system notification + webhook hooks), and `menuconfig` (`config.zig`
+scaffold). Guard + Fleet are **read-only**; Setup's `[w]` shell-integration
+write is the one mutating action (consented), and profile switching is via
+atty's `Alt+P` or the daemon CLI (wiring it into the Guard panel is a future
+step).
 
 ## Why
 
@@ -209,10 +221,50 @@ Each rung is **named in plain language with a one-line TL;DR/tip**:
 
 ## First-run wizard
 
-`Welcome → detect shell/terminal → install proxy → (optional) turn on the
-safety guard [explained] → (optional) pick an AI model → done.` Converts
-"too high-level" into "it set itself up and I get it." Reuses the embedded
-doctor for the final health-check.
+**Shipped.** The wizard *is* the Setup screen — there's no separate flow to
+finish. attop detects what's present (it's a standalone binary, so it reads
+**host + daemon** state, not atty's compiled module set) and guides the rest.
+
+**Capability-aware landing.** On launch attop opens on **Setup** when the
+stack isn't ready — atty not on `$PATH`, or the daemon unreachable on a
+one-shot probe — and on **Home** otherwise. So a fresh user lands on the
+checklist, not an empty dashboard.
+
+**The Setup checklist.** One row per capability, each failing/optional one
+with a one-line fix:
+
+| Row | ✓ | otherwise |
+|-----|---|-----------|
+| `atty` | on `$PATH` | the `bin.atty.sh` install one-liner |
+| `shell` | wired (via `$ATTY_SOURCE` or an rc integration signature) | `[w]` to wire it, or the manual `atty init <shell>` |
+| `atty-guard` | daemon running | `sudo systemctl start atty-guard` |
+| `security` | active profile | raise it |
+| `eBPF` | attached (+ the enforcement depth) | the `GUARD_FEATURES` build |
+| `features` | the daemon's compiled-in Cargo features | "minimal build" / "unknown" (older daemon) |
+| `metrics` | sessions reporting | enable `metrics_exporter` |
+| `session` | inside an atty session | `run: atty` |
+
+Detection is read-only + best-effort (an unreadable rc reads as "not wired",
+never an error); Home likewise shows "no metrics — enable metrics_exporter or
+start a session" rather than misleading zeros when nothing is reporting.
+
+**`[w]` — consented shell-integration write.** On a not-wired shell, `[w]`
+opens a confirm view showing the **exact** lines that will be written, and
+writes **only** on `y` (any other key cancels — nothing is touched without
+consent). It uses a managed-snippet model:
+
+- writes `~/.config/atty/init.<shell>` — a self-updating one-liner
+  (`eval "$(atty init <shell>)"`, or `atty init fish | source` for fish) so it
+  never goes stale;
+- adds one **marker-guarded** block to the shell rc that exports
+  `$ATTY_SOURCE` and sources that file. The block is **idempotent** (re-running
+  rewrites in place, never duplicates), preserves everything outside its
+  markers byte-for-byte, and the rc is **backed up** to `.atty.bak` before any
+  edit (writes are atomic via temp + rename). Remove it by deleting between the
+  markers. Syntax is bash/zsh/fish-aware.
+
+`$ATTY_SOURCE` is the locator config tooling can pick up; its presence (or the
+rc marker) is exactly what the `shell` row detects as "wired".
 
 ## Language & rendering [locked]
 
