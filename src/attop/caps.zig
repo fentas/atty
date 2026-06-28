@@ -65,7 +65,7 @@ pub fn shellName() []const u8 {
 /// ~/.bashrc, zsh → ~/.zshrc, fish → ~/.config/fish/config.fish). The common
 /// interactive rc — login-only files (~/.bash_profile, ~/.zprofile) read as
 /// unwired, which the $ATTY_SOURCE short-circuit covers when run under atty.
-fn rcPath(buf: []u8) ?[:0]const u8 {
+pub fn rcPath(buf: []u8) ?[:0]const u8 {
     const home = std.mem.span(std.c.getenv("HOME") orelse return null);
     const name = shellName();
     const rel = if (std.mem.eql(u8, name, "zsh"))

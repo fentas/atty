@@ -75,6 +75,12 @@ pub const Strings = struct {
     fix_enable_metrics: []const u8,
     fix_install_atty: []const u8,
     fix_wire_shell: []const u8,
+    // Shell-integration write (the consented 3b flow)
+    wire_hint: []const u8, // Setup: the [w] key prompt on the not-wired row
+    wire_intro: []const u8, // confirm: "attop will write:"
+    wire_confirm: []const u8, // confirm: the y/cancel prompt
+    wire_done: []const u8,
+    wire_failed: []const u8,
     fix_run_atty: []const u8,
     fleet_enable_hint: []const u8,
 };
@@ -128,6 +134,11 @@ pub const en = Strings{
     .fix_enable_metrics = "enable the metrics_exporter module",
     .fix_install_atty = "install: curl -fsSL https://bin.atty.sh | sh",
     .fix_wire_shell = "wire it: ", // prefix only — the command is universal, not localized
+    .wire_hint = "press [w] to let attop wire it for you",
+    .wire_intro = "attop will create + source this (a marked, removable block):",
+    .wire_confirm = "[y] write    any other key cancels",
+    .wire_done = "wired \u{2014} restart your shell to activate",
+    .wire_failed = "could not write \u{2014} check permissions",
     .fix_run_atty = "run: atty",
     .fleet_enable_hint = "(enable the metrics_exporter module — see docs/dashboard.md)",
 };
@@ -182,6 +193,11 @@ pub const de = Strings{
     .fix_enable_metrics = "Modul metrics_exporter aktivieren",
     .fix_install_atty = "installieren: curl -fsSL https://bin.atty.sh | sh",
     .fix_wire_shell = "einrichten: ", // prefix only — the command is universal, not localized
+    .wire_hint = "[w] drücken, damit attop es einrichtet",
+    .wire_intro = "attop erstellt + lädt dies (ein markierter, entfernbarer Block):",
+    .wire_confirm = "[y] schreiben    andere Taste bricht ab",
+    .wire_done = "eingerichtet \u{2014} Shell neu starten zum Aktivieren",
+    .wire_failed = "Schreiben fehlgeschlagen \u{2014} Rechte prüfen",
     .fix_run_atty = "ausführen: atty",
     .fleet_enable_hint = "(Modul metrics_exporter aktivieren — siehe docs/dashboard.md)",
 };

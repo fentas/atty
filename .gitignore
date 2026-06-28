@@ -2,6 +2,10 @@
 zig-out/
 .zig-cache/
 
+# Process core dumps (a crashing test/binary can drop these in the tree)
+core
+core.*
+
 # ---- atty build outputs -----------------------------------------------------
 dist/
 *.tar.gz
