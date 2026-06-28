@@ -298,6 +298,13 @@ body.home .hamburger { display: none !important; }
   align-items: center;
   gap: 0.5rem;
 }
+/* The per-module list reveals (only rendered when in the Modules section).
+   A subtle fade so it reads as a submenu opening, not a layout jump. */
+.sidebar-modules-reveal { animation: sidebar-modules-fade 200ms ease-out; }
+@keyframes sidebar-modules-fade { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-modules-reveal { animation: none; }
+}
 .module-flag {
   font-size: 0.62rem;
   letter-spacing: 0.05em;

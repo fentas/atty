@@ -1,139 +1,54 @@
 <aside class="sidebar" aria-label="Documentation navigation">
-  <nav class="sidebar-nav" data-sidebar>
-    <!-- Main panel (default view). -->
-    <div class="sidebar-panel sidebar-panel-main" data-panel="main">
-      <div class="sidebar-group">
-        <h3>Guide</h3>
-        <ul>
-          <li><a href="{{ '/getting-started/' | relative_url }}"{% if page.url == '/getting-started/' %} class="active"{% endif %}>Getting started</a></li>
-          <li><a href="{{ '/faq/' | relative_url }}"{% if page.url == '/faq/' %} class="active"{% endif %}>FAQ</a></li>
-        </ul>
-      </div>
-      <div class="sidebar-group">
-        <h3>
-          <button type="button" class="sidebar-submenu-toggle" data-submenu-target="modules" aria-haspopup="true" aria-controls="sidebar-modules" aria-expanded="false">
-            Modules <span class="chevron" aria-hidden="true">›</span>
-          </button>
-        </h3>
-        <ul>
-          <li><a href="{{ '/modules/' | relative_url }}"{% if page.url == '/modules/' %} class="active"{% endif %}>Writing a module</a></li>
-        </ul>
-      </div>
-      <div class="sidebar-group">
-        <h3>Advanced</h3>
-        <ul>
-          <li><a href="{{ '/architecture/' | relative_url }}"{% if page.url == '/architecture/' %} class="active"{% endif %}>Architecture</a></li>
-          <li><a href="{{ '/operator-workflow/' | relative_url }}"{% if page.url == '/operator-workflow/' %} class="active"{% endif %}>Operator workflow</a></li>
-        </ul>
-      </div>
-      <div class="sidebar-group">
-        <h3>External</h3>
-        <ul>
-          <li><a href="https://github.com/fentas/atty" rel="noopener">GitHub&nbsp;↗</a></li>
-          <li><a href="https://github.com/fentas/atty/issues" rel="noopener">Report a bug&nbsp;↗</a></li>
-        </ul>
-      </div>
+  <nav class="sidebar-nav">
+    <div class="sidebar-group">
+      <h3>Guide</h3>
+      <ul>
+        <li><a href="{{ '/getting-started/' | relative_url }}"{% if page.url == '/getting-started/' %} class="active"{% endif %}>Getting started</a></li>
+        <li><a href="{{ '/dashboard/' | relative_url }}"{% if page.url == '/dashboard/' %} class="active"{% endif %}>Dashboard (attop)</a></li>
+        <li><a href="{{ '/faq/' | relative_url }}"{% if page.url == '/faq/' %} class="active"{% endif %}>FAQ</a></li>
+      </ul>
     </div>
 
-    <!-- Modules submenu (hidden until activated). -->
-    <div class="sidebar-panel sidebar-panel-submenu" id="sidebar-modules" data-panel="modules" hidden>
-      <div class="sidebar-group">
-        <h3>
-          <button type="button" class="sidebar-submenu-back" data-submenu-back aria-label="Back to main navigation">
-            <span class="chevron chevron-back" aria-hidden="true">‹</span> Back
-          </button>
-        </h3>
-        {%- comment -%}
-          Module list is derived from front-matter — each module page declares
-          `module_default: true|false`, which doubles as both the membership
-          marker and the default/opt-in badge. Sort by URL so the order is
-          deterministic regardless of title casing.
-        {%- endcomment -%}
-        {% assign module_pages = site.pages
-           | where_exp: "p", "p.module_default == true or p.module_default == false"
-           | sort: "url" %}
-        <ul class="sidebar-modules-list">
-          {% for p in module_pages -%}
-            {%- comment -%}
-              `p.url` is e.g. `/modules/atuin/` or `/llm/`. Ruby's `split('/')`
-              strips the trailing empty token, so the last element is the slug
-              we want as the visible label.
-            {%- endcomment -%}
-            {% assign label = p.url | split: '/' | last %}
-            {% if p.module_default %}{% assign flag = 'default' %}{% else %}{% assign flag = 'opt-in' %}{% endif %}
-            <li><a href="{{ p.url | relative_url }}"{% if page.url == p.url %} class="active"{% endif %}>{{ label }} <span class="module-flag" data-flag="{{ flag }}">{{ flag }}</span></a></li>
-          {%- endfor %}
-        </ul>
-        <p class="sidebar-modules-footer"><a href="{{ '/modules/' | relative_url }}">Writing a module &rarr;</a></p>
-      </div>
+    {%- comment -%}
+      Module pages are derived from front-matter (`module_default: true|false`,
+      which doubles as the membership marker + the default/opt-in badge). The
+      list is a normal nav group — NOT a header-as-button. The per-module list
+      reveals (fades in) only when the reader is in the Modules section (on the
+      overview or a module page), so it's route-driven, no toggle JS.
+    {%- endcomment -%}
+    {%- assign module_pages = site.pages | where_exp: "p", "p.module_default == true or p.module_default == false" | sort: "url" -%}
+    {%- assign in_modules = false -%}
+    {%- if page.url == '/modules/' -%}{%- assign in_modules = true -%}{%- endif -%}
+    {%- for p in module_pages -%}{%- if page.url == p.url -%}{%- assign in_modules = true -%}{%- endif -%}{%- endfor -%}
+    <div class="sidebar-group">
+      <h3>Modules</h3>
+      <ul>
+        <li><a href="{{ '/modules/' | relative_url }}"{% if page.url == '/modules/' %} class="active"{% endif %}>Overview</a></li>
+      </ul>
+      {%- if in_modules %}
+      <ul class="sidebar-modules-list sidebar-modules-reveal">
+        {% for p in module_pages -%}
+          {% assign label = p.url | split: '/' | last %}
+          {% if p.module_default %}{% assign flag = 'default' %}{% else %}{% assign flag = 'opt-in' %}{% endif %}
+          <li><a href="{{ p.url | relative_url }}"{% if page.url == p.url %} class="active"{% endif %}>{{ label }} <span class="module-flag" data-flag="{{ flag }}">{{ flag }}</span></a></li>
+        {%- endfor %}
+      </ul>
+      {%- endif %}
+    </div>
+
+    <div class="sidebar-group">
+      <h3>Advanced</h3>
+      <ul>
+        <li><a href="{{ '/architecture/' | relative_url }}"{% if page.url == '/architecture/' %} class="active"{% endif %}>Architecture</a></li>
+        <li><a href="{{ '/operator-workflow/' | relative_url }}"{% if page.url == '/operator-workflow/' %} class="active"{% endif %}>Operator workflow</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-group">
+      <h3>External</h3>
+      <ul>
+        <li><a href="https://github.com/fentas/atty" rel="noopener">GitHub&nbsp;↗</a></li>
+        <li><a href="https://github.com/fentas/atty/issues" rel="noopener">Report a bug&nbsp;↗</a></li>
+      </ul>
     </div>
   </nav>
 </aside>
-
-<script>
-  (function () {
-    var root = document.querySelector('[data-sidebar]');
-    if (!root) return;
-
-    var panels = {
-      main: root.querySelector('[data-panel="main"]'),
-      modules: root.querySelector('[data-panel="modules"]')
-    };
-    var startPanel = 'main';
-    // Auto-open the modules panel when landing on a module page so the
-    // sidebar matches where the reader actually is. Only the module-detail
-    // links count; the "Writing a module" footer link would otherwise
-    // false-fire on the framework page (its href is a prefix of all others).
-    var path = (window.location.pathname || '').replace(/\/+$/, '/');
-    if (panels.modules) {
-      var moduleLinks = panels.modules.querySelectorAll('.sidebar-modules-list a[href]');
-      for (var i = 0; i < moduleLinks.length; i++) {
-        var href = moduleLinks[i].getAttribute('href') || '';
-        var normalized = href.replace(/\/+$/, '/');
-        if (normalized && (path === normalized || path.indexOf(normalized) === 0)) {
-          startPanel = 'modules';
-          break;
-        }
-      }
-    }
-
-    function show(name) {
-      Object.keys(panels).forEach(function (key) {
-        var el = panels[key];
-        if (!el) return;
-        if (key === name) {
-          el.hidden = false;
-        } else {
-          el.hidden = true;
-        }
-      });
-      var toggle = root.querySelector('[data-submenu-target="modules"]');
-      if (toggle) toggle.setAttribute('aria-expanded', name === 'modules' ? 'true' : 'false');
-    }
-
-    root.addEventListener('click', function (evt) {
-      var openTrigger = evt.target.closest('[data-submenu-target]');
-      if (openTrigger) {
-        evt.preventDefault();
-        var target = openTrigger.getAttribute('data-submenu-target');
-        if (panels[target]) {
-          show(target);
-          var firstLink = panels[target].querySelector('ul a') ||
-            panels[target].querySelector('a, button');
-          if (firstLink) firstLink.focus();
-        }
-        return;
-      }
-      var backTrigger = evt.target.closest('[data-submenu-back]');
-      if (backTrigger) {
-        evt.preventDefault();
-        show('main');
-        var modulesTrigger = root.querySelector('[data-submenu-target="modules"]');
-        if (modulesTrigger) modulesTrigger.focus();
-      }
-    });
-
-    // Initialise once panels are wired.
-    show(startPanel);
-  })();
-</script>

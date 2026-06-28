@@ -1,4 +1,27 @@
-# atty dashboard (`attop`) — design
+---
+layout: default
+title: Dashboard (attop)
+permalink: /dashboard/
+---
+
+# The atty dashboard (`attop`)
+
+`attop` is the dashboard — *the Grafana of atty*: am I protected? what is atty
+doing for me? is everything wired up? It's a standalone binary that reads the
+`atty-guard` daemon and reuses atty's render primitives. Install it with:
+
+```sh
+curl -fsSL https://tui.atty.sh | sh    # → ~/.local/bin/attop
+```
+
+Run `attop`. It opens on a **setup wizard** that detects what's installed and
+walks you through the rest — installing atty, wiring your shell (with your
+consent), enabling the daemon — and shows what's compiled in and configured.
+From a clone: `zig build attop` builds it, `zig build run-attop` runs it in
+place. See [Getting started](/getting-started/) for the install walkthrough.
+
+The rest of this page is the **design of record** — the architecture split, UX
+bar, screens, metrics API, theming/i18n, and phasing.
 
 > **Status (2026-06): design of record — LOCKED with the maintainer.** The
 > architecture split, UX bar, screens, metrics API, theming/i18n,
