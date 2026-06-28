@@ -34,7 +34,7 @@ fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void 
         // null = the round-trip failed for ANY reason (down, unreachable,
         // timeout, malformed) — say "not reachable", not "not running".
         try w.print("  {f}{s}{s}\r\n", .{ t.danger, s.not_reachable, reset });
-        try w.writeAll("  is it running?  sudo systemctl start atty-guard\r\n");
+        try w.print("  {s}  sudo systemctl start atty-guard\r\n", .{s.fix_is_it_running});
         return;
     }
     const list = instances.?;
@@ -64,8 +64,8 @@ fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void 
         try w.writeAll("\r\n");
     }
 
-    const plural: []const u8 = if (list.len == 1) "" else "s";
-    try w.print("\r\n  {d} terminal{s}\r\n", .{ list.len, plural });
+    const term = if (list.len == 1) s.fleet_terminals_one else s.fleet_terminals_many;
+    try w.print("\r\n  {d} {s}\r\n", .{ list.len, term });
 }
 
 /// Columns available for the cwd after the pid/shell/cmds prefix, leaving

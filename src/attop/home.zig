@@ -44,7 +44,7 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
 
     if (m == null) {
         try w.print("  {f}{s}{s}\r\n", .{ t.danger, s.not_running, reset });
-        try w.writeAll("  start it:  sudo systemctl start atty-guard\r\n");
+        try w.print("  {s}  sudo systemctl start atty-guard\r\n", .{s.fix_start_it});
         return;
     }
     const metrics = m.?;
@@ -59,7 +59,7 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     // em-dash rather than faking activity.
     const prof = if (metrics.guard.profile.len > 0) metrics.guard.profile else "\u{2014}";
     const ebpf = if (metrics.guard.ebpf.len > 0) metrics.guard.ebpf else "\u{2014}";
-    try w.print("  {s}  Guard     {s}     kernel: {s}\r\n", .{ g.shield, prof, ebpf });
+    try w.print("  {s}  Guard     {s}     {s}: {s}\r\n", .{ g.shield, prof, s.word_kernel, ebpf });
     try w.print("  {s}  AI        \u{2014}\r\n", .{g.ai});
     try w.print("  {s}  Suggest   \u{2014}\r\n\r\n", .{g.suggest});
 

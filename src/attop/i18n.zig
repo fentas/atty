@@ -36,6 +36,12 @@ pub const Strings = struct {
 
     // Fleet
     no_sessions: []const u8,
+    fleet_terminals_one: []const u8, // "{d} <this>" (the fleet total)
+    fleet_terminals_many: []const u8,
+
+    // Daemon-down fix prose (the command part stays literal)
+    fix_start_it: []const u8, // "start it:"
+    fix_is_it_running: []const u8, // "is it running?"
 
     // Setup statuses
     st_running: []const u8,
@@ -72,6 +78,10 @@ pub const en = Strings{
     .word_kernel = "kernel",
     .word_switch = "switch",
     .no_sessions = "no atty sessions reporting",
+    .fleet_terminals_one = "terminal",
+    .fleet_terminals_many = "terminals",
+    .fix_start_it = "start it:",
+    .fix_is_it_running = "is it running?",
     .st_running = "running",
     .st_not_reachable = "not reachable",
     .st_attached = "attached",
@@ -106,6 +116,10 @@ pub const de = Strings{
     .word_kernel = "Kernel",
     .word_switch = "Wechsel",
     .no_sessions = "keine atty-Sitzungen gemeldet",
+    .fleet_terminals_one = "Terminal",
+    .fleet_terminals_many = "Terminals",
+    .fix_start_it = "starten:",
+    .fix_is_it_running = "läuft er?",
     .st_running = "läuft",
     .st_not_reachable = "nicht erreichbar",
     .st_attached = "aktiv",
@@ -128,7 +142,8 @@ pub var active: Strings = en;
 /// prefix (e.g. "de_DE.UTF-8" → "de"); else English.
 pub fn resolve() Strings {
     if (std.c.getenv("ATTOP_LANG")) |p| {
-        if (byLang(std.mem.span(p))) |s| return s;
+        // Accept a bare code or a full locale ("de" or "de_DE.UTF-8").
+        if (byLang(langPrefix(std.mem.span(p)))) |s| return s;
     }
     const envs = [_][*:0]const u8{ "LC_ALL", "LANG" };
     for (envs) |e| {
