@@ -138,8 +138,8 @@ pub const de = Strings{
 /// The active string table — set once at startup (see `resolve`).
 pub var active: Strings = en;
 
-/// Resolve the locale: `$ATTOP_LANG` override; else `$LANG`/`$LC_ALL`
-/// prefix (e.g. "de_DE.UTF-8" → "de"); else English.
+/// Resolve the locale: `$ATTOP_LANG` override; else `$LC_ALL` then `$LANG`
+/// (LC_ALL wins, per POSIX) prefix (e.g. "de_DE.UTF-8" → "de"); else English.
 pub fn resolve() Strings {
     if (std.c.getenv("ATTOP_LANG")) |p| {
         // Accept a bare code or a full locale ("de" or "de_DE.UTF-8").
