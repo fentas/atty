@@ -100,7 +100,7 @@ test "Guard renders the negative states across widths" {
 
 test "Setup renders the checklist across widths (up, neutral, down)" {
     var buf: [65536]u8 = undefined;
-    const neutral_m = uds.Metrics{ .guard = .{ .profile = "prompt" } }; // no ebpf, no sessions
+    const neutral_m = uds.Metrics{ .guard = .{ .profile = "prompt", .ebpf = "off" } }; // off, no sessions
     for (widths) |cols| {
         const up = try screen(testing.allocator, setup.renderSetup(&buf, homeMetrics("strict"), true, cols, 40), 40, cols);
         defer testing.allocator.free(up);

@@ -1,7 +1,7 @@
-//! attop Setup/Doctor screen — the embedded health check (docs/dashboard.md
-//! Setup). Answers "is my atty stack wired up?" with a checklist + a one-
-//! line fix per failing/optional item, so onboarding + troubleshooting live
-//! in the dashboard. PURE render (no I/O): the daemon metrics + the
+//! attop Setup/Doctor screen (docs/dashboard.md Setup) — the embedded
+//! health check. Answers "is my atty stack wired up?" with a checklist + a
+//! one-line fix per failing/optional item, so onboarding + troubleshooting
+//! live in the dashboard. PURE render (no I/O): the daemon metrics + the
 //! under-atty flag are passed in.
 
 const std = @import("std");
@@ -44,14 +44,17 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void
             try row(w, t, .neutral, "security", "unknown", "");
         }
 
+        // The daemon reports ebpf as exactly "attached" or "off"
+        // (main.rs GuardPosture); handle both, keep the install fix on the
+        // explicit "off", and stay forward/older-daemon tolerant.
         if (std.mem.eql(u8, metrics.guard.ebpf, "attached")) {
             try row(w, t, .ok, "eBPF", "attached", "");
-        } else if (metrics.guard.ebpf.len > 0) {
-            // A non-attached status the daemon reported — show it verbatim
-            // rather than collapse it to "off".
-            try row(w, t, .neutral, "eBPF", metrics.guard.ebpf, "");
-        } else {
+        } else if (std.mem.eql(u8, metrics.guard.ebpf, "off")) {
             try row(w, t, .neutral, "eBPF", "off", "install: sudo make install-guard GUARD_FEATURES=...,ebpf");
+        } else if (metrics.guard.ebpf.len > 0) {
+            try row(w, t, .neutral, "eBPF", metrics.guard.ebpf, ""); // future status, verbatim
+        } else {
+            try row(w, t, .neutral, "eBPF", "unknown", ""); // field absent (older daemon)
         }
 
         if (metrics.instances > 0) {

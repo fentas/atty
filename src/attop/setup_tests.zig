@@ -26,9 +26,9 @@ test "daemon down → bad mark + fix; session still checkable" {
     try testing.expect(std.mem.indexOf(u8, out, "run: atty") != null);
 }
 
-test "prompt profile + no ebpf + no sessions → neutral rows with fixes" {
+test "prompt profile + ebpf off + no sessions → neutral rows with fixes" {
     var buf: [4096]u8 = undefined;
-    const m = uds.Metrics{ .guard = .{ .profile = "prompt" }, .instances = 0 };
+    const m = uds.Metrics{ .guard = .{ .profile = "prompt", .ebpf = "off" }, .instances = 0 };
     const out = setup.renderSetup(&buf, m, true, 120, 40);
     try testing.expect(std.mem.indexOf(u8, out, "warn-only") != null);
     try testing.expect(std.mem.indexOf(u8, out, "Guard panel") != null);
@@ -36,17 +36,23 @@ test "prompt profile + no ebpf + no sessions → neutral rows with fixes" {
     try testing.expect(std.mem.indexOf(u8, out, "GUARD_FEATURES") != null);
 }
 
-test "eBPF: a non-attached status shows verbatim; empty → off + fix" {
+test "eBPF: daemon \"off\" keeps the install fix; future status verbatim; empty → unknown" {
+    // The daemon sends exactly "attached" or "off" (main.rs GuardPosture).
     var buf: [4096]u8 = undefined;
-    const m = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "failed" } };
-    const out = setup.renderSetup(&buf, m, true, 120, 40);
-    try testing.expect(std.mem.indexOf(u8, out, "failed") != null); // raw, not "off"
+    const off = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "off" } };
+    const out = setup.renderSetup(&buf, off, true, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "off") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "GUARD_FEATURES") != null); // off keeps the fix
 
     var buf2: [4096]u8 = undefined;
-    const m2 = uds.Metrics{ .guard = .{ .profile = "strict" } }; // ebpf empty
-    const out2 = setup.renderSetup(&buf2, m2, true, 120, 40);
-    try testing.expect(std.mem.indexOf(u8, out2, "off") != null);
-    try testing.expect(std.mem.indexOf(u8, out2, "GUARD_FEATURES") != null);
+    const future = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "degraded" } };
+    const out2 = setup.renderSetup(&buf2, future, true, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out2, "degraded") != null); // verbatim
+
+    var buf3: [4096]u8 = undefined;
+    const absent = uds.Metrics{ .guard = .{ .profile = "strict" } }; // ebpf field absent
+    const out3 = setup.renderSetup(&buf3, absent, true, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out3, "unknown") != null);
 }
 
 test "empty profile (daemon up) → unknown, not prompt" {
