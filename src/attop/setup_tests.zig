@@ -35,15 +35,37 @@ test "setup shell row → wired ✓; not wired → ✗ + the wire fix" {
     try testing.expect(std.mem.indexOf(u8, wired, "wired") != null);
     try testing.expect(std.mem.indexOf(u8, wired, "not wired") == null);
 
+    // atty installed + not wired → offer the consented [w] write.
     var buf2: [4096]u8 = undefined;
-    const not = setup.renderSetup(&buf2, m, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = false }, 120, 40); // not wired (default shell bash)
+    const not = setup.renderSetup(&buf2, m, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = false }, 120, 40);
     try testing.expect(std.mem.indexOf(u8, not, "not wired") != null);
-    try testing.expect(std.mem.indexOf(u8, not, "atty init bash") != null); // the wire fix
+    try testing.expect(std.mem.indexOf(u8, not, "[w]") != null); // the consented-write prompt
+
+    // atty NOT installed + not wired → the manual command, naming the shell
+    // ([w] would point at an atty that isn't on PATH yet).
+    var buf3: [4096]u8 = undefined;
+    const zsh = setup.renderSetup(&buf3, m, .{ .atty_on_path = false, .shell_integrated = false, .shell_name = "zsh" }, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, zsh, "atty init zsh") != null);
+    try testing.expect(std.mem.indexOf(u8, zsh, "atty init bash") == null);
+}
+
+test "renderWire confirm shows the block + paths + prompt; done/failed messages" {
+    var buf: [4096]u8 = undefined;
+    const block = "# >>> atty >>>\nexport ATTY_SOURCE=\"/h/.config/atty/init.bash\"\n# <<< atty <<<\n";
+
+    const confirm = setup.renderWire(&buf, .confirm, "/h/.config/atty/init.bash", "/h/.bashrc", block, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, confirm, "/h/.config/atty/init.bash") != null);
+    try testing.expect(std.mem.indexOf(u8, confirm, "/h/.bashrc") != null);
+    try testing.expect(std.mem.indexOf(u8, confirm, "ATTY_SOURCE") != null); // the block is shown verbatim
+    try testing.expect(std.mem.indexOf(u8, confirm, "[y]") != null); // the consent key
+
+    var buf2: [4096]u8 = undefined;
+    const done = setup.renderWire(&buf2, .done, "", "", "", 120, 40);
+    try testing.expect(std.mem.indexOf(u8, done, "wired") != null);
 
     var buf3: [4096]u8 = undefined;
-    const zsh = setup.renderSetup(&buf3, m, .{ .shell_integrated = false, .shell_name = "zsh" }, 120, 40);
-    try testing.expect(std.mem.indexOf(u8, zsh, "atty init zsh") != null); // fix names the DETECTED shell
-    try testing.expect(std.mem.indexOf(u8, zsh, "atty init bash") == null);
+    const failed = setup.renderWire(&buf3, .failed, "", "", "", 120, 40);
+    try testing.expect(std.mem.indexOf(u8, failed, "could not write") != null);
 }
 
 test "daemon up, protected, ebpf, sessions, in-atty → all ok marks" {

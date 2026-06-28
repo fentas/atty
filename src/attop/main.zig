@@ -20,6 +20,8 @@ const fleet = @import("fleet.zig");
 const setup = @import("setup.zig");
 const help = @import("help.zig");
 const caps = @import("caps.zig");
+const rc_writer = @import("rc_writer.zig");
+const rc_apply = @import("rc_apply.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
 const posix = std.posix;
@@ -90,7 +92,7 @@ fn runLoop() void {
     // Fixed for the session — attop is launched once, in or out of atty.
     const under_atty = caps.underAtty();
     const atty_on_path = caps.attyOnPath();
-    const shell_integrated = caps.shellIntegrated();
+    var shell_integrated = caps.shellIntegrated();
     // Sized to hold a full Fleet render of a large reply (matches uds's
     // 64KiB read buffer). Per-row capping to the visible height is a future
     // polish; for now a big fleet renders complete (the terminal scrolls).
@@ -104,6 +106,9 @@ fn runLoop() void {
         defer probe.deinit();
         break :blk if (uds.fetch(probe.allocator(), sock, fetch_timeout_ms) != null) .home else .setup;
     };
+    // Non-null while the consented shell-integration write is being confirmed
+    // or its result shown — gates the whole rc write behind an explicit 'y'.
+    var wire: ?setup.WireState = null;
     const footer = "\r\n  \x1b[2m[h]ome  [g]uard  [f]leet  [s]etup  [?]help  q quit\x1b[0m\r\n";
 
     while (true) {
@@ -119,7 +124,11 @@ fn runLoop() void {
             // Each screen fetches only what it needs (Home/Guard →
             // get_metrics, Fleet → list_instances). The Parsed lives in the
             // arena; the render copies into framebuf before it's freed.
-            const frame = switch (screen) {
+            const frame = if (wire) |ws| wb: {
+                const wp = wirePaths(a) orelse break :wb setup.renderWire(&framebuf, ws, "", "", "", sz.cols, sz.rows);
+                const block = rc_writer.buildBlock(a, wp.init_path) catch "";
+                break :wb setup.renderWire(&framebuf, ws, wp.init_path, wp.rc_path, block, sz.cols, sz.rows);
+            } else switch (screen) {
                 .home => home.renderHome(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
                 .guard => guard.renderGuard(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
                 .fleet => fleet.renderFleet(&framebuf, instancesOf(uds.listInstances(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
@@ -127,7 +136,7 @@ fn runLoop() void {
                 .help => help.renderHelp(&framebuf, sz.cols, sz.rows),
             };
             _ = std.c.write(out, frame.ptr, frame.len);
-            _ = std.c.write(out, footer.ptr, footer.len);
+            if (wire == null) _ = std.c.write(out, footer.ptr, footer.len);
         }
 
         // Wait for a key, a terminating signal, or the refresh tick. A
@@ -142,7 +151,19 @@ fn runLoop() void {
                 var b: [8]u8 = undefined;
                 const n = std.c.read(posix.STDIN_FILENO, &b, b.len);
                 if (n <= 0) return; // EOF / error → restore + exit
-                switch (classifyInput(b[0..@intCast(n)])) {
+                const keys = b[0..@intCast(n)];
+                if (wire) |ws| switch (ws) {
+                    // The consent gate: ONLY 'y' writes; anything else cancels.
+                    .confirm => {
+                        if (keys.len == 1 and (keys[0] == 'y' or keys[0] == 'Y')) {
+                            wire = if (doWire()) .done else .failed;
+                            shell_integrated = caps.shellIntegrated(); // re-detect
+                        } else wire = null;
+                    },
+                    .done, .failed => wire = null, // any key dismisses
+                } else if (screen == .setup and atty_on_path and !shell_integrated and keys.len == 1 and keys[0] == 'w') {
+                    wire = .confirm; // open the consent view (atty installed + not wired)
+                } else switch (classifyInput(keys)) {
                     .quit => return, // restore + exit
                     .home => screen = .home,
                     .guard => screen = .guard,
@@ -154,6 +175,31 @@ fn runLoop() void {
             }
         }
     }
+}
+
+const WirePaths = struct { config_dir: []const u8, init_path: []const u8, rc_path: []const u8, shell: []const u8 };
+
+/// Shell-integration paths from $HOME + the detected shell; strings allocated
+/// in `a`. null if $HOME is unset (nothing to write into).
+fn wirePaths(a: std.mem.Allocator) ?WirePaths {
+    const home_dir = std.mem.span(std.c.getenv("HOME") orelse return null);
+    const shell = caps.shellName();
+    const config_dir = std.fmt.allocPrint(a, "{s}/.config/atty", .{home_dir}) catch return null;
+    const init_path = std.fmt.allocPrint(a, "{s}/init.{s}", .{ config_dir, shell }) catch return null;
+    var rcbuf: [4096]u8 = undefined;
+    const rc = caps.rcPath(&rcbuf) orelse return null;
+    const rc_path = a.dupe(u8, rc) catch return null;
+    return .{ .config_dir = config_dir, .init_path = init_path, .rc_path = rc_path, .shell = shell };
+}
+
+/// Perform the consented write in its own arena. true on success.
+fn doWire() bool {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const wp = wirePaths(a) orelse return false;
+    rc_apply.wireShell(a, wp.config_dir, wp.shell, wp.rc_path) catch return false;
+    return true;
 }
 
 pub const Screen = enum { home, guard, fleet, setup, help };

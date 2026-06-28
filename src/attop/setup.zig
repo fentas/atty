@@ -51,9 +51,13 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
         try row(w, t, .bad, "atty", s.st_not_installed, s.fix_install_atty);
     }
 
-    // The fix names the detected shell so the command is copy-pasteable.
+    // When atty is installed, offer the consented [w] write; otherwise show
+    // the manual command (the [w] write would point at an atty that isn't on
+    // PATH yet — install it first via the atty row).
     if (host.shell_integrated) {
         try row(w, t, .ok, "shell", s.st_wired, "");
+    } else if (host.atty_on_path) {
+        try row(w, t, .neutral, "shell", s.st_not_wired, s.wire_hint);
     } else {
         var fixbuf: [128]u8 = undefined;
         const fix = std.fmt.bufPrint(&fixbuf, "{s}eval \"$(atty init {s})\"", .{ s.fix_wire_shell, host.shell_name }) catch s.fix_wire_shell;
@@ -111,6 +115,43 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
         try row(w, t, .ok, "session", s.st_in_session, "");
     } else {
         try row(w, t, .neutral, "session", s.st_not_under_atty, s.fix_run_atty);
+    }
+}
+
+pub const WireState = enum { confirm, done, failed };
+
+/// The confirm/result view for the consented shell-integration write. The
+/// confirm state shows the EXACT block + target paths so the user consents to
+/// precisely what lands on disk — no write happens elsewhere without a 'y'.
+/// `block` is built by the caller (which owns an allocator); rendering it
+/// verbatim avoids re-deriving the block format here (single source = rc_writer).
+pub fn renderWire(buf: []u8, state: WireState, init_path: []const u8, rc_path: []const u8, block: []const u8, cols: u16, rows: u16) []const u8 {
+    _ = rows;
+    _ = cols;
+    var w = std.Io.Writer.fixed(buf);
+    renderWireInner(&w, state, init_path, rc_path, block) catch {};
+    return buf[0..w.end];
+}
+
+fn renderWireInner(w: *std.Io.Writer, state: WireState, init_path: []const u8, rc_path: []const u8, block: []const u8) !void {
+    const t = theme.active;
+    const s = i18n.active;
+    try w.writeAll("\x1b[2J\x1b[H");
+    try w.print("{f}Setup{s}{s}\r\n\r\n", .{ t.title, reset, s.suffix_health });
+    switch (state) {
+        .confirm => {
+            try w.print("  {s}\r\n\r\n", .{s.wire_intro});
+            try w.print("  {f}{s}{s}\r\n", .{ t.muted, init_path, reset });
+            var it = std.mem.splitScalar(u8, block, '\n');
+            while (it.next()) |line| {
+                if (line.len == 0) continue;
+                try w.print("    {f}{s}{s}\r\n", .{ t.muted, line, reset });
+            }
+            try w.print("\r\n  \u{2192} {f}{s}{s}\r\n\r\n", .{ t.muted, rc_path, reset });
+            try w.print("  {f}{s}{s}\r\n", .{ t.warn, s.wire_confirm, reset });
+        },
+        .done => try w.print("  {f}{s} {s}{s}\r\n", .{ t.ok, t.glyph.ok_mark, s.wire_done, reset }),
+        .failed => try w.print("  {f}{s} {s}{s}\r\n", .{ t.danger, t.glyph.bad_mark, s.wire_failed, reset }),
     }
 }
 
