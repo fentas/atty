@@ -12,6 +12,7 @@ const home = @import("home.zig");
 const guard = @import("guard.zig");
 const fleet = @import("fleet.zig");
 const setup = @import("setup.zig");
+const help = @import("help.zig");
 
 /// Render `frame` into a rows×cols VT grid and return the visible text
 /// (trailing blanks trimmed per row). Caller frees.
@@ -115,6 +116,19 @@ test "Setup renders the checklist across widths (up, neutral, down)" {
         const down = try screen(testing.allocator, setup.renderSetup(&buf, null, false, cols, 40), 40, cols);
         defer testing.allocator.free(down);
         try expectOnScreen(down, &.{ "not reachable", "sudo systemctl start atty-guard", "unknown (daemon down)", "not under atty" });
+    }
+}
+
+test "Help renders the key + env reference across widths" {
+    var buf: [65536]u8 = undefined;
+    for (widths) |cols| {
+        const out = try screen(testing.allocator, help.renderHelp(&buf, cols, 40), 40, cols);
+        defer testing.allocator.free(out);
+        // Contiguous key→screen pairs (the grid is SGR-stripped, so the key
+        // sits next to its screen) — proves each key is rendered as a key,
+        // not matched in unrelated text. Plus full env strings as needles so
+        // a wrap at the narrow width (which splits them across rows) fails.
+        try expectOnScreen(out, &.{ "Keys", "h   Home", "g   Guard", "f   Fleet", "s   Setup", "?   Help", "q   Quit", "ATTOP_THEME=dark|light|high-contrast|mono|ascii", "NO_COLOR forces mono", "atty-guard daemon" });
     }
 }
 

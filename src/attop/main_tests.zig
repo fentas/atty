@@ -12,6 +12,7 @@ test "classifyInput: quit keys, screen switches, nav/Esc-sequences" {
     try testing.expectEqual(mod.Input.home, mod.classifyInput("h"));
     try testing.expectEqual(mod.Input.fleet, mod.classifyInput("f"));
     try testing.expectEqual(mod.Input.setup, mod.classifyInput("s"));
+    try testing.expectEqual(mod.Input.help, mod.classifyInput("?"));
     // a multi-byte burst still acts (first recognized command wins)
     try testing.expectEqual(mod.Input.guard, mod.classifyInput("gx"));
     // a multi-byte Esc sequence (arrow) is nav, not quit
