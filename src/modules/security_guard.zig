@@ -106,7 +106,6 @@ pub const Config = struct {
     /// `🛡 session`), polled from the daemon and cached. On by default —
     /// it's read-only and answers "am I protected, at what level?".
     show_profile: bool = true,
-    /// Allow Alt+P to CYCLE the live profile from inside atty. Off by
     /// What Alt+P does (see `ProfileSwitchMode`). Defaults to `.sudo`:
     /// Alt+P stages `sudo atty-guard profile set <next>` into your prompt —
     /// no daemon flag, per-action sudo auth, atty never touches the
@@ -472,7 +471,10 @@ pub fn configure(comptime cfg: Config) type {
                 return;
             };
             const next = nextProfile(cur);
-            const cmd = std.fmt.bufPrint(&rt.staged_input, "sudo atty-guard profile set {s}", .{next}) catch return;
+            const cmd = std.fmt.bufPrint(&rt.staged_input, "sudo atty-guard profile set {s}", .{next}) catch {
+                writeSink(rt, "\r\natty security_guard: couldn't stage the profile command.\r\n");
+                return;
+            };
             rt.staged_input_len = cmd.len;
         }
 
