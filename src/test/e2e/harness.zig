@@ -178,6 +178,22 @@ pub const Session = struct {
         }
     }
 
+    /// Pump until the child's output goes quiet for `quiet_ms` (a poll of
+    /// that length reads nothing), capped at `timeout_ms`. A deterministic
+    /// replacement for a fixed `sleep` before a snapshot: it waits exactly
+    /// until the screen settles, regardless of how slow/loaded the host is,
+    /// and the quiet window resets on every byte — so a late async repaint
+    /// (e.g. ghost text computed off the keystroke) is still awaited.
+    pub fn waitStable(self: *Session, quiet_ms: u32, timeout_ms: u32) !void {
+        const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
+        const quiet: i32 = @intCast(@max(quiet_ms, 1));
+        while (snapshot.monoMillis() < deadline) {
+            // pumpMs returns false when the poll elapsed with no bytes — i.e.
+            // a full quiet window passed → settled.
+            if (!try self.pumpMs(quiet)) return;
+        }
+    }
+
     /// Render the current grid text and check for substring.
     pub fn gridContains(self: *Session, needle: []const u8) bool {
         const text = self.renderTextInto(self.text_buf) catch return false;

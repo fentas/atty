@@ -34,6 +34,7 @@ pub const Kind = enum {
     key,
     sleep,
     wait_for,
+    wait_stable,
     expect_substr,
     expect_no_substr,
     snapshot,
@@ -132,6 +133,10 @@ pub fn parse(allocator: Allocator, source: []const u8) ParseError!Script {
             try cmds.append(allocator, .{ .kind = .sleep, .line = line_no, .int_arg = try parseInt(tail) });
         } else if (eq(head, "wait_for")) {
             try cmds.append(allocator, .{ .kind = .wait_for, .line = line_no, .str_arg = try parseString(tail) });
+        } else if (eq(head, "wait_stable")) {
+            // Pump until the screen is quiet for `quiet_ms` (default 150) —
+            // a deterministic alternative to `sleep` before a snapshot.
+            try cmds.append(allocator, .{ .kind = .wait_stable, .line = line_no, .int_arg = if (tail.len == 0) 150 else try parseInt(tail) });
         } else if (eq(head, "expect_substr")) {
             try cmds.append(allocator, .{ .kind = .expect_substr, .line = line_no, .str_arg = try parseString(tail) });
         } else if (eq(head, "expect_no_substr")) {

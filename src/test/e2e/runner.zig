@@ -370,6 +370,7 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
                 try session.writeInput(bytes);
             },
             .sleep => try session.sleepMs(@intCast(c.int_arg)),
+            .wait_stable => try session.waitStable(@intCast(c.int_arg), timeout_ms),
             .wait_for => {
                 const found = try session.waitFor(c.str_arg, timeout_ms);
                 if (!found) {
