@@ -74,7 +74,11 @@ const Cwd = struct { ellipsis: bool, text: []const u8 };
 /// leading ellipsis when truncated.
 fn cwdShow(cwd: []const u8, max: usize) Cwd {
     if (cwd.len <= max) return .{ .ellipsis = false, .text = cwd };
-    return .{ .ellipsis = true, .text = cwd[cwd.len - (max - 1) ..] };
+    var start = cwd.len - (max - 1);
+    // Don't start mid-codepoint: skip UTF-8 continuation bytes (10xxxxxx)
+    // so a tail-truncated path can't emit a garbled glyph.
+    while (start < cwd.len and (cwd[start] & 0xC0) == 0x80) start += 1;
+    return .{ .ellipsis = true, .text = cwd[start..] };
 }
 
 test {

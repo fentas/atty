@@ -63,9 +63,6 @@ pub fn socketPath() []const u8 {
     return default_socket;
 }
 
-/// Parse a get_metrics reply line into Metrics. Caller owns + deinits the
-/// returned Parsed (its arena backs the Guard strings). Pure — split out
-/// so the wire shape is unit-testable without a daemon.
 /// Parse a reply line into T (caller deinits the Parsed). Pure — split out
 /// so each wire shape is unit-testable without a daemon.
 pub fn parseInto(comptime T: type, allocator: std.mem.Allocator, line: []const u8) ?std.json.Parsed(T) {
@@ -77,8 +74,6 @@ pub fn parse(allocator: std.mem.Allocator, line: []const u8) ?std.json.Parsed(Me
     return parseInto(Metrics, allocator, line);
 }
 
-/// One get_metrics round-trip. Returns the parsed Metrics (caller deinits)
-/// or null on any failure (no daemon, timeout, malformed reply).
 /// One request→reply round-trip parsed into T. Fully bounded: a
 /// non-blocking connect + a polled read against ONE deadline, so a
 /// down/wedged daemon can't hang the UI. Returns the parsed reply (caller
@@ -118,7 +113,11 @@ fn roundtrip(
     }
 
     // Read one newline-framed reply, bounded by the buffer + deadline.
-    var buf: [16384]u8 = undefined;
+    // 64 KiB holds a list_instances reply of a few hundred sessions (each
+    // ~200B); a single user realistically has a handful, so truncation
+    // (no newline in the buffer → null → the "unavailable" state) is only
+    // reachable by a pathological fleet.
+    var buf: [65536]u8 = undefined;
     var len: usize = 0;
     while (len < buf.len) {
         if (!pollOnce(fd, posix.POLL.IN, deadline)) return null;
