@@ -9,6 +9,7 @@ const atty = @import("atty");
 const uds = @import("uds.zig");
 const theme = @import("theme.zig");
 const home = @import("home.zig");
+const i18n = @import("i18n.zig");
 
 const reset = atty.style.reset;
 
@@ -25,59 +26,60 @@ pub fn renderSetup(buf: []u8, m: ?uds.Metrics, under_atty: bool, cols: u16, rows
 
 fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void {
     const t = theme.active;
+    const s = i18n.active;
     try w.writeAll("\x1b[2J\x1b[H");
     if (cols < compact_cols) {
         try w.print("{f}Setup{s}\r\n\r\n", .{ t.title, reset });
     } else {
-        try w.print("{f}Setup{s} \u{2014} health check\r\n\r\n", .{ t.title, reset });
+        try w.print("{f}Setup{s}{s}\r\n\r\n", .{ t.title, reset, s.suffix_health });
     }
 
     if (m) |metrics| {
-        try row(w, t, .ok, "atty-guard", "running", "");
+        try row(w, t, .ok, "atty-guard", s.st_running, "");
 
         if (home.isProtected(metrics)) {
             try row(w, t, .ok, "security", metrics.guard.profile, "");
         } else if (std.mem.eql(u8, metrics.guard.profile, "prompt")) {
-            try row(w, t, .neutral, "security", "prompt (warn-only)", "raise it in the Guard panel ([g])");
+            try row(w, t, .neutral, "security", s.st_warn_only, s.fix_raise_profile);
         } else {
             // Daemon up but the profile field is empty/absent (any non-empty
             // value is either "prompt" or → isProtected) — don't claim "prompt".
-            try row(w, t, .neutral, "security", "unknown", "");
+            try row(w, t, .neutral, "security", s.st_unknown, "");
         }
 
         // The daemon reports ebpf as exactly "attached" or "off"
         // (main.rs GuardPosture); handle both, keep the install fix on the
         // explicit "off", and stay forward/older-daemon tolerant.
         if (std.mem.eql(u8, metrics.guard.ebpf, "attached")) {
-            try row(w, t, .ok, "eBPF", "attached", "");
+            try row(w, t, .ok, "eBPF", s.st_attached, "");
         } else if (std.mem.eql(u8, metrics.guard.ebpf, "off")) {
-            try row(w, t, .neutral, "eBPF", "off", "install: sudo make install-guard GUARD_FEATURES=...,ebpf");
+            try row(w, t, .neutral, "eBPF", s.st_off, "install: sudo make install-guard GUARD_FEATURES=...,ebpf");
         } else if (metrics.guard.ebpf.len > 0) {
             try row(w, t, .neutral, "eBPF", metrics.guard.ebpf, ""); // future status, verbatim
         } else {
-            try row(w, t, .neutral, "eBPF", "unknown", ""); // field absent (older daemon)
+            try row(w, t, .neutral, "eBPF", s.st_unknown, ""); // field absent (older daemon)
         }
 
         if (metrics.instances > 0) {
-            var nbuf: [40]u8 = undefined;
-            const plural: []const u8 = if (metrics.instances == 1) "" else "s";
-            const sess = std.fmt.bufPrint(&nbuf, "{d} session{s} reporting", .{ metrics.instances, plural }) catch "reporting";
+            var nbuf: [48]u8 = undefined;
+            const word = if (metrics.instances == 1) s.session_reporting_one else s.session_reporting_many;
+            const sess = std.fmt.bufPrint(&nbuf, "{d} {s}", .{ metrics.instances, word }) catch word;
             try row(w, t, .ok, "metrics", sess, "");
         } else {
-            try row(w, t, .neutral, "metrics", "no sessions", "enable the metrics_exporter module");
+            try row(w, t, .neutral, "metrics", s.st_no_sessions, "enable the metrics_exporter module");
         }
     } else {
-        try row(w, t, .bad, "atty-guard", "not reachable", "sudo systemctl start atty-guard");
-        try row(w, t, .neutral, "security", "unknown (daemon down)", "");
-        try row(w, t, .neutral, "eBPF", "unknown (daemon down)", "");
-        try row(w, t, .neutral, "metrics", "unknown (daemon down)", "");
+        try row(w, t, .bad, "atty-guard", s.st_not_reachable, "sudo systemctl start atty-guard");
+        try row(w, t, .neutral, "security", s.daemon_down, "");
+        try row(w, t, .neutral, "eBPF", s.daemon_down, "");
+        try row(w, t, .neutral, "metrics", s.daemon_down, "");
     }
 
     // Always checkable — attop knows its own environment.
     if (under_atty) {
-        try row(w, t, .ok, "session", "in an atty session", "");
+        try row(w, t, .ok, "session", s.st_in_session, "");
     } else {
-        try row(w, t, .neutral, "session", "not under atty", "run: atty");
+        try row(w, t, .neutral, "session", s.st_not_under_atty, "run: atty");
     }
 }
 
