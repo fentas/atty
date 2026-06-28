@@ -34,8 +34,11 @@ snapshot list_visible
 
 # Enter runs `l` (command not found). The list MUST be cleared first, so no
 # `…backgrounds-marker` list-row residue remains beside the shell output.
+# Anchor on this run's output before settling — `l: command not found` is
+# unique vs the seeds' `…marker: command not found`, so it can't match early.
 key Enter
-wait_stable 400
+wait_for "l: command not found"
+wait_stable 200
 snapshot after_enter
 
 type "exit\r"
