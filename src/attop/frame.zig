@@ -11,7 +11,10 @@
 
 const std = @import("std");
 
-pub const max_rows = 256;
+/// Upper bound on rows tracked/diffed — well beyond any realistic terminal
+/// height (typical 24-60; this covers a 512-row pane). `cap` (the live
+/// terminal height) is what actually bounds a frame; this is the safety net.
+pub const max_rows = 512;
 pub const buf_size = 64 * 1024;
 
 pub const Frame = struct {

@@ -12,10 +12,19 @@ pub const RawMode = atty.terminal.RawMode;
 
 pub const Size = struct { rows: u16, cols: u16 };
 
-/// Enter the alt-screen, hide the cursor, clear+home. Inverse on exit. The
-/// caller writes these so teardown can run on every exit path (defer).
-pub const enter_screen = "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H";
-pub const exit_screen = "\x1b[?25h\x1b[?1049l";
+/// Enter the alt-screen, hide the cursor, DISABLE AUTOWRAP, clear+home.
+/// Inverse on exit. The caller writes these so teardown runs on every exit
+/// path (defer).
+///
+/// Autowrap off (`?7l`) is load-bearing for the diff renderer (frame.zig):
+/// it addresses each logical row at an absolute screen line, so a row wider
+/// than the terminal must NOT wrap onto the next physical line (that would
+/// shift every following row and, because the diff only repaints changed
+/// rows, the misalignment would persist). With autowrap off the terminal
+/// hard-truncates an over-wide row at the right margin — the 1:1 logical↔
+/// physical mapping always holds.
+pub const enter_screen = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J\x1b[H";
+pub const exit_screen = "\x1b[?7h\x1b[?25h\x1b[?1049l";
 
 // <asm-generic/ioctls.h> — hardcoded like pty.zig so we don't @cImport.
 const TIOCGWINSZ: c_int = 0x5413;
