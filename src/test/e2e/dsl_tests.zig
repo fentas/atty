@@ -40,6 +40,21 @@ test "DSL parses a minimal script" {
     try std.testing.expectEqualStrings("first", s.cmds[5].str_arg);
 }
 
+test "DSL parses wait_stable (default + explicit quiet_ms)" {
+    const src =
+        \\wait_stable
+        \\wait_stable 250
+        \\
+    ;
+    var s = try parse(std.testing.allocator, src);
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 2), s.cmds.len);
+    try std.testing.expectEqual(Kind.wait_stable, s.cmds[0].kind);
+    try std.testing.expectEqual(@as(i64, 150), s.cmds[0].int_arg); // default
+    try std.testing.expectEqual(Kind.wait_stable, s.cmds[1].kind);
+    try std.testing.expectEqual(@as(i64, 250), s.cmds[1].int_arg);
+}
+
 test "DSL string escapes" {
     const src = "type \"a\\tb\\nc\\x41\"\n";
     var s = try parse(std.testing.allocator, src);

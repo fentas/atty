@@ -54,17 +54,20 @@ type "echo starship-survived-overwrite\r"
 wait_for "starship-survived-overwrite"
 sleep 300
 
-# Type a prefix — ghost overlay must paint.
+# Type a prefix — ghost overlay must paint. Wait for the screen to SETTLE
+# (the prefix echo + the ghost repaint) instead of a fixed sleep, so a slow
+# CI host can't snapshot before the ghost lands — the source of this
+# scenario's historical CI flakiness.
 type "echo starship-survived-"
-sleep 500
+wait_stable 250
 snapshot ghost_visible
 
 key Enter
 sleep 200
 
-# Confirm the file was written too.
+# Confirm the file was written too — settle on the `cat` output.
 type "cat /tmp/atty-e2e-ghost-starship-overwrite\r"
-sleep 400
+wait_stable 250
 snapshot history_written
 
 type "exit\r"

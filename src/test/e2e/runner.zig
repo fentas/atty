@@ -370,6 +370,15 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
                 try session.writeInput(bytes);
             },
             .sleep => try session.sleepMs(@intCast(c.int_arg)),
+            .wait_stable => {
+                // A timeout (never settled) isn't a hard failure — the
+                // snapshot comparison still catches a wrong screen — but
+                // surface it so a too-long quiet_ms / continuous output is
+                // diagnosable rather than a silent wait.
+                if (!try session.waitStable(@intCast(c.int_arg), timeout_ms)) {
+                    std.debug.print("  wait_stable: screen did not settle within {d}ms (line {d}) — snapshotting anyway\n", .{ timeout_ms, c.line });
+                }
+            },
             .wait_for => {
                 const found = try session.waitFor(c.str_arg, timeout_ms);
                 if (!found) {
