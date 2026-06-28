@@ -52,10 +52,13 @@ pub fn wireShell(
     defer allocator.free(init_body);
     try writeFileAtomic(init_path, init_body);
 
-    // ENOENT → first-time, treat as empty. Any other read error → abort here,
-    // before the rc is written, so a failed read can't be read as "empty".
-    const rc_content: []const u8 = (try readFile(allocator, rc_path)) orelse "";
-    defer if (rc_content.len > 0) allocator.free(rc_content);
+    // ENOENT → first-time (null, not owned). Any other read error → abort
+    // here, before the rc is written, so a failed read can't be read as
+    // "empty". Free whatever readFile allocated regardless of length (a 0-byte
+    // rc returns an owned empty slice — len can't double as the ownership flag).
+    const maybe_rc = try readFile(allocator, rc_path);
+    defer if (maybe_rc) |rc| allocator.free(rc);
+    const rc_content: []const u8 = maybe_rc orelse "";
 
     if (rc_content.len > 0) {
         var bbuf: [4096]u8 = undefined;

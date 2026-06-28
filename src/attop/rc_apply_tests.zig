@@ -109,6 +109,27 @@ test "wireShell aborts on a read error, leaving the target untouched" {
     try testing.expect(readBack(bak) == null);
 }
 
+test "wireShell on a 0-byte rc: block written, no backup, no leak" {
+    var tmpl = "/tmp/atty-rcw4-XXXXXX".*;
+    const dir = mkdtemp(&tmpl) orelse return error.MkdtempFailed;
+    const ds = std.mem.span(dir);
+    var rcbuf: [256]u8 = undefined;
+    const rc_path = try std.fmt.bufPrint(&rcbuf, "{s}/.bashrc", .{ds});
+    try seed(rc_path, ""); // exists but empty — readFile returns an owned empty slice
+    var cfgbuf: [256]u8 = undefined;
+    const cfg = try std.fmt.bufPrint(&cfgbuf, "{s}/cfg", .{ds});
+
+    try rc_apply.wireShell(testing.allocator, cfg, "bash", rc_path); // testing.allocator flags any leak
+
+    const rc = readBack(rc_path) orelse return error.NoRc;
+    defer testing.allocator.free(rc);
+    try testing.expectEqual(@as(usize, 1), countMarkers(rc));
+    // empty rc → nothing to back up
+    var bakbuf: [256]u8 = undefined;
+    const bak = try std.fmt.bufPrint(&bakbuf, "{s}.atty.bak", .{rc_path});
+    try testing.expect(readBack(bak) == null);
+}
+
 test "wireShell creates the rc when it does not exist (no backup)" {
     var tmpl = "/tmp/atty-rcw2-XXXXXX".*;
     const dir = mkdtemp(&tmpl) orelse return error.MkdtempFailed;
