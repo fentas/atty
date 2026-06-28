@@ -220,13 +220,15 @@ const atty = @import("atty");
 // //     // Live security-profile UX (talks to atty-guard over the UDS):
 // //     .show_profile = true,           // statusbar segment "🛡 <profile>"
 // //                                     // (polled + cached, default on)
-// //     .allow_profile_switch = false,  // Alt+P cycles the live profile.
-// //                                     // Off by default; the profile is
-// //                                     // daemon-GLOBAL so the daemon also
-// //                                     // gates it ([profile]
-// //                                     // allow_user_switch). Turn BOTH on
-// //                                     // for a single-user box; else use
-// //                                     // `sudo atty-guard profile set`.
+// //     .profile_switch_mode = .sudo,   // what Alt+P does. Default .sudo:
+// //                                     // stages `sudo atty-guard profile
+// //                                     // set <next>` into your prompt to
+// //                                     // run (per-action sudo auth, atty
+// //                                     // never handles the password). Or
+// //                                     // .daemon (switch directly — needs
+// //                                     // root / the daemon's [profile]
+// //                                     // allow_user_switch), or .off (keep
+// //                                     // M-p).
 // //     .profile_poll_ms = 3000,        // profile-segment refresh cadence
 // // }),
 

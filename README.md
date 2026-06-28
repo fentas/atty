@@ -342,7 +342,7 @@ Four screens, switched by a single key (`q` quits):
 - **Language** — `ATTOP_LANG` (else `$LC_ALL` / `$LANG`); ships `en` + `de`.
 - **Live data** needs the `atty-guard` daemon running; the per-session Fleet rows need the `metrics_exporter` module enabled in `config.zig`. With no daemon, attop shows a clear daemon-unavailable state on each screen and how to start it.
 
-attop is read-only today — profile switching is via atty's `Alt+P` (when `security_guard.allow_profile_switch` is set) or `sudo atty-guard profile set`. Design: [docs/dashboard.md](docs/dashboard.md).
+attop is read-only today — profile switching is via atty's `Alt+P` (per `security_guard.profile_switch_mode`; the default `.sudo` stages the `sudo atty-guard profile set` command for you to run) or that command directly. Design: [docs/dashboard.md](docs/dashboard.md).
 
 &nbsp;
 
