@@ -78,7 +78,10 @@ fn runLoop() void {
     if (have_sigpipe) term.installQuitSignals(sigpipe[1]);
 
     const sock = uds.socketPath();
-    var framebuf: [16384]u8 = undefined;
+    // Sized to hold a full Fleet render of a large reply (matches uds's
+    // 64KiB read buffer). Per-row capping to the visible height is a future
+    // polish; for now a big fleet renders complete (the terminal scrolls).
+    var framebuf: [65536]u8 = undefined;
     var sz = term.size(out);
     var screen: Screen = .home;
     const footer = "\r\n  \x1b[2m[h]ome  [g]uard  [f]leet  q quit\x1b[0m\r\n";
