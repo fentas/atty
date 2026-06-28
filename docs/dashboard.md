@@ -18,7 +18,7 @@ Run `attop`. It opens on a **setup wizard** that detects what's installed and
 walks you through the rest — installing atty, wiring your shell (with your
 consent), enabling the daemon — and shows what's compiled in and configured.
 From a clone: `zig build attop` builds it, `zig build run-attop` runs it in
-place. See [Getting started](/getting-started/) for the install walkthrough.
+place. See [Getting started]({{ '/getting-started/' | relative_url }}) for the install walkthrough.
 
 The rest of this page is the **design of record** — the architecture split, UX
 bar, screens, metrics API, theming/i18n, and phasing.
