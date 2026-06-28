@@ -60,6 +60,11 @@ pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: 
     if (fd < 0) return null;
     defer _ = std.c.close(fd);
 
+    // One TOTAL budget across connect + read, so a daemon that dribbles
+    // bytes can't stretch the round-trip past timeout_ms (the read loop
+    // would otherwise apply the timeout per-iteration).
+    const deadline = nowMs() + @as(i64, timeout_ms);
+
     var addr: posix.sockaddr.un = std.mem.zeroes(posix.sockaddr.un);
     addr.family = posix.AF.UNIX;
     if (socket_path.len >= addr.path.len) return null;
@@ -73,7 +78,7 @@ pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: 
         // anything else means no reachable daemon.
         const e = posix.errno(crc);
         if (e != .AGAIN and e != .INPROGRESS) return null;
-        if (!pollOnce(fd, posix.POLL.OUT, timeout_ms)) return null;
+        if (!pollOnce(fd, posix.POLL.OUT, remainingMs(deadline))) return null;
     }
 
     const req = "{\"id\":1,\"method\":\"get_metrics\"}\n";
@@ -88,7 +93,9 @@ pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: 
     var buf: [16384]u8 = undefined;
     var len: usize = 0;
     while (len < buf.len) {
-        if (!pollOnce(fd, posix.POLL.IN, timeout_ms)) return null;
+        const rem = remainingMs(deadline);
+        if (rem == 0) return null; // total budget spent
+        if (!pollOnce(fd, posix.POLL.IN, rem)) return null;
         const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
         if (n <= 0) return null;
         len += @intCast(n);
@@ -99,10 +106,27 @@ pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: 
     return null;
 }
 
-fn pollOnce(fd: i32, events: i16, timeout_ms: u32) bool {
+fn pollOnce(fd: i32, events: i16, timeout_ms: i32) bool {
     var pfd = [_]posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
-    if (std.c.poll(&pfd, 1, @intCast(timeout_ms)) <= 0) return false;
-    return (pfd[0].revents & events) != 0;
+    while (true) {
+        const r = std.c.poll(&pfd, 1, timeout_ms);
+        // Retry on EINTR — attop installs a SIGWINCH handler, so a resize
+        // mid-fetch must not be mistaken for "daemon unreachable".
+        if (r < 0 and posix.errno(r) == .INTR) continue;
+        if (r <= 0) return false;
+        return (pfd[0].revents & events) != 0;
+    }
+}
+
+fn nowMs() i64 {
+    var ts: std.posix.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
+}
+
+fn remainingMs(deadline: i64) i32 {
+    const r = deadline - nowMs();
+    return if (r <= 0) 0 else @intCast(@min(r, std.math.maxInt(i32)));
 }
 
 test {

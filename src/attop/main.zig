@@ -44,9 +44,14 @@ pub fn main() void {
 
 fn runLoop() void {
     const out = posix.STDOUT_FILENO;
-    // Raw mode on stdin (fails cleanly if stdin isn't a tty — e.g. input
-    // redirected). The guard restores the original termios on deinit.
-    var raw = term.RawMode.enter(posix.STDIN_FILENO) catch return;
+    // Raw mode on stdin. If stdin isn't a tty (e.g. `echo x | attop`),
+    // say so instead of exiting silently — the stdout-tty guard alone
+    // wouldn't have caught this.
+    var raw = term.RawMode.enter(posix.STDIN_FILENO) catch {
+        const msg = "attop needs an interactive terminal (stdin is not a TTY)\n";
+        _ = std.c.write(posix.STDERR_FILENO, msg.ptr, msg.len);
+        return;
+    };
     defer raw.deinit();
     // Alt-screen + hide cursor; the defer restores on EVERY exit path
     // (quit key, EOF, error), so the user's shell is never left wedged.

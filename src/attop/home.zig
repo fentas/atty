@@ -37,7 +37,6 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     const compact = cols < compact_cols;
     try w.writeAll("\x1b[2J\x1b[H"); // clear + home
 
-    // Title.
     if (compact) {
         try w.print("{f}atty{s}\r\n\r\n", .{ style.presets.emphasis, reset });
     } else {
@@ -51,28 +50,25 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     }
     const metrics = m.?;
 
-    // Protection status.
     if (isProtected(metrics)) {
         try w.print("  {f}\u{25CF} Protected{s}\r\n\r\n", .{ ok, reset });
     } else {
         try w.print("  {f}\u{25CB} Unguarded{s}\r\n\r\n", .{ warn, reset });
     }
 
-    // Subsystems. AI/Suggest aren't wired into the metrics yet — show an
-    // honest em-dash rather than faking activity.
+    // AI/Suggest aren't wired into the metrics yet — show an honest
+    // em-dash rather than faking activity.
     const prof = if (metrics.guard.profile.len > 0) metrics.guard.profile else "\u{2014}";
     const ebpf = if (metrics.guard.ebpf.len > 0) metrics.guard.ebpf else "\u{2014}";
     try w.print("  \u{1F6E1}  Guard     {s}     kernel: {s}\r\n", .{ prof, ebpf });
     try w.writeAll("  \u{1F916}  AI        \u{2014}\r\n");
     try w.writeAll("  \u{2728}  Suggest   \u{2014}\r\n\r\n");
 
-    // Today's value.
     try w.print(
         "  {f}Today{s}    {d} commands \u{B7} {d} threats blocked\r\n",
         .{ style.presets.muted, reset, metrics.aggregate.commands, metrics.aggregate.guard_block },
     );
 
-    // Fleet.
     const plural: []const u8 = if (metrics.instances == 1) "" else "s";
     try w.print("  {d} terminal{s} active\r\n", .{ metrics.instances, plural });
 }
