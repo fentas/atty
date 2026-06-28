@@ -42,12 +42,12 @@ sleep 200
 
 # Type the common prefix — inline ghost + list should both render.
 type "prefix-x "
-sleep 500
+wait_stable 250
 snapshot list_visible
 
 # Ctrl+2 — pick entry #2 from the list.
 type "\x1b[50;5u"
-sleep 400
+wait_stable 250
 
 # Snapshot AFTER the pick, BEFORE Enter. The line should show the
 # picked command's trailing portion appended to the typed prefix.
@@ -60,14 +60,14 @@ snapshot post_pick
 # no stale "1: ..." residue anywhere on screen. This is the path
 # that surfaced the column-1 / ED 0 bug.
 key ^U
-sleep 300
+wait_stable 250
 snapshot after_clear
 
 # Re-type the prefix — list should activate again, showing the
 # same 3 matches (history hasn't changed). Proves the activate
 # path works repeatedly within a session.
 type "prefix-x "
-sleep 400
+wait_stable 250
 snapshot reactivated
 
 key Enter
