@@ -281,15 +281,13 @@ jobs:
           echo "--- preview (first 20 lines) ---"
           head -20 /tmp/release_body.md || true
 
-      # Create or update the GitHub release + upload assets via the
-      # `gh` CLI. Replaces `softprops/action-gh-release@v3`, whose
-      # PATCH-first ("upsert") asset-metadata call races against
-      # GitHub's eventually-consistent read replica and can fail
-      # nondeterministically on the final asset (see #376). `gh
-      # release upload --clobber` is a single POST per file with no
-      # metadata sidecar; the action's intermittent late-asset 404
-      # disappears.
-      - name: create or update release + upload assets
+      # Create the GitHub release WITH its assets in one `gh release create`
+      # call. The repo enables immutable releases, which reject any
+      # post-creation asset upload or edit (HTTP 422) — `gh release create`
+      # uploads as a draft then publishes, so the assets are present before
+      # immutability locks. (This also replaces softprops/action-gh-release@v3,
+      # whose PATCH-first upsert raced GitHub's read replica — see #376.)
+      - name: create release with assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -317,24 +315,19 @@ jobs:
           echo "Found ${#assets[@]} assets:"
           printf '  %s\n' "${assets[@]}"
 
+          # Immutable releases (repo setting, for supply-chain integrity)
+          # REJECT post-creation asset uploads + edits — "HTTP 422: Cannot
+          # upload assets to an immutable release". So the release must be
+          # created WITH its assets + notes in a single call. A pre-existing
+          # release (a failed prior run) can't be appended to, but immutable
+          # releases CAN be deleted — so delete it (keeping the tag) and
+          # recreate atomically. This keeps re-runs idempotent.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; updating body"
-            gh release edit "$TAG" --notes-file /tmp/release_body.md
-          else
-            echo "Creating release $TAG"
-            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release_body.md
+            echo "Release $TAG exists; deleting to recreate atomically (immutable releases can't be appended to)"
+            gh release delete "$TAG" --yes --cleanup-tag=false
           fi
-
-          # `--clobber` overwrites an existing asset (idempotent
-          # re-runs are safe). One POST per file; no metadata
-          # update step that could 404.
-          #
-          # Caveat: --clobber deletes the existing asset BEFORE
-          # the re-upload. A retry that dies mid-upload leaves the
-          # release missing that asset until the next successful
-          # run. Acceptable for transient retries; if a maintainer
-          # is hand-tweaking assets between runs, expect overwrites.
-          gh release upload "$TAG" --clobber "${assets[@]}"
+          echo "Creating release $TAG with ${#assets[@]} assets"
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/release_body.md "${assets[@]}"
 
   # ---------------------------------------------------------------------------
   # Multi-arch Docker image to ghcr.io/<owner>/atty.
