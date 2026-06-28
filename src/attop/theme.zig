@@ -48,7 +48,7 @@ const ascii_glyphs = Glyphs{
     .unguarded = "o",
     .active = ">",
     .shield = "#",
-    .ai = "AI",
+    .ai = "@", // 1 cell — keeps the Home glyph column aligned (was "AI")
     .suggest = "~",
     .incognito = "P",
     .bullet = "-",
@@ -68,7 +68,7 @@ pub const dark = Theme{
 pub const light = Theme{
     .title = .{ .bold = true },
     .ok = .{ .bold = true, .fg = 2 },
-    .warn = .{ .bold = true, .fg = 3 },
+    .warn = .{ .bold = true, .fg = 130 }, // dark orange (yellow washes out on white)
     .danger = .{ .bold = true, .fg = 1 },
     .muted = .{ .fg = 8 }, // gray (dim is hard to read on a light bg)
     .accent = .{ .bold = true, .fg = 4 }, // blue (cyan washes out on light)
@@ -85,8 +85,21 @@ pub const high_contrast = Theme{
     .glyph = unicode_glyphs,
 };
 
-/// NO_COLOR / no-nerd-font: no foreground colors, ASCII glyphs. Bold is
-/// kept (it's monochrome-safe structure, not color).
+/// No foreground colors (the NO_COLOR degrade) but KEEP the unicode glyphs
+/// — NO_COLOR means no color, not no nerd-font. Bold is kept (monochrome-
+/// safe structure, not color).
+pub const mono = Theme{
+    .title = .{ .bold = true },
+    .ok = .{ .bold = true },
+    .warn = .{ .bold = true },
+    .danger = .{ .bold = true },
+    .muted = .{ .dim = true },
+    .accent = .{ .bold = true },
+    .glyph = unicode_glyphs,
+};
+
+/// mono + ASCII glyphs — for terminals without a nerd font (opt in via
+/// $ATTOP_THEME=ascii).
 pub const ascii = Theme{
     .title = .{ .bold = true },
     .ok = .{ .bold = true },
@@ -100,16 +113,15 @@ pub const ascii = Theme{
 /// The active theme — set once at startup (see `resolve`), read by renders.
 pub var active: Theme = dark;
 
-extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
-
-/// Resolve the theme: `$ATTOP_THEME` override wins; else `NO_COLOR` →
-/// ascii; else a light terminal bg (via `COLORFGBG`) → light; else dark.
+/// Resolve the theme: `$ATTOP_THEME` override wins; else `NO_COLOR` → mono
+/// (no color, glyphs kept); else a light terminal bg (via `COLORFGBG`) →
+/// light; else dark.
 pub fn resolve() Theme {
-    if (getenv("ATTOP_THEME")) |p| {
+    if (std.c.getenv("ATTOP_THEME")) |p| {
         if (byName(std.mem.span(p))) |t| return t;
     }
-    if (getenv("NO_COLOR") != null) return ascii;
-    if (getenv("COLORFGBG")) |p| {
+    if (std.c.getenv("NO_COLOR") != null) return mono;
+    if (std.c.getenv("COLORFGBG")) |p| {
         if (looksLight(std.mem.span(p))) return light;
     }
     return dark;
@@ -120,6 +132,7 @@ pub fn byName(name: []const u8) ?Theme {
     if (std.mem.eql(u8, name, "dark")) return dark;
     if (std.mem.eql(u8, name, "light")) return light;
     if (std.mem.eql(u8, name, "high-contrast") or std.mem.eql(u8, name, "high_contrast")) return high_contrast;
+    if (std.mem.eql(u8, name, "mono")) return mono;
     if (std.mem.eql(u8, name, "ascii")) return ascii;
     return null;
 }

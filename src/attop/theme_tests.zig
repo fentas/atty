@@ -9,6 +9,7 @@ test "byName maps known themes + rejects unknown" {
     try testing.expect(theme.byName("light") != null);
     try testing.expect(theme.byName("high-contrast") != null);
     try testing.expect(theme.byName("high_contrast") != null);
+    try testing.expect(theme.byName("mono") != null);
     try testing.expect(theme.byName("ascii") != null);
     try testing.expect(theme.byName("nope") == null);
 }
@@ -22,9 +23,12 @@ test "looksLight reads the COLORFGBG background field" {
     try testing.expect(!theme.looksLight("nodelim"));
 }
 
-test "ascii theme uses ascii glyphs, dark uses unicode" {
+test "ascii theme uses ascii glyphs; dark + mono use unicode" {
     try testing.expectEqualStrings("*", theme.ascii.glyph.protected);
     try testing.expectEqualStrings("\u{25CF}", theme.dark.glyph.protected);
+    // mono is the NO_COLOR degrade: no color but glyphs kept.
+    try testing.expectEqualStrings("\u{25CF}", theme.mono.glyph.protected);
+    try testing.expectEqual(@as(?u8, null), theme.mono.ok.fg);
 }
 
 test "the active theme drives the render glyphs" {
