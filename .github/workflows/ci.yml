@@ -42,6 +42,18 @@ jobs:
         # the code that caused it lands, not at the next release.
         run: zig build e2e --summary all
 
+      - name: upload e2e failure renders
+        # On a snapshot mismatch the runner writes actual/ next to each
+        # golden/. Upload them so a CI-only flake is diagnosable (diff
+        # actual vs golden) instead of a blind "snapshot mismatch".
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-actual
+          path: tests/e2e/*/actual/
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: smoke test
         # atty refuses non-TTY stdio (src/main.zig), so we wrap it in
         # `script` (util-linux on the runner host, NOT inside the

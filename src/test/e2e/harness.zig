@@ -168,6 +168,19 @@ pub const Session = struct {
         }
     }
 
+    /// Pump until `needle` is NO LONGER on the grid, capped at `timeout_ms`.
+    /// The inverse of waitFor — for "wait until the old screen is gone" before
+    /// a snapshot (e.g. a `clear` that must wipe a prior line before the new
+    /// output is captured). Returns false on timeout (still present).
+    pub fn waitForAbsent(self: *Session, needle: []const u8, timeout_ms: u32) !bool {
+        const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
+        while (true) {
+            if (!self.gridContains(needle)) return true;
+            if (snapshot.monoMillis() >= deadline) return false;
+            _ = try self.pumpMs(50);
+        }
+    }
+
     /// Sleep, while pumping output so the grid stays current.
     pub fn sleepMs(self: *Session, ms: u32) !void {
         const deadline = snapshot.monoMillis() + @as(i64, @intCast(ms));

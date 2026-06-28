@@ -17,6 +17,9 @@
 //!                               # (for an async paint whose text also exists
 //!                               # elsewhere — e.g. a ghost completing a
 //!                               # command still shown in scrollback)
+//!   wait_for_absent "substring" # block until substring is GONE (inverse of
+//!                               # wait_for — e.g. after a `clear` that must
+//!                               # wipe a prior line before the snapshot)
 //!   wait_stable [quiet_ms]      # block until output is quiet for quiet_ms
 //!                               # (default 150), capped at timeout_ms — a
 //!                               # deterministic alternative to sleep before
@@ -43,6 +46,7 @@ pub const Kind = enum {
     sleep,
     wait_for,
     wait_for_count,
+    wait_for_absent,
     wait_stable,
     expect_substr,
     expect_no_substr,
@@ -151,6 +155,8 @@ pub fn parse(allocator: Allocator, source: []const u8) ParseError!Script {
             const needle = try parseString(tail[0 .. close + 1]);
             const n = try parseInt(trim(tail[close + 1 ..]));
             try cmds.append(allocator, .{ .kind = .wait_for_count, .line = line_no, .str_arg = needle, .int_arg = n });
+        } else if (eq(head, "wait_for_absent")) {
+            try cmds.append(allocator, .{ .kind = .wait_for_absent, .line = line_no, .str_arg = try parseString(tail) });
         } else if (eq(head, "wait_stable")) {
             // Pump until the screen is quiet for `quiet_ms` (default 150) —
             // a deterministic alternative to `sleep` before a snapshot.
