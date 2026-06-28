@@ -113,6 +113,15 @@ pub fn build(b: *std.Build) void {
     // run-attop`) — not in the default install while WIP (mirrors the bench
     // exe: run-only, not installed).
     // -------------------------------------------------------------------------
+    // The VT-grid emulator (also used by the proxy e2e harness) — exposed
+    // as a module so attop's screenshot tests can feed a rendered frame
+    // through it and assert the on-screen grid. (@import can't reach across
+    // module subtrees, hence a named import.)
+    const vt_module = b.createModule(.{
+        .root_source_file = b.path("src/test/e2e/vt.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const attop_module = b.createModule(.{
         .root_source_file = b.path("src/attop/main.zig"),
         .target = target,
@@ -120,6 +129,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "atty", .module = atty_module },
+            .{ .name = "vt", .module = vt_module },
         },
     });
     const attop_exe = b.addExecutable(.{ .name = "attop", .root_module = attop_module });
