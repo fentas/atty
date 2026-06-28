@@ -90,6 +90,7 @@ fn runLoop() void {
     // Fixed for the session — attop is launched once, in or out of atty.
     const under_atty = caps.underAtty();
     const atty_on_path = caps.attyOnPath();
+    const shell_integrated = caps.shellIntegrated();
     // Sized to hold a full Fleet render of a large reply (matches uds's
     // 64KiB read buffer). Per-row capping to the visible height is a future
     // polish; for now a big fleet renders complete (the terminal scrolls).
@@ -122,7 +123,7 @@ fn runLoop() void {
                 .home => home.renderHome(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
                 .guard => guard.renderGuard(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
                 .fleet => fleet.renderFleet(&framebuf, instancesOf(uds.listInstances(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
-                .setup => setup.renderSetup(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), atty_on_path, under_atty, sz.cols, sz.rows),
+                .setup => setup.renderSetup(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), .{ .atty_on_path = atty_on_path, .under_atty = under_atty, .shell_integrated = shell_integrated, .shell_name = caps.shellName() }, sz.cols, sz.rows),
                 .help => help.renderHelp(&framebuf, sz.cols, sz.rows),
             };
             _ = std.c.write(out, frame.ptr, frame.len);
