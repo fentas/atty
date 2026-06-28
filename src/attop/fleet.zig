@@ -67,8 +67,9 @@ fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void 
 }
 
 /// Columns available for the cwd after the pid/shell/cmds prefix, leaving
-/// room for the trailing incognito marker (" 🔒" ≈ 3 display cols) so an
-/// incognito row's cwd can't push the line past the terminal width.
+/// room for the trailing incognito marker so an incognito row's cwd can't
+/// push the line past the width. Reserves the worst case (unicode " 🔒" ≈ 3
+/// cols); the ascii " P" (2) just over-reserves harmlessly.
 fn cwdBudget(cols: u16) usize {
     const reserved: usize = 26 + 3; // prefix (2+7+1+8+1+5+2) + marker
     return if (cols > reserved + 8) cols - reserved else 8;

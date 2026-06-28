@@ -8,7 +8,8 @@ const std = @import("std");
 const atty = @import("atty");
 const Style = atty.Style;
 
-/// Glyphs with an ASCII fallback for non-nerd-font / NO_COLOR terminals.
+/// Glyphs with an ASCII fallback for terminals without a nerd font. (Not
+/// the NO_COLOR path — that's `mono`, which keeps these unicode glyphs.)
 pub const Glyphs = struct {
     protected: []const u8,
     unguarded: []const u8,

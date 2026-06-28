@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const theme = @import("theme.zig");
 const home = @import("home.zig");
+const fleet = @import("fleet.zig");
 const uds = @import("uds.zig");
 
 test "byName maps known themes + rejects unknown" {
@@ -48,4 +49,22 @@ test "the active theme drives the render glyphs" {
     var buf2: [4096]u8 = undefined;
     const d = home.renderHome(&buf2, m, 120, 40);
     try testing.expect(std.mem.indexOf(u8, d, "\u{25CF} Protected") != null);
+}
+
+test "fleet truncation ellipsis follows the theme (ascii ... vs unicode …)" {
+    const prev = theme.active;
+    defer theme.active = prev;
+    // A cwd long enough to truncate at 120 (> cwdBudget).
+    var list = [_]uds.Instance{.{ .pid = 1, .shell = "bash", .cwd = "/HEADXYZ" ++ ("/abcdefghij" ** 12) ++ "/tail" }};
+
+    theme.active = theme.ascii;
+    var buf: [4096]u8 = undefined;
+    const a = fleet.renderFleet(&buf, &list, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, a, "...") != null); // ascii ellipsis
+    try testing.expect(std.mem.indexOf(u8, a, "\u{2026}") == null);
+
+    theme.active = theme.dark;
+    var buf2: [4096]u8 = undefined;
+    const d = fleet.renderFleet(&buf2, &list, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, d, "\u{2026}") != null); // unicode …
 }
