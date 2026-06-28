@@ -67,12 +67,10 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bo
             try row(w, t, .neutral, "eBPF", s.st_unknown, ""); // field absent (older daemon)
         }
 
-        // The configured eBPF enforcement depth (one_level / ancestry /
-        // propagate) — surfaced from the posture (was unshown). Informational.
-        if (metrics.guard.enforcement.len > 0) {
+        // The eBPF enforcement depth (one_level / ancestry / propagate) —
+        // only meaningful when eBPF is attached, so don't show it otherwise.
+        if (std.mem.eql(u8, metrics.guard.ebpf, "attached") and metrics.guard.enforcement.len > 0) {
             try row(w, t, .neutral, "enforce", metrics.guard.enforcement, "");
-        } else {
-            try row(w, t, .neutral, "enforce", s.st_unknown, "");
         }
 
         if (metrics.instances > 0) {

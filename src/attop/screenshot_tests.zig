@@ -73,7 +73,9 @@ test "Home renders protected/unguarded/unavailable across widths" {
             const m = uds.Metrics{ .guard = .{ .profile = "session" }, .instances = 0 };
             const t = try screen(testing.allocator, home.renderHome(&buf, m, cols, 40), 40, cols);
             defer testing.allocator.free(t);
-            try expectOnScreen(t, &.{"metrics off"});
+            // Full hint as the needle so a wrap at 70 (which would split it)
+            // fails the test.
+            try expectOnScreen(t, &.{"enable metrics_exporter or start a session"});
         }
     }
 }
