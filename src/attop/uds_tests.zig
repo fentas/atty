@@ -32,6 +32,24 @@ test "parse tolerates missing fields (defaults) + ignores unknown" {
     try testing.expectEqual(@as(u64, 0), parsed.value.instances);
 }
 
+test "parse a list_instances reply into InstancesReply" {
+    const reply =
+        "{\"type\":\"instances\",\"instances\":[" ++
+        "{\"uid\":1000,\"pid\":4242,\"cwd\":\"/proj\",\"shell\":\"bash\"," ++
+        "\"incognito\":false,\"last_seen_ms\":1,\"counters\":{\"commands\":12}}," ++
+        "{\"uid\":1000,\"pid\":99,\"shell\":\"zsh\",\"incognito\":true," ++
+        "\"counters\":{\"commands\":3}}]}";
+    const parsed = uds.parseInto(uds.InstancesReply, testing.allocator, reply) orelse return error.ParseFailed;
+    defer parsed.deinit();
+    const inst = parsed.value.instances;
+    try testing.expectEqual(@as(usize, 2), inst.len);
+    try testing.expectEqual(@as(u32, 4242), inst[0].pid);
+    try testing.expectEqualStrings("bash", inst[0].shell);
+    try testing.expectEqualStrings("/proj", inst[0].cwd);
+    try testing.expectEqual(@as(u64, 12), inst[0].counters.commands);
+    try testing.expect(inst[1].incognito);
+}
+
 test "parse rejects malformed json" {
     try testing.expect(uds.parse(testing.allocator, "{not json") == null);
 }

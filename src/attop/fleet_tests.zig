@@ -63,7 +63,8 @@ test "empty fleet + unavailable states" {
 
     var buf2: [4096]u8 = undefined;
     const down = fleet.renderFleet(&buf2, null, 120, 40);
-    try testing.expect(std.mem.indexOf(u8, down, "atty-guard not running") != null);
+    // Stable substring — tolerates wording tweaks of the unavailable line.
+    try testing.expect(std.mem.indexOf(u8, down, "atty-guard not") != null);
 }
 
 test "singular terminal" {

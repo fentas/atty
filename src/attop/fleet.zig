@@ -28,8 +28,10 @@ fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void 
     }
 
     if (instances == null) {
-        try w.print("  {f}atty-guard not running{s}\r\n", .{ style.presets.danger, reset });
-        try w.writeAll("  start it:  sudo systemctl start atty-guard\r\n");
+        // null = the round-trip failed for ANY reason (down, unreachable,
+        // timeout, malformed) — say "not reachable", not "not running".
+        try w.print("  {f}atty-guard not reachable{s}\r\n", .{ style.presets.danger, reset });
+        try w.writeAll("  is it running?  sudo systemctl start atty-guard\r\n");
         return;
     }
     const list = instances.?;

@@ -108,7 +108,16 @@ fn roundtrip(
     var off: usize = 0;
     while (off < req.len) {
         const n = std.c.write(fd, req.ptr + off, req.len - off);
-        if (n <= 0) return null;
+        if (n < 0) {
+            // Non-blocking socket: a full send buffer is EAGAIN, not a
+            // failure — poll for writability (bounded by the deadline).
+            if (posix.errno(n) == .AGAIN) {
+                if (!pollOnce(fd, posix.POLL.OUT, deadline)) return null;
+                continue;
+            }
+            return null;
+        }
+        if (n == 0) return null;
         off += @intCast(n);
     }
 
@@ -122,7 +131,13 @@ fn roundtrip(
     while (len < buf.len) {
         if (!pollOnce(fd, posix.POLL.IN, deadline)) return null;
         const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
-        if (n <= 0) return null;
+        if (n < 0) {
+            // EAGAIN after a poll wake (spurious / raced) — re-poll rather
+            // than treat it as a dead connection.
+            if (posix.errno(n) == .AGAIN) continue;
+            return null;
+        }
+        if (n == 0) return null; // EOF
         len += @intCast(n);
         if (std.mem.indexOfScalar(u8, buf[0..len], '\n')) |nl| {
             return parseInto(T, allocator, buf[0..nl]);
