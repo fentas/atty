@@ -21,13 +21,16 @@ From a clone: `zig build attop` builds it, `zig build run-attop` runs it in
 place. See [Getting started]({{ '/getting-started/' | relative_url }}) for the install walkthrough.
 
 The rest of this page is the **design of record** — the architecture split, UX
-bar, screens, metrics API, theming/i18n, and phasing.
+bar, screens, metrics API, theming/i18n, and phasing. The interactive core is
+now **shipped** (see Status + *Writing a panel*); the `[locked]` markers record
+decisions ratified before building that still hold.
 
-> **Status (2026-06): design of record — LOCKED with the maintainer.** The
-> architecture split, UX bar, screens, metrics API, theming/i18n,
-> alerting, and phasing below are agreed. Building starts at P1. Don't
-> re-derive the surface split or the Suckless-vs-config tension — settled
-> here. Decisions marked **[locked]** were ratified 2026-06-27.
+> **Status (2026-06): design ratified + the interactive core SHIPPED.** The
+> panel framework, keyboard navigation, selectable/scrollable lists, detail
+> views, `/`-search, and flicker-free diff rendering are built (next section).
+> The architecture split, UX bar, screens, metrics API, and theming/i18n below
+> are the agreed design; don't re-derive the surface split or the
+> Suckless-vs-config tension — settled here.
 
 ## Status — shipped vs planned (2026-06)
 
@@ -58,13 +61,23 @@ The rest of this doc is the plan; this section tracks what's **built** on
   Pressing **`[w]`** on a not-wired shell does a **consented** integration
   write (see "First-run wizard"). **Home** is honest when no session reports
   metrics (says so rather than showing zeros).
+- **Interactive, panel-extensible TUI** (the UX-bar + Extensibility design,
+  now built). Screens are **panels** — a comptime tuple in
+  `src/attop/config.zig`, walked like the proxy's modules (see *Writing a
+  panel*). Real keyboard nav (Tab / Shift+Tab / arrows / the `[h][g][f][s][?]`
+  hotkeys), the focused panel sees each key first, render-on-keystroke (no
+  input lag), and **synchronized-output, diff-rendered** frames — only changed
+  rows repaint, so it never flickers. **Fleet** is a selectable, scrollable
+  session list with Enter-to-open detail and `/`-search; **Guard** is a
+  browsable rung list. Add a panel by dropping a struct into the tuple.
 
 **Planned (not yet built):** the AI panel's productivity counters, Alerts
-(system notification + webhook hooks), and `menuconfig` (`config.zig`
-scaffold). Guard + Fleet are **read-only**; Setup's `[w]` shell-integration
-write is the one mutating action (consented), and profile switching is via
-atty's `Alt+P` or the daemon CLI (wiring it into the Guard panel is a future
-step).
+(system notification + webhook hooks), `menuconfig` (`config.zig` scaffold),
+and optional polish — mouse (click a tab / row), responsive multi-column at
+≥120 cols, i18n of the tab titles. Guard's profile switch stays on atty's
+`Alt+P` / `sudo atty-guard profile set` (wiring it into the Guard panel is a
+future step); Setup's `[w]` shell-integration write remains the one mutating
+action (consented).
 
 ## Why
 
@@ -131,14 +144,44 @@ then run `zig build`. Source of truth stays `config.zig`. (`atty-guard`'s
 `[profile]`/`[enforcement]` TOML — the one existing runtime config — is
 edited via the existing sudo-mediated CLI, not a new path.)
 
-## Extensibility — Suckless style [locked]
+## Extensibility — Suckless style (shipped)
 
-`attop` itself follows the atty ethos: panels + themes + keymaps are
-**compile-time composed** from a config (its own `config.def.zig` /
-`config.zig`, dwm-style), not a runtime plugin loader. Adding a panel = a
-struct in a comptime tuple with the same hook shape as the proxy's modules
-(`render`, `onKey`, `onTick`, `title`). A user forks a panel by editing
-config + recompiling — same contract as the rest of atty.
+`attop` follows the atty ethos: panels are **compile-time composed** from its
+own config (`src/attop/config.def.zig` committed template →
+`src/attop/config.zig` gitignored, dwm-style) — no runtime plugin loader.
+`PanelHost(panels)` (`src/attop/panel_host.zig`) walks the tuple exactly like
+the proxy's `Dispatcher(modules)`: every hook is `@hasDecl`-gated, so a panel
+contributes zero code for hooks it omits, and deleting it from the tuple
+removes it from the binary.
+
+### Writing a panel
+
+A panel is any type with this hook shape (`src/attop/panel.zig`):
+
+```zig
+pub const Runtime = struct { /* per-panel state, e.g. a list.List */ };
+pub fn attach(allocator) !Runtime           // required
+pub fn title() []const u8                    // required — tab label
+pub fn navKey() u8                           // required — global hotkey
+pub fn render(rt, ctx, w) !void              // required — draw content
+pub fn onKey(rt, ctx, key) !panel.Action     // optional — handled | pass | quit | refresh
+pub fn onTick(rt, ctx, elapsed_ms) !void     // optional — periodic work
+pub fn footerHint(rt, ctx) ?[]const u8       // optional — panel key legend
+pub fn wantsFocusAtStart(ctx) bool           // optional — landing vote
+```
+
+`ctx` (`panel.Ctx`) carries the cached daemon snapshot (`metrics`,
+`instances`), terminal geometry, `focused`, and a per-frame arena. `render`
+writes content only — the host owns the tab bar, footer, screen clear, and the
+diff render. Drop the type into the `panels` tuple and recompile:
+
+```zig
+pub const panels = .{ home.Panel, guard.Panel, fleet.Panel, my.Panel, help.Panel };
+```
+
+Reuse `list.List` for a selectable/scrollable list (Fleet + Guard do) and
+`box.drawBox` for a framed detail view. Return `.handled` from `onKey` when the
+panel consumed a key (so global nav doesn't also act on it), `.pass` otherwise.
 
 ## UX bar (the differentiators — this is the product) [locked]
 
