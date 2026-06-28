@@ -190,13 +190,18 @@ pub const Session = struct {
     /// surface it).
     pub fn waitStable(self: *Session, quiet_ms: u32, timeout_ms: u32) !bool {
         const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
-        const quiet: i32 = @intCast(@max(quiet_ms, 1));
-        while (snapshot.monoMillis() < deadline) {
-            // pumpMs returns false when the poll elapsed with no bytes — i.e.
-            // a full quiet window passed → settled.
-            if (!try self.pumpMs(quiet)) return true;
+        const quiet: i64 = @max(@as(i64, @intCast(quiet_ms)), 1);
+        while (true) {
+            const remaining = deadline - snapshot.monoMillis();
+            if (remaining <= 0) return false; // hit timeout_ms before settling
+            // Clamp the poll to the remaining budget so the total never
+            // exceeds timeout_ms. Only a FULL quiet window with no bytes
+            // counts as settled — a clamped final slice elapsing just loops
+            // back to the timeout check above.
+            const full = remaining >= quiet;
+            const slice: i32 = @intCast(if (full) quiet else remaining);
+            if (!try self.pumpMs(slice) and full) return true;
         }
-        return false;
     }
 
     /// Render the current grid text and check for substring.

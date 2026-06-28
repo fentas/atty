@@ -4,7 +4,7 @@
 //!
 //!   cols <int>
 //!   rows <int>
-//!   timeout_ms <int>            # default 5000, applies to wait_for
+//!   timeout_ms <int>            # default 5000, caps wait_for + wait_stable
 //!   env KEY=VALUE
 //!   spawn <argv...>             # argv0 is the binary (token-split, no quoting yet)
 //!                               # if argv0 is "$ATTY", harness substitutes the binary
