@@ -78,7 +78,7 @@ pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: 
         // anything else means no reachable daemon.
         const e = posix.errno(crc);
         if (e != .AGAIN and e != .INPROGRESS) return null;
-        if (!pollOnce(fd, posix.POLL.OUT, remainingMs(deadline))) return null;
+        if (!pollOnce(fd, posix.POLL.OUT, deadline)) return null;
     }
 
     const req = "{\"id\":1,\"method\":\"get_metrics\"}\n";
@@ -93,9 +93,7 @@ pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: 
     var buf: [16384]u8 = undefined;
     var len: usize = 0;
     while (len < buf.len) {
-        const rem = remainingMs(deadline);
-        if (rem == 0) return null; // total budget spent
-        if (!pollOnce(fd, posix.POLL.IN, rem)) return null;
+        if (!pollOnce(fd, posix.POLL.IN, deadline)) return null;
         const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
         if (n <= 0) return null;
         len += @intCast(n);
@@ -106,12 +104,14 @@ pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: 
     return null;
 }
 
-fn pollOnce(fd: i32, events: i16, timeout_ms: i32) bool {
+fn pollOnce(fd: i32, events: i16, deadline: i64) bool {
     var pfd = [_]posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
     while (true) {
-        const r = std.c.poll(&pfd, 1, timeout_ms);
-        // Retry on EINTR — attop installs a SIGWINCH handler, so a resize
-        // mid-fetch must not be mistaken for "daemon unreachable".
+        const t = remainingMs(deadline);
+        if (t == 0) return false; // total budget spent
+        const r = std.c.poll(&pfd, 1, t);
+        // Retry on EINTR (attop's SIGWINCH handler) — but with the
+        // REMAINING budget, so an EINTR storm can't exceed the deadline.
         if (r < 0 and posix.errno(r) == .INTR) continue;
         if (r <= 0) return false;
         return (pfd[0].revents & events) != 0;
