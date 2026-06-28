@@ -98,9 +98,16 @@ pub fn PanelHost(comptime panels: anytype) type {
 
         // ---- all-panel hooks ----------------------------------------------
 
-        pub fn tickAll(rts: *Runtimes, ctx: *Ctx, elapsed_ms: u64) !void {
+        /// Fan onTick into every panel (panels may keep state warm while
+        /// off-screen). `ctx.focused` is set per-panel from `focus` so each
+        /// onTick sees the correct `Ctx.focused` contract (only the focused
+        /// panel gets true), rather than a single shared value.
+        pub fn tickAll(rts: *Runtimes, ctx: *Ctx, focus: usize, elapsed_ms: u64) !void {
             inline for (panels, 0..) |P, i| {
-                if (comptime @hasDecl(P, "onTick")) try P.onTick(rts[i], ctx, elapsed_ms);
+                if (comptime @hasDecl(P, "onTick")) {
+                    ctx.focused = (i == focus);
+                    try P.onTick(rts[i], ctx, elapsed_ms);
+                }
             }
         }
 

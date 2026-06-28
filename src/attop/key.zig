@@ -9,11 +9,13 @@
 //! printable `char`, leaving richer protocols for if/when a panel asks.
 //!
 //! Decoding is greedy left-to-right over the raw bytes of a single
-//! read. A lone ESC (0x1b) with no following bytes IS the Escape key;
-//! an ESC that begins a recognised CSI/SS3 sequence is that key. An
-//! unrecognised escape sequence is consumed (so its bytes don't leak
-//! as printable noise) and reported as `.unknown` — the host ignores
-//! those rather than mis-firing an action.
+//! read. A CSI/SS3 sequence with recognised structure but an unhandled
+//! final byte (e.g. bracketed-paste `ESC [ 200 ~`) is consumed whole and
+//! reported as `.unknown` — so its bytes never leak as printable noise and
+//! the host can ignore it rather than mis-fire. A lone ESC, an ESC followed
+//! by an unrecognised byte, or an incomplete (split) sequence decodes as
+//! `.escape`, consuming only the ESC so the following byte re-decodes on the
+//! next step. Anything else is a `char`/`ctrl`/named key.
 
 const std = @import("std");
 

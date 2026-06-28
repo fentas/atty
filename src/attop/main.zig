@@ -239,7 +239,7 @@ fn runLoop() void {
             var ta = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer ta.deinit();
             var tctx = app.ctx(ta.allocator(), true);
-            Host.tickAll(&app.rts, &tctx, @intCast(refresh_ms)) catch {};
+            Host.tickAll(&app.rts, &tctx, app.focus, @intCast(refresh_ms)) catch {};
             app.render();
         }
     }
