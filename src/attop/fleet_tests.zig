@@ -2,12 +2,60 @@ const std = @import("std");
 const testing = std.testing;
 const fleet = @import("fleet.zig");
 const uds = @import("uds.zig");
+const panel = @import("panel.zig");
 
 fn instances() [2]uds.Instance {
     return .{
         .{ .pid = 4242, .shell = "bash", .cwd = "/home/u/proj", .counters = .{ .commands = 12 } },
         .{ .pid = 99, .shell = "zsh", .cwd = "/tmp", .incognito = true, .counters = .{ .commands = 3 } },
     };
+}
+
+// The LIVE interactive path (Panel.render + onKey), distinct from the legacy
+// renderFleet wrapper the byte-layout tests above exercise.
+test "Fleet.Panel: select, detail, search, and g falls through to nav" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var list = instances();
+    var rt = try fleet.Panel.attach(testing.allocator);
+    var ctx = panel.Ctx{ .instances = &list, .cols = 100, .rows = 24, .arena = arena.allocator() };
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try fleet.Panel.render(&rt, &ctx, &w);
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "bash") != null);
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "zsh") != null);
+
+    // j moves selection (and reports handled so global nav won't also act).
+    try testing.expectEqual(panel.Action.handled, try fleet.Panel.onKey(&rt, &ctx, .{ .char = 'j' }));
+    try testing.expectEqual(@as(usize, 1), rt.list.selected);
+
+    // Enter → detail of the 2nd session (pid 99), framed in a box.
+    _ = try fleet.Panel.onKey(&rt, &ctx, .enter);
+    try testing.expect(rt.mode == .detail);
+    w = std.Io.Writer.fixed(&buf);
+    try fleet.Panel.render(&rt, &ctx, &w);
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "session 99") != null);
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "\u{2502}") != null); // box side border
+
+    // Any key closes detail.
+    _ = try fleet.Panel.onKey(&rt, &ctx, .escape);
+    try testing.expect(rt.mode == .browse);
+
+    // `/` then `z` filters to the zsh row only.
+    _ = try fleet.Panel.onKey(&rt, &ctx, .{ .char = '/' });
+    try testing.expect(rt.mode == .search);
+    _ = try fleet.Panel.onKey(&rt, &ctx, .{ .char = 'z' });
+    w = std.Io.Writer.fixed(&buf);
+    try fleet.Panel.render(&rt, &ctx, &w);
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "zsh") != null);
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "bash") == null);
+
+    // Esc clears the filter + leaves search; in browse, `g` must fall through
+    // (.pass) so the host's global g→Guard hotkey still works (regression).
+    _ = try fleet.Panel.onKey(&rt, &ctx, .escape);
+    try testing.expect(rt.mode == .browse);
+    try testing.expectEqual(panel.Action.pass, try fleet.Panel.onKey(&rt, &ctx, .{ .char = 'g' }));
 }
 
 test "rows render with pid, shell, cmds, cwd + the total" {

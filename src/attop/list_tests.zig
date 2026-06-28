@@ -86,7 +86,7 @@ test "List: shrinking len re-clamps the selection" {
     try testing.expectEqual(@as(usize, 0), l.offset);
 }
 
-test "List.handleKey: vim + arrows, gg/G, consume reporting" {
+test "List.handleKey: vim + arrows, G/Home, consume reporting" {
     var l = List{};
     l.setViewport(5);
     l.setLen(10);
@@ -99,18 +99,15 @@ test "List.handleKey: vim + arrows, gg/G, consume reporting" {
     try testing.expectEqual(@as(usize, 1), l.selected);
     try testing.expect(l.handleKey(.{ .char = 'G' })); // bottom
     try testing.expectEqual(@as(usize, 9), l.selected);
-
-    // gg: first g arms (consumed), second g jumps to top.
-    try testing.expect(l.handleKey(.{ .char = 'g' }));
-    try testing.expect(l.pending_g);
-    try testing.expect(l.handleKey(.{ .char = 'g' }));
+    try testing.expect(l.handleKey(.home)); // Home → top
     try testing.expectEqual(@as(usize, 0), l.selected);
-    try testing.expect(!l.pending_g);
 
-    // A non-list key is NOT consumed (so global nav can act), and clears g.
-    _ = l.handleKey(.{ .char = 'g' }); // arm
-    try testing.expect(!l.handleKey(.{ .char = 'q' })); // not consumed
-    try testing.expect(!l.pending_g); // latch cleared
+    // A lone `g` is deliberately NOT consumed — it must fall through so the
+    // host's global `g`→Guard hotkey still works while a list panel is
+    // focused (there is no `gg`; Home covers "top").
+    try testing.expect(!l.handleKey(.{ .char = 'g' }));
+    // Any other non-list char is likewise not consumed.
+    try testing.expect(!l.handleKey(.{ .char = 'q' }));
 }
 
 test "containsIgnoreCase" {

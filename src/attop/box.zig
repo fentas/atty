@@ -35,7 +35,11 @@ pub fn drawBox(w: *std.Io.Writer, title: []const u8, lines: []const []const u8, 
 
     // Top border: ┌─ title ─…─┐  (the run between ┌┐ spans inner+2 columns:
     // "─ " + title + trailing "─" fill, with the title clamped to fit).
-    const title_shown = if (title.len > inner) title[0..inner] else title;
+    // Clamp the title to inner-1 so the top run ("─ " + title + " ") can never
+    // exceed the box's interior width (inner+2) — otherwise the fill loop is
+    // skipped and the top border ends up one ─ wider than the rest.
+    const tmax = inner - 1; // inner is >= 1 (clamped above)
+    const title_shown = if (title.len > tmax) title[0..tmax] else title;
     try w.print("  {f}{s}{s} {s} ", .{ t.muted, tl, hbar, title_shown });
     // Columns used after ┌: "─"(1)+" "(1)+title+" "(1) = title_shown.len + 3.
     // Fill ─ up to inner+2, then ┐.

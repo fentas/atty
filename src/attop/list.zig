@@ -4,9 +4,13 @@
 //! and renders each visible row itself (consulting `selected`/`visible`),
 //! so one widget serves every list shape without a render contract.
 //!
-//! Keys (vim + arrows): j/k + Down/Up, PageUp/PageDown, Home/End, gg/G.
+//! Keys (vim + arrows): j/k + Down/Up, PageUp/PageDown, Home/End, G (bottom).
 //! All motion clamps so the selection stays on a real row AND inside the
 //! viewport — no off-screen cursor, no scroll past the end.
+//!
+//! Note: there is deliberately no `gg` (top). A lone `g` must fall through
+//! unconsumed so the host's global nav hotkey `g` (→ Guard) still works while
+//! a list panel is focused; `Home` covers "go to top".
 
 const std = @import("std");
 const key = @import("key.zig");
@@ -22,8 +26,6 @@ pub const List = struct {
     len: usize = 0,
     /// Visible rows. Set each frame from the panel's content height.
     viewport: usize = 1,
-    /// vim `gg` latch: first `g` arms, second `g` jumps to the top.
-    pending_g: bool = false,
 
     /// Update the row count (e.g. after a filter changed it) + re-clamp.
     pub fn setLen(self: *List, n: usize) void {
@@ -86,75 +88,51 @@ pub const List = struct {
     }
 
     /// Apply a key to the list. Returns true when it was a list-motion key
-    /// (so the panel can report `.handled` and the host's global nav doesn't
-    /// also act on it). `gg` is handled via the `pending_g` latch; any other
-    /// key clears the latch.
+    /// (so the panel reports `.handled` and the host's global nav doesn't also
+    /// act on it) — and, crucially, FALSE for everything else, including a
+    /// lone `g`, so the global `g`→Guard hotkey survives. `Home` is "top".
     pub fn handleKey(self: *List, k: Key) bool {
         switch (k) {
             .up => {
-                self.pending_g = false;
                 self.moveUp();
                 return true;
             },
             .down => {
-                self.pending_g = false;
                 self.moveDown();
                 return true;
             },
             .page_up => {
-                self.pending_g = false;
                 self.pageUp();
                 return true;
             },
             .page_down => {
-                self.pending_g = false;
                 self.pageDown();
                 return true;
             },
             .home => {
-                self.pending_g = false;
                 self.toTop();
                 return true;
             },
             .end => {
-                self.pending_g = false;
                 self.toBottom();
                 return true;
             },
             .char => |c| switch (c) {
                 'k' => {
-                    self.pending_g = false;
                     self.moveUp();
                     return true;
                 },
                 'j' => {
-                    self.pending_g = false;
                     self.moveDown();
                     return true;
                 },
                 'G' => {
-                    self.pending_g = false;
                     self.toBottom();
                     return true;
                 },
-                'g' => {
-                    if (self.pending_g) {
-                        self.toTop();
-                        self.pending_g = false;
-                    } else {
-                        self.pending_g = true;
-                    }
-                    return true; // the lone first `g` is consumed (armed)
-                },
-                else => {
-                    self.pending_g = false;
-                    return false;
-                },
+                else => return false,
             },
-            else => {
-                self.pending_g = false;
-                return false;
-            },
+            else => return false,
         }
     }
 };
