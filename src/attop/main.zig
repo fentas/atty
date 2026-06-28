@@ -128,16 +128,17 @@ pub const Screen = enum { home, guard };
 
 pub const Input = enum { none, quit, home, guard };
 
-/// Classify a raw-mode read into one action. A MULTI-byte read starting
-/// with Esc is a CSI/SS3 sequence (arrow keys etc.) → none (nav stub). A
-/// lone Esc is quit. Otherwise the first recognized command byte wins —
-/// so a fast multi-key burst (read() can return >1 byte in raw mode) still
-/// acts, unlike a strict len==1 check.
+/// Classify a raw-mode read into one action. Quit is `q` or Ctrl-C only —
+/// NOT Esc: a terminal can deliver an arrow key's `\x1b[A` split across
+/// reads (the bare `\x1b` first, over a slow ssh link), so quitting on a
+/// lone Esc would false-fire. A multi-byte read starting with Esc is a
+/// CSI/SS3 sequence → none (nav stub). The first recognized command byte
+/// wins, so a fast multi-key burst (read() can return >1 byte) still acts.
 pub fn classifyInput(keys: []const u8) Input {
     if (keys.len == 0) return .none;
     if (keys.len > 1 and keys[0] == 0x1b) return .none; // Esc-sequence → nav
     for (keys) |k| switch (k) {
-        'q', 0x03, 0x1b => return .quit,
+        'q', 0x03 => return .quit,
         'g' => return .guard,
         'h' => return .home,
         else => {},

@@ -3,10 +3,10 @@ const testing = std.testing;
 const mod = @import("main.zig");
 
 test "classifyInput: quit keys, screen switches, nav/Esc-sequences" {
-    // quit: q / Ctrl-C / bare Esc
+    // quit: q / Ctrl-C only (NOT Esc — a split arrow seq must not quit)
     try testing.expectEqual(mod.Input.quit, mod.classifyInput("q"));
     try testing.expectEqual(mod.Input.quit, mod.classifyInput(&.{0x03}));
-    try testing.expectEqual(mod.Input.quit, mod.classifyInput(&.{0x1b}));
+    try testing.expectEqual(mod.Input.none, mod.classifyInput(&.{0x1b})); // lone Esc → none
     // screen switches
     try testing.expectEqual(mod.Input.guard, mod.classifyInput("g"));
     try testing.expectEqual(mod.Input.home, mod.classifyInput("h"));
