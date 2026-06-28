@@ -1,8 +1,9 @@
 //! attop Setup/Doctor screen (docs/dashboard.md Setup) — the embedded
 //! health check. Answers "is my atty stack wired up?" with a checklist + a
 //! one-line fix per failing/optional item, so onboarding + troubleshooting
-//! live in the dashboard. PURE render (no I/O): the daemon metrics, the
-//! atty-on-PATH flag, and the under-atty flag are passed in.
+//! live in the dashboard. PURE render (no I/O): the daemon metrics + the
+//! host-detected `Host` caps (atty-on-PATH, under-atty, shell wiring) are
+//! passed in.
 
 const std = @import("std");
 const atty = @import("atty");
@@ -50,8 +51,7 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
         try row(w, t, .bad, "atty", s.st_not_installed, s.fix_install_atty);
     }
 
-    // Shell integration (the rc wiring that auto-starts atty + OSC 133). The
-    // fix names the DETECTED shell so the command is copy-pasteable as-is.
+    // The fix names the detected shell so the command is copy-pasteable.
     if (host.shell_integrated) {
         try row(w, t, .ok, "shell", s.st_wired, "");
     } else {
