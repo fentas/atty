@@ -17,14 +17,23 @@ pub const compact_cols: u16 = 80;
 
 const Status = enum { ok, bad, neutral };
 
-pub fn renderSetup(buf: []u8, m: ?uds.Metrics, atty_on_path: bool, under_atty: bool, shell_integrated: bool, cols: u16, rows: u16) []const u8 {
+/// Host-side capabilities attop detects locally (not from the daemon) — see
+/// caps.zig. Bundled so the render signature stays small as the wizard grows.
+pub const Host = struct {
+    atty_on_path: bool = false,
+    under_atty: bool = false,
+    shell_integrated: bool = false,
+    shell_name: []const u8 = "bash",
+};
+
+pub fn renderSetup(buf: []u8, m: ?uds.Metrics, host: Host, cols: u16, rows: u16) []const u8 {
     _ = rows;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, m, atty_on_path, under_atty, shell_integrated, cols) catch {};
+    render(&w, m, host, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bool, shell_integrated: bool, cols: u16) !void {
+fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
     const t = theme.active;
     const s = i18n.active;
     try w.writeAll("\x1b[2J\x1b[H");
@@ -35,17 +44,20 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bo
     }
 
     // atty itself first — the rest is moot if the proxy isn't installed.
-    if (atty_on_path) {
+    if (host.atty_on_path) {
         try row(w, t, .ok, "atty", s.st_installed, "");
     } else {
         try row(w, t, .bad, "atty", s.st_not_installed, s.fix_install_atty);
     }
 
-    // Shell integration (the rc wiring that auto-starts atty + OSC 133).
-    if (shell_integrated) {
+    // Shell integration (the rc wiring that auto-starts atty + OSC 133). The
+    // fix names the DETECTED shell so the command is copy-pasteable as-is.
+    if (host.shell_integrated) {
         try row(w, t, .ok, "shell", s.st_wired, "");
     } else {
-        try row(w, t, .neutral, "shell", s.st_not_wired, s.fix_wire_shell);
+        var fixbuf: [128]u8 = undefined;
+        const fix = std.fmt.bufPrint(&fixbuf, "{s}eval \"$(atty init {s})\"", .{ s.fix_wire_shell, host.shell_name }) catch s.fix_wire_shell;
+        try row(w, t, .neutral, "shell", s.st_not_wired, fix);
     }
 
     if (m) |metrics| {
@@ -95,7 +107,7 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bo
     }
 
     // Always checkable — attop knows its own environment.
-    if (under_atty) {
+    if (host.under_atty) {
         try row(w, t, .ok, "session", s.st_in_session, "");
     } else {
         try row(w, t, .neutral, "session", s.st_not_under_atty, s.fix_run_atty);

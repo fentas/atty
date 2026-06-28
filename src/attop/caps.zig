@@ -45,14 +45,25 @@ pub fn shellIntegrated() bool {
     return rcHasMarker(rc);
 }
 
+/// The login shell's short name (bash/zsh/fish) from $SHELL; bash by default.
+/// Drives both the rc path and the `atty init <shell>` fix shown on Setup.
+pub fn shellName() []const u8 {
+    const shell = if (std.c.getenv("SHELL")) |s| std.mem.span(s) else "";
+    if (std.mem.endsWith(u8, shell, "zsh")) return "zsh";
+    if (std.mem.endsWith(u8, shell, "fish")) return "fish";
+    return "bash";
+}
+
 /// The login shell's rc path, derived from $SHELL + $HOME (bash/default →
-/// ~/.bashrc, zsh → ~/.zshrc, fish → ~/.config/fish/config.fish).
+/// ~/.bashrc, zsh → ~/.zshrc, fish → ~/.config/fish/config.fish). The common
+/// interactive rc — login-only files (~/.bash_profile, ~/.zprofile) read as
+/// unwired, which the $ATTY_SOURCE short-circuit covers when run under atty.
 fn rcPath(buf: []u8) ?[:0]const u8 {
     const home = std.mem.span(std.c.getenv("HOME") orelse return null);
-    const shell = if (std.c.getenv("SHELL")) |s| std.mem.span(s) else "";
-    const rel = if (std.mem.endsWith(u8, shell, "zsh"))
+    const name = shellName();
+    const rel = if (std.mem.eql(u8, name, "zsh"))
         "/.zshrc"
-    else if (std.mem.endsWith(u8, shell, "fish"))
+    else if (std.mem.eql(u8, name, "fish"))
         "/.config/fish/config.fish"
     else
         "/.bashrc";

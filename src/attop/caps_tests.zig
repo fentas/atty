@@ -153,3 +153,16 @@ test "shellIntegrated false with no ATTY_SOURCE and an unmarked rc" {
     _ = setenv("SHELL", "/bin/bash", 1);
     try testing.expect(!caps.shellIntegrated());
 }
+
+test "shellName maps $SHELL to bash/zsh/fish (default bash)" {
+    const save = saveEnv("SHELL");
+    defer restoreEnv(save);
+    _ = setenv("SHELL", "/usr/bin/zsh", 1);
+    try testing.expectEqualStrings("zsh", caps.shellName());
+    _ = setenv("SHELL", "/usr/bin/fish", 1);
+    try testing.expectEqualStrings("fish", caps.shellName());
+    _ = setenv("SHELL", "/bin/bash", 1);
+    try testing.expectEqualStrings("bash", caps.shellName());
+    _ = unsetenv("SHELL");
+    try testing.expectEqualStrings("bash", caps.shellName()); // unset → default
+}
