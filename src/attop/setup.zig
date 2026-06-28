@@ -40,7 +40,8 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void
         } else if (std.mem.eql(u8, metrics.guard.profile, "prompt")) {
             try row(w, t, .neutral, "security", "prompt (warn-only)", "raise it in the Guard panel ([g])");
         } else {
-            // Daemon up but no/unrecognized profile — don't claim "prompt".
+            // Daemon up but the profile field is empty/absent (any non-empty
+            // value is either "prompt" or → isProtected) — don't claim "prompt".
             try row(w, t, .neutral, "security", "unknown", "");
         }
 
