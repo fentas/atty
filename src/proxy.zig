@@ -1731,6 +1731,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (args.is_tty) {
                     ctx.cursor_row = cursor_tracker.currentRow();
                     ctx.cursor_col = cursor_tracker.currentCol();
+                    // Keep terminal width fresh for THIS path's ghost paint
+                    // (renderGhost below) too — with the statusbar off it's
+                    // otherwise only refreshed on the idle tick, so a paint
+                    // in the ~tick_interval window after a narrowing resize
+                    // would clip against the stale (wider) width and briefly
+                    // re-admit the wrapped-residue bug.
+                    ctx.terminal_cols = cursor_tracker.maxCols();
                 }
                 if (alt_before != alt_screen.active) {
                     trace.log(.altscreen, "alt_screen transition: {}->{}", .{ alt_before, alt_screen.active });

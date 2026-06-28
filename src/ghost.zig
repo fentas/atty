@@ -82,14 +82,15 @@ pub const Ghost = struct {
 /// WITHOUT wrapping, snapped to a UTF-8 codepoint boundary so a
 /// multi-byte char is never split (which would render as garbage).
 ///
-/// Byte length is used as a conservative upper bound for display
-/// width: ASCII is one column per byte, and any multi-byte UTF-8
-/// sequence is ≥2 bytes but ≤2 columns, so capping *bytes* to
-/// `max_cols` can only ever UNDER-fill — it never over-fills, which is
-/// the property we need (an overlay that exceeds the line wraps onto a
-/// continuation row, and the single-row clear leaves that wrapped tail
-/// as residue — see `writeClearGhost`). Wide CJK glyphs render slightly
-/// short of the edge; that's the safe direction.
+/// Byte length is used as a conservative proxy for display width: for
+/// any valid UTF-8, byte length ≥ display columns (ASCII is 1 byte = 1
+/// col; a multi-byte sequence is ≥2 bytes for ≤2 cols — and 0 for
+/// combining marks). So capping *bytes* to `max_cols` can only ever
+/// UNDER-fill the column budget, never over-fill — the property we need
+/// (an overlay exceeding the line wraps onto a continuation row, and the
+/// single-row clear leaves that wrapped tail as residue — see
+/// `writeClearGhost`). Wide/zero-width glyphs render slightly short of
+/// the edge; that's the safe direction.
 pub fn fitWidth(text: []const u8, max_cols: usize) []const u8 {
     if (text.len <= max_cols) return text;
     var end = max_cols;
