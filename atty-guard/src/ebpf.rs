@@ -602,14 +602,23 @@ mod with_libbpf {
         /// AWAY from `strict` clears exactly the key set_deny_bin inserted,
         /// so a weaker profile doesn't keep synchronously -EPERM'ing it.
         pub fn clear_deny_bin(&self, path: &str) -> Result<(), LoadError> {
-            let key = super::encode_deny_key(path)?;
+            // A key is only in the map if encode SUCCEEDED at arm time, so an
+            // encode error here means there's nothing to clear — no-op, not
+            // an error (don't log a phantom failure for a never-armed rule).
+            let key = match super::encode_deny_key(path) {
+                Ok(k) => k,
+                Err(_) => return Ok(()),
+            };
             self.delete("deny_bins", &key)
         }
 
         /// Remove a BASENAME from the kernel deny-map (runtime switch away
         /// from `strict`).
         pub fn clear_deny_basename(&self, name: &str) -> Result<(), LoadError> {
-            let key = super::encode_basename_key(name)?;
+            let key = match super::encode_basename_key(name) {
+                Ok(k) => k,
+                Err(_) => return Ok(()),
+            };
             self.delete("deny_basenames", &key)
         }
 

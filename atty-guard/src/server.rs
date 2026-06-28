@@ -89,8 +89,11 @@ pub fn serve(
         threat = threat.with_ebpf(es);
     }
 
-    // Seed the live armed-rule counts from the startup posture (which
-    // reflects the load-time arming); SetProfile updates them per switch.
+    // Seed the live armed-rule counts from the startup posture. That seed is
+    // the CONFIGURED count (main.rs uses the list length) — equal to the
+    // armed count unless a rule failed to encode at startup (rare). Each
+    // SetProfile then stores the exact success count, so post-switch the
+    // reported count is precise.
     let init_deny_path = guard_posture.deny_path;
     let init_deny_basename = guard_posture.deny_basename;
 
@@ -1233,30 +1236,45 @@ fn handle_set_profile(
                         ),
                     }
                 }
-                if let Err(e) = es.set_basename_gate(armed_names > 0) {
-                    eprintln!("atty-guard: switch->strict basename_gate failed — {e}");
-                }
+                // The basenames are only enforced when the scan gate is on;
+                // if the gate-set fails they're loaded-but-inert, so report 0
+                // armed basenames rather than overstate enforcement.
+                let gate_on = match es.set_basename_gate(armed_names > 0) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("atty-guard: switch->strict basename_gate failed — {e}");
+                        false
+                    }
+                };
+                let effective_names = if gate_on { armed_names } else { 0 };
                 state
                     .deny_path_armed
                     .store(armed_bins as u32, std::sync::atomic::Ordering::Relaxed);
                 state
                     .deny_basename_armed
-                    .store(armed_names as u32, std::sync::atomic::Ordering::Relaxed);
+                    .store(effective_names as u32, std::sync::atomic::Ordering::Relaxed);
                 if state.verbosity >= 1 {
                     eprintln!(
-                        "atty-guard: switched to strict — armed {armed_bins} path + {armed_names} basename kernel deny-rule(s)"
+                        "atty-guard: switched to strict — armed {armed_bins} path + {effective_names} basename kernel deny-rule(s)"
                     );
                 }
             }
             DenyAction::Clear => {
+                // Count entries that FAILED to clear — they're still in the
+                // kernel deny-map, so the reported armed count must reflect
+                // them (not assume 0) to avoid hiding an over-block.
+                let mut still_bins: usize = 0;
                 for path in &state.deny_binaries {
                     if let Err(e) = es.clear_deny_bin(path) {
                         eprintln!("atty-guard: switch-away-from-strict clear deny_binaries: {path:?} — {e}");
+                        still_bins += 1;
                     }
                 }
+                let mut still_names: usize = 0;
                 for name in &state.deny_basenames {
                     if let Err(e) = es.clear_deny_basename(name) {
                         eprintln!("atty-guard: switch-away-from-strict clear deny_basenames: {name:?} — {e}");
+                        still_names += 1;
                     }
                 }
                 if let Err(e) = es.set_basename_gate(false) {
@@ -1266,13 +1284,13 @@ fn handle_set_profile(
                 }
                 state
                     .deny_path_armed
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                    .store(still_bins as u32, std::sync::atomic::Ordering::Relaxed);
                 state
                     .deny_basename_armed
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                    .store(still_names as u32, std::sync::atomic::Ordering::Relaxed);
                 if state.verbosity >= 1 {
                     eprintln!(
-                        "atty-guard: switched away from strict — cleared the kernel deny-map"
+                        "atty-guard: switched away from strict — cleared the kernel deny-map ({still_bins} path + {still_names} basename still armed)"
                     );
                 }
             }
