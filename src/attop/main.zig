@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const atty = @import("atty");
+const term = @import("term.zig");
 
 // Force-analyze the atty-module reuse so the cross-binary import wiring
 // compiles (the render core consumes atty.ansi / atty.style).
@@ -22,6 +23,17 @@ comptime {
 }
 
 pub fn main() void {
+    // attop is a full-screen TUI — it needs a real terminal. Without one
+    // (piped / redirected), print the banner + bail rather than emit raw
+    // escapes into a pipe.
+    if (!term.isatty(std.posix.STDOUT_FILENO)) {
+        var buf: [160]u8 = undefined;
+        const line = banner(&buf, std.c.getenv("ATTY") != null);
+        _ = std.c.write(std.posix.STDOUT_FILENO, line.ptr, line.len);
+        return;
+    }
+    // The live render loop (term setup → poll get_metrics → render Home)
+    // lands in the next step; for now the banner stands in.
     var buf: [160]u8 = undefined;
     const line = banner(&buf, std.c.getenv("ATTY") != null);
     _ = std.c.write(std.posix.STDOUT_FILENO, line.ptr, line.len);
@@ -42,4 +54,5 @@ pub fn banner(buf: []u8, under_atty: bool) []const u8 {
 
 test {
     _ = @import("main_tests.zig");
+    _ = @import("term.zig");
 }
