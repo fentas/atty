@@ -321,6 +321,31 @@ Manage trust and atoms with `sudo atty-guard atoms|urls|session|trust …` (SO_P
 
 &nbsp;
 
+### 📊 attop — the dashboard
+
+`attop` is atty's dashboard — the accessible face of what the proxy and the `atty-guard` sidecar do, so you don't need to read `config.zig` or know what "eBPF" means to see whether you're protected. Run it (WIP — run-only, not yet installed):
+
+```sh
+zig build run-attop -Dtarget=x86_64-linux-gnu
+```
+
+Four screens, switched by a single key (`q` quits):
+
+| Key | Screen | Shows |
+|-----|--------|-------|
+| `h` | **Home** | the 3-second answer — protected? what's atty doing? healthy? |
+| `g` | **Guard** | the security profile as a named-rung ladder + the kernel posture |
+| `f` | **Fleet** | every live atty session — pid, shell, cwd, command count |
+| `s` | **Setup** | an embedded health check (daemon · eBPF · profile · metrics · in-atty) with a one-line fix per item |
+
+- **Themes** — `ATTOP_THEME` = `dark`, `light`, `high-contrast`, `mono`, or `ascii`. Auto by default: `NO_COLOR` → mono (no color, glyphs kept), a light `COLORFGBG` → light, else dark.
+- **Language** — `ATTOP_LANG` (else `$LC_ALL` / `$LANG`); ships `en` + `de`.
+- **Live data** needs the `atty-guard` daemon running; the per-session Fleet rows need the `metrics_exporter` module enabled in `config.zig`. With no daemon, attop shows a clear "not reachable" state and how to start it.
+
+attop is read-only today — profile switching is via atty's `Alt+P` or `sudo atty-guard profile set`. Design: [docs/dashboard.md](docs/dashboard.md).
+
+&nbsp;
+
 ### ⌨️ Keys, status bar & surfaces
 
 Default global bindings (overridable in `config.keymap`):
@@ -417,6 +442,7 @@ Full docs live at **[atty.sh](https://atty.sh)**:
 
 ### 🎯 Roadmap
 
+- [x] ~~`attop` dashboard~~ — the accessible UI: Home/Guard/Fleet/Setup, themes + i18n, screenshot-tested. Run `zig build run-attop`; see [docs/dashboard.md](docs/dashboard.md). (AI panel, Alerts, menuconfig still to come.)
 - [x] ~~OSC 133 prompt-marker awareness~~ — shipped in `src/osc133.zig`; auto-detects `;A`/`;B`/`;C`/`;D` markers.
 - [ ] Atuin daemon socket backend (replace the subprocess fallback once IPC stabilises)
 - [ ] Bracketed-paste detection (suppress ghost text during a paste burst)

@@ -6,6 +6,31 @@
 > re-derive the surface split or the Suckless-vs-config tension — settled
 > here. Decisions marked **[locked]** were ratified 2026-06-27.
 
+## Status — shipped vs planned (2026-06)
+
+The rest of this doc is the plan; this section tracks what's **built** on
+`master`.
+
+**Shipped:**
+
+- **P1 — metrics plumbing.** The opt-in `metrics_exporter` module + the
+  atty-guard metrics API (`report_metrics` / `get_metrics` / `list_instances`,
+  per-UID gated).
+- **P2 — `attop` + the UI foundation.** The standalone binary (`zig build
+  run-attop`) with **Home / Guard / Fleet / Setup** screens, responsive
+  layout, **theming** (dark / light / high-contrast / mono / ascii; `NO_COLOR`
+  + `COLORFGBG` aware), **i18n** (en + de, `$ATTOP_LANG`-driven), and
+  **screenshot-verified** rendering (each screen fed through the VT grid).
+- **Profile switch.** Live `prompt → … → strict` switching from atty
+  (`Alt+P`) or `sudo atty-guard profile set`, with the kernel eBPF deny-map
+  armed/cleared on the strict boundary.
+
+**Planned (not yet built):** the AI panel's productivity counters, Alerts
+(system notification + webhook hooks), `menuconfig` (`config.zig` scaffold),
+and the first-run wizard. The Guard/Fleet/Setup screens are **read-only**
+today — profile switching is via atty's `Alt+P` or the daemon CLI (wiring it
+into the Guard panel is a future step).
+
 ## Why
 
 Everything atty exposes today is power-user surface: `src/config.zig`,
