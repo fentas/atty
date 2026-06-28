@@ -54,6 +54,11 @@ pub fn serve(
     // worker) + whether a non-root caller may switch it.
     active_profile: Arc<std::sync::atomic::AtomicU8>,
     allow_user_switch: bool,
+    // The strict deny-lists (from the load-time profile config) so a runtime
+    // switch TO strict arms exactly these in the kernel deny-map, and a
+    // switch AWAY clears exactly them.
+    deny_binaries: Vec<String>,
+    deny_basenames: Vec<String>,
 ) -> std::io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     // Socket perms: owner (the daemon's `atty` user) read+write, group
@@ -77,6 +82,9 @@ pub fn serve(
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660))?;
 
     let mut threat = ThreatMap::new();
+    // Keep a handle in State too (cheap Arc clone) so SetProfile can
+    // arm/clear the kernel deny-map at runtime, not just at startup.
+    let ebpf_handle = ebpf.clone();
     if let Some(es) = ebpf {
         threat = threat.with_ebpf(es);
     }
@@ -93,6 +101,9 @@ pub fn serve(
         guard_posture,
         active_profile,
         allow_user_switch,
+        ebpf: ebpf_handle,
+        deny_binaries,
+        deny_basenames,
     });
 
     // Bounded-resources gate: shared atomic counter ticks up on
@@ -239,6 +250,12 @@ struct State {
     active_profile: Arc<std::sync::atomic::AtomicU8>,
     /// Whether a NON-root caller may switch the daemon-global profile.
     allow_user_switch: bool,
+    /// eBPF handle for runtime deny-map arming on a SetProfile switch
+    /// (None when eBPF isn't built/attached). The same Arc the threat map
+    /// holds; the deny-lists below are the strict config to (un)arm.
+    ebpf: Option<Arc<crate::ebpf::EbpfState>>,
+    deny_binaries: Vec<String>,
+    deny_basenames: Vec<String>,
 }
 
 /// Caps for `SubscribeWarnEvents` connections. Kept separate from
@@ -1076,7 +1093,21 @@ fn handle_list_instances(state: &State, peer: PeerCred) -> ResponseBody {
 fn handle_get_metrics(state: &State, peer: PeerCred) -> ResponseBody {
     let (aggregate, instances) = state.metrics.aggregate(peer.uid, peer.is_root);
     let mut guard = state.guard_posture.clone();
-    guard.profile = live_profile(state).as_str().to_string();
+    let live = live_profile(state);
+    guard.profile = live.as_str().to_string();
+    // Deny counts follow the LIVE profile (only strict arms the deny-map),
+    // so a runtime switch is reflected rather than the startup count.
+    let strict = live == crate::profile::SecurityProfile::Strict;
+    guard.deny_path = if strict {
+        state.deny_binaries.len() as u32
+    } else {
+        0
+    };
+    guard.deny_basename = if strict {
+        state.deny_basenames.len() as u32
+    } else {
+        0
+    };
     ResponseBody::Metrics {
         aggregate,
         guard,
@@ -1106,19 +1137,41 @@ fn may_switch_profile(is_root: bool, allow_user_switch: bool) -> bool {
     is_root || allow_user_switch
 }
 
+/// What a profile switch must do to the kernel deny-map. Only `strict` arms
+/// it, so the action is decided purely by whether the switch crosses the
+/// strict boundary — kept pure so the transition logic is unit-testable
+/// without an eBPF kernel.
+#[derive(Debug, PartialEq, Eq)]
+enum DenyAction {
+    Arm,
+    Clear,
+    None,
+}
+
+fn deny_action(old_strict: bool, new_strict: bool) -> DenyAction {
+    match (old_strict, new_strict) {
+        (false, true) => DenyAction::Arm,
+        (true, false) => DenyAction::Clear,
+        _ => DenyAction::None,
+    }
+}
+
 /// Switch the live active profile. The profile is daemon-GLOBAL, so a
 /// non-root caller is allowed only when `[profile] allow_user_switch` is
 /// set; root always. The eBPF worker picks up the new value on its next
 /// exec; GetMetrics/GetProfile reflect it immediately.
 ///
-/// LIMITATION: this drives the REACTIVE ladder (prompt/audit/session/
-/// lockdown-decide + smart) live. `strict`'s EXTRA in-kernel deny-map
-/// (the synchronous `-EPERM` of curated `deny_binaries`/`deny_basenames`)
-/// is armed at STARTUP from the load-time profile, decoupled from runtime
-/// switches: a live switch TO strict enforces reactively (session-grade)
-/// until a restart arms the deny-map; switching AWAY from a startup-strict
-/// daemon leaves the deny-map armed (fail-closed). Arming the deny-map on
-/// switch is a follow-up.
+/// This drives BOTH the reactive ladder (prompt/audit/session/lockdown-
+/// decide + smart) AND `strict`'s in-kernel deny-map: crossing the strict
+/// boundary arms (→ strict) or clears (← strict) the curated
+/// `deny_binaries`/`deny_basenames` in the kernel and flips the basename
+/// scan gate, so a live switch to strict gets the synchronous `-EPERM`
+/// deny-list and a switch away stops over-blocking. The eBPF worker picks
+/// up the reactive level on its next exec; GetMetrics/GetProfile — incl. the
+/// live deny counts — reflect the switch immediately.
+///
+/// SCOPE: the profile is daemon-GLOBAL (one setting for all sessions), so a
+/// non-root caller is allowed only when `[profile] allow_user_switch` is set.
 fn handle_set_profile(
     state: &State,
     peer: PeerCred,
@@ -1132,18 +1185,66 @@ fn handle_set_profile(
                 .to_string(),
         };
     }
-    state
+    let strict = crate::profile::SecurityProfile::Strict.to_u8();
+    let old = state
         .active_profile
-        .store(profile.to_u8(), std::sync::atomic::Ordering::Relaxed);
-    // Honest about strict's startup-bound deny-map (see the doc above) so
-    // an operator isn't surprised that a live switch to strict enforces
-    // reactively rather than via the synchronous kernel deny-list.
-    if profile == crate::profile::SecurityProfile::Strict && state.verbosity >= 1 {
-        eprintln!(
-            "atty-guard: switched to strict — reactive layer is live; the \
-             in-kernel deny-map reflects the startup config (restart to \
-             arm/disarm the synchronous deny-list)"
-        );
+        .swap(profile.to_u8(), std::sync::atomic::Ordering::Relaxed);
+
+    // Arm/clear the kernel deny-map when the switch crosses the strict
+    // boundary (no-op without eBPF). Failures are logged, not swallowed —
+    // a half-armed deny-list is a security gap, not a cosmetic glitch.
+    if let Some(es) = &state.ebpf {
+        match deny_action(old == strict, profile.to_u8() == strict) {
+            DenyAction::Arm => {
+                for path in &state.deny_binaries {
+                    if let Err(e) = es.set_deny_bin(path) {
+                        eprintln!(
+                            "atty-guard: switch->strict deny_binaries: skipping {path:?} — {e}"
+                        );
+                    }
+                }
+                for name in &state.deny_basenames {
+                    if let Err(e) = es.set_deny_basename(name) {
+                        eprintln!(
+                            "atty-guard: switch->strict deny_basenames: skipping {name:?} — {e}"
+                        );
+                    }
+                }
+                if let Err(e) = es.set_basename_gate(!state.deny_basenames.is_empty()) {
+                    eprintln!("atty-guard: switch->strict basename_gate failed — {e}");
+                }
+                if state.verbosity >= 1 {
+                    eprintln!(
+                        "atty-guard: switched to strict — armed {} path + {} basename kernel deny-rule(s)",
+                        state.deny_binaries.len(),
+                        state.deny_basenames.len()
+                    );
+                }
+            }
+            DenyAction::Clear => {
+                for path in &state.deny_binaries {
+                    if let Err(e) = es.clear_deny_bin(path) {
+                        eprintln!("atty-guard: switch-away-from-strict clear deny_binaries: {path:?} — {e}");
+                    }
+                }
+                for name in &state.deny_basenames {
+                    if let Err(e) = es.clear_deny_basename(name) {
+                        eprintln!("atty-guard: switch-away-from-strict clear deny_basenames: {name:?} — {e}");
+                    }
+                }
+                if let Err(e) = es.set_basename_gate(false) {
+                    eprintln!(
+                        "atty-guard: switch-away-from-strict basename_gate clear failed — {e}"
+                    );
+                }
+                if state.verbosity >= 1 {
+                    eprintln!(
+                        "atty-guard: switched away from strict — cleared the kernel deny-map"
+                    );
+                }
+            }
+            DenyAction::None => {}
+        }
     }
     ResponseBody::Profile { profile }
 }
@@ -2092,6 +2193,8 @@ mod tests {
                 crate::protocol::GuardPosture::default(),
                 std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
                 true,
+                Vec::new(),
+                Vec::new(),
             );
         });
         for _ in 0..500 {
@@ -2139,6 +2242,8 @@ mod tests {
                 crate::protocol::GuardPosture::default(),
                 std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
                 true,
+                Vec::new(),
+                Vec::new(),
             );
         });
         for _ in 0..500 {
@@ -2152,6 +2257,15 @@ mod tests {
 
     fn spawn_server() -> (std::path::PathBuf, thread::JoinHandle<()>) {
         spawn_server_allow(true)
+    }
+
+    #[test]
+    fn deny_action_crosses_strict_boundary() {
+        use super::{deny_action, DenyAction};
+        assert_eq!(deny_action(false, true), DenyAction::Arm); // → strict arms
+        assert_eq!(deny_action(true, false), DenyAction::Clear); // ← strict clears
+        assert_eq!(deny_action(false, false), DenyAction::None); // weak ↔ weak
+        assert_eq!(deny_action(true, true), DenyAction::None); // strict → strict, idempotent
     }
 
     /// Like `spawn_server` but with an explicit `allow_user_switch` so the
@@ -2183,6 +2297,8 @@ mod tests {
                 crate::protocol::GuardPosture::default(),
                 std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
                 allow_user_switch,
+                Vec::new(),
+                Vec::new(),
             );
         });
         // Wait for the bind to actually accept connections. The

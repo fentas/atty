@@ -1261,6 +1261,10 @@ fn main() -> std::io::Result<()> {
         guard_posture,
         active_profile,
         file_cfg.profile.allow_user_switch,
+        // The strict deny-lists, so a runtime switch to strict arms exactly
+        // these in the kernel (independent of the startup profile).
+        file_cfg.profile.deny_binaries.clone(),
+        file_cfg.profile.deny_basenames.clone(),
     )
 }
 

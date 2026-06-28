@@ -220,6 +220,12 @@ impl EbpfState {
     pub fn set_deny_basename(&self, _name: &str) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
+    pub fn clear_deny_bin(&self, _path: &str) -> Result<(), LoadError> {
+        Err(LoadError::FeatureNotBuilt)
+    }
+    pub fn clear_deny_basename(&self, _name: &str) -> Result<(), LoadError> {
+        Err(LoadError::FeatureNotBuilt)
+    }
     pub fn set_basename_gate(&self, _active: bool) -> Result<(), LoadError> {
         Err(LoadError::FeatureNotBuilt)
     }
@@ -592,6 +598,21 @@ mod with_libbpf {
             self.update("deny_basenames", &key, &[1u8])
         }
 
+        /// Remove a binary PATH from the kernel deny-map — a runtime switch
+        /// AWAY from `strict` clears exactly the key set_deny_bin inserted,
+        /// so a weaker profile doesn't keep synchronously -EPERM'ing it.
+        pub fn clear_deny_bin(&self, path: &str) -> Result<(), LoadError> {
+            let key = super::encode_deny_key(path)?;
+            self.delete("deny_bins", &key)
+        }
+
+        /// Remove a BASENAME from the kernel deny-map (runtime switch away
+        /// from `strict`).
+        pub fn clear_deny_basename(&self, name: &str) -> Result<(), LoadError> {
+            let key = super::encode_basename_key(name)?;
+            self.delete("deny_basenames", &key)
+        }
+
         /// Flip the kernel `basename_gate` so the LSM hook only runs the
         /// (expensive) per-exec basename scan when deny_basenames is
         /// non-empty — audit/session leave it off.
@@ -639,7 +660,6 @@ mod with_libbpf {
             self.update("enforce_cfg", &key.to_ne_bytes(), &value)
         }
 
-        #[allow(dead_code)]
         fn delete(&self, map_name: &str, key: &[u8]) -> Result<(), LoadError> {
             let map = self
                 .obj
