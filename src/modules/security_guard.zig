@@ -461,15 +461,19 @@ pub fn configure(comptime cfg: Config) type {
                 writeSink(rt, "\r\natty security_guard: clear the line first, then Alt+P to stage the profile switch.\r\n");
                 return;
             }
-            const client = profileClient(rt) orelse {
-                writeSink(rt, "\r\natty security_guard: no daemon configured for profile switch.\r\n");
-                return;
-            };
+            // Prefer the onTick-refreshed cache so this keystroke path never
+            // does a blocking UDS connect; read live only on a cold cache.
             var cur_buf: [16]u8 = undefined;
-            const cur = currentProfile(rt, client, &cur_buf) orelse {
+            const cur: ?[]const u8 = if (rt.profile_name_len > 0)
+                rt.profile_name[0..rt.profile_name_len]
+            else if (profileClient(rt)) |client|
+                currentProfile(rt, client, &cur_buf)
+            else
+                null;
+            if (cur == null) {
                 writeSink(rt, "\r\natty security_guard: can't read the current profile (daemon unreachable) — not staged.\r\n");
                 return;
-            };
+            }
             const next = nextProfile(cur);
             const cmd = std.fmt.bufPrint(&rt.staged_input, "sudo atty-guard profile set {s}", .{next}) catch {
                 writeSink(rt, "\r\natty security_guard: couldn't stage the profile command.\r\n");

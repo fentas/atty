@@ -48,6 +48,28 @@ test "profile_switch_mode .sudo (default) — Alt+P stages the sudo command, one
     try testing.expect((try L.pollShellInput(&rt, &ctx)) == null); // one-shot
 }
 
+test "profile_switch_mode .sudo — a non-empty line is not clobbered (no stage)" {
+    const L = mod.configure(.{ .enabled = true });
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+    @memcpy(rt.profile_name[0.."session".len], "session");
+    rt.profile_name_len = "session".len;
+
+    var line: LineState = .{};
+    @memcpy(line.buffer[0.."ls -la".len], "ls -la"); // non-empty prompt
+    line.len = "ls -la".len;
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+
+    try testing.expect(try L.onAction(&rt, &ctx, .security_guard_cycle_profile)); // .sudo claims Alt+P
+    try testing.expect((try L.pollShellInput(&rt, &ctx)) == null); // nothing staged (would clobber)
+    try testing.expect(std.mem.indexOf(u8, sink.buf.items, "clear the line") != null); // guided
+}
+
 test "profile_switch_mode .daemon — Alt+P switches directly (consumed, never stages)" {
     const L = mod.configure(.{ .enabled = true, .profile_switch_mode = .daemon, .daemon_socket_path = "/tmp/atty-test-no-such.sock" });
     var rt = try L.attach(testing.allocator, undefined);
