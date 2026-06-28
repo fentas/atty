@@ -8,6 +8,7 @@ const std = @import("std");
 const atty = @import("atty");
 const uds = @import("uds.zig");
 const theme = @import("theme.zig");
+const home = @import("home.zig");
 
 const reset = atty.style.reset;
 
@@ -34,15 +35,21 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void
     if (m) |metrics| {
         try row(w, t, .ok, "atty-guard", "running", "");
 
-        const protected = metrics.guard.profile.len > 0 and !std.mem.eql(u8, metrics.guard.profile, "prompt");
-        if (protected) {
+        if (home.isProtected(metrics)) {
             try row(w, t, .ok, "security", metrics.guard.profile, "");
-        } else {
+        } else if (std.mem.eql(u8, metrics.guard.profile, "prompt")) {
             try row(w, t, .neutral, "security", "prompt (warn-only)", "raise it in the Guard panel ([g])");
+        } else {
+            // Daemon up but no/unrecognized profile — don't claim "prompt".
+            try row(w, t, .neutral, "security", "unknown", "");
         }
 
         if (std.mem.eql(u8, metrics.guard.ebpf, "attached")) {
             try row(w, t, .ok, "eBPF", "attached", "");
+        } else if (metrics.guard.ebpf.len > 0) {
+            // A non-attached status the daemon reported — show it verbatim
+            // rather than collapse it to "off".
+            try row(w, t, .neutral, "eBPF", metrics.guard.ebpf, "");
         } else {
             try row(w, t, .neutral, "eBPF", "off", "install: sudo make install-guard GUARD_FEATURES=...,ebpf");
         }

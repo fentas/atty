@@ -36,6 +36,27 @@ test "prompt profile + no ebpf + no sessions → neutral rows with fixes" {
     try testing.expect(std.mem.indexOf(u8, out, "GUARD_FEATURES") != null);
 }
 
+test "eBPF: a non-attached status shows verbatim; empty → off + fix" {
+    var buf: [4096]u8 = undefined;
+    const m = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "failed" } };
+    const out = setup.renderSetup(&buf, m, true, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "failed") != null); // raw, not "off"
+
+    var buf2: [4096]u8 = undefined;
+    const m2 = uds.Metrics{ .guard = .{ .profile = "strict" } }; // ebpf empty
+    const out2 = setup.renderSetup(&buf2, m2, true, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out2, "off") != null);
+    try testing.expect(std.mem.indexOf(u8, out2, "GUARD_FEATURES") != null);
+}
+
+test "empty profile (daemon up) → unknown, not prompt" {
+    var buf: [4096]u8 = undefined;
+    const m = uds.Metrics{ .guard = .{} }; // daemon up, profile empty
+    const out = setup.renderSetup(&buf, m, true, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "unknown") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "warn-only") == null);
+}
+
 test "singular session reporting" {
     var buf: [4096]u8 = undefined;
     const m = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "attached" }, .instances = 1 };
