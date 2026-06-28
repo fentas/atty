@@ -11,6 +11,7 @@ const uds = @import("uds.zig");
 const home = @import("home.zig");
 const guard = @import("guard.zig");
 const fleet = @import("fleet.zig");
+const setup = @import("setup.zig");
 
 /// Render `frame` into a rows×cols VT grid and return the visible text
 /// (trailing blanks trimmed per row). Caller frees.
@@ -94,6 +95,19 @@ test "Guard renders the negative states across widths" {
         const unknown = try screen(testing.allocator, guard.renderGuard(&buf, homeMetrics("bogus"), cols, 40), 40, cols);
         defer testing.allocator.free(unknown);
         try expectOnScreen(unknown, &.{"not a listed rung"});
+    }
+}
+
+test "Setup renders the checklist across widths (daemon up + down)" {
+    var buf: [65536]u8 = undefined;
+    for (widths) |cols| {
+        const up = try screen(testing.allocator, setup.renderSetup(&buf, homeMetrics("strict"), true, cols, 40), 40, cols);
+        defer testing.allocator.free(up);
+        try expectOnScreen(up, &.{ "Setup", "atty-guard", "running", "strict", "session" });
+
+        const down = try screen(testing.allocator, setup.renderSetup(&buf, null, false, cols, 40), 40, cols);
+        defer testing.allocator.free(down);
+        try expectOnScreen(down, &.{ "not reachable", "sudo systemctl start atty-guard", "not under atty" });
     }
 }
 
