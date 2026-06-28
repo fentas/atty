@@ -83,9 +83,8 @@ test "Guard renders the ladder + active rung across widths" {
         // a non-active rung must not.
         try expectOnScreen(t, &.{"\u{25B8} strict"});
         try testing.expect(std.mem.indexOf(u8, t, "\u{25B8} prompt") == null);
-        // A long TL;DR must render intact (not wrapped mid-line) at full
-        // width — the wrap the VT grid would expose.
-        if (cols >= 120) try expectOnScreen(t, &.{"freezes anything ambiguous"});
+        // The TL;DR copy renders intact (no mid-word wrap) at every width.
+        try expectOnScreen(t, &.{"freezes anything ambiguous"});
     }
 }
 
@@ -121,7 +120,9 @@ test "Fleet renders the negative states across widths" {
     for (widths) |cols| {
         const down = try screen(testing.allocator, fleet.renderFleet(&buf, null, cols, 40), 40, cols);
         defer testing.allocator.free(down);
-        try expectOnScreen(down, &.{"atty-guard not"});
+        // Pin the deliberate "reachable" wording (null = any failure, not
+        // specifically "not running").
+        try expectOnScreen(down, &.{"atty-guard not reachable"});
 
         const empty = try screen(testing.allocator, fleet.renderFleet(&buf, &.{}, cols, 40), 40, cols);
         defer testing.allocator.free(empty);
@@ -129,12 +130,15 @@ test "Fleet renders the negative states across widths" {
     }
 }
 
-test "Fleet truncates a long cwd intact (tail visible, head dropped)" {
+test "Fleet truncates a long cwd through the grid (tail kept, head dropped)" {
     var buf: [65536]u8 = undefined;
-    var list = [_]uds.Instance{.{ .pid = 1, .shell = "bash", .cwd = "/very/deeply/nested/that/will/overflow/the/column/budget/tail-marker" }};
-    // At full width the cwd still overflows the column → tail-truncated; the
-    // tail must land on screen intact (not split by a wrap).
+    // The cwd must exceed cwdBudget(120)=91 so truncation ACTUALLY fires
+    // (a shorter path renders whole and would test nothing).
+    const cwd = "/HEADXYZ" ++ ("/abcdefghij" ** 12) ++ "/tail-marker"; // ~152 chars
+    var list = [_]uds.Instance{.{ .pid = 1, .shell = "bash", .cwd = cwd }};
     const t = try screen(testing.allocator, fleet.renderFleet(&buf, &list, 120, 40), 40, 120);
     defer testing.allocator.free(t);
-    try expectOnScreen(t, &.{"tail-marker"});
+    // The tail (incl. the ellipsis) lands on screen intact; the head drops.
+    try expectOnScreen(t, &.{ "\u{2026}", "tail-marker" });
+    try testing.expect(std.mem.indexOf(u8, t, "HEADXYZ") == null);
 }
