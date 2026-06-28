@@ -36,7 +36,7 @@ pub fn size(fd: posix.fd_t) Size {
 /// re-query the size and repaint. Atomic so the handler's write is visible.
 pub var resized = std.atomic.Value(bool).init(false);
 
-fn onWinch(_: c_int) callconv(.c) void {
+fn onWinch(_: posix.SIG) callconv(.c) void {
     resized.store(true, .seq_cst);
 }
 
