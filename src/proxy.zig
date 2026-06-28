@@ -779,12 +779,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // only refreshed on scroll / in the stdin path, so it would
                 // be stale (col 1) at paint time.
                 if (args.is_tty) {
+                    // Snapshot the tracker's geometry onto Context so the
+                    // ghost overlay can clip its suggestion to the columns
+                    // left on the row (a wrap leaves a tail the single-row
+                    // clear can't reach). The tick path carries no new
+                    // output, but the tracker already holds the last-parsed
+                    // cursor/width; without this snapshot `ctx.cursor_col`
+                    // would be stale (it's otherwise only refreshed on
+                    // scroll / in the stdin + master-output paths), and
+                    // `ctx.terminal_cols` is null with the statusbar off.
                     ctx.cursor_col = cursor_tracker.currentCol();
                     ctx.cursor_row = cursor_tracker.currentRow();
-                    // terminal_cols is otherwise only set inside the
-                    // `if (statusbar)` block — null with the bar off, which
-                    // disabled the ghost wrap-clip. The tracker's width is
-                    // always available.
                     ctx.terminal_cols = cursor_tracker.maxCols();
                 }
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
@@ -2203,6 +2208,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         if (args.is_tty) {
                             ctx.cursor_row = cursor_tracker.currentRow();
                             ctx.cursor_col = cursor_tracker.currentCol();
+                            // Refresh terminal geometry for BOTH branches —
+                            // the statusbar branch sets it from `sb`, but with
+                            // the bar off nothing did, leaving modules (ghost
+                            // clip) on stale width after a resize.
+                            ctx.terminal_cols = s.cols;
+                            ctx.terminal_rows = s.rows;
                         }
                         // Always pass the FULL size — slimming would
                         // bake the statusbar reservation into the

@@ -8,10 +8,11 @@
 //!
 //! Lifecycle is dynamic, modelled on atuin's interactive Ctrl+R:
 //!
-//!   * `activate(w, n)`  — make room with `\n` × N (scrolls the
+//!   * `activate(w, n, cols)` — make room with `\n` × N (scrolls the
 //!     scroll region at the screen bottom; mid-screen it's just
-//!     cursor moves) + CUU N + ED-below wipe, then paint.
-//!   * `repaint(w)`      — re-emit the entries onto already-reserved
+//!     cursor moves) + CUU N + ED-below wipe, then paint. `cols` is the
+//!     terminal width each row is clipped to so it can't wrap.
+//!   * `repaint(w, cols)` — re-emit the entries onto already-reserved
 //!     rows when the cache changes. No LFs, no extra wipe.
 //!   * `deactivate(w)`   — ED-below from the prompt row. Cursor
 //!     does NOT scroll back; the prompt stays at whatever screen
@@ -166,10 +167,12 @@ pub const GhostList = struct {
 
     fn paintEntries(self: *GhostList, w: *std.Io.Writer) !void {
         try w.writeAll(ansi.save_cursor);
-        // Leave the last column empty so a row filling the width doesn't
-        // trip the terminal's auto-margin wrap. `cols == 0` (unknown
-        // width) disables truncation — the pre-width-tracking behaviour.
-        const budget: usize = if (self.cols > 1) self.cols - 1 else std.math.maxInt(usize);
+        // Leave the last column free so a row filling the width doesn't
+        // trip the terminal's auto-margin wrap. `cols == 0` means UNKNOWN
+        // width (non-tty / not yet probed) → don't truncate; any real
+        // width clips to `cols - 1` (a 1-col terminal clips to nothing,
+        // which still beats wrapping).
+        const budget: usize = if (self.cols == 0) std.math.maxInt(usize) else self.cols - 1;
         var i: u16 = 0;
         while (i < self.reserved_rows) : (i += 1) {
             // CUD 1 + CHA 1 (cursor to column 1) + EL 0 (erase row)
