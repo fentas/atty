@@ -1,0 +1,51 @@
+const std = @import("std");
+const testing = std.testing;
+const fleet = @import("fleet.zig");
+const uds = @import("uds.zig");
+
+fn instances() [2]uds.Instance {
+    return .{
+        .{ .pid = 4242, .shell = "bash", .cwd = "/home/u/proj", .counters = .{ .commands = 12 } },
+        .{ .pid = 99, .shell = "zsh", .cwd = "/tmp", .incognito = true, .counters = .{ .commands = 3 } },
+    };
+}
+
+test "rows render with pid, shell, cmds, cwd + the total" {
+    var buf: [4096]u8 = undefined;
+    var list = instances();
+    const out = fleet.renderFleet(&buf, &list, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "4242") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "bash") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "/home/u/proj") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "12") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "2 terminals") != null);
+    // incognito session marked
+    try testing.expect(std.mem.indexOf(u8, out, "\u{1F512}") != null);
+}
+
+test "long cwd is tail-truncated with a leading ellipsis" {
+    var buf: [4096]u8 = undefined;
+    var list = [_]uds.Instance{.{ .pid = 1, .shell = "bash", .cwd = "/very/deeply/nested/path/that/exceeds/the/column/budget/for/sure/x" }};
+    const out = fleet.renderFleet(&buf, &list, 80, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "\u{2026}") != null); // ellipsis
+    // the tail (deepest) survives; the head is dropped
+    try testing.expect(std.mem.indexOf(u8, out, "/sure/x") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "/very/deeply") == null);
+}
+
+test "empty fleet + unavailable states" {
+    var buf: [4096]u8 = undefined;
+    const empty = fleet.renderFleet(&buf, &.{}, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, empty, "no atty sessions reporting") != null);
+
+    var buf2: [4096]u8 = undefined;
+    const down = fleet.renderFleet(&buf2, null, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, down, "atty-guard not running") != null);
+}
+
+test "singular terminal" {
+    var buf: [4096]u8 = undefined;
+    var list = [_]uds.Instance{.{ .pid = 7, .shell = "fish" }};
+    const out = fleet.renderFleet(&buf, &list, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "1 terminal\r\n") != null);
+}
