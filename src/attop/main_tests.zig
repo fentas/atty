@@ -2,6 +2,15 @@ const std = @import("std");
 const testing = std.testing;
 const mod = @import("main.zig");
 
+test "isQuit: q / Ctrl-C / bare Esc quit; arrow sequences don't" {
+    try testing.expect(mod.isQuit("q"));
+    try testing.expect(mod.isQuit(&.{0x03})); // Ctrl-C
+    try testing.expect(mod.isQuit(&.{0x1b})); // bare Esc
+    try testing.expect(!mod.isQuit("\x1b[A")); // up-arrow (nav, not quit)
+    try testing.expect(!mod.isQuit("j")); // nav stub
+    try testing.expect(!mod.isQuit("")); // nothing
+}
+
 test "banner notes the atty session and is bounded" {
     var buf: [160]u8 = undefined;
 
