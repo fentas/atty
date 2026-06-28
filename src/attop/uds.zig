@@ -38,6 +38,23 @@ pub const Metrics = struct {
     instances: u64 = 0,
 };
 
+/// One live atty instance (mirrors atty-guard's InstanceInfo). Strings
+/// borrow the parse arena.
+pub const Instance = struct {
+    uid: u32 = 0,
+    pid: u32 = 0,
+    cwd: []const u8 = "",
+    shell: []const u8 = "",
+    incognito: bool = false,
+    last_seen_ms: u64 = 0,
+    counters: Counters = .{},
+};
+
+/// The list_instances reply body.
+pub const InstancesReply = struct {
+    instances: []Instance = &.{},
+};
+
 pub const default_socket = "/run/atty-guard/atty-guard.sock";
 
 /// $ATTY_GUARD_SOCK override, else the system daemon path.
@@ -46,23 +63,32 @@ pub fn socketPath() []const u8 {
     return default_socket;
 }
 
-/// Parse a get_metrics reply line into Metrics. Caller owns + deinits the
-/// returned Parsed (its arena backs the Guard strings). Pure — split out
-/// so the wire shape is unit-testable without a daemon.
-pub fn parse(allocator: std.mem.Allocator, line: []const u8) ?std.json.Parsed(Metrics) {
-    return std.json.parseFromSlice(Metrics, allocator, line, .{ .ignore_unknown_fields = true }) catch null;
+/// Parse a reply line into T (caller deinits the Parsed). Pure — split out
+/// so each wire shape is unit-testable without a daemon.
+pub fn parseInto(comptime T: type, allocator: std.mem.Allocator, line: []const u8) ?std.json.Parsed(T) {
+    return std.json.parseFromSlice(T, allocator, line, .{ .ignore_unknown_fields = true }) catch null;
 }
 
-/// One get_metrics round-trip. Returns the parsed Metrics (caller deinits)
-/// or null on any failure (no daemon, timeout, malformed reply).
-pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: u32) ?std.json.Parsed(Metrics) {
+/// Metrics-specific parse (the get_metrics path + its tests).
+pub fn parse(allocator: std.mem.Allocator, line: []const u8) ?std.json.Parsed(Metrics) {
+    return parseInto(Metrics, allocator, line);
+}
+
+/// One request→reply round-trip parsed into T. Fully bounded: a
+/// non-blocking connect + a polled read against ONE deadline, so a
+/// down/wedged daemon can't hang the UI. Returns the parsed reply (caller
+/// deinits) or null on any failure.
+fn roundtrip(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    socket_path: []const u8,
+    timeout_ms: u32,
+    req: []const u8,
+) ?std.json.Parsed(T) {
     const fd = std.c.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
     if (fd < 0) return null;
     defer _ = std.c.close(fd);
 
-    // One TOTAL budget across connect + read, so a daemon that dribbles
-    // bytes can't stretch the round-trip past timeout_ms (the read loop
-    // would otherwise apply the timeout per-iteration).
     const deadline = nowMs() + @as(i64, timeout_ms);
 
     var addr: posix.sockaddr.un = std.mem.zeroes(posix.sockaddr.un);
@@ -74,34 +100,62 @@ pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: 
 
     const crc = std.c.connect(fd, @ptrCast(&addr), addr_len);
     if (crc != 0) {
-        // Non-blocking connect: AGAIN/INPROGRESS → poll for writability;
-        // anything else means no reachable daemon.
         const e = posix.errno(crc);
         if (e != .AGAIN and e != .INPROGRESS) return null;
         if (!pollOnce(fd, posix.POLL.OUT, deadline)) return null;
     }
 
-    const req = "{\"id\":1,\"method\":\"get_metrics\"}\n";
     var off: usize = 0;
     while (off < req.len) {
         const n = std.c.write(fd, req.ptr + off, req.len - off);
-        if (n <= 0) return null;
+        if (n < 0) {
+            const e = posix.errno(n);
+            // Non-blocking socket: a full send buffer is EAGAIN (poll for
+            // writability); EINTR is a signal (attop's SIGWINCH/SIGTERM
+            // handlers) — both retry, not fail. Bounded by the deadline.
+            if (e == .AGAIN) {
+                if (!pollOnce(fd, posix.POLL.OUT, deadline)) return null;
+                continue;
+            }
+            if (e == .INTR) continue;
+            return null;
+        }
+        if (n == 0) return null;
         off += @intCast(n);
     }
 
-    // Read one newline-framed reply, bounded by the buffer + timeout.
-    var buf: [16384]u8 = undefined;
+    // Read one newline-framed reply, bounded by the buffer + deadline.
+    // 64 KiB holds a list_instances reply of a few hundred sessions (each
+    // ~200B); a single user realistically has a handful, so truncation
+    // (no newline in the buffer → null → the "unavailable" state) is only
+    // reachable by a pathological fleet.
+    var buf: [65536]u8 = undefined;
     var len: usize = 0;
     while (len < buf.len) {
         if (!pollOnce(fd, posix.POLL.IN, deadline)) return null;
         const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
-        if (n <= 0) return null;
+        if (n < 0) {
+            // EAGAIN (spurious/raced poll wake) or EINTR (a signal, e.g.
+            // SIGWINCH) — re-poll rather than treat it as a dead connection.
+            const e = posix.errno(n);
+            if (e == .AGAIN or e == .INTR) continue;
+            return null;
+        }
+        if (n == 0) return null; // EOF
         len += @intCast(n);
         if (std.mem.indexOfScalar(u8, buf[0..len], '\n')) |nl| {
-            return parse(allocator, buf[0..nl]);
+            return parseInto(T, allocator, buf[0..nl]);
         }
     }
     return null;
+}
+
+pub fn fetch(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: u32) ?std.json.Parsed(Metrics) {
+    return roundtrip(Metrics, allocator, socket_path, timeout_ms, "{\"id\":1,\"method\":\"get_metrics\"}\n");
+}
+
+pub fn listInstances(allocator: std.mem.Allocator, socket_path: []const u8, timeout_ms: u32) ?std.json.Parsed(InstancesReply) {
+    return roundtrip(InstancesReply, allocator, socket_path, timeout_ms, "{\"id\":1,\"method\":\"list_instances\"}\n");
 }
 
 fn pollOnce(fd: i32, events: i16, deadline: i64) bool {

@@ -16,6 +16,7 @@ const term = @import("term.zig");
 const uds = @import("uds.zig");
 const home = @import("home.zig");
 const guard = @import("guard.zig");
+const fleet = @import("fleet.zig");
 const posix = std.posix;
 
 // Force-analyze the atty-module reuse so the cross-binary import wiring
@@ -77,10 +78,13 @@ fn runLoop() void {
     if (have_sigpipe) term.installQuitSignals(sigpipe[1]);
 
     const sock = uds.socketPath();
-    var framebuf: [16384]u8 = undefined;
+    // Sized to hold a full Fleet render of a large reply (matches uds's
+    // 64KiB read buffer). Per-row capping to the visible height is a future
+    // polish; for now a big fleet renders complete (the terminal scrolls).
+    var framebuf: [65536]u8 = undefined;
     var sz = term.size(out);
     var screen: Screen = .home;
-    const footer = "\r\n  \x1b[2m[h]ome  [g]uard  q quit\x1b[0m\r\n";
+    const footer = "\r\n  \x1b[2m[h]ome  [g]uard  [f]leet  q quit\x1b[0m\r\n";
 
     while (true) {
         if (term.resized.swap(false, .seq_cst)) sz = term.size(out);
@@ -91,11 +95,14 @@ fn runLoop() void {
         {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
-            const parsed = uds.fetch(arena.allocator(), sock, fetch_timeout_ms);
-            const metrics: ?uds.Metrics = if (parsed) |p| p.value else null;
+            const a = arena.allocator();
+            // Each screen fetches only what it needs (Home/Guard →
+            // get_metrics, Fleet → list_instances). The Parsed lives in the
+            // arena; the render copies into framebuf before it's freed.
             const frame = switch (screen) {
-                .home => home.renderHome(&framebuf, metrics, sz.cols, sz.rows),
-                .guard => guard.renderGuard(&framebuf, metrics, sz.cols, sz.rows),
+                .home => home.renderHome(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
+                .guard => guard.renderGuard(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
+                .fleet => fleet.renderFleet(&framebuf, instancesOf(uds.listInstances(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
             };
             _ = std.c.write(out, frame.ptr, frame.len);
             _ = std.c.write(out, footer.ptr, footer.len);
@@ -117,6 +124,7 @@ fn runLoop() void {
                     .quit => return, // restore + exit
                     .home => screen = .home,
                     .guard => screen = .guard,
+                    .fleet => screen = .fleet,
                     .none => {}, // nav/help (j/k, arrows, ?) — stubs for now
                 }
             }
@@ -124,9 +132,20 @@ fn runLoop() void {
     }
 }
 
-pub const Screen = enum { home, guard };
+pub const Screen = enum { home, guard, fleet };
 
-pub const Input = enum { none, quit, home, guard };
+pub const Input = enum { none, quit, home, guard, fleet };
+
+/// Extract the Metrics from a Parsed (no deinit — the caller's arena owns
+/// the allocation). null passes through.
+fn metricsOf(p: ?std.json.Parsed(uds.Metrics)) ?uds.Metrics {
+    return if (p) |x| x.value else null;
+}
+
+/// Extract the instance slice from a list_instances Parsed.
+fn instancesOf(p: ?std.json.Parsed(uds.InstancesReply)) ?[]const uds.Instance {
+    return if (p) |x| x.value.instances else null;
+}
 
 /// Classify a raw-mode read into one action. Quit is `q` or Ctrl-C only —
 /// NOT Esc: a terminal can deliver an arrow key's `\x1b[A` split across
@@ -141,6 +160,7 @@ pub fn classifyInput(keys: []const u8) Input {
         'q', 0x03 => return .quit,
         'g' => return .guard,
         'h' => return .home,
+        'f' => return .fleet,
         else => {},
     };
     return .none;
@@ -165,4 +185,5 @@ test {
     _ = @import("uds.zig");
     _ = @import("home.zig");
     _ = @import("guard.zig");
+    _ = @import("fleet.zig");
 }
