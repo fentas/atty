@@ -8,6 +8,8 @@ const uds = @import("uds.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
 const panel = @import("panel.zig");
+const list_mod = @import("list.zig");
+const box = @import("box.zig");
 
 const reset = atty.style.reset;
 
@@ -20,10 +22,18 @@ pub fn renderFleet(buf: []u8, instances: ?[]const uds.Instance, cols: u16, rows:
     return buf[0..w.end];
 }
 
-/// Fleet panel — live atty sessions. Read-only in Phase 1; selection +
-/// scrolling land with the List widget.
+/// Fleet panel — live atty sessions, now selectable + scrollable, with a
+/// per-session detail view and `/`-search.
 pub const Panel = struct {
-    pub const Runtime = struct {};
+    const Mode = enum { browse, search, detail };
+
+    pub const Runtime = struct {
+        list: list_mod.List = .{},
+        mode: Mode = .browse,
+        filter: [128]u8 = undefined,
+        filter_len: usize = 0,
+    };
+
     pub fn attach(_: std.mem.Allocator) !Runtime {
         return .{};
     }
@@ -33,10 +43,179 @@ pub const Panel = struct {
     pub fn navKey() u8 {
         return 'f';
     }
-    pub fn render(_: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
-        try draw(w, ctx.instances, ctx.cols);
+
+    fn filterStr(rt: *Runtime) []const u8 {
+        return rt.filter[0..rt.filter_len];
+    }
+
+    /// Indices into `insts` that pass the `/`-filter (shell or cwd substring,
+    /// case-insensitive). Allocated in the per-frame arena.
+    fn filtered(rt: *Runtime, insts: []const uds.Instance, a: std.mem.Allocator) []const usize {
+        const f = filterStr(rt);
+        var out: std.ArrayList(usize) = .empty;
+        for (insts, 0..) |inst, i| {
+            if (f.len == 0 or
+                list_mod.containsIgnoreCase(inst.shell, f) or
+                list_mod.containsIgnoreCase(inst.cwd, f))
+            {
+                out.append(a, i) catch {};
+            }
+        }
+        return out.items;
+    }
+
+    /// Visible session rows = total height minus host chrome (tab bar +
+    /// footer) and the panel's own header/count lines. Approximate; the
+    /// List clamps the selection into whatever it gets.
+    fn viewportRows(rows: u16) usize {
+        const reserved: u16 = 9;
+        return if (rows > reserved) rows - reserved else 1;
+    }
+
+    pub fn render(rt: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
+        const t = theme.active;
+        const s = i18n.active;
+        const cols = ctx.cols;
+        const compact = cols < compact_cols;
+
+        if (ctx.instances == null) {
+            try w.print("{f}Fleet{s}\r\n\r\n", .{ t.title, reset });
+            try w.print("  {f}{s}{s}\r\n  {s}\r\n", .{ t.danger, s.not_reachable, reset, s.fix_daemon_unreachable });
+            return;
+        }
+        const insts = ctx.instances.?;
+        const idx = filtered(rt, insts, ctx.arena);
+        rt.list.setViewport(viewportRows(ctx.rows));
+        rt.list.setLen(idx.len);
+
+        // Detail view replaces the list for the selected session.
+        if (rt.mode == .detail and idx.len > 0) {
+            try renderDetail(w, insts[idx[rt.list.selected]], cols);
+            return;
+        }
+
+        // Header + (search line | blank).
+        try w.print("{f}Fleet{s}{s}\r\n", .{ t.title, reset, if (compact) "" else s.suffix_sessions });
+        if (rt.mode == .search) {
+            try w.print("  {f}/{s}{s}\u{2588}\r\n", .{ t.accent, filterStr(rt), reset });
+        } else {
+            try w.writeAll("\r\n");
+        }
+
+        if (insts.len == 0) {
+            try w.print("  {f}{s}{s}\r\n  {s}\r\n", .{ t.muted, s.no_sessions, reset, s.fleet_enable_hint });
+            return;
+        }
+        if (idx.len == 0) {
+            try w.print("  {f}no sessions match \u{201C}{s}\u{201D}{s}\r\n", .{ t.muted, filterStr(rt), reset });
+            return;
+        }
+
+        if (compact) {
+            try w.print("  {f}{s:<7} {s:<8} {s:>5}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", reset });
+        } else {
+            try w.print("  {f}{s:<7} {s:<8} {s:>5}  {s}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", "cwd", reset });
+        }
+
+        const vis = rt.list.visible();
+        var i = vis.start;
+        while (i < vis.end) : (i += 1) {
+            try renderRow(w, insts[idx[i]], cols, compact, i == rt.list.selected, t);
+        }
+
+        const term = if (idx.len == 1) s.fleet_terminals_one else s.fleet_terminals_many;
+        try w.print("\r\n  {d} {s}\r\n", .{ idx.len, term });
+    }
+
+    pub fn onKey(rt: *Runtime, _: *panel.Ctx, k: panel.Key) !panel.Action {
+        switch (rt.mode) {
+            // Detail is modal: any key closes it (Ctrl-C still quits, handled
+            // by the host before onKey).
+            .detail => {
+                rt.mode = .browse;
+                return .handled;
+            },
+            .search => {
+                switch (k) {
+                    .escape => {
+                        rt.filter_len = 0; // clear + leave search
+                        rt.mode = .browse;
+                    },
+                    .enter => rt.mode = .browse, // keep the filter
+                    .backspace => if (rt.filter_len > 0) {
+                        rt.filter_len -= 1;
+                    },
+                    .char => |c| if (rt.filter_len < rt.filter.len) {
+                        rt.filter[rt.filter_len] = c;
+                        rt.filter_len += 1;
+                    },
+                    else => {},
+                }
+                return .handled;
+            },
+            .browse => {
+                switch (k) {
+                    .char => |c| if (c == '/') {
+                        rt.mode = .search;
+                        return .handled;
+                    },
+                    .enter => {
+                        if (rt.list.len > 0) rt.mode = .detail;
+                        return .handled;
+                    },
+                    else => {},
+                }
+                // List motion (j/k/arrows/gg/G/page). Consumed → don't let
+                // global nav also act on j/k.
+                if (rt.list.handleKey(k)) return .handled;
+                return .pass;
+            },
+        }
+    }
+
+    pub fn footerHint(rt: *Runtime, _: *panel.Ctx) ?[]const u8 {
+        return switch (rt.mode) {
+            .detail => "any key closes detail",
+            .search => "type to filter \u{b7} Enter keep \u{b7} Esc clear",
+            .browse => "j/k move \u{b7} Enter detail \u{b7} / search",
+        };
     }
 };
+
+/// One session row; the selected row is wrapped in reverse video.
+fn renderRow(w: *std.Io.Writer, inst: uds.Instance, cols: u16, compact: bool, selected: bool, t: theme.Theme) !void {
+    const shell = if (inst.shell.len > 0) inst.shell else "\u{2014}";
+    if (selected) try w.writeAll("\x1b[7m");
+    try w.print("  {d:<7} {s:<8} {d:>5}", .{ inst.pid, shell, inst.counters.commands });
+    if (!compact) {
+        const cwd = cwdShow(inst.cwd, cwdBudget(cols), t.glyph.ellipsis);
+        try w.writeAll("  ");
+        if (cwd.ellipsis) try w.writeAll(t.glyph.ellipsis);
+        try w.print("{s}", .{cwd.text});
+    }
+    if (inst.incognito) try w.print(" {s}", .{t.glyph.incognito});
+    if (selected) try w.writeAll("\x1b[27m");
+    try w.writeAll("\r\n");
+}
+
+/// Per-session detail, framed in a box.
+fn renderDetail(w: *std.Io.Writer, inst: uds.Instance, cols: u16) !void {
+    const t = theme.active;
+    try w.print("{f}Fleet{s} \u{203A} session\r\n\r\n", .{ t.title, reset });
+
+    var lb: [5][96]u8 = undefined;
+    var lines: [5][]const u8 = undefined;
+    const shell = if (inst.shell.len > 0) inst.shell else "\u{2014}";
+    lines[0] = std.fmt.bufPrint(&lb[0], "pid        {d}", .{inst.pid}) catch "";
+    lines[1] = std.fmt.bufPrint(&lb[1], "shell      {s}", .{shell}) catch "";
+    lines[2] = std.fmt.bufPrint(&lb[2], "cwd        {s}", .{inst.cwd}) catch "";
+    lines[3] = std.fmt.bufPrint(&lb[3], "commands   {d}", .{inst.counters.commands}) catch "";
+    lines[4] = std.fmt.bufPrint(&lb[4], "incognito  {s}", .{if (inst.incognito) "yes" else "no"}) catch "";
+
+    var title_buf: [32]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "session {d}", .{inst.pid}) catch "session";
+    try box.drawBox(w, title, lines[0..5], cols);
+}
 
 fn draw(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void {
     const t = theme.active;

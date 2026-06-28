@@ -110,6 +110,35 @@ test "PanelHost: footerHintAt only for panels that declare it" {
     try testing.expectEqual(@as(?[]const u8, null), Host.footerHintAt(&rts, &ctx, 1));
 }
 
+var panel_c_detached: bool = false;
+
+const PanelC = struct {
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator) !Runtime {
+        return .{};
+    }
+    pub fn detach(_: *Runtime) void {
+        panel_c_detached = true;
+    }
+    pub fn title() []const u8 {
+        return "C";
+    }
+    pub fn navKey() u8 {
+        return 'c';
+    }
+    pub fn render(_: *Runtime, _: *panel.Ctx, w: *std.Io.Writer) !void {
+        try w.writeAll("C");
+    }
+};
+
+test "PanelHost: detach hook runs on detachAll" {
+    const HostC = PanelHost(.{PanelC});
+    panel_c_detached = false;
+    var rts = try HostC.attachAll(testing.allocator);
+    HostC.detachAll(testing.allocator, &rts);
+    try testing.expect(panel_c_detached);
+}
+
 test "PanelHost: landingIndex honors the first wantsFocusAtStart vote" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

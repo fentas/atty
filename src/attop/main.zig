@@ -322,6 +322,8 @@ test {
     _ = @import("key.zig");
     _ = @import("panel.zig");
     _ = @import("panel_host.zig");
+    _ = @import("list.zig");
+    _ = @import("box.zig");
     _ = @import("home.zig");
     _ = @import("guard.zig");
     _ = @import("fleet.zig");
