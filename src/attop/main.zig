@@ -24,7 +24,7 @@ comptime {
 pub fn main() void {
     var buf: [160]u8 = undefined;
     const line = banner(&buf, std.c.getenv("ATTY") != null);
-    _ = std.c.write(1, line.ptr, line.len);
+    _ = std.c.write(std.posix.STDOUT_FILENO, line.ptr, line.len);
 }
 
 /// The startup line. Pure (no I/O) so it's unit-testable without a TTY.
@@ -37,7 +37,7 @@ pub fn banner(buf: []u8, under_atty: bool) []const u8 {
         "attop — atty dashboard (WIP){s}\n" ++
             "The live TUI is not built yet; see docs/dashboard.md.\n",
         .{if (under_atty) " · in atty session" else ""},
-    ) catch "attop — atty dashboard (WIP)\n";
+    ) catch "attop — atty dashboard (WIP)\nThe live TUI is not built yet; see docs/dashboard.md.\n";
 }
 
 test {
