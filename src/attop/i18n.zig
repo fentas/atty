@@ -47,6 +47,8 @@ pub const Strings = struct {
     fleet_terminals_many: []const u8,
 
     // Setup statuses
+    st_installed: []const u8,
+    st_not_installed: []const u8,
     st_running: []const u8,
     st_not_reachable: []const u8,
     st_attached: []const u8,
@@ -68,6 +70,7 @@ pub const Strings = struct {
     fix_raise_profile: []const u8,
     fix_ebpf_install: []const u8,
     fix_enable_metrics: []const u8,
+    fix_install_atty: []const u8,
     fix_run_atty: []const u8,
     fleet_enable_hint: []const u8,
 };
@@ -97,6 +100,8 @@ pub const en = Strings{
     .no_sessions = "no atty sessions reporting",
     .fleet_terminals_one = "terminal",
     .fleet_terminals_many = "terminals",
+    .st_installed = "installed",
+    .st_not_installed = "not installed",
     .st_running = "running",
     .st_not_reachable = "not reachable",
     .st_attached = "attached",
@@ -114,6 +119,7 @@ pub const en = Strings{
     .fix_raise_profile = "raise it in the Guard panel ([g])",
     .fix_ebpf_install = "install: sudo make install-guard GUARD_FEATURES=...,ebpf",
     .fix_enable_metrics = "enable the metrics_exporter module",
+    .fix_install_atty = "install: curl -fsSL https://bin.atty.sh | sh",
     .fix_run_atty = "run: atty",
     .fleet_enable_hint = "(enable the metrics_exporter module — see docs/dashboard.md)",
 };
@@ -144,6 +150,8 @@ pub const de = Strings{
     .no_sessions = "keine atty-Sitzungen gemeldet",
     .fleet_terminals_one = "Terminal",
     .fleet_terminals_many = "Terminals",
+    .st_installed = "installiert",
+    .st_not_installed = "nicht installiert",
     .st_running = "läuft",
     .st_not_reachable = "nicht erreichbar",
     .st_attached = "aktiv",
@@ -161,6 +169,7 @@ pub const de = Strings{
     .fix_raise_profile = "im Guard-Panel anheben ([g])",
     .fix_ebpf_install = "installieren: sudo make install-guard GUARD_FEATURES=...,ebpf",
     .fix_enable_metrics = "Modul metrics_exporter aktivieren",
+    .fix_install_atty = "installieren: curl -fsSL https://bin.atty.sh | sh",
     .fix_run_atty = "ausführen: atty",
     .fleet_enable_hint = "(Modul metrics_exporter aktivieren — siehe docs/dashboard.md)",
 };

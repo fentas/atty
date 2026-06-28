@@ -17,14 +17,14 @@ pub const compact_cols: u16 = 80;
 
 const Status = enum { ok, bad, neutral };
 
-pub fn renderSetup(buf: []u8, m: ?uds.Metrics, under_atty: bool, cols: u16, rows: u16) []const u8 {
+pub fn renderSetup(buf: []u8, m: ?uds.Metrics, atty_on_path: bool, under_atty: bool, cols: u16, rows: u16) []const u8 {
     _ = rows;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, m, under_atty, cols) catch {};
+    render(&w, m, atty_on_path, under_atty, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void {
+fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bool, cols: u16) !void {
     const t = theme.active;
     const s = i18n.active;
     try w.writeAll("\x1b[2J\x1b[H");
@@ -32,6 +32,13 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void
         try w.print("{f}Setup{s}\r\n\r\n", .{ t.title, reset });
     } else {
         try w.print("{f}Setup{s}{s}\r\n\r\n", .{ t.title, reset, s.suffix_health });
+    }
+
+    // atty itself first — the rest is moot if the proxy isn't installed.
+    if (atty_on_path) {
+        try row(w, t, .ok, "atty", s.st_installed, "");
+    } else {
+        try row(w, t, .bad, "atty", s.st_not_installed, s.fix_install_atty);
     }
 
     if (m) |metrics| {
