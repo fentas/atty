@@ -50,6 +50,9 @@ coverage/
 # build.zig bootstraps config.zig from the template on first build, so a
 # fresh clone "just works" and personal overrides never conflict on pull.
 /src/config.zig
+# attop's panel config — same dwm-style def/user split (src/attop/config.def.zig
+# is the template; build.zig seeds config.zig from it on first build).
+/src/attop/config.zig
 
 # ignore review folders but keep for reference
 /gpt-review

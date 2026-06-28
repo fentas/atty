@@ -2,24 +2,20 @@ const std = @import("std");
 const testing = std.testing;
 const mod = @import("main.zig");
 
-test "classifyInput: quit keys, screen switches, nav/Esc-sequences" {
-    // quit: q / Ctrl-C only (NOT Esc — a split arrow seq must not quit)
-    try testing.expectEqual(mod.Input.quit, mod.classifyInput("q"));
-    try testing.expectEqual(mod.Input.quit, mod.classifyInput(&.{0x03}));
-    try testing.expectEqual(mod.Input.none, mod.classifyInput(&.{0x1b})); // lone Esc → none
-    // screen switches
-    try testing.expectEqual(mod.Input.guard, mod.classifyInput("g"));
-    try testing.expectEqual(mod.Input.home, mod.classifyInput("h"));
-    try testing.expectEqual(mod.Input.fleet, mod.classifyInput("f"));
-    try testing.expectEqual(mod.Input.setup, mod.classifyInput("s"));
-    try testing.expectEqual(mod.Input.help, mod.classifyInput("?"));
-    // a multi-byte burst still acts (first recognized command wins)
-    try testing.expectEqual(mod.Input.guard, mod.classifyInput("gx"));
-    // a multi-byte Esc sequence (arrow) is nav, not quit
-    try testing.expectEqual(mod.Input.none, mod.classifyInput("\x1b[A"));
-    // nav stubs + nothing
-    try testing.expectEqual(mod.Input.none, mod.classifyInput("j"));
-    try testing.expectEqual(mod.Input.none, mod.classifyInput(""));
+test "paintTabBar lists every panel + reverse-videos the focused one" {
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try mod.paintTabBar(&w, 0); // focus on the first panel (Home)
+    const out = buf[0..w.end];
+
+    // All five default panels appear, with their nav-key hint.
+    for ([_][]const u8{ "[h]Home", "[g]Guard", "[f]Fleet", "[s]Setup", "[?]Help" }) |label| {
+        try testing.expect(std.mem.indexOf(u8, out, label) != null);
+    }
+    // The focused panel is wrapped in reverse video (SGR 7 / 27).
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[7m [h]Home \x1b[27m") != null);
+    // A non-focused panel is NOT reverse-videoed.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[7m [g]Guard") == null);
 }
 
 test "banner notes the atty session and is bounded" {

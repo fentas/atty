@@ -8,6 +8,7 @@ const atty = @import("atty");
 const uds = @import("uds.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
+const panel = @import("panel.zig");
 
 const reset = atty.style.reset;
 
@@ -25,16 +26,32 @@ pub fn isProtected(m: uds.Metrics) bool {
 pub fn renderHome(buf: []u8, m: ?uds.Metrics, cols: u16, rows: u16) []const u8 {
     _ = rows;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, m, cols) catch {};
+    draw(&w, m, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
+/// Home panel — the 3-second protection answer. Read-only (no `onKey`).
+pub const Panel = struct {
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator) !Runtime {
+        return .{};
+    }
+    pub fn title() []const u8 {
+        return "Home";
+    }
+    pub fn navKey() u8 {
+        return 'h';
+    }
+    pub fn render(_: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
+        try draw(w, ctx.metrics, ctx.cols);
+    }
+};
+
+fn draw(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     const t = theme.active;
     const g = t.glyph;
     const s = i18n.active;
     const compact = cols < compact_cols;
-    try w.writeAll("\x1b[2J\x1b[H"); // clear + home
 
     if (compact) {
         try w.print("{f}atty{s}\r\n\r\n", .{ t.title, reset });

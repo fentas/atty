@@ -10,6 +10,7 @@ const atty = @import("atty");
 const uds = @import("uds.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
+const panel = @import("panel.zig");
 
 const reset = atty.style.reset;
 
@@ -32,14 +33,31 @@ pub const compact_cols: u16 = 80;
 pub fn renderGuard(buf: []u8, m: ?uds.Metrics, cols: u16, rows: u16) []const u8 {
     _ = rows;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, m, cols) catch {};
+    draw(&w, m, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
+/// Guard panel — the security-profile ladder. Read-only for now; the
+/// profile switch deliberately stays on atty's Alt+P / the daemon CLI.
+pub const Panel = struct {
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator) !Runtime {
+        return .{};
+    }
+    pub fn title() []const u8 {
+        return "Guard";
+    }
+    pub fn navKey() u8 {
+        return 'g';
+    }
+    pub fn render(_: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
+        try draw(w, ctx.metrics, ctx.cols);
+    }
+};
+
+fn draw(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     const t = theme.active;
     const s = i18n.active;
-    try w.writeAll("\x1b[2J\x1b[H");
     if (cols < compact_cols) {
         try w.print("{f}Guard{s}\r\n\r\n", .{ t.title, reset });
     } else {

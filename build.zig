@@ -24,8 +24,11 @@ pub fn build(b: *std.Build) void {
     // commented examples. Idempotent — only copies if the destination
     // is missing.
     if (std.mem.eql(u8, config_path, "src/config.zig")) {
-        bootstrapUserConfig(b);
+        seedConfig(b, "src/config.def.zig", "src/config.zig");
     }
+    // attop's panel config — same dwm-style def/user split. Idempotent, so
+    // it's safe to seed unconditionally (only the `attop` steps read it).
+    seedConfig(b, "src/attop/config.def.zig", "src/attop/config.zig");
 
     // atty library module — owns every source file under src/ except
     // config.zig. Keeping them in a single named module avoids
@@ -270,21 +273,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_bench_tests.step);
 }
 
-/// Copy `src/config.def.zig` → `src/config.zig` if the latter is missing.
-/// Safe to call on every build — short-circuits when the file exists.
-fn bootstrapUserConfig(b: *std.Build) void {
+/// Copy `def_path` → `user_path` if the latter is missing. Safe to call on
+/// every build — short-circuits when the destination exists. Used for both
+/// the proxy's config (src/config.zig) and attop's panel config
+/// (src/attop/config.zig): the committed `*.def.zig` is the template, the
+/// user's copy is gitignored so `git pull` won't fight local edits.
+fn seedConfig(b: *std.Build, def_path: []const u8, user_path: []const u8) void {
     const io = b.graph.io;
     const cwd = std.Io.Dir.cwd();
-    cwd.access(io, "src/config.zig", .{}) catch {
+    cwd.access(io, user_path, .{}) catch {
         // Open template, create destination, stream bytes.
-        var src = cwd.openFile(io, "src/config.def.zig", .{}) catch |e| {
-            std.debug.print("note: could not open src/config.def.zig: {t}\n", .{e});
+        var src = cwd.openFile(io, def_path, .{}) catch |e| {
+            std.debug.print("note: could not open {s}: {t}\n", .{ def_path, e });
             return;
         };
         defer src.close(io);
 
-        var dst = cwd.createFile(io, "src/config.zig", .{}) catch |e| {
-            std.debug.print("note: could not create src/config.zig: {t}\n", .{e});
+        var dst = cwd.createFile(io, user_path, .{}) catch |e| {
+            std.debug.print("note: could not create {s}: {t}\n", .{ user_path, e });
             return;
         };
         defer dst.close(io);

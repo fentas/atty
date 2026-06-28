@@ -7,6 +7,7 @@ const std = @import("std");
 const atty = @import("atty");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
+const panel = @import("panel.zig");
 
 const reset = atty.style.reset;
 
@@ -25,14 +26,30 @@ const rows = [_]KeyRow{
 pub fn renderHelp(buf: []u8, cols: u16, rows_: u16) []const u8 {
     _ = rows_;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, cols) catch {};
+    draw(&w, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, cols: u16) !void {
+/// Help panel — keybinding + env-var reference. Read-only.
+pub const Panel = struct {
+    pub const Runtime = struct {};
+    pub fn attach(_: std.mem.Allocator) !Runtime {
+        return .{};
+    }
+    pub fn title() []const u8 {
+        return "Help";
+    }
+    pub fn navKey() u8 {
+        return '?';
+    }
+    pub fn render(_: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
+        try draw(w, ctx.cols);
+    }
+};
+
+fn draw(w: *std.Io.Writer, cols: u16) !void {
     const t = theme.active;
     const s = i18n.active;
-    try w.writeAll("\x1b[2J\x1b[H");
     if (cols < compact_cols) {
         try w.print("{f}attop{s}\r\n\r\n", .{ t.title, reset });
     } else {
