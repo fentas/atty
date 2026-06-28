@@ -8,12 +8,9 @@
 const std = @import("std");
 const atty = @import("atty");
 const uds = @import("uds.zig");
+const theme = @import("theme.zig");
 
-const style = atty.style;
-const reset = style.reset;
-const Style = atty.Style;
-
-const active_style: Style = .{ .bold = true, .fg = 2 }; // green — active rung
+const reset = atty.style.reset;
 
 const Rung = struct { name: []const u8, tldr: []const u8 };
 
@@ -39,15 +36,16 @@ pub fn renderGuard(buf: []u8, m: ?uds.Metrics, cols: u16, rows: u16) []const u8 
 }
 
 fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
+    const t = theme.active;
     try w.writeAll("\x1b[2J\x1b[H");
     if (cols < compact_cols) {
-        try w.print("{f}Guard{s}\r\n\r\n", .{ style.presets.emphasis, reset });
+        try w.print("{f}Guard{s}\r\n\r\n", .{ t.title, reset });
     } else {
-        try w.print("{f}Guard{s} \u{2014} security profile\r\n\r\n", .{ style.presets.emphasis, reset });
+        try w.print("{f}Guard{s} \u{2014} security profile\r\n\r\n", .{ t.title, reset });
     }
 
     if (m == null) {
-        try w.print("  {f}atty-guard not running{s}\r\n", .{ style.presets.danger, reset });
+        try w.print("  {f}atty-guard not running{s}\r\n", .{ t.danger, reset });
         try w.writeAll("  start it:  sudo systemctl start atty-guard\r\n");
         return;
     }
@@ -57,27 +55,27 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     for (rungs) |r| {
         if (std.mem.eql(u8, r.name, g.profile)) {
             matched = true;
-            try w.print("  {f}\u{25B8} {s:<9}{s}  {s}\r\n", .{ active_style, r.name, reset, r.tldr });
+            try w.print("  {f}{s} {s:<9}{s}  {s}\r\n", .{ t.ok, t.glyph.active, r.name, reset, r.tldr });
         } else {
-            try w.print("    {s:<9}  {f}{s}{s}\r\n", .{ r.name, style.presets.muted, r.tldr, reset });
+            try w.print("    {s:<9}  {f}{s}{s}\r\n", .{ r.name, t.muted, r.tldr, reset });
         }
     }
     // A profile the daemon reports but we don't know (older/newer daemon)
     // would otherwise leave NO rung marked — say so rather than look idle.
     if (!matched) {
         const p = if (g.profile.len > 0) g.profile else "unknown";
-        try w.print("  {f}active: {s} (not a listed rung){s}\r\n", .{ style.presets.warning, p, reset });
+        try w.print("  {f}active: {s} (not a listed rung){s}\r\n", .{ t.warn, p, reset });
     }
 
     try w.writeAll("\r\n");
     const ebpf = if (g.ebpf.len > 0) g.ebpf else "\u{2014}";
     try w.print(
         "  {f}kernel{s} {s}    deny-rules: {d} path + {d} basename\r\n",
-        .{ style.presets.muted, reset, ebpf, g.deny_path, g.deny_basename },
+        .{ t.muted, reset, ebpf, g.deny_path, g.deny_basename },
     );
     try w.print(
         "  {f}switch{s} Alt+P in atty, or: sudo atty-guard profile set <rung>\r\n",
-        .{ style.presets.muted, reset },
+        .{ t.muted, reset },
     );
 }
 
