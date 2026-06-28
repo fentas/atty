@@ -2,6 +2,14 @@ const std = @import("std");
 const testing = std.testing;
 const mod = @import("main.zig");
 
+test "nextScreen maps g/h, ignores the rest" {
+    try testing.expectEqual(mod.Screen.guard, mod.nextScreen("g").?);
+    try testing.expectEqual(mod.Screen.home, mod.nextScreen("h").?);
+    try testing.expect(mod.nextScreen("q") == null);
+    try testing.expect(mod.nextScreen("\x1b[A") == null); // arrow, not a switch
+    try testing.expect(mod.nextScreen("") == null);
+}
+
 test "isQuit: q / Ctrl-C / bare Esc quit; arrow sequences don't" {
     try testing.expect(mod.isQuit("q"));
     try testing.expect(mod.isQuit(&.{0x03})); // Ctrl-C

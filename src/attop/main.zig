@@ -15,6 +15,7 @@ const atty = @import("atty");
 const term = @import("term.zig");
 const uds = @import("uds.zig");
 const home = @import("home.zig");
+const guard = @import("guard.zig");
 const posix = std.posix;
 
 // Force-analyze the atty-module reuse so the cross-binary import wiring
@@ -78,20 +79,26 @@ fn runLoop() void {
     const sock = uds.socketPath();
     var framebuf: [16384]u8 = undefined;
     var sz = term.size(out);
+    var screen: Screen = .home;
+    const footer = "\r\n  \x1b[2m[h]ome  [g]uard  q quit\x1b[0m\r\n";
 
     while (true) {
         if (term.resized.swap(false, .seq_cst)) sz = term.size(out);
 
-        // Fetch (best-effort) + render. A per-iteration arena owns the JSON
-        // parse; renderHome copies what it needs into framebuf before the
-        // arena is freed, so the frame write below is safe.
+        // Fetch (best-effort) + render the active screen. A per-iteration
+        // arena owns the JSON parse; the render copies what it needs into
+        // framebuf before the arena is freed, so the writes below are safe.
         {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             const parsed = uds.fetch(arena.allocator(), sock, fetch_timeout_ms);
             const metrics: ?uds.Metrics = if (parsed) |p| p.value else null;
-            const frame = home.renderHome(&framebuf, metrics, sz.cols, sz.rows);
+            const frame = switch (screen) {
+                .home => home.renderHome(&framebuf, metrics, sz.cols, sz.rows),
+                .guard => guard.renderGuard(&framebuf, metrics, sz.cols, sz.rows),
+            };
             _ = std.c.write(out, frame.ptr, frame.len);
+            _ = std.c.write(out, footer.ptr, footer.len);
         }
 
         // Wait for a key, a terminating signal, or the refresh tick. A
@@ -106,12 +113,25 @@ fn runLoop() void {
                 var b: [8]u8 = undefined;
                 const n = std.c.read(posix.STDIN_FILENO, &b, b.len);
                 if (n <= 0) return; // EOF / error → restore + exit
-                if (isQuit(b[0..@intCast(n)])) return;
-                // Other keys (h/j/k/l, arrows, ?) are nav/help stubs — the
-                // panels land in the next P2 step; ignore for now.
+                const keys = b[0..@intCast(n)];
+                if (isQuit(keys)) return;
+                if (nextScreen(keys)) |s| screen = s;
+                // Other keys (j/k, arrows, ?) are nav/help stubs for now.
             }
         }
     }
+}
+
+pub const Screen = enum { home, guard };
+
+/// Map a key to a screen switch (single-byte g/h), else null.
+pub fn nextScreen(keys: []const u8) ?Screen {
+    if (keys.len != 1) return null;
+    return switch (keys[0]) {
+        'g' => .guard,
+        'h' => .home,
+        else => null,
+    };
 }
 
 /// Quit on a lone `q`, Ctrl-C (0x03), or a BARE Esc — but not a multi-byte
@@ -139,4 +159,5 @@ test {
     _ = @import("term.zig");
     _ = @import("uds.zig");
     _ = @import("home.zig");
+    _ = @import("guard.zig");
 }
