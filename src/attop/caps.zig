@@ -35,14 +35,21 @@ pub fn underAtty() bool {
     return std.c.getenv("ATTY") != null;
 }
 
-/// Is the shell wired to atty? True when $ATTY_SOURCE is exported (the
-/// managed snippet was sourced) or the detected shell's rc carries the atty
-/// marker. Read-only + best-effort: an unreadable/absent rc reads as false.
+/// Integration signatures scanned for in the rc: the managed-snippet marker
+/// (3b), plus the two integrations users wire by hand today — `atty init`
+/// (the eval/OSC-133 line) and `exec atty` (the wrap guard from the README).
+/// Any one means the shell is wired, so detection is accurate before the
+/// managed writer exists.
+const rc_signatures = [_][]const u8{ rc_marker, "atty init", "exec atty" };
+
+/// Is the shell wired to atty? True when $ATTY_SOURCE is exported (the managed
+/// snippet was sourced) or the detected shell's rc carries any integration
+/// signature. Read-only + best-effort: an unreadable/absent rc reads as false.
 pub fn shellIntegrated() bool {
     if (std.c.getenv("ATTY_SOURCE") != null) return true;
     var buf: [4096]u8 = undefined;
     const rc = rcPath(&buf) orelse return false;
-    return rcHasMarker(rc);
+    return rcHasIntegration(rc);
 }
 
 /// The login shell's short name (bash/zsh/fish) from $SHELL; bash by default.
@@ -70,9 +77,9 @@ fn rcPath(buf: []u8) ?[:0]const u8 {
     return std.fmt.bufPrintZ(buf, "{s}{s}", .{ home, rel }) catch null;
 }
 
-/// Does the rc file contain the atty marker? Bounded read (≤64 KiB), libc
-/// so no io threading; any open/read failure → false.
-fn rcHasMarker(path: [:0]const u8) bool {
+/// Does the rc file contain any integration signature? Bounded read
+/// (≤64 KiB), libc so no io threading; any open/read failure → false.
+fn rcHasIntegration(path: [:0]const u8) bool {
     const fd = open(path.ptr, O_RDONLY);
     if (fd < 0) return false;
     defer _ = std.c.close(fd);
@@ -83,7 +90,11 @@ fn rcHasMarker(path: [:0]const u8) bool {
         if (n <= 0) break;
         len += @intCast(n);
     }
-    return std.mem.indexOf(u8, buf[0..len], rc_marker) != null;
+    const hay = buf[0..len];
+    for (rc_signatures) |sig| {
+        if (std.mem.indexOf(u8, hay, sig) != null) return true;
+    }
+    return false;
 }
 
 test {

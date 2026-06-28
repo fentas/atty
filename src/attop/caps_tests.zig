@@ -129,6 +129,32 @@ test "shellIntegrated true when the rc carries the atty marker" {
     try testing.expect(caps.shellIntegrated());
 }
 
+test "shellIntegrated true for a hand-wired rc (eval atty init)" {
+    const save_src = saveEnv("ATTY_SOURCE");
+    defer restoreEnv(save_src);
+    const save_home = saveEnv("HOME");
+    defer restoreEnv(save_home);
+    const save_shell = saveEnv("SHELL");
+    defer restoreEnv(save_shell);
+    _ = unsetenv("ATTY_SOURCE");
+
+    var tmpl = "/tmp/atty-home-XXXXXX".*;
+    const dir = mkdtemp(&tmpl) orelse return error.MkdtempFailed;
+    defer _ = rmdir(dir);
+    var fbuf: [256]u8 = undefined;
+    const rc = try std.fmt.bufPrintZ(&fbuf, "{s}/.bashrc", .{std.mem.span(dir)});
+    const fd = open(rc.ptr, O_CREAT | O_WRONLY, 0o644);
+    try testing.expect(fd >= 0);
+    const body = "eval \"$(atty init bash)\"\n"; // the canonical manual integration
+    _ = std.c.write(fd, body.ptr, body.len);
+    _ = std.c.close(fd);
+    defer _ = unlink(rc.ptr);
+
+    _ = setenv("HOME", dir, 1);
+    _ = setenv("SHELL", "/bin/bash", 1);
+    try testing.expect(caps.shellIntegrated());
+}
+
 test "shellIntegrated false with no ATTY_SOURCE and an unmarked rc" {
     const save_src = saveEnv("ATTY_SOURCE");
     defer restoreEnv(save_src);
