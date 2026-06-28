@@ -102,47 +102,56 @@ const App = struct {
     }
 
     /// Paint a full frame (chrome + focused panel) into framebuf and flush.
+    /// The synchronized-output markers bracket the body as SEPARATE writes,
+    /// so `end_sync` is emitted even if the body overflowed the frame buffer
+    /// — otherwise an oversized frame would leave the terminal stuck in
+    /// synchronized-update mode (a frozen display).
     fn render(self: *App) void {
         var frame_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer frame_arena.deinit();
         var w = std.Io.Writer.fixed(&self.framebuf);
         self.paint(&w, frame_arena.allocator()) catch {};
+        _ = std.c.write(self.out, begin_sync.ptr, begin_sync.len);
         const bytes = self.framebuf[0..w.end];
         _ = std.c.write(self.out, bytes.ptr, bytes.len);
+        _ = std.c.write(self.out, end_sync.ptr, end_sync.len);
     }
 
     fn paint(self: *App, w: *std.Io.Writer, frame_arena: std.mem.Allocator) !void {
-        const t = theme.active;
-        try w.writeAll(begin_sync);
         try w.writeAll("\x1b[2J\x1b[H");
-
-        // Tab bar: every panel as `[<key>]<title>`, the focused one in
-        // reverse video so it reads as "you are here" regardless of theme.
-        var i: usize = 0;
-        while (i < Host.count) : (i += 1) {
-            const title = Host.titleAt(i);
-            const nk = Host.navKeyAt(i);
-            if (i == self.focus) {
-                try w.print(" \x1b[7m [{c}]{s} \x1b[27m", .{ nk, title });
-            } else {
-                try w.print(" {f}[{c}]{s}{s}", .{ t.muted, nk, title, atty.style.reset });
-            }
-        }
-        try w.writeAll("\r\n\r\n");
+        try paintTabBar(w, self.focus);
 
         // Focused panel content.
         var pctx = self.ctx(frame_arena, true);
         try Host.renderAt(&self.rts, &pctx, self.focus, w);
 
         // Footer: the focused panel's own hint (if any) + the global legend.
+        const t = theme.active;
         try w.writeAll("\r\n");
         if (Host.footerHintAt(&self.rts, &pctx, self.focus)) |hint| {
             try w.print("  {f}{s}{s}\r\n", .{ t.muted, hint, atty.style.reset });
         }
         try w.print("  {f}Tab/\u{2190}\u{2192} switch \u{b7} q quit{s}\r\n", .{ t.muted, atty.style.reset });
-        try w.writeAll(end_sync);
     }
 };
+
+/// Render the tab bar: every panel as `[<key>]<title>`, the focused one in
+/// reverse video so it reads as "you are here" regardless of theme. Pure
+/// (Host comptime metadata + the active theme) — unit-testable.
+pub fn paintTabBar(w: *std.Io.Writer, focus: usize) !void {
+    const t = theme.active;
+    var i: usize = 0;
+    while (i < Host.count) : (i += 1) {
+        const title = Host.titleAt(i);
+        const nk = Host.navKeyAt(i);
+        if (i == focus) {
+            try w.print(" \x1b[7m [{c}]{s} \x1b[27m", .{ nk, title });
+        } else {
+            try w.print(" {f}[{c}]{s}{s}", .{ t.muted, nk, title, atty.style.reset });
+        }
+    }
+    try w.writeAll("\r\n\r\n");
+}
 
 fn runLoop() void {
     // Resolve the palette/glyph set + locale once; panels read the globals.
@@ -193,9 +202,13 @@ fn runLoop() void {
 
     app.refetch();
     // Landing focus: the first panel that votes for it (Setup, when the
-    // stack isn't ready), else panel 0.
+    // stack isn't ready), else panel 0. A dedicated scratch arena — never
+    // the cache arena, which `refetch` resets out from under any panel
+    // allocation (see panel.Ctx.arena's per-frame contract).
     {
-        var lctx = app.ctx(app.fetch_arena.allocator(), true);
+        var la = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer la.deinit();
+        var lctx = app.ctx(la.allocator(), true);
         app.focus = Host.landingIndex(&lctx);
     }
     app.render();
@@ -222,7 +235,10 @@ fn runLoop() void {
             }
         } else if (pr == 0) {
             app.refetch();
-            var tctx = app.ctx(app.fetch_arena.allocator(), true);
+            // Dedicated scratch arena (not the cache arena — see landing).
+            var ta = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer ta.deinit();
+            var tctx = app.ctx(ta.allocator(), true);
             Host.tickAll(&app.rts, &tctx, @intCast(refresh_ms)) catch {};
             app.render();
         }

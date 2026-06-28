@@ -70,9 +70,9 @@ pub fn decode(bytes: []const u8) ?Decoded {
     if (b < 0x20) {
         // C0 control → Ctrl-<letter>. 0x01='a' … 0x1a='z'; others map
         // to their `@` + offset form but only letters are bound today.
+        // (0x7f / DEL is handled as backspace by the switch above.)
         return .{ .key = .{ .ctrl = b + 0x60 }, .len = 1 };
     }
-    if (b == 0x7f) return .{ .key = .backspace, .len = 1 };
 
     // Printable.
     return .{ .key = .{ .char = b }, .len = 1 };
