@@ -83,6 +83,7 @@ impl From<LoadError> for std::io::Error {
 
 /// Byte length of `struct deny_key.path` in the BPF object — the deny-map
 /// key is a fixed null-padded buffer of this size.
+#[cfg(any(test, feature = "ebpf"))]
 pub(crate) const DENY_PATH_LEN: usize = 256;
 
 /// Encode a `strict` deny-binary path into the kernel deny-map key: a
@@ -94,6 +95,7 @@ pub(crate) const DENY_PATH_LEN: usize = 256;
 /// the kernel's (which stops at the NUL), i.e. a deny that wouldn't deny.
 /// Free function (not a method) so the encoding is unit-testable without a
 /// loaded BPF object.
+#[cfg(any(test, feature = "ebpf"))]
 pub(crate) fn encode_deny_key(path: &str) -> Result<[u8; DENY_PATH_LEN], LoadError> {
     let bytes = path.as_bytes();
     if bytes.is_empty() || bytes.len() >= DENY_PATH_LEN {
@@ -113,6 +115,7 @@ pub(crate) fn encode_deny_key(path: &str) -> Result<[u8; DENY_PATH_LEN], LoadErr
 }
 
 /// Byte length of `struct bname_key.name` — the basename deny-map key (A+).
+#[cfg(any(test, feature = "ebpf"))]
 pub(crate) const DENY_NAME_LEN: usize = 64;
 
 /// Encode a `strict` deny-BASENAME into the 64-byte null-padded key that
@@ -121,6 +124,7 @@ pub(crate) const DENY_NAME_LEN: usize = 64;
 /// '/': a basename has no slash (the kernel keys the segment AFTER the last
 /// '/'), so a slashed entry could never match — reject rather than load a
 /// dead rule.
+#[cfg(any(test, feature = "ebpf"))]
 pub(crate) fn encode_basename_key(name: &str) -> Result<[u8; DENY_NAME_LEN], LoadError> {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() >= DENY_NAME_LEN {
@@ -139,6 +143,9 @@ pub(crate) fn encode_basename_key(name: &str) -> Result<[u8; DENY_NAME_LEN], Loa
     Ok(key)
 }
 
+// The deny-key encoders compile under `any(test, feature = "ebpf")`, so these
+// tests run in the default `cargo test` (no feature needed) while the
+// non-test, non-ebpf build still drops the unused code.
 #[cfg(test)]
 mod deny_key_tests {
     use super::{encode_basename_key, encode_deny_key, DENY_NAME_LEN, DENY_PATH_LEN};
