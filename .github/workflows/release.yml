@@ -38,7 +38,9 @@ jobs:
           version: 0.16.0
 
       - name: zig build (${{ matrix.target }})
-        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        # `install` (the default step) builds the atty proxy; `attop` builds
+        # the dashboard binary. Both land in zig-out/bin and get packaged.
+        run: zig build install attop -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
       # End-to-end scenarios — spawn atty under a controlled PTY and
       # diff a rendered terminal grid against goldens. We only run on
@@ -76,6 +78,19 @@ jobs:
 
           rm dist/atty
 
+          # attop dashboard — same packaging shape; the unversioned bare
+          # binary is what the https://tui.atty.sh installer resolves to.
+          attop_stem="attop-${version}-${{ matrix.asset_arch }}"
+          attop_unver="attop-${{ matrix.asset_arch }}"
+          install -m 0755 zig-out/bin/attop "dist/attop"
+          tar -C dist -czf "dist/${attop_stem}.tar.gz" attop
+          ( cd dist && sha256sum "${attop_stem}.tar.gz" > "${attop_stem}.tar.gz.sha256" )
+          install -m 0755 zig-out/bin/attop "dist/${attop_stem}"
+          ( cd dist && sha256sum "${attop_stem}" > "${attop_stem}.sha256" )
+          install -m 0755 zig-out/bin/attop "dist/${attop_unver}"
+          ( cd dist && sha256sum "${attop_unver}" > "${attop_unver}.sha256" )
+          rm dist/attop
+
           {
             echo "stem=${stem}"
             echo "unver=${unver}"
@@ -89,6 +104,11 @@ jobs:
           chmod +x dist/${{ steps.pkg.outputs.stem }}
           script -qfec "dist/${{ steps.pkg.outputs.stem }} bash -c 'echo atty-release-ok'" /dev/null 2>&1 | tee /tmp/out
           grep -q atty-release-ok /tmp/out
+          # attop: with stdout not a TTY it prints its banner + exits 0 — a
+          # headless runtime check that the dashboard binary actually runs.
+          chmod +x "dist/attop-${{ matrix.asset_arch }}"
+          "dist/attop-${{ matrix.asset_arch }}" </dev/null > /tmp/attop_out 2>&1
+          grep -q "atty dashboard" /tmp/attop_out
 
       - uses: actions/upload-artifact@v7
         with:
@@ -100,6 +120,12 @@ jobs:
             dist/atty-*-${{ matrix.asset_arch }}.sha256
             dist/atty-${{ matrix.asset_arch }}
             dist/atty-${{ matrix.asset_arch }}.sha256
+            dist/attop-*.tar.gz
+            dist/attop-*.tar.gz.sha256
+            dist/attop-*-${{ matrix.asset_arch }}
+            dist/attop-*-${{ matrix.asset_arch }}.sha256
+            dist/attop-${{ matrix.asset_arch }}
+            dist/attop-${{ matrix.asset_arch }}.sha256
 
   # ---------------------------------------------------------------------------
   # atty-guard sidecar binaries. Same musl cross-targets as `binaries`,
@@ -275,7 +301,11 @@ jobs:
                 -name 'atty-*.tar.gz.sha256' -o \
                 -name 'atty-*-linux-*' -o \
                 -name 'atty-linux-*' -o \
-                -name 'atty-guard-linux-*' \
+                -name 'atty-guard-linux-*' -o \
+                -name 'attop-*.tar.gz' -o \
+                -name 'attop-*.tar.gz.sha256' -o \
+                -name 'attop-*-linux-*' -o \
+                -name 'attop-linux-*' \
               \) | sort -u
             }
           )
