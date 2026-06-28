@@ -42,7 +42,7 @@ const widths = [_]u16{ 120, 80, 70 };
 fn homeMetrics(profile: []const u8) uds.Metrics {
     return .{
         .aggregate = .{ .commands = 312, .guard_block = 3 },
-        .guard = .{ .profile = profile, .ebpf = "attached" },
+        .guard = .{ .profile = profile, .ebpf = "attached", .enforcement = "one_level" },
         .instances = 5,
     };
 }
@@ -67,6 +67,15 @@ test "Home renders protected/unguarded/unavailable across widths" {
             const t = try screen(testing.allocator, home.renderHome(&buf, null, cols, 40), 40, cols);
             defer testing.allocator.free(t);
             try expectOnScreen(t, &.{"atty-guard not running"});
+        }
+        // metrics off (daemon up, no session reporting) → honest hint
+        {
+            const m = uds.Metrics{ .guard = .{ .profile = "session" }, .instances = 0 };
+            const t = try screen(testing.allocator, home.renderHome(&buf, m, cols, 40), 40, cols);
+            defer testing.allocator.free(t);
+            // Full hint as the needle so a wrap at 70 (which would split it)
+            // fails the test.
+            try expectOnScreen(t, &.{"enable metrics_exporter or start a session"});
         }
     }
 }
@@ -105,7 +114,7 @@ test "Setup renders the checklist across widths (up, neutral, down)" {
     for (widths) |cols| {
         const up = try screen(testing.allocator, setup.renderSetup(&buf, homeMetrics("strict"), true, true, cols, 40), 40, cols);
         defer testing.allocator.free(up);
-        try expectOnScreen(up, &.{ "Setup", "atty-guard", "running", "strict", "session" });
+        try expectOnScreen(up, &.{ "Setup", "atty-guard", "running", "strict", "enforce", "one_level", "session" });
 
         // Neutral rows + their fix lines must render intact — the long eBPF
         // install fix is the wrap-prone one at 70.

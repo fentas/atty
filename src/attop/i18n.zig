@@ -31,6 +31,7 @@ pub const Strings = struct {
     word_threats_blocked: []const u8,
     terminals_active_one: []const u8, // "{d} <this>"
     terminals_active_many: []const u8,
+    metrics_off: []const u8, // Home: instances==0 → don't show 0s as if real
 
     // Shared daemon states
     not_running: []const u8, // "atty-guard not running"
@@ -92,6 +93,7 @@ pub const en = Strings{
     .word_threats_blocked = "threats blocked",
     .terminals_active_one = "terminal active",
     .terminals_active_many = "terminals active",
+    .metrics_off = "no metrics — enable metrics_exporter or start a session",
     .not_running = "atty-guard not running",
     .not_reachable = "atty-guard not reachable",
     .not_listed_rung = "not a listed rung",
@@ -142,6 +144,7 @@ pub const de = Strings{
     .word_threats_blocked = "Bedrohungen geblockt",
     .terminals_active_one = "Terminal aktiv",
     .terminals_active_many = "Terminals aktiv",
+    .metrics_off = "keine Metriken — metrics_exporter aktivieren oder Sitzung starten",
     .not_running = "atty-guard läuft nicht",
     .not_reachable = "atty-guard nicht erreichbar",
     .not_listed_rung = "keine gelistete Stufe",

@@ -67,6 +67,11 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bo
             try row(w, t, .neutral, "eBPF", s.st_unknown, ""); // field absent (older daemon)
         }
 
+        // The enforcement depth only matters while eBPF is attached.
+        if (std.mem.eql(u8, metrics.guard.ebpf, "attached") and metrics.guard.enforcement.len > 0) {
+            try row(w, t, .neutral, "enforce", metrics.guard.enforcement, "");
+        }
+
         if (metrics.instances > 0) {
             var nbuf: [48]u8 = undefined;
             const word = if (metrics.instances == 1) s.session_reporting_one else s.session_reporting_many;
