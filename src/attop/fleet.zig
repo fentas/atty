@@ -64,10 +64,12 @@ fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void 
     try w.print("\r\n  {d} terminal{s}\r\n", .{ list.len, plural });
 }
 
-/// Columns available for the cwd after the pid/shell/cmds prefix.
+/// Columns available for the cwd after the pid/shell/cmds prefix, leaving
+/// room for the trailing incognito marker (" 🔒" ≈ 3 display cols) so an
+/// incognito row's cwd can't push the line past the terminal width.
 fn cwdBudget(cols: u16) usize {
-    const prefix: usize = 26; // 2 + 7 + 1 + 8 + 1 + 5 + 2
-    return if (cols > prefix + 8) cols - prefix else 8;
+    const reserved: usize = 26 + 3; // prefix (2+7+1+8+1+5+2) + marker
+    return if (cols > reserved + 8) cols - reserved else 8;
 }
 
 const Cwd = struct { ellipsis: bool, text: []const u8 };

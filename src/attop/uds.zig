@@ -109,12 +109,15 @@ fn roundtrip(
     while (off < req.len) {
         const n = std.c.write(fd, req.ptr + off, req.len - off);
         if (n < 0) {
-            // Non-blocking socket: a full send buffer is EAGAIN, not a
-            // failure — poll for writability (bounded by the deadline).
-            if (posix.errno(n) == .AGAIN) {
+            const e = posix.errno(n);
+            // Non-blocking socket: a full send buffer is EAGAIN (poll for
+            // writability); EINTR is a signal (attop's SIGWINCH/SIGTERM
+            // handlers) — both retry, not fail. Bounded by the deadline.
+            if (e == .AGAIN) {
                 if (!pollOnce(fd, posix.POLL.OUT, deadline)) return null;
                 continue;
             }
+            if (e == .INTR) continue;
             return null;
         }
         if (n == 0) return null;
@@ -132,9 +135,10 @@ fn roundtrip(
         if (!pollOnce(fd, posix.POLL.IN, deadline)) return null;
         const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
         if (n < 0) {
-            // EAGAIN after a poll wake (spurious / raced) — re-poll rather
-            // than treat it as a dead connection.
-            if (posix.errno(n) == .AGAIN) continue;
+            // EAGAIN (spurious/raced poll wake) or EINTR (a signal, e.g.
+            // SIGWINCH) — re-poll rather than treat it as a dead connection.
+            const e = posix.errno(n);
+            if (e == .AGAIN or e == .INTR) continue;
             return null;
         }
         if (n == 0) return null; // EOF
