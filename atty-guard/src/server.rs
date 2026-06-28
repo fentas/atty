@@ -104,6 +104,7 @@ pub fn serve(
         ebpf: ebpf_handle,
         deny_binaries,
         deny_basenames,
+        switch_lock: std::sync::Mutex::new(()),
     });
 
     // Bounded-resources gate: shared atomic counter ticks up on
@@ -256,6 +257,9 @@ struct State {
     ebpf: Option<Arc<crate::ebpf::EbpfState>>,
     deny_binaries: Vec<String>,
     deny_basenames: Vec<String>,
+    /// Serializes a profile switch's atomic-swap + deny-map mutation so
+    /// concurrent SetProfile callers can't desync the kernel deny-map.
+    switch_lock: std::sync::Mutex<()>,
 }
 
 /// Caps for `SubscribeWarnEvents` connections. Kept separate from
@@ -1186,6 +1190,10 @@ fn handle_set_profile(
         };
     }
     let strict = crate::profile::SecurityProfile::Strict.to_u8();
+    // Serialize the whole switch (atomic swap + deny-map mutation) so two
+    // concurrent SetProfile callers can't interleave and leave the kernel
+    // deny-map out of sync with the final profile.
+    let _switch = state.switch_lock.lock().unwrap_or_else(|p| p.into_inner());
     let old = state
         .active_profile
         .swap(profile.to_u8(), std::sync::atomic::Ordering::Relaxed);
@@ -1196,28 +1204,33 @@ fn handle_set_profile(
     if let Some(es) = &state.ebpf {
         match deny_action(old == strict, profile.to_u8() == strict) {
             DenyAction::Arm => {
+                // Gate + log on the SUCCESS count (matches the startup path):
+                // an all-fail encode must not leave the scan gate on over an
+                // empty map, nor claim rules were armed.
+                let mut armed_bins: usize = 0;
                 for path in &state.deny_binaries {
-                    if let Err(e) = es.set_deny_bin(path) {
-                        eprintln!(
+                    match es.set_deny_bin(path) {
+                        Ok(()) => armed_bins += 1,
+                        Err(e) => eprintln!(
                             "atty-guard: switch->strict deny_binaries: skipping {path:?} — {e}"
-                        );
+                        ),
                     }
                 }
+                let mut armed_names: usize = 0;
                 for name in &state.deny_basenames {
-                    if let Err(e) = es.set_deny_basename(name) {
-                        eprintln!(
+                    match es.set_deny_basename(name) {
+                        Ok(()) => armed_names += 1,
+                        Err(e) => eprintln!(
                             "atty-guard: switch->strict deny_basenames: skipping {name:?} — {e}"
-                        );
+                        ),
                     }
                 }
-                if let Err(e) = es.set_basename_gate(!state.deny_basenames.is_empty()) {
+                if let Err(e) = es.set_basename_gate(armed_names > 0) {
                     eprintln!("atty-guard: switch->strict basename_gate failed — {e}");
                 }
                 if state.verbosity >= 1 {
                     eprintln!(
-                        "atty-guard: switched to strict — armed {} path + {} basename kernel deny-rule(s)",
-                        state.deny_binaries.len(),
-                        state.deny_basenames.len()
+                        "atty-guard: switched to strict — armed {armed_bins} path + {armed_names} basename kernel deny-rule(s)"
                     );
                 }
             }
