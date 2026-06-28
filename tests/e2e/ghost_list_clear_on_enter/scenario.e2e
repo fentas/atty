@@ -1,0 +1,45 @@
+# Regression: with the pick-list up, pressing Enter runs the command and the
+# shell writes output onto the rows the list occupied. The list must be
+# deactivated BEFORE that output lands — otherwise the (longer) list row's
+# tail survives beside the shell's shorter line (e.g. a `1: l… backgrounds`
+# row leaving `…backgrounds` after `command not found: l`).
+cols 80
+rows 24
+timeout_ms 6000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 200
+
+# Seed several long `l…` entries; the inline ghost takes the newest, the
+# list shows the rest (newest-first), so the list rows carry the marker.
+type "l-alpha-backgrounds-marker\r"
+wait_for "alpha-backgrounds-marker"
+sleep 100
+type "l-beta-backgrounds-marker\r"
+wait_for "beta-backgrounds-marker"
+sleep 100
+type "l-gamma-backgrounds-marker\r"
+wait_for "gamma-backgrounds-marker"
+sleep 100
+type "l-delta-backgrounds-marker\r"
+wait_for "delta-backgrounds-marker"
+sleep 200
+
+# Type `l` → inline ghost = newest (delta); the list shows the older three.
+type "l"
+wait_for " 3: l-alpha-backgrounds-marker"
+wait_stable 150
+snapshot list_visible
+
+# Enter runs `l` (command not found). The list MUST be cleared first, so no
+# `…backgrounds-marker` list-row residue remains beside the shell output.
+# Anchor on this run's output before settling — `l: command not found` is
+# unique vs the seeds' `…marker: command not found`, so it can't match early.
+key Enter
+wait_for "l: command not found"
+wait_stable 200
+snapshot after_enter
+
+type "exit\r"
+exit_code 0

@@ -12,6 +12,7 @@ const ansi = @import("ansi.zig");
 // Re-binds of pub decls so test bodies stay short.
 const Ghost = mod.Ghost;
 const nextSectionEnd = mod.nextSectionEnd;
+const fitWidth = mod.fitWidth;
 const Style = mod.Style;
 
 // ===========================================================================
@@ -28,6 +29,27 @@ test "trailing rejects mismatch" {
 
 test "trailing rejects shorter suggestion" {
     try std.testing.expect(Ghost.trailing("lsla", "ls") == null);
+}
+
+test "fitWidth: fits within budget returns whole" {
+    try std.testing.expectEqualSlices(u8, "ls -la", fitWidth("ls -la", 10));
+    try std.testing.expectEqualSlices(u8, "ls -la", fitWidth("ls -la", 6));
+}
+
+test "fitWidth: clips ASCII to the budget" {
+    // `ls -la /usr/share/backgrounds/` clipped so it never reaches the
+    // wrapping column — the regression that left `grounds/` residue.
+    try std.testing.expectEqualSlices(u8, "ls -la /usr", fitWidth("ls -la /usr/share/backgrounds/", 11));
+    try std.testing.expectEqualSlices(u8, "", fitWidth("anything", 0));
+}
+
+test "fitWidth: never splits a UTF-8 codepoint" {
+    // "héllo" — é is 2 bytes (0xC3 0xA9). Budgeting 2 bytes must not cut
+    // mid-sequence: it backs off to just "h".
+    const s = "h\xC3\xA9llo";
+    try std.testing.expectEqualSlices(u8, "h", fitWidth(s, 2));
+    // 3 bytes fits "hé" exactly (h + the 2-byte é).
+    try std.testing.expectEqualSlices(u8, "h\xC3\xA9", fitWidth(s, 3));
 }
 
 test "nextSectionEnd: rooted path peels segment + slash" {

@@ -70,7 +70,7 @@ test "GhostList.activate makes room with LFs + CUU + ED-below, then paints relat
 
     var buf: [1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.activate(&w, 3);
+    try gl.activate(&w, 3, 0);
     const out = buf[0..w.end];
 
     // The activate dance: 3 LFs + CUU 3 + step-down + ED 0 + step-up.
@@ -91,12 +91,32 @@ test "GhostList.activate makes room with LFs + CUU + ED-below, then paints relat
     try testing.expectEqual(@as(u16, 3), gl.reserved_rows);
 }
 
+test "GhostList truncates a wide entry to the width so it cannot wrap" {
+    var gl = GhostList.init(testing.allocator, .{ .dim = true });
+    defer gl.deinit();
+    // An entry wider than the terminal — the case that left `grounds/`
+    // residue when it wrapped onto a second physical row.
+    const a = [_][]const u8{"ls -la /usr/share/backgrounds/"};
+    _ = try gl.set(&a, 9);
+
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gl.activate(&w, 1, 20); // 20-col terminal
+    const out = buf[0..w.end];
+
+    // Row budget is cols-1 = 19: ` 1: ` (4) + 15 entry bytes = 19. The
+    // wrapping tail (`grounds/`) must NOT appear anywhere in the output.
+    try testing.expect(std.mem.indexOf(u8, out, " 1: ls -la /usr") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "backgrounds/") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "grounds/") == null);
+}
+
 test "GhostList.activate is a no-op when entries are empty" {
     var gl = GhostList.init(testing.allocator, .{});
     defer gl.deinit();
     var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.activate(&w, 3);
+    try gl.activate(&w, 3, 0);
     try testing.expectEqual(@as(usize, 0), w.end);
     try testing.expect(!gl.active);
 }
@@ -108,9 +128,9 @@ test "GhostList.activate is a no-op when already active" {
     _ = try gl.set(&a, 9);
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.activate(&w, 2);
+    try gl.activate(&w, 2, 0);
     const first = w.end;
-    try gl.activate(&w, 2);
+    try gl.activate(&w, 2, 0);
     try testing.expectEqual(first, w.end); // no bytes emitted on 2nd call
 }
 
@@ -123,13 +143,13 @@ test "GhostList.repaint emits only the paint sequence (no LFs, no ED-below)" {
     _ = try gl.set(&a, 9);
     var buf: [1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.activate(&w, 2);
+    try gl.activate(&w, 2, 0);
 
     var rp_buf: [512]u8 = undefined;
     var rp_w: std.Io.Writer = .fixed(&rp_buf);
     const b = [_][]const u8{ "delta", "echo" };
     _ = try gl.set(&b, 9);
-    try gl.repaint(&rp_w);
+    try gl.repaint(&rp_w, 0);
     const out = rp_buf[0..rp_w.end];
 
     // No LFs, no whole-screen ED in repaint — those are activation-only.
@@ -147,7 +167,7 @@ test "GhostList.deactivate clears reserved rows + leaves cursor put" {
     _ = try gl.set(&a, 9);
     var buf: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.activate(&w, 2);
+    try gl.activate(&w, 2, 0);
     try testing.expect(gl.active);
 
     var dx_buf: [256]u8 = undefined;
@@ -186,7 +206,7 @@ test "GhostList.deactivate steps to column 1 before ED 0 (regression)" {
     _ = try gl.set(&a, 9);
     var buf: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.activate(&w, 2);
+    try gl.activate(&w, 2, 0);
 
     var dx_buf: [256]u8 = undefined;
     var dx_w: std.Io.Writer = .fixed(&dx_buf);
@@ -215,7 +235,7 @@ test "GhostList.activate steps to column 1 before ED 0 (regression)" {
     _ = try gl.set(&a, 9);
     var buf: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try gl.activate(&w, 1);
+    try gl.activate(&w, 1, 0);
     const out = buf[0..w.end];
 
     // The wipe inside activate must include the `\x1b[1G` step
@@ -244,7 +264,7 @@ test "GhostList full lifecycle: activate → shrinking repaint → grow back →
 
     const three = [_][]const u8{ "git status", "git push", "git log" };
     _ = try gl.set(&three, 9);
-    try gl.activate(&w, 3);
+    try gl.activate(&w, 3, 0);
     try testing.expect(gl.active);
     try testing.expectEqual(@as(u16, 3), gl.reserved_rows);
 
@@ -253,7 +273,7 @@ test "GhostList full lifecycle: activate → shrinking repaint → grow back →
     w.end = 0;
     const one = [_][]const u8{"git push origin master"};
     _ = try gl.set(&one, 9);
-    try gl.repaint(&w);
+    try gl.repaint(&w, 0);
     const shrunk = buf[0..w.end];
     try testing.expect(std.mem.indexOf(u8, shrunk, " 1: git push origin master") != null);
     // The painted output iterates reserved_rows (=3), erasing each
@@ -264,7 +284,7 @@ test "GhostList full lifecycle: activate → shrinking repaint → grow back →
     // populate all three slots.
     w.end = 0;
     _ = try gl.set(&three, 9);
-    try gl.repaint(&w);
+    try gl.repaint(&w, 0);
     const regrown = buf[0..w.end];
     try testing.expect(std.mem.indexOf(u8, regrown, " 1: git status") != null);
     try testing.expect(std.mem.indexOf(u8, regrown, " 2: git push") != null);

@@ -1,0 +1,36 @@
+# Regression: a ghost suggestion wider than the terminal is clipped to one
+# row, so the single erase-to-EOL clear leaves no wrapped tail. Before the
+# fix the wrapped tail (`dd` here; `grounds/` in the wild) survived on the
+# continuation row as residue. Narrow width forces the would-be wrap.
+cols 24
+rows 10
+timeout_ms 5000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+
+type "echo aaaa-bbbb-cccc-dddd\r"
+wait_for "dddd"
+sleep 200
+
+# Ghost for "ech" = "o aaaa-bbbb-cccc-dddd" (would wrap at 24 cols); it is
+# clipped to the row. The clipped hint "echo aaaa-bbbb-cccc-d" is the 2nd
+# on-screen occurrence (the recorded command is the 1st) — wait for it so
+# the snapshot never races the async paint.
+type "ech"
+wait_for_count "echo aaaa-bbbb-cccc-d" 2
+wait_stable 150
+snapshot ghost_capped
+
+# A match-breaking char clears the ghost; no wrapped tail must remain.
+type "Z"
+wait_for "echZ"
+wait_for_count "echo aaaa-bbbb-cccc-d" 1
+wait_stable 150
+snapshot ghost_cleared
+
+# Abort the partial line before exiting (Ctrl-C), else `exit` appends to it.
+type "\x03"
+wait_stable 150
+type "exit 0\r"
+exit_code 0

@@ -78,6 +78,23 @@ pub const Ghost = struct {
     }
 };
 
+/// Longest prefix of `text` within a `max_cols` column budget, snapped to
+/// a UTF-8 codepoint boundary so a multi-byte char is never split.
+///
+/// Byte length is a conservative proxy for display width: for valid UTF-8
+/// byte length ≥ display columns, so capping bytes to `max_cols` only ever
+/// UNDER-fills the budget, never over-fills. Callers that must not exceed a
+/// column count rely on that one-directional guarantee; wide / zero-width
+/// glyphs render slightly short of the budget.
+pub fn fitWidth(text: []const u8, max_cols: usize) []const u8 {
+    if (text.len <= max_cols) return text;
+    var end = max_cols;
+    // Back off a UTF-8 continuation byte (0b10xx_xxxx) to the lead byte
+    // so the cut lands between codepoints, not inside one.
+    while (end > 0 and text[end] & 0xC0 == 0x80) end -= 1;
+    return text[0..end];
+}
+
 /// How many bytes from the START of `trailing` constitute the
 /// next "section" for `ghost_accept_word` (Ctrl+Right). A section
 /// ends at the FIRST `/` AFTER an opening segment, or at the

@@ -770,6 +770,28 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // cursor in its input row; an unrelated ghost overlay
             // would paint OVER the panel chrome.
             if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes) and !cursor_tracker.inEscape()) {
+                // Snapshot the live cursor column onto Context so the ghost
+                // overlay can clip its suggestion to the columns left on the
+                // row (preventing a wrap whose tail the single-row clear
+                // can't reach). The tracker is fresh here — it just parsed
+                // this iteration's shell output, including the echo of what
+                // the user typed — whereas `ctx.cursor_col` is otherwise
+                // only refreshed on scroll / in the stdin path, so it would
+                // be stale (col 1) at paint time.
+                if (args.is_tty) {
+                    // Snapshot the tracker's geometry onto Context so the
+                    // ghost overlay can clip its suggestion to the columns
+                    // left on the row (a wrap leaves a tail the single-row
+                    // clear can't reach). The tick path carries no new
+                    // output, but the tracker already holds the last-parsed
+                    // cursor/width; without this snapshot `ctx.cursor_col`
+                    // would be stale (it's otherwise only refreshed on
+                    // scroll / in the stdin + master-output paths), and
+                    // `ctx.terminal_cols` is null with the statusbar off.
+                    ctx.cursor_col = cursor_tracker.currentCol();
+                    ctx.cursor_row = cursor_tracker.currentRow();
+                    ctx.terminal_cols = cursor_tracker.maxCols();
+                }
                 renderGhost(&runtimes, &ctx, &ghost, &out_buf) catch {};
                 renderGhostList(&runtimes, &ctx, &ghost_list, &out_buf) catch {};
             }
@@ -1340,11 +1362,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
-                // The pick list (if active) owns rows below the
-                // prompt — the typed character lands on the prompt
-                // row, no overlap. renderGhostList in the master
-                // path handles repaint/deactivate when content
-                // changes.
+                // The pick list owns rows BELOW the prompt. While typing, the
+                // char lands on the prompt row (no overlap), so we leave the
+                // list for renderGhostList to repaint/deactivate. But a
+                // line-ENDING keystroke (Enter, or Ctrl+C aborting the line)
+                // makes the shell write its output onto those very rows next
+                // — deactivate the list FIRST so the shell's (usually
+                // shorter) output doesn't leave the list row's tail as
+                // residue beside it (the `…/backgrounds/` row → `command not
+                // found: lgrounds/` overlap). renderGhostList would only
+                // deactivate on the later master-output tick, after the shell
+                // has already overwritten the rows.
+                if (ghost_list.active and
+                    (containsEnter(input) or std.mem.indexOfScalar(u8, input, 0x03) != null))
+                {
+                    deactivateGhostList(&ghost_list, &out_buf) catch {};
+                }
                 //
                 // Skip `line_state.applyInput` while:
                 //   • an alt-screen TUI is active — keystrokes are
@@ -1714,6 +1747,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (args.is_tty) {
                     ctx.cursor_row = cursor_tracker.currentRow();
                     ctx.cursor_col = cursor_tracker.currentCol();
+                    // Keep terminal width fresh for THIS path's ghost paint
+                    // (renderGhost below) too — with the statusbar off it's
+                    // otherwise only refreshed on the idle tick, so a paint
+                    // in the ~tick_interval window after a narrowing resize
+                    // would clip against the stale (wider) width and briefly
+                    // re-admit the wrapped-residue bug.
+                    ctx.terminal_cols = cursor_tracker.maxCols();
                 }
                 if (alt_before != alt_screen.active) {
                     trace.log(.altscreen, "alt_screen transition: {}->{}", .{ alt_before, alt_screen.active });
@@ -2112,6 +2152,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 const sig: posix.SIG = @enumFromInt(sig_buf[i]);
                 if (sig == posix.SIG.WINCH) {
                     if (Pty.querySize(posix.STDOUT_FILENO)) |s| {
+                        // Width changes with the resize; keep the tracker's
+                        // max_cols current (rows are set per-branch below).
+                        // The ghost overlay reads it as terminal width for
+                        // its wrap clip, so a stale value would re-admit the
+                        // wrapped-residue bug after a resize.
+                        cursor_tracker.setMaxCols(s.cols);
                         // setMaxRows AFTER sb.onResize so we can
                         // read the new effectiveRows() — see the
                         // startup-init comment for why the tracker
@@ -2173,6 +2219,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         if (args.is_tty) {
                             ctx.cursor_row = cursor_tracker.currentRow();
                             ctx.cursor_col = cursor_tracker.currentCol();
+                            // Refresh terminal geometry for BOTH branches —
+                            // the statusbar branch sets it from `sb`, but with
+                            // the bar off nothing did, leaving modules (ghost
+                            // clip) on stale width after a resize.
+                            ctx.terminal_cols = s.cols;
+                            ctx.terminal_rows = s.rows;
                         }
                         // Always pass the FULL size — slimming would
                         // bake the statusbar reservation into the
@@ -2422,9 +2474,23 @@ fn renderGhost(rts: *D.Runtimes, ctx: *module.Context, ghost: *Ghost, out_buf: [
 
     const sug_opt = D.gatherGhostText(rts, ctx) catch null;
     if (sug_opt) |sug| {
-        if (sug.len > 0) {
+        // Cap the painted suggestion to the columns left on the cursor's
+        // row so it never wraps. A wrapped overlay leaves its tail on a
+        // continuation row that `clearGhost`'s single erase-to-EOL can't
+        // reach — observed as stale ghost bytes (e.g. `grounds/`) that
+        // survive into the next paint. `cursor_col` is 1-based; columns
+        // `cursor_col..terminal_cols-1` are writable without tripping the
+        // terminal's auto-margin wrap at the last column. Accept still
+        // injects the FULL trailing (gatherGhostText) — only the on-
+        // screen hint is clipped, matching fish/zsh near the edge.
+        const avail: usize = if (ctx.terminal_cols) |tc| blk: {
+            const cc = ctx.cursor_col orelse 1;
+            break :blk if (tc > cc) tc - cc else 0;
+        } else sug.len;
+        const painted = ghost_mod.fitWidth(sug, avail);
+        if (painted.len > 0) {
             var w: std.Io.Writer = .fixed(out_buf);
-            ghost.show(&w, sug) catch return;
+            ghost.show(&w, painted) catch return;
             try writeAll(posix.STDOUT_FILENO, out_buf[0..w.end]);
             return;
         }
@@ -2557,11 +2623,14 @@ fn renderGhostList(rts: *D.Runtimes, ctx: *module.Context, list: *GhostList, out
     const entries_opt = D.gatherGhostList(rts, ctx) catch null;
     if (entries_opt) |entries| {
         const changed = list.set(entries, config.ghost.list_count) catch return;
+        // Width truncates each row so a long entry stays on one physical
+        // row (the per-row descent assumes that); 0 = unknown → no clip.
+        const cols = ctx.terminal_cols orelse 0;
         var w: std.Io.Writer = .fixed(out_buf);
         if (!list.active) {
-            list.activate(&w, config.ghost.list_count) catch return;
+            list.activate(&w, config.ghost.list_count, cols) catch return;
         } else if (changed) {
-            list.repaint(&w) catch return;
+            list.repaint(&w, cols) catch return;
         } else {
             return; // active + content unchanged: emit nothing
         }

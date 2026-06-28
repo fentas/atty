@@ -142,6 +142,14 @@ pub const CursorTracker = struct {
         return self.col;
     }
 
+    /// Terminal width the tracker is wrapping at — the proxy reads this
+    /// as a statusbar-independent source of truth for the ghost overlay's
+    /// wrap-prevention clip (`ctx.terminal_cols` is otherwise only
+    /// maintained inside the statusbar block).
+    pub fn maxCols(self: *const CursorTracker) u16 {
+        return self.max_cols;
+    }
+
     /// External "I know where the cursor is" — used by the proxy
     /// after a DSR-6n reply so the model picks up the truth.
     pub fn setPosition(self: *CursorTracker, row: u16, col: u16) void {
