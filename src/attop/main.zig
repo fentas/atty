@@ -55,4 +55,5 @@ pub fn banner(buf: []u8, under_atty: bool) []const u8 {
 test {
     _ = @import("main_tests.zig");
     _ = @import("term.zig");
+    _ = @import("uds.zig");
 }
