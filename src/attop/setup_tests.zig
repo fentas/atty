@@ -56,10 +56,17 @@ test "setup lists daemon compiled features; empty → minimal build" {
     try testing.expect(std.mem.indexOf(u8, out, "features") != null);
     try testing.expect(std.mem.indexOf(u8, out, "ebpf, osv-live") != null);
 
+    // present-but-empty (a new daemon, default build) → "minimal build"
     var buf2: [4096]u8 = undefined;
-    const m2 = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "off" }, .instances = 1 }; // no features
+    const m2 = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "off", .features = &.{} }, .instances = 1 };
     const out2 = setup.renderSetup(&buf2, m2, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, 120, 40);
     try testing.expect(std.mem.indexOf(u8, out2, "minimal build") != null);
+
+    // absent (older daemon, features=null) → "unknown", NOT "minimal build"
+    var buf3: [4096]u8 = undefined;
+    const m3 = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "attached" }, .instances = 1 }; // features defaults null
+    const out3 = setup.renderSetup(&buf3, m3, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out3, "minimal build") == null);
 }
 
 test "renderWire confirm shows the block + paths + prompt; done/failed messages" {

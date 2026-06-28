@@ -660,9 +660,8 @@ fn remove_socket_if_safe(path: &std::path::Path) -> Result<(), SocketRemoveError
     std::fs::remove_file(&resolved).map_err(SocketRemoveError::Io)
 }
 
-/// The Cargo features compiled into this daemon — the single source for both
-/// the guard posture (so the dashboard shows what's available: eBPF / SLM /
-/// OSV / atom fetch) and `--print-features`. Sorted for a stable order.
+/// The Cargo features compiled into this daemon. Single source (sorted, stable
+/// order) so the two emitters of this set can't drift.
 fn enabled_features() -> Vec<String> {
     let mut f = Vec::new();
     if cfg!(feature = "ebpf") {

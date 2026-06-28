@@ -342,8 +342,8 @@ pub struct GuardPosture {
     pub deny_path: u32,
     pub deny_basename: u32,
     /// Compile-time Cargo features built into this daemon (e.g. "ebpf",
-    /// "tier2-onnx") — what the dashboard can't otherwise see. `#[serde(default)]`
-    /// so an older daemon/client without the field still deserializes.
+    /// "tier2-onnx"). `#[serde(default)]` keeps a peer without the field
+    /// deserializing.
     #[serde(default)]
     pub features: Vec<String>,
 }
