@@ -2,13 +2,21 @@ const std = @import("std");
 const testing = std.testing;
 const mod = @import("main.zig");
 
-test "isQuit: q / Ctrl-C / bare Esc quit; arrow sequences don't" {
-    try testing.expect(mod.isQuit("q"));
-    try testing.expect(mod.isQuit(&.{0x03})); // Ctrl-C
-    try testing.expect(mod.isQuit(&.{0x1b})); // bare Esc
-    try testing.expect(!mod.isQuit("\x1b[A")); // up-arrow (nav, not quit)
-    try testing.expect(!mod.isQuit("j")); // nav stub
-    try testing.expect(!mod.isQuit("")); // nothing
+test "classifyInput: quit keys, screen switches, nav/Esc-sequences" {
+    // quit: q / Ctrl-C only (NOT Esc — a split arrow seq must not quit)
+    try testing.expectEqual(mod.Input.quit, mod.classifyInput("q"));
+    try testing.expectEqual(mod.Input.quit, mod.classifyInput(&.{0x03}));
+    try testing.expectEqual(mod.Input.none, mod.classifyInput(&.{0x1b})); // lone Esc → none
+    // screen switches
+    try testing.expectEqual(mod.Input.guard, mod.classifyInput("g"));
+    try testing.expectEqual(mod.Input.home, mod.classifyInput("h"));
+    // a multi-byte burst still acts (first recognized command wins)
+    try testing.expectEqual(mod.Input.guard, mod.classifyInput("gx"));
+    // a multi-byte Esc sequence (arrow) is nav, not quit
+    try testing.expectEqual(mod.Input.none, mod.classifyInput("\x1b[A"));
+    // nav stubs + nothing
+    try testing.expectEqual(mod.Input.none, mod.classifyInput("j"));
+    try testing.expectEqual(mod.Input.none, mod.classifyInput(""));
 }
 
 test "banner notes the atty session and is bounded" {

@@ -15,6 +15,7 @@ const atty = @import("atty");
 const term = @import("term.zig");
 const uds = @import("uds.zig");
 const home = @import("home.zig");
+const guard = @import("guard.zig");
 const posix = std.posix;
 
 // Force-analyze the atty-module reuse so the cross-binary import wiring
@@ -78,20 +79,26 @@ fn runLoop() void {
     const sock = uds.socketPath();
     var framebuf: [16384]u8 = undefined;
     var sz = term.size(out);
+    var screen: Screen = .home;
+    const footer = "\r\n  \x1b[2m[h]ome  [g]uard  q quit\x1b[0m\r\n";
 
     while (true) {
         if (term.resized.swap(false, .seq_cst)) sz = term.size(out);
 
-        // Fetch (best-effort) + render. A per-iteration arena owns the JSON
-        // parse; renderHome copies what it needs into framebuf before the
-        // arena is freed, so the frame write below is safe.
+        // Fetch (best-effort) + render the active screen. A per-iteration
+        // arena owns the JSON parse; the render copies what it needs into
+        // framebuf before the arena is freed, so the writes below are safe.
         {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             const parsed = uds.fetch(arena.allocator(), sock, fetch_timeout_ms);
             const metrics: ?uds.Metrics = if (parsed) |p| p.value else null;
-            const frame = home.renderHome(&framebuf, metrics, sz.cols, sz.rows);
+            const frame = switch (screen) {
+                .home => home.renderHome(&framebuf, metrics, sz.cols, sz.rows),
+                .guard => guard.renderGuard(&framebuf, metrics, sz.cols, sz.rows),
+            };
             _ = std.c.write(out, frame.ptr, frame.len);
+            _ = std.c.write(out, footer.ptr, footer.len);
         }
 
         // Wait for a key, a terminating signal, or the refresh tick. A
@@ -106,19 +113,37 @@ fn runLoop() void {
                 var b: [8]u8 = undefined;
                 const n = std.c.read(posix.STDIN_FILENO, &b, b.len);
                 if (n <= 0) return; // EOF / error → restore + exit
-                if (isQuit(b[0..@intCast(n)])) return;
-                // Other keys (h/j/k/l, arrows, ?) are nav/help stubs — the
-                // panels land in the next P2 step; ignore for now.
+                switch (classifyInput(b[0..@intCast(n)])) {
+                    .quit => return, // restore + exit
+                    .home => screen = .home,
+                    .guard => screen = .guard,
+                    .none => {}, // nav/help (j/k, arrows, ?) — stubs for now
+                }
             }
         }
     }
 }
 
-/// Quit on a lone `q`, Ctrl-C (0x03), or a BARE Esc — but not a multi-byte
-/// Esc sequence (arrow keys etc. start with Esc and are nav, not quit).
-pub fn isQuit(input: []const u8) bool {
-    if (input.len == 1) return input[0] == 'q' or input[0] == 0x03 or input[0] == 0x1b;
-    return false;
+pub const Screen = enum { home, guard };
+
+pub const Input = enum { none, quit, home, guard };
+
+/// Classify a raw-mode read into one action. Quit is `q` or Ctrl-C only —
+/// NOT Esc: a terminal can deliver an arrow key's `\x1b[A` split across
+/// reads (the bare `\x1b` first, over a slow ssh link), so quitting on a
+/// lone Esc would false-fire. A multi-byte read starting with Esc is a
+/// CSI/SS3 sequence → none (nav stub). The first recognized command byte
+/// wins, so a fast multi-key burst (read() can return >1 byte) still acts.
+pub fn classifyInput(keys: []const u8) Input {
+    if (keys.len == 0) return .none;
+    if (keys.len > 1 and keys[0] == 0x1b) return .none; // Esc-sequence → nav
+    for (keys) |k| switch (k) {
+        'q', 0x03 => return .quit,
+        'g' => return .guard,
+        'h' => return .home,
+        else => {},
+    };
+    return .none;
 }
 
 /// The startup line. Pure (no I/O) so it's unit-testable without a TTY.
@@ -139,4 +164,5 @@ test {
     _ = @import("term.zig");
     _ = @import("uds.zig");
     _ = @import("home.zig");
+    _ = @import("guard.zig");
 }
