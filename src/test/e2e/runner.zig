@@ -393,6 +393,12 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
                     break;
                 }
             },
+            .wait_for_absent => {
+                if (!try session.waitForAbsent(c.str_arg, timeout_ms)) {
+                    first_failure = "wait_for_absent timeout";
+                    break;
+                }
+            },
             .expect_substr => {
                 if (!session.gridContains(c.str_arg)) {
                     first_failure = "expect_substr missing";

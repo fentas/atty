@@ -52,7 +52,11 @@ snapshot ghost_visible
 key Enter
 sleep 200
 type "clear && cat /tmp/atty-e2e-ghost-atty-init-bash\r"
-wait_stable 250
+# Block until `clear` has actually wiped the prior PS1-setting line — under CI
+# load wait_stable could settle in the gap before clear ran, leaving that line
+# on the grid (the observed history_written flake). Then settle the cat output.
+wait_for_absent "PS1="
+wait_stable 200
 snapshot history_written
 
 type "exit\r"

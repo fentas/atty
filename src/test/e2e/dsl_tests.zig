@@ -55,6 +55,18 @@ test "DSL parses wait_stable (default + explicit quiet_ms)" {
     try std.testing.expectEqual(@as(i64, 250), s.cmds[1].int_arg);
 }
 
+test "DSL parses wait_for_absent" {
+    const src =
+        \\wait_for_absent "PS1="
+        \\
+    ;
+    var s = try parse(std.testing.allocator, src);
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 1), s.cmds.len);
+    try std.testing.expectEqual(Kind.wait_for_absent, s.cmds[0].kind);
+    try std.testing.expectEqualStrings("PS1=", s.cmds[0].str_arg);
+}
+
 test "DSL parses wait_for_count (quoted substr with spaces + count)" {
     const src =
         \\wait_for_count "echo init-bash x" 2
