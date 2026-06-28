@@ -18,7 +18,9 @@ test "looksLight reads the COLORFGBG background field" {
     try testing.expect(theme.looksLight("15;15"));
     try testing.expect(theme.looksLight("0;15"));
     try testing.expect(theme.looksLight("default;7"));
+    try testing.expect(theme.looksLight("0;;15")); // the "fg;;bg" variant
     try testing.expect(!theme.looksLight("15;0"));
+    try testing.expect(!theme.looksLight("15;;0"));
     try testing.expect(!theme.looksLight("7;0"));
     try testing.expect(!theme.looksLight("nodelim"));
 }

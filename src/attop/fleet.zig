@@ -53,7 +53,7 @@ fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void 
         if (compact) {
             try w.print("  {d:<7} {s:<8} {d:>5}", .{ inst.pid, shell, inst.counters.commands });
         } else {
-            const cwd = cwdShow(inst.cwd, cwdBudget(cols));
+            const cwd = cwdShow(inst.cwd, cwdBudget(cols), t.glyph.ellipsis);
             try w.print("  {d:<7} {s:<8} {d:>5}  ", .{ inst.pid, shell, inst.counters.commands });
             if (cwd.ellipsis) try w.writeAll(t.glyph.ellipsis);
             try w.print("{s}", .{cwd.text});
@@ -77,14 +77,27 @@ fn cwdBudget(cols: u16) usize {
 const Cwd = struct { ellipsis: bool, text: []const u8 };
 
 /// Show the TAIL of a path (the deepest dirs are the useful part), with a
-/// leading ellipsis when truncated.
-fn cwdShow(cwd: []const u8, max: usize) Cwd {
+/// leading ellipsis when truncated. Reserves the ellipsis's DISPLAY width
+/// (1 for "…", 3 for the ascii "...") so the marked line still fits `max`.
+fn cwdShow(cwd: []const u8, max: usize, ellipsis: []const u8) Cwd {
     if (cwd.len <= max) return .{ .ellipsis = false, .text = cwd };
-    var start = cwd.len - (max - 1);
+    const ew = cellWidth(ellipsis);
+    const keep = if (max > ew) max - ew else 1;
+    var start = cwd.len - keep;
     // Don't start mid-codepoint: skip UTF-8 continuation bytes (10xxxxxx)
     // so a tail-truncated path can't emit a garbled glyph.
     while (start < cwd.len and (cwd[start] & 0xC0) == 0x80) start += 1;
     return .{ .ellipsis = true, .text = cwd[start..] };
+}
+
+/// Display columns of a (no-wide-char) glyph string = its codepoint count
+/// (one column each); a UTF-8 continuation byte adds no column.
+fn cellWidth(s: []const u8) usize {
+    var n: usize = 0;
+    for (s) |b| {
+        if ((b & 0xC0) != 0x80) n += 1;
+    }
+    return n;
 }
 
 test {
