@@ -14,8 +14,8 @@
 const std = @import("std");
 const atty = @import("atty");
 
-// Force-analyze the atty-module reuse so the cross-binary wiring is proven
-// by the build (the live render core consumes atty.ansi / atty.style next).
+// Force-analyze the atty-module reuse so the cross-binary import wiring
+// compiles (the live render core consumes atty.ansi / atty.style next).
 comptime {
     _ = atty.Style;
     _ = atty.ansi;
@@ -24,7 +24,7 @@ comptime {
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
 
-pub fn main() !void {
+pub fn main() void {
     var buf: [160]u8 = undefined;
     const line = banner(&buf, getenv("ATTY") != null);
     _ = write(1, line.ptr, line.len);

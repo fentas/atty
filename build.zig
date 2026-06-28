@@ -109,7 +109,10 @@ pub fn build(b: *std.Build) void {
     // -------------------------------------------------------------------------
     // attop — the dashboard TUI (docs/dashboard.md). A standalone binary
     // (the "Grafana" of atty) that reads the atty-guard metrics API; reuses
-    // the atty module's style/ansi primitives. Opt-in to build/install.
+    // the atty module's style/ansi primitives. RUN-ONLY for now (`zig build
+    // run-attop`) — NOT added to the default install while it's WIP; it
+    // gets `installArtifact` + release/`make link` wiring once the dashboard
+    // is feature-complete. (Mirrors the bench exe: run-only, not installed.)
     // -------------------------------------------------------------------------
     const attop_module = b.createModule(.{
         .root_source_file = b.path("src/attop/main.zig"),
@@ -121,10 +124,8 @@ pub fn build(b: *std.Build) void {
         },
     });
     const attop_exe = b.addExecutable(.{ .name = "attop", .root_module = attop_module });
-    b.installArtifact(attop_exe);
 
     const run_attop = b.addRunArtifact(attop_exe);
-    run_attop.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_attop.addArgs(args);
     const run_attop_step = b.step("run-attop", "Run the attop dashboard");
     run_attop_step.dependOn(&run_attop.step);
