@@ -184,14 +184,19 @@ pub const Session = struct {
     /// until the screen settles, regardless of how slow/loaded the host is,
     /// and the quiet window resets on every byte — so a late async repaint
     /// (e.g. ghost text computed off the keystroke) is still awaited.
-    pub fn waitStable(self: *Session, quiet_ms: u32, timeout_ms: u32) !void {
+    /// Returns true if it observed a full quiet window (settled), false if it
+    /// hit `timeout_ms` first (the screen never went quiet — likely a
+    /// too-long quiet_ms or continuous output; the caller proceeds but should
+    /// surface it).
+    pub fn waitStable(self: *Session, quiet_ms: u32, timeout_ms: u32) !bool {
         const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
         const quiet: i32 = @intCast(@max(quiet_ms, 1));
         while (snapshot.monoMillis() < deadline) {
             // pumpMs returns false when the poll elapsed with no bytes — i.e.
             // a full quiet window passed → settled.
-            if (!try self.pumpMs(quiet)) return;
+            if (!try self.pumpMs(quiet)) return true;
         }
+        return false;
     }
 
     /// Render the current grid text and check for substring.
