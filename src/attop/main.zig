@@ -113,10 +113,12 @@ fn runLoop() void {
                 var b: [8]u8 = undefined;
                 const n = std.c.read(posix.STDIN_FILENO, &b, b.len);
                 if (n <= 0) return; // EOF / error → restore + exit
-                const keys = b[0..@intCast(n)];
-                if (isQuit(keys)) return;
-                if (nextScreen(keys)) |s| screen = s;
-                // Other keys (j/k, arrows, ?) are nav/help stubs for now.
+                switch (classifyInput(b[0..@intCast(n)])) {
+                    .quit => return, // restore + exit
+                    .home => screen = .home,
+                    .guard => screen = .guard,
+                    .none => {}, // nav/help (j/k, arrows, ?) — stubs for now
+                }
             }
         }
     }
@@ -124,21 +126,23 @@ fn runLoop() void {
 
 pub const Screen = enum { home, guard };
 
-/// Map a key to a screen switch (single-byte g/h), else null.
-pub fn nextScreen(keys: []const u8) ?Screen {
-    if (keys.len != 1) return null;
-    return switch (keys[0]) {
-        'g' => .guard,
-        'h' => .home,
-        else => null,
-    };
-}
+pub const Input = enum { none, quit, home, guard };
 
-/// Quit on a lone `q`, Ctrl-C (0x03), or a BARE Esc — but not a multi-byte
-/// Esc sequence (arrow keys etc. start with Esc and are nav, not quit).
-pub fn isQuit(input: []const u8) bool {
-    if (input.len == 1) return input[0] == 'q' or input[0] == 0x03 or input[0] == 0x1b;
-    return false;
+/// Classify a raw-mode read into one action. A MULTI-byte read starting
+/// with Esc is a CSI/SS3 sequence (arrow keys etc.) → none (nav stub). A
+/// lone Esc is quit. Otherwise the first recognized command byte wins —
+/// so a fast multi-key burst (read() can return >1 byte in raw mode) still
+/// acts, unlike a strict len==1 check.
+pub fn classifyInput(keys: []const u8) Input {
+    if (keys.len == 0) return .none;
+    if (keys.len > 1 and keys[0] == 0x1b) return .none; // Esc-sequence → nav
+    for (keys) |k| switch (k) {
+        'q', 0x03, 0x1b => return .quit,
+        'g' => return .guard,
+        'h' => return .home,
+        else => {},
+    };
+    return .none;
 }
 
 /// The startup line. Pure (no I/O) so it's unit-testable without a TTY.
