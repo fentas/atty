@@ -124,7 +124,9 @@ test "Help renders the key + env reference across widths" {
     for (widths) |cols| {
         const out = try screen(testing.allocator, help.renderHelp(&buf, cols, 40), 40, cols);
         defer testing.allocator.free(out);
-        try expectOnScreen(out, &.{ "Keys", "Home", "Guard", "Fleet", "Setup", "ATTOP_THEME", "atty-guard daemon" });
+        // Full env strings as needles so a wrap at the narrow width (which
+        // would split them across grid rows) fails the test.
+        try expectOnScreen(out, &.{ "Keys", "Home", "Guard", "Fleet", "Setup", "ATTOP_THEME=dark|light|high-contrast|mono|ascii", "NO_COLOR forces mono", "atty-guard daemon" });
     }
 }
 

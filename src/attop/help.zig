@@ -44,11 +44,16 @@ fn render(w: *std.Io.Writer, cols: u16) !void {
         try w.print("    {f}{s}{s}   {s}\r\n", .{ t.accent, r.key, reset, r.screen });
     }
 
+    // Two lines, each ≤ 70 cols (NO_COLOR moved off the theme line so it
+    // doesn't wrap at the compact width).
     try w.print(
-        "\r\n  {f}{s}{s}    ATTOP_THEME=dark|light|high-contrast|mono|ascii  \u{B7}  NO_COLOR\r\n",
+        "\r\n  {f}{s}{s}    ATTOP_THEME=dark|light|high-contrast|mono|ascii\r\n",
         .{ t.muted, s.help_display, reset },
     );
-    try w.print("  {f}{s}{s}   ATTOP_LANG (en, de)\r\n", .{ t.muted, s.help_language, reset });
+    try w.print(
+        "  {f}{s}{s}   ATTOP_LANG=en|de   \u{B7}   NO_COLOR forces mono\r\n",
+        .{ t.muted, s.help_language, reset },
+    );
 
     try w.print("\r\n  {f}{s}{s}\r\n", .{ t.muted, s.help_needs_daemon, reset });
 }
