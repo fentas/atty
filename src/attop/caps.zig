@@ -86,9 +86,13 @@ fn rcHasIntegration(path: [:0]const u8) bool {
     var buf: [65536]u8 = undefined;
     var len: usize = 0;
     while (len < buf.len) {
-        const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
-        if (n <= 0) break;
-        len += @intCast(n);
+        // posix.read retries EINTR internally — attop installs a SIGWINCH
+        // handler, and a raw read() interrupted by a resize would truncate the
+        // scan into a false "not wired". A real error → best-effort: scan what
+        // we have.
+        const n = std.posix.read(fd, buf[len..]) catch break;
+        if (n == 0) break; // EOF
+        len += n;
     }
     const hay = buf[0..len];
     for (rc_signatures) |sig| {

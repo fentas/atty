@@ -127,7 +127,7 @@ pub const en = Strings{
     .fix_ebpf_install = "install: sudo make install-guard GUARD_FEATURES=...,ebpf",
     .fix_enable_metrics = "enable the metrics_exporter module",
     .fix_install_atty = "install: curl -fsSL https://bin.atty.sh | sh",
-    .fix_wire_shell = "wire it: ", // render appends eval "$(atty init <shell>)"
+    .fix_wire_shell = "wire it: ", // prefix only — the command is universal, not localized
     .fix_run_atty = "run: atty",
     .fleet_enable_hint = "(enable the metrics_exporter module — see docs/dashboard.md)",
 };
@@ -181,7 +181,7 @@ pub const de = Strings{
     .fix_ebpf_install = "installieren: sudo make install-guard GUARD_FEATURES=...,ebpf",
     .fix_enable_metrics = "Modul metrics_exporter aktivieren",
     .fix_install_atty = "installieren: curl -fsSL https://bin.atty.sh | sh",
-    .fix_wire_shell = "einrichten: ", // render appends eval "$(atty init <shell>)"
+    .fix_wire_shell = "einrichten: ", // prefix only — the command is universal, not localized
     .fix_run_atty = "ausführen: atty",
     .fleet_enable_hint = "(Modul metrics_exporter aktivieren — siehe docs/dashboard.md)",
 };
