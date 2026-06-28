@@ -103,19 +103,24 @@ test "Setup renders the checklist across widths (up, neutral, down)" {
     var buf: [65536]u8 = undefined;
     const neutral_m = uds.Metrics{ .guard = .{ .profile = "prompt", .ebpf = "off" } }; // off, no sessions
     for (widths) |cols| {
-        const up = try screen(testing.allocator, setup.renderSetup(&buf, homeMetrics("strict"), true, cols, 40), 40, cols);
+        const up = try screen(testing.allocator, setup.renderSetup(&buf, homeMetrics("strict"), true, true, cols, 40), 40, cols);
         defer testing.allocator.free(up);
         try expectOnScreen(up, &.{ "Setup", "atty-guard", "running", "strict", "session" });
 
         // Neutral rows + their fix lines must render intact — the long eBPF
         // install fix is the wrap-prone one at 70.
-        const neut = try screen(testing.allocator, setup.renderSetup(&buf, neutral_m, true, cols, 40), 40, cols);
+        const neut = try screen(testing.allocator, setup.renderSetup(&buf, neutral_m, true, true, cols, 40), 40, cols);
         defer testing.allocator.free(neut);
         try expectOnScreen(neut, &.{ "warn-only", "Guard panel", "make install-guard GUARD_FEATURES", "metrics_exporter" });
 
-        const down = try screen(testing.allocator, setup.renderSetup(&buf, null, false, cols, 40), 40, cols);
+        const down = try screen(testing.allocator, setup.renderSetup(&buf, null, true, false, cols, 40), 40, cols);
         defer testing.allocator.free(down);
         try expectOnScreen(down, &.{ "not reachable", "sudo systemctl start atty-guard", "unknown (daemon down)", "not under atty" });
+
+        // The wizard state: atty itself not installed → the install fix.
+        const noatty = try screen(testing.allocator, setup.renderSetup(&buf, null, false, false, cols, 40), 40, cols);
+        defer testing.allocator.free(noatty);
+        try expectOnScreen(noatty, &.{ "not installed", "install: curl -fsSL https://bin.atty.sh | sh" });
     }
 }
 

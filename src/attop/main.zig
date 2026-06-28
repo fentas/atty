@@ -19,6 +19,7 @@ const guard = @import("guard.zig");
 const fleet = @import("fleet.zig");
 const setup = @import("setup.zig");
 const help = @import("help.zig");
+const caps = @import("caps.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
 const posix = std.posix;
@@ -41,7 +42,7 @@ pub fn main() void {
     // escapes into a pipe.
     if (!term.isatty(posix.STDOUT_FILENO)) {
         var buf: [160]u8 = undefined;
-        const line = banner(&buf, std.c.getenv("ATTY") != null);
+        const line = banner(&buf, caps.underAtty());
         _ = std.c.write(posix.STDOUT_FILENO, line.ptr, line.len);
         return;
     }
@@ -87,13 +88,21 @@ fn runLoop() void {
 
     const sock = uds.socketPath();
     // Fixed for the session — attop is launched once, in or out of atty.
-    const under_atty = std.c.getenv("ATTY") != null;
+    const under_atty = caps.underAtty();
+    const atty_on_path = caps.attyOnPath();
     // Sized to hold a full Fleet render of a large reply (matches uds's
     // 64KiB read buffer). Per-row capping to the visible height is a future
     // polish; for now a big fleet renders complete (the terminal scrolls).
     var framebuf: [65536]u8 = undefined;
     var sz = term.size(out);
-    var screen: Screen = .home;
+    // Land on the Setup/wizard when the stack isn't ready (atty not
+    // installed, or the daemon unreachable on a one-shot probe) — else Home.
+    var screen: Screen = blk: {
+        if (!atty_on_path) break :blk .setup;
+        var probe = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer probe.deinit();
+        break :blk if (uds.fetch(probe.allocator(), sock, fetch_timeout_ms) != null) .home else .setup;
+    };
     const footer = "\r\n  \x1b[2m[h]ome  [g]uard  [f]leet  [s]etup  [?]help  q quit\x1b[0m\r\n";
 
     while (true) {
@@ -113,7 +122,7 @@ fn runLoop() void {
                 .home => home.renderHome(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
                 .guard => guard.renderGuard(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
                 .fleet => fleet.renderFleet(&framebuf, instancesOf(uds.listInstances(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
-                .setup => setup.renderSetup(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), under_atty, sz.cols, sz.rows),
+                .setup => setup.renderSetup(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), atty_on_path, under_atty, sz.cols, sz.rows),
                 .help => help.renderHelp(&framebuf, sz.cols, sz.rows),
             };
             _ = std.c.write(out, frame.ptr, frame.len);
@@ -204,6 +213,7 @@ test {
     _ = @import("fleet.zig");
     _ = @import("setup.zig");
     _ = @import("help.zig");
+    _ = @import("caps.zig");
     _ = @import("screenshot_tests.zig");
     _ = @import("theme.zig");
     _ = @import("i18n.zig");
