@@ -49,6 +49,34 @@ pub fn installWinch() void {
     posix.sigaction(posix.SIG.WINCH, &sa, null);
 }
 
+// Self-pipe so a terminating signal exits the loop on its NORMAL path
+// (poll wakes → loop returns → the teardown defers run), rather than
+// killing the process with the alt-screen + raw mode left wedged.
+var g_quit_pipe_w: i32 = -1;
+
+fn onQuitSignal(_: posix.SIG) callconv(.c) void {
+    if (g_quit_pipe_w >= 0) {
+        const b = [_]u8{1};
+        _ = std.c.write(g_quit_pipe_w, &b, 1);
+    }
+}
+
+/// Route SIGTERM/SIGHUP/SIGINT to `quit_fd` (a pipe write end the loop
+/// polls) so a `kill` / terminal-close / external Ctrl-C still tears the
+/// terminal down cleanly. (Typed Ctrl-C is already a 0x03 byte — ISIG is
+/// off under raw mode — so this only matters for delivered signals.)
+pub fn installQuitSignals(quit_fd: i32) void {
+    g_quit_pipe_w = quit_fd;
+    const sa = posix.Sigaction{
+        .handler = .{ .handler = onQuitSignal },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.TERM, &sa, null);
+    posix.sigaction(posix.SIG.HUP, &sa, null);
+    posix.sigaction(posix.SIG.INT, &sa, null);
+}
+
 pub fn isatty(fd: posix.fd_t) bool {
     return std.c.isatty(fd) != 0;
 }
