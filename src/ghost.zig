@@ -78,6 +78,27 @@ pub const Ghost = struct {
     }
 };
 
+/// Longest prefix of `text` that fits in `max_cols` terminal columns
+/// WITHOUT wrapping, snapped to a UTF-8 codepoint boundary so a
+/// multi-byte char is never split (which would render as garbage).
+///
+/// Byte length is used as a conservative upper bound for display
+/// width: ASCII is one column per byte, and any multi-byte UTF-8
+/// sequence is ≥2 bytes but ≤2 columns, so capping *bytes* to
+/// `max_cols` can only ever UNDER-fill — it never over-fills, which is
+/// the property we need (an overlay that exceeds the line wraps onto a
+/// continuation row, and the single-row clear leaves that wrapped tail
+/// as residue — see `writeClearGhost`). Wide CJK glyphs render slightly
+/// short of the edge; that's the safe direction.
+pub fn fitWidth(text: []const u8, max_cols: usize) []const u8 {
+    if (text.len <= max_cols) return text;
+    var end = max_cols;
+    // Back off a UTF-8 continuation byte (0b10xx_xxxx) to the lead byte
+    // so the cut lands between codepoints, not inside one.
+    while (end > 0 and text[end] & 0xC0 == 0x80) end -= 1;
+    return text[0..end];
+}
+
 /// How many bytes from the START of `trailing` constitute the
 /// next "section" for `ghost_accept_word` (Ctrl+Right). A section
 /// ends at the FIRST `/` AFTER an opening segment, or at the

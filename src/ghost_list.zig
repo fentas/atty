@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const ansi = @import("ansi.zig");
+const ghost = @import("ghost.zig");
 const Style = @import("style.zig").Style;
 const style_mod = @import("style.zig");
 
@@ -38,6 +39,12 @@ pub const GhostList = struct {
     /// Number of rows currently reserved below the prompt.
     /// Set on activate, used by paint + clear.
     reserved_rows: u16 = 0,
+    /// Terminal width, refreshed on each activate/repaint. Rows are
+    /// truncated to it so a wide entry never wraps onto a second
+    /// physical row — the per-entry descent in `paintEntries` assumes
+    /// one physical row per entry, and a wrap would desync the descent
+    /// and leave the wrapped tail uncleared.
+    cols: u16 = 0,
     /// Style applied to the index prefix (`1: `) and the entry text.
     style: Style,
 
@@ -122,10 +129,11 @@ pub const GhostList = struct {
     /// cursor — we do NOT scroll the screen back down. That matches
     /// atuin's behavior: close the overlay, the prompt stays where
     /// it scrolled to.
-    pub fn activate(self: *GhostList, w: *std.Io.Writer, n: u16) !void {
+    pub fn activate(self: *GhostList, w: *std.Io.Writer, n: u16, cols: u16) !void {
         if (n == 0) return;
         if (self.active) return; // already reserved
         if (self.entries.items.len == 0) return;
+        self.cols = cols;
 
         var i: u16 = 0;
         while (i < n) : (i += 1) try w.writeByte('\n');
@@ -150,13 +158,18 @@ pub const GhostList = struct {
     /// another character, atuin returned a different result set).
     /// Does NOT scroll — uses relative descent within the reserved
     /// band.
-    pub fn repaint(self: *GhostList, w: *std.Io.Writer) !void {
+    pub fn repaint(self: *GhostList, w: *std.Io.Writer, cols: u16) !void {
         if (!self.active) return;
+        self.cols = cols;
         try self.paintEntries(w);
     }
 
     fn paintEntries(self: *GhostList, w: *std.Io.Writer) !void {
         try w.writeAll(ansi.save_cursor);
+        // Leave the last column empty so a row filling the width doesn't
+        // trip the terminal's auto-margin wrap. `cols == 0` (unknown
+        // width) disables truncation — the pre-width-tracking behaviour.
+        const budget: usize = if (self.cols > 1) self.cols - 1 else std.math.maxInt(usize);
         var i: u16 = 0;
         while (i < self.reserved_rows) : (i += 1) {
             // CUD 1 + CHA 1 (cursor to column 1) + EL 0 (erase row)
@@ -165,7 +178,15 @@ pub const GhostList = struct {
             try w.writeAll("\x1b[1B\x1b[1G\x1b[K");
             if (i < self.entries.items.len) {
                 try w.print("{f}", .{self.style});
-                try w.print(" {d}: {s}", .{ i + 1, self.entries.items[i].items });
+                // Prefix (` N: `) then entry, the whole row clipped to
+                // the width budget so it occupies exactly one row.
+                var pfxbuf: [16]u8 = undefined;
+                const pfx = ghost.fitWidth(
+                    std.fmt.bufPrint(&pfxbuf, " {d}: ", .{i + 1}) catch " ",
+                    budget,
+                );
+                try w.writeAll(pfx);
+                try w.writeAll(ghost.fitWidth(self.entries.items[i].items, budget - pfx.len));
                 try w.writeAll(style_mod.reset);
             }
         }
