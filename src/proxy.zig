@@ -1362,11 +1362,22 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 }
 
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
-                // The pick list (if active) owns rows below the
-                // prompt — the typed character lands on the prompt
-                // row, no overlap. renderGhostList in the master
-                // path handles repaint/deactivate when content
-                // changes.
+                // The pick list owns rows BELOW the prompt. While typing, the
+                // char lands on the prompt row (no overlap), so we leave the
+                // list for renderGhostList to repaint/deactivate. But a
+                // line-ENDING keystroke (Enter, or Ctrl+C aborting the line)
+                // makes the shell write its output onto those very rows next
+                // — deactivate the list FIRST so the shell's (usually
+                // shorter) output doesn't leave the list row's tail as
+                // residue beside it (the `…/backgrounds/` row → `command not
+                // found: lgrounds/` overlap). renderGhostList would only
+                // deactivate on the later master-output tick, after the shell
+                // has already overwritten the rows.
+                if (ghost_list.active and
+                    (containsEnter(input) or std.mem.indexOfScalar(u8, input, 0x03) != null))
+                {
+                    deactivateGhostList(&ghost_list, &out_buf) catch {};
+                }
                 //
                 // Skip `line_state.applyInput` while:
                 //   • an alt-screen TUI is active — keystrokes are
