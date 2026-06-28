@@ -215,6 +215,7 @@ test {
     _ = @import("setup.zig");
     _ = @import("help.zig");
     _ = @import("caps.zig");
+    _ = @import("rc_writer.zig");
     _ = @import("screenshot_tests.zig");
     _ = @import("theme.zig");
     _ = @import("i18n.zig");
