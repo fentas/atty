@@ -18,6 +18,7 @@ const home = @import("home.zig");
 const guard = @import("guard.zig");
 const fleet = @import("fleet.zig");
 const setup = @import("setup.zig");
+const help = @import("help.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
 const posix = std.posix;
@@ -93,7 +94,7 @@ fn runLoop() void {
     var framebuf: [65536]u8 = undefined;
     var sz = term.size(out);
     var screen: Screen = .home;
-    const footer = "\r\n  \x1b[2m[h]ome  [g]uard  [f]leet  [s]etup  q quit\x1b[0m\r\n";
+    const footer = "\r\n  \x1b[2m[h]ome  [g]uard  [f]leet  [s]etup  [?]help  q quit\x1b[0m\r\n";
 
     while (true) {
         if (term.resized.swap(false, .seq_cst)) sz = term.size(out);
@@ -113,6 +114,7 @@ fn runLoop() void {
                 .guard => guard.renderGuard(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
                 .fleet => fleet.renderFleet(&framebuf, instancesOf(uds.listInstances(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),
                 .setup => setup.renderSetup(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), under_atty, sz.cols, sz.rows),
+                .help => help.renderHelp(&framebuf, sz.cols, sz.rows),
             };
             _ = std.c.write(out, frame.ptr, frame.len);
             _ = std.c.write(out, footer.ptr, footer.len);
@@ -136,16 +138,17 @@ fn runLoop() void {
                     .guard => screen = .guard,
                     .fleet => screen = .fleet,
                     .setup => screen = .setup,
-                    .none => {}, // nav/help (j/k, arrows, ?) — stubs for now
+                    .help => screen = .help,
+                    .none => {}, // nav (j/k, arrows) — stubs for now
                 }
             }
         }
     }
 }
 
-pub const Screen = enum { home, guard, fleet, setup };
+pub const Screen = enum { home, guard, fleet, setup, help };
 
-pub const Input = enum { none, quit, home, guard, fleet, setup };
+pub const Input = enum { none, quit, home, guard, fleet, setup, help };
 
 /// Extract the Metrics from a Parsed (no deinit — the caller's arena owns
 /// the allocation). null passes through.
@@ -173,6 +176,7 @@ pub fn classifyInput(keys: []const u8) Input {
         'h' => return .home,
         'f' => return .fleet,
         's' => return .setup,
+        '?' => return .help,
         else => {},
     };
     return .none;
@@ -199,6 +203,7 @@ test {
     _ = @import("guard.zig");
     _ = @import("fleet.zig");
     _ = @import("setup.zig");
+    _ = @import("help.zig");
     _ = @import("screenshot_tests.zig");
     _ = @import("theme.zig");
     _ = @import("i18n.zig");

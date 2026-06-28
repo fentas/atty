@@ -15,6 +15,13 @@ pub const Strings = struct {
     suffix_security: []const u8,
     suffix_sessions: []const u8,
     suffix_health: []const u8,
+    suffix_help: []const u8,
+
+    // Help screen section labels
+    help_keys: []const u8,
+    help_display: []const u8,
+    help_language: []const u8,
+    help_needs_daemon: []const u8,
 
     // Home
     protected: []const u8,
@@ -70,6 +77,11 @@ pub const en = Strings{
     .suffix_security = " \u{2014} security profile",
     .suffix_sessions = " \u{2014} atty sessions",
     .suffix_health = " \u{2014} health check",
+    .suffix_help = " \u{2014} help",
+    .help_keys = "Keys",
+    .help_display = "Display",
+    .help_language = "Language",
+    .help_needs_daemon = "Live data needs the atty-guard daemon running.",
     .protected = "Protected",
     .unguarded = "Unguarded",
     .today = "Today",
@@ -112,6 +124,11 @@ pub const de = Strings{
     .suffix_security = " \u{2014} Sicherheitsprofil",
     .suffix_sessions = " \u{2014} atty-Sitzungen",
     .suffix_health = " \u{2014} Statusprüfung",
+    .suffix_help = " \u{2014} Hilfe",
+    .help_keys = "Tasten",
+    .help_display = "Anzeige",
+    .help_language = "Sprache",
+    .help_needs_daemon = "Live-Daten brauchen den laufenden atty-guard-Daemon.",
     .protected = "Geschützt",
     .unguarded = "Ungeschützt",
     .today = "Heute",
