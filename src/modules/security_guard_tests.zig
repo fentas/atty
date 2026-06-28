@@ -48,6 +48,21 @@ test "profile_switch_mode .sudo (default) — Alt+P stages the sudo command, one
     try testing.expect((try L.pollShellInput(&rt, &ctx)) == null); // one-shot
 }
 
+test "profile_switch_mode .daemon — Alt+P switches directly (consumed, never stages)" {
+    const L = mod.configure(.{ .enabled = true, .profile_switch_mode = .daemon, .daemon_socket_path = "/tmp/atty-test-no-such.sock" });
+    var rt = try L.attach(testing.allocator, undefined);
+    defer L.detach(&rt, undefined);
+    var sink: Sink = .{};
+    defer sink.buf.deinit(testing.allocator);
+    L.setSink(&rt, &sink, Sink.write);
+    var line: LineState = .{};
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(testing.allocator);
+    var ctx = makeCtx(&line, &scratch);
+    try testing.expect(try L.onAction(&rt, &ctx, .security_guard_cycle_profile)); // consumed
+    try testing.expect((try L.pollShellInput(&rt, &ctx)) == null); // daemon mode stages nothing
+}
+
 test "profile_switch_mode .off — Alt+P is inert (not consumed, keeps M-p)" {
     const L = mod.configure(.{ .enabled = true, .profile_switch_mode = .off });
     var rt = try L.attach(testing.allocator, undefined);

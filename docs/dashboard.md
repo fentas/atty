@@ -21,9 +21,9 @@ The rest of this doc is the plan; this section tracks what's **built** on
   layout, **theming** (dark / light / high-contrast / mono / ascii; `NO_COLOR`
   + `COLORFGBG` aware), **i18n** (en + de, `$ATTOP_LANG`-driven), and
   **screenshot-verified** rendering (each screen fed through the VT grid).
-- **Profile switch.** Live `prompt → … → strict` switching from atty
-  (`Alt+P`, when `security_guard.allow_profile_switch` is set) or
-  `sudo atty-guard profile set`.
+- **Profile switch.** Live `prompt → … → strict` switching: atty's `Alt+P`
+  (per `security_guard.profile_switch_mode` — default `.sudo` stages the
+  `sudo atty-guard profile set` command) or that command directly.
 
 **Planned (not yet built):** the AI panel's productivity counters, Alerts
 (system notification + webhook hooks), `menuconfig` (`config.zig` scaffold),

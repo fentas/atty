@@ -408,6 +408,15 @@ pub fn configure(comptime cfg: Config) type {
             rt.profile_name_len = n;
         }
 
+        /// CURRENT rung: live read (UDS), else the last-known cache; null if
+        /// neither. NEVER advance from a failed read — `nextProfile(null)` is
+        /// `prompt`, so a transient timeout would silently DOWNGRADE the
+        /// posture to the weakest rung. Callers abort on null.
+        fn currentProfile(rt: *Runtime, client: *UdsClient, buf: []u8) ?[]const u8 {
+            return client.getProfile(buf) orelse
+                (if (rt.profile_name_len > 0) rt.profile_name[0..rt.profile_name_len] else null);
+        }
+
         /// Cycle the live security profile directly via the daemon
         /// (`profile_switch_mode = .daemon`); the daemon enforces who may
         /// switch (the profile is daemon-global). Renders the outcome to
@@ -418,17 +427,11 @@ pub fn configure(comptime cfg: Config) type {
                 return;
             };
             var cur_buf: [16]u8 = undefined;
-            // CURRENT rung: live read, else the last-known cache. NEVER
-            // advance from a failed read — `nextProfile(null)` is `prompt`,
-            // so a transient timeout would silently DOWNGRADE the posture
-            // to the weakest rung. Abort instead.
-            const cur: ?[]const u8 = client.getProfile(&cur_buf) orelse
-                (if (rt.profile_name_len > 0) rt.profile_name[0..rt.profile_name_len] else null);
-            if (cur == null) {
+            const cur = currentProfile(rt, client, &cur_buf) orelse {
                 writeSink(rt, "\r\natty security_guard: can't read the current " ++
                     "profile (daemon unreachable) — switch aborted.\r\n");
                 return;
-            }
+            };
             const next = nextProfile(cur);
             var out_buf: [192]u8 = undefined;
             var line: [256]u8 = undefined;
@@ -464,14 +467,10 @@ pub fn configure(comptime cfg: Config) type {
                 return;
             };
             var cur_buf: [16]u8 = undefined;
-            // Same as cycleProfile: live read, else cache; never advance from
-            // a failed read (nextProfile(null) = prompt would downgrade).
-            const cur: ?[]const u8 = client.getProfile(&cur_buf) orelse
-                (if (rt.profile_name_len > 0) rt.profile_name[0..rt.profile_name_len] else null);
-            if (cur == null) {
+            const cur = currentProfile(rt, client, &cur_buf) orelse {
                 writeSink(rt, "\r\natty security_guard: can't read the current profile (daemon unreachable) — not staged.\r\n");
                 return;
-            }
+            };
             const next = nextProfile(cur);
             const cmd = std.fmt.bufPrint(&rt.staged_input, "sudo atty-guard profile set {s}", .{next}) catch return;
             rt.staged_input_len = cmd.len;
