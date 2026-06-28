@@ -17,14 +17,14 @@ pub const compact_cols: u16 = 80;
 
 const Status = enum { ok, bad, neutral };
 
-pub fn renderSetup(buf: []u8, m: ?uds.Metrics, atty_on_path: bool, under_atty: bool, cols: u16, rows: u16) []const u8 {
+pub fn renderSetup(buf: []u8, m: ?uds.Metrics, atty_on_path: bool, under_atty: bool, shell_integrated: bool, cols: u16, rows: u16) []const u8 {
     _ = rows;
     var w = std.Io.Writer.fixed(buf);
-    render(&w, m, atty_on_path, under_atty, cols) catch {};
+    render(&w, m, atty_on_path, under_atty, shell_integrated, cols) catch {};
     return buf[0..w.end];
 }
 
-fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bool, cols: u16) !void {
+fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bool, shell_integrated: bool, cols: u16) !void {
     const t = theme.active;
     const s = i18n.active;
     try w.writeAll("\x1b[2J\x1b[H");
@@ -39,6 +39,13 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bo
         try row(w, t, .ok, "atty", s.st_installed, "");
     } else {
         try row(w, t, .bad, "atty", s.st_not_installed, s.fix_install_atty);
+    }
+
+    // Shell integration (the rc wiring that auto-starts atty + OSC 133).
+    if (shell_integrated) {
+        try row(w, t, .ok, "shell", s.st_wired, "");
+    } else {
+        try row(w, t, .neutral, "shell", s.st_not_wired, s.fix_wire_shell);
     }
 
     if (m) |metrics| {
