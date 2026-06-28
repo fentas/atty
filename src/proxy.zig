@@ -770,24 +770,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             // cursor in its input row; an unrelated ghost overlay
             // would paint OVER the panel chrome.
             if (!inSubprocess(&alt_screen, &osc133_tracker) and !D.anyInlineChatActive(&runtimes) and !cursor_tracker.inEscape()) {
-                // Snapshot the live cursor column onto Context so the ghost
-                // overlay can clip its suggestion to the columns left on the
-                // row (preventing a wrap whose tail the single-row clear
-                // can't reach). The tracker is fresh here — it just parsed
-                // this iteration's shell output, including the echo of what
-                // the user typed — whereas `ctx.cursor_col` is otherwise
-                // only refreshed on scroll / in the stdin path, so it would
-                // be stale (col 1) at paint time.
                 if (args.is_tty) {
-                    // Snapshot the tracker's geometry onto Context so the
-                    // ghost overlay can clip its suggestion to the columns
-                    // left on the row (a wrap leaves a tail the single-row
-                    // clear can't reach). The tick path carries no new
-                    // output, but the tracker already holds the last-parsed
-                    // cursor/width; without this snapshot `ctx.cursor_col`
-                    // would be stale (it's otherwise only refreshed on
-                    // scroll / in the stdin + master-output paths), and
-                    // `ctx.terminal_cols` is null with the statusbar off.
+                    // Geometry the ghost clip reads to keep a suggestion from
+                    // wrapping past the row. `cursor_col` is otherwise only
+                    // refreshed on scroll / in the stdin + master paths, and
+                    // `terminal_cols` is unset with the statusbar off — so
+                    // snapshot the tracker here before the paint.
                     ctx.cursor_col = cursor_tracker.currentCol();
                     ctx.cursor_row = cursor_tracker.currentRow();
                     ctx.terminal_cols = cursor_tracker.maxCols();
@@ -1364,15 +1352,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 if (ghost.visible) try clearGhost(&ghost, &out_buf);
                 // The pick list owns rows BELOW the prompt. While typing, the
                 // char lands on the prompt row (no overlap), so we leave the
-                // list for renderGhostList to repaint/deactivate. But a
-                // line-ENDING keystroke (Enter, or Ctrl+C aborting the line)
-                // makes the shell write its output onto those very rows next
-                // — deactivate the list FIRST so the shell's (usually
-                // shorter) output doesn't leave the list row's tail as
-                // residue beside it (the `…/backgrounds/` row → `command not
-                // found: lgrounds/` overlap). renderGhostList would only
-                // deactivate on the later master-output tick, after the shell
-                // has already overwritten the rows.
+                // list to renderGhostList. But a line-ENDING key (Enter, or
+                // Ctrl+C aborting the line) makes the shell write its output
+                // onto those rows next — deactivate FIRST so the shell's
+                // shorter output can't leave the list row's tail as residue
+                // beside it. renderGhostList only deactivates on a later
+                // tick, after the shell has already overwritten the rows.
                 if (ghost_list.active and
                     (containsEnter(input) or std.mem.indexOfScalar(u8, input, 0x03) != null))
                 {
@@ -2474,15 +2459,12 @@ fn renderGhost(rts: *D.Runtimes, ctx: *module.Context, ghost: *Ghost, out_buf: [
 
     const sug_opt = D.gatherGhostText(rts, ctx) catch null;
     if (sug_opt) |sug| {
-        // Cap the painted suggestion to the columns left on the cursor's
-        // row so it never wraps. A wrapped overlay leaves its tail on a
-        // continuation row that `clearGhost`'s single erase-to-EOL can't
-        // reach — observed as stale ghost bytes (e.g. `grounds/`) that
-        // survive into the next paint. `cursor_col` is 1-based; columns
-        // `cursor_col..terminal_cols-1` are writable without tripping the
-        // terminal's auto-margin wrap at the last column. Accept still
-        // injects the FULL trailing (gatherGhostText) — only the on-
-        // screen hint is clipped, matching fish/zsh near the edge.
+        // Clip the painted suggestion to the columns left on the cursor's
+        // row so it never wraps — a wrapped overlay's tail lands on a
+        // continuation row the single erase-to-EOL clear can't reach.
+        // `cursor_col` is 1-based; columns `cursor_col..terminal_cols-1` are
+        // writable without tripping auto-margin wrap at the last column.
+        // Accept still injects the FULL trailing; only the hint is clipped.
         const avail: usize = if (ctx.terminal_cols) |tc| blk: {
             const cc = ctx.cursor_col orelse 1;
             break :blk if (tc > cc) tc - cc else 0;
