@@ -24,6 +24,7 @@ const i18n = @import("i18n.zig");
 const panel = @import("panel.zig");
 const key = @import("key.zig");
 const config = @import("config.zig");
+const frame_mod = @import("frame.zig");
 const PanelHost = @import("panel_host.zig").PanelHost;
 const posix = std.posix;
 
@@ -78,6 +79,9 @@ const App = struct {
     cur_metrics: ?uds.Metrics = null,
     cur_instances: ?[]const uds.Instance = null,
     framebuf: [65536]u8 = undefined,
+    /// Diff state + the buffer the row-diff ops are emitted into.
+    frame: frame_mod.Frame = .{},
+    diffbuf: [131072]u8 = undefined,
 
     fn ctx(self: *App, frame_arena: std.mem.Allocator, focused: bool) panel.Ctx {
         return .{
@@ -101,24 +105,29 @@ const App = struct {
         self.cur_instances = instancesOf(uds.listInstances(a, self.sock, fetch_timeout_ms));
     }
 
-    /// Paint a full frame (chrome + focused panel) into framebuf and flush.
-    /// The synchronized-output markers bracket the body as SEPARATE writes,
-    /// so `end_sync` is emitted even if the body overflowed the frame buffer
-    /// — otherwise an oversized frame would leave the terminal stuck in
-    /// synchronized-update mode (a frozen display).
+    /// Paint the new frame, then emit only the rows that changed (diff
+    /// render) bracketed by synchronized-output markers. The markers are
+    /// SEPARATE writes so `end_sync` always lands even if the diff buffer
+    /// overflowed — otherwise the terminal could stay stuck in
+    /// synchronized-update mode (a frozen display). Diffing means a keystroke
+    /// or a metric tick rewrites a row or two, not the whole screen — no
+    /// flicker.
     fn render(self: *App) void {
         var frame_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer frame_arena.deinit();
-        var w = std.Io.Writer.fixed(&self.framebuf);
-        self.paint(&w, frame_arena.allocator()) catch {};
+        var pw = std.Io.Writer.fixed(&self.framebuf);
+        self.paint(&pw, frame_arena.allocator()) catch {};
+
+        var dw = std.Io.Writer.fixed(&self.diffbuf);
+        self.frame.diff(self.framebuf[0..pw.end], self.sz.rows, &dw) catch {};
+
         _ = std.c.write(self.out, begin_sync.ptr, begin_sync.len);
-        const bytes = self.framebuf[0..w.end];
+        const bytes = self.diffbuf[0..dw.end];
         _ = std.c.write(self.out, bytes.ptr, bytes.len);
         _ = std.c.write(self.out, end_sync.ptr, end_sync.len);
     }
 
     fn paint(self: *App, w: *std.Io.Writer, frame_arena: std.mem.Allocator) !void {
-        try w.writeAll("\x1b[2J\x1b[H");
         try paintTabBar(w, self.focus);
 
         // Focused panel content.
@@ -216,6 +225,7 @@ fn runLoop() void {
     while (true) {
         if (term.resized.swap(false, .seq_cst)) {
             app.sz = term.size(out);
+            app.frame.invalidate(); // row positions shift → full repaint
             app.render();
         }
 
@@ -324,6 +334,7 @@ test {
     _ = @import("panel_host.zig");
     _ = @import("list.zig");
     _ = @import("box.zig");
+    _ = @import("frame.zig");
     _ = @import("home.zig");
     _ = @import("guard.zig");
     _ = @import("fleet.zig");
