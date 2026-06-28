@@ -203,12 +203,17 @@ fn renderDetail(w: *std.Io.Writer, inst: uds.Instance, cols: u16) !void {
     const t = theme.active;
     try w.print("{f}Fleet{s} \u{203A} session\r\n\r\n", .{ t.title, reset });
 
-    var lb: [5][96]u8 = undefined;
+    var lb: [5][256]u8 = undefined;
     var lines: [5][]const u8 = undefined;
     const shell = if (inst.shell.len > 0) inst.shell else "\u{2014}";
+    // Pre-truncate the cwd so the format can never overflow its buffer (a
+    // failed bufPrint would silently blank the row). The box width-clamps for
+    // display on top of this.
+    const cwd_cap = lb[2].len - 16;
+    const cwd_shown = if (inst.cwd.len > cwd_cap) inst.cwd[0..cwd_cap] else inst.cwd;
     lines[0] = std.fmt.bufPrint(&lb[0], "pid        {d}", .{inst.pid}) catch "";
     lines[1] = std.fmt.bufPrint(&lb[1], "shell      {s}", .{shell}) catch "";
-    lines[2] = std.fmt.bufPrint(&lb[2], "cwd        {s}", .{inst.cwd}) catch "";
+    lines[2] = std.fmt.bufPrint(&lb[2], "cwd        {s}", .{cwd_shown}) catch "";
     lines[3] = std.fmt.bufPrint(&lb[3], "commands   {d}", .{inst.counters.commands}) catch "";
     lines[4] = std.fmt.bufPrint(&lb[4], "incognito  {s}", .{if (inst.incognito) "yes" else "no"}) catch "";
 
