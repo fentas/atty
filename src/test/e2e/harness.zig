@@ -210,6 +210,35 @@ pub const Session = struct {
         return std.mem.indexOf(u8, text, needle) != null;
     }
 
+    /// How many (non-overlapping) times `needle` appears in the grid text.
+    pub fn gridCount(self: *Session, needle: []const u8) usize {
+        if (needle.len == 0) return 0;
+        const text = self.renderTextInto(self.text_buf) catch return 0;
+        var n: usize = 0;
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, text, i, needle)) |pos| {
+            n += 1;
+            i = pos + needle.len;
+        }
+        return n;
+    }
+
+    /// Pump until `needle` appears at least `count` times, capped at
+    /// `timeout_ms`. For an async paint whose text ALSO appears elsewhere on
+    /// screen (a ghost completing a command that's still in scrollback): the
+    /// count rises when the new occurrence lands, so this waits for the paint
+    /// deterministically — where waitFor (any occurrence) returns immediately
+    /// on the pre-existing copy and wait_stable can settle before the worker
+    /// paints. Returns false on timeout.
+    pub fn waitForCount(self: *Session, needle: []const u8, count: usize, timeout_ms: u32) !bool {
+        const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
+        while (true) {
+            if (self.gridCount(needle) >= count) return true;
+            if (snapshot.monoMillis() >= deadline) return false;
+            _ = try self.pumpMs(50);
+        }
+    }
+
     fn renderTextInto(self: *Session, buf: []u8) ![]u8 {
         var w = std.Io.Writer.fixed(buf);
         try self.grid.renderText(&w);

@@ -386,6 +386,13 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
                     break;
                 }
             },
+            .wait_for_count => {
+                const found = try session.waitForCount(c.str_arg, @intCast(c.int_arg), timeout_ms);
+                if (!found) {
+                    first_failure = "wait_for_count timeout";
+                    break;
+                }
+            },
             .expect_substr => {
                 if (!session.gridContains(c.str_arg)) {
                     first_failure = "expect_substr missing";
