@@ -2,9 +2,34 @@ const std = @import("std");
 const testing = std.testing;
 const guard = @import("guard.zig");
 const uds = @import("uds.zig");
+const panel = @import("panel.zig");
 
 fn metrics(profile: []const u8) uds.Metrics {
     return .{ .guard = .{ .profile = profile, .ebpf = "attached", .deny_path = 1, .deny_basename = 2 } };
+}
+
+// The LIVE interactive path: j/k browse the rungs (the active profile stays
+// marked), and `g` falls through so the host's g→Guard hotkey survives.
+test "Guard.Panel: j moves selection; g is not consumed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var rt = try guard.Panel.attach(testing.allocator);
+    const m = metrics("session");
+    var ctx = panel.Ctx{ .metrics = m, .cols = 100, .rows = 24, .arena = arena.allocator() };
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try guard.Panel.render(&rt, &ctx, &w);
+    // All rungs render through the live path.
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "prompt") != null);
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "lockdown") != null);
+
+    const before = rt.list.selected;
+    try testing.expectEqual(panel.Action.handled, try guard.Panel.onKey(&rt, &ctx, .{ .char = 'j' }));
+    try testing.expectEqual(before + 1, rt.list.selected);
+
+    // `g` is not a list key → .pass, so the host can switch to Guard.
+    try testing.expectEqual(panel.Action.pass, try guard.Panel.onKey(&rt, &ctx, .{ .char = 'g' }));
 }
 
 test "all six rungs render with their TL;DRs" {

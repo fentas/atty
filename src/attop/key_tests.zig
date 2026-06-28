@@ -80,6 +80,25 @@ test "decode: drains a multi-key read left-to-right" {
     try testing.expectEqual(Key{ .char = 'k' }, keys[2]);
 }
 
+test "decode: incomplete/split escape degrades to Escape (len 1)" {
+    // CSI with no final byte yet (split across reads) → consume just the ESC.
+    const d1 = mod.decode("\x1b[").?;
+    try testing.expectEqual(Key.escape, d1.key);
+    try testing.expectEqual(@as(usize, 1), d1.len);
+    const d2 = mod.decode("\x1b[1;5").?; // modified prefix, no final
+    try testing.expectEqual(Key.escape, d2.key);
+    try testing.expectEqual(@as(usize, 1), d2.len);
+    // SS3 lead-in with no final byte.
+    const d3 = mod.decode("\x1bO").?;
+    try testing.expectEqual(Key.escape, d3.key);
+    try testing.expectEqual(@as(usize, 1), d3.len);
+}
+
+test "decode: high (UTF-8) bytes pass through as char" {
+    // The lead byte of `é` (0xC3) is >= 0x20 → a printable char, not control.
+    try testing.expectEqual(Key{ .char = 0xC3 }, one("\xC3\xA9"));
+}
+
 test "decode: empty slice yields null" {
     try testing.expect(mod.decode("") == null);
 }

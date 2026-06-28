@@ -11,6 +11,7 @@ const uds = @import("uds.zig");
 const theme = @import("theme.zig");
 const i18n = @import("i18n.zig");
 const panel = @import("panel.zig");
+const list_mod = @import("list.zig");
 
 const reset = atty.style.reset;
 
@@ -33,14 +34,18 @@ pub const compact_cols: u16 = 80;
 pub fn renderGuard(buf: []u8, m: ?uds.Metrics, cols: u16, rows: u16) []const u8 {
     _ = rows;
     var w = std.Io.Writer.fixed(buf);
-    draw(&w, m, cols) catch {};
+    draw(&w, m, cols, null) catch {};
     return buf[0..w.end];
 }
 
-/// Guard panel — the security-profile ladder. Read-only for now; the
-/// profile switch deliberately stays on atty's Alt+P / the daemon CLI.
+/// Guard panel — the security-profile ladder, now browsable: j/k move a
+/// selection cursor over the rungs (the ACTIVE profile stays marked with ▸).
+/// Read-only — switching a daemon-global, gated profile stays on atty's
+/// Alt+P / `sudo atty-guard profile set` per the agreed scope.
 pub const Panel = struct {
-    pub const Runtime = struct {};
+    pub const Runtime = struct {
+        list: list_mod.List = .{},
+    };
     pub fn attach(_: std.mem.Allocator) !Runtime {
         return .{};
     }
@@ -50,12 +55,23 @@ pub const Panel = struct {
     pub fn navKey() u8 {
         return 'g';
     }
-    pub fn render(_: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
-        try draw(w, ctx.metrics, ctx.cols);
+    pub fn render(rt: *Runtime, ctx: *panel.Ctx, w: *std.Io.Writer) !void {
+        rt.list.setViewport(rungs.len); // all rungs fit; no scroll needed
+        rt.list.setLen(rungs.len);
+        try draw(w, ctx.metrics, ctx.cols, rt.list.selected);
+    }
+    pub fn onKey(rt: *Runtime, _: *panel.Ctx, k: panel.Key) !panel.Action {
+        if (rt.list.handleKey(k)) return .handled;
+        return .pass;
+    }
+    pub fn footerHint(_: *Runtime, _: *panel.Ctx) ?[]const u8 {
+        return "j/k browse rungs \u{b7} switch via Alt+P / sudo atty-guard profile set";
     }
 };
 
-fn draw(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
+/// `selected` highlights a rung with the browse cursor (reverse video);
+/// null = no cursor (the read-only render path used by tests).
+fn draw(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16, selected: ?usize) !void {
     const t = theme.active;
     const s = i18n.active;
     if (cols < compact_cols) {
@@ -72,9 +88,16 @@ fn draw(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     const g = m.?.guard;
 
     var matched = false;
-    for (rungs) |r| {
-        if (std.mem.eql(u8, r.name, g.profile)) {
-            matched = true;
+    for (rungs, 0..) |r, i| {
+        const is_active = std.mem.eql(u8, r.name, g.profile);
+        if (is_active) matched = true;
+        const is_sel = if (selected) |sel| i == sel else false;
+        if (is_sel) {
+            // Reverse-video the whole row; no inner `reset` (it would cancel
+            // the reverse mid-row). The active rung keeps its ▸ marker.
+            const marker = if (is_active) t.glyph.active else " ";
+            try w.print("\x1b[7m  {s} {s:<9}  {s}\x1b[27m\r\n", .{ marker, r.name, r.tldr });
+        } else if (is_active) {
             try w.print("  {f}{s} {s:<9}{s}  {s}\r\n", .{ t.ok, t.glyph.active, r.name, reset, r.tldr });
         } else {
             try w.print("    {s:<9}  {f}{s}{s}\r\n", .{ r.name, t.muted, r.tldr, reset });
