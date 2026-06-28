@@ -336,7 +336,7 @@ Four screens, switched by a single key (`q` quits):
 | `h` | **Home** | the 3-second answer — protected? what's atty doing? healthy? |
 | `g` | **Guard** | the security profile as a named-rung ladder + the kernel posture |
 | `f` | **Fleet** | every live atty session — pid, shell, cwd, command count |
-| `s` | **Setup** | an embedded health check (daemon · eBPF · profile · metrics · in-atty) with a one-line fix per item |
+| `s` | **Setup** | an embedded health check (daemon · profile · eBPF · metrics · in-atty) with a one-line fix per item |
 
 - **Themes** — `ATTOP_THEME` = `dark`, `light`, `high-contrast`, `mono`, or `ascii`. Auto by default: `NO_COLOR` → mono (no color, glyphs kept), a light `COLORFGBG` → light, else dark.
 - **Language** — `ATTOP_LANG` (else `$LC_ALL` / `$LANG`); ships `en` + `de`.
