@@ -39,10 +39,6 @@ pub const Strings = struct {
     fleet_terminals_one: []const u8, // "{d} <this>" (the fleet total)
     fleet_terminals_many: []const u8,
 
-    // Daemon-down fix prose (the command part stays literal)
-    fix_start_it: []const u8, // "start it:"
-    fix_is_it_running: []const u8, // "is it running?"
-
     // Setup statuses
     st_running: []const u8,
     st_not_reachable: []const u8,
@@ -56,8 +52,17 @@ pub const Strings = struct {
     st_no_sessions: []const u8,
     session_reporting_one: []const u8, // "{d} <this>"
     session_reporting_many: []const u8,
-    // Setup fix prose (the command part stays literal in the render)
+
+    // Fix lines — full messages. Embedded commands/identifiers (sudo …,
+    // metrics_exporter, atty) are positioned, NOT translated (standard
+    // message-catalog practice).
+    fix_start_daemon: []const u8,
+    fix_daemon_unreachable: []const u8,
     fix_raise_profile: []const u8,
+    fix_ebpf_install: []const u8,
+    fix_enable_metrics: []const u8,
+    fix_run_atty: []const u8,
+    fleet_enable_hint: []const u8,
 };
 
 pub const en = Strings{
@@ -80,8 +85,6 @@ pub const en = Strings{
     .no_sessions = "no atty sessions reporting",
     .fleet_terminals_one = "terminal",
     .fleet_terminals_many = "terminals",
-    .fix_start_it = "start it:",
-    .fix_is_it_running = "is it running?",
     .st_running = "running",
     .st_not_reachable = "not reachable",
     .st_attached = "attached",
@@ -94,7 +97,13 @@ pub const en = Strings{
     .st_no_sessions = "no sessions",
     .session_reporting_one = "session reporting",
     .session_reporting_many = "sessions reporting",
+    .fix_start_daemon = "start it:  sudo systemctl start atty-guard",
+    .fix_daemon_unreachable = "is it running?  sudo systemctl start atty-guard",
     .fix_raise_profile = "raise it in the Guard panel ([g])",
+    .fix_ebpf_install = "install: sudo make install-guard GUARD_FEATURES=...,ebpf",
+    .fix_enable_metrics = "enable the metrics_exporter module",
+    .fix_run_atty = "run: atty",
+    .fleet_enable_hint = "(enable the metrics_exporter module — see docs/dashboard.md)",
 };
 
 /// Proof locale (German). Kept short to fit the responsive widths.
@@ -118,8 +127,6 @@ pub const de = Strings{
     .no_sessions = "keine atty-Sitzungen gemeldet",
     .fleet_terminals_one = "Terminal",
     .fleet_terminals_many = "Terminals",
-    .fix_start_it = "starten:",
-    .fix_is_it_running = "läuft er?",
     .st_running = "läuft",
     .st_not_reachable = "nicht erreichbar",
     .st_attached = "aktiv",
@@ -132,7 +139,13 @@ pub const de = Strings{
     .st_no_sessions = "keine Sitzungen",
     .session_reporting_one = "Sitzung gemeldet",
     .session_reporting_many = "Sitzungen gemeldet",
+    .fix_start_daemon = "starten:  sudo systemctl start atty-guard",
+    .fix_daemon_unreachable = "läuft er?  sudo systemctl start atty-guard",
     .fix_raise_profile = "im Guard-Panel anheben ([g])",
+    .fix_ebpf_install = "installieren: sudo make install-guard GUARD_FEATURES=...,ebpf",
+    .fix_enable_metrics = "Modul metrics_exporter aktivieren",
+    .fix_run_atty = "ausführen: atty",
+    .fleet_enable_hint = "(Modul metrics_exporter aktivieren — siehe docs/dashboard.md)",
 };
 
 /// The active string table — set once at startup (see `resolve`).

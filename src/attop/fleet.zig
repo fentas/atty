@@ -34,13 +34,13 @@ fn render(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void 
         // null = the round-trip failed for ANY reason (down, unreachable,
         // timeout, malformed) — say "not reachable", not "not running".
         try w.print("  {f}{s}{s}\r\n", .{ t.danger, s.not_reachable, reset });
-        try w.print("  {s}  sudo systemctl start atty-guard\r\n", .{s.fix_is_it_running});
+        try w.print("  {s}\r\n", .{s.fix_daemon_unreachable});
         return;
     }
     const list = instances.?;
     if (list.len == 0) {
         try w.print("  {f}{s}{s}\r\n", .{ t.muted, s.no_sessions, reset });
-        try w.writeAll("  (enable the metrics_exporter module — see docs/dashboard.md)\r\n");
+        try w.print("  {s}\r\n", .{s.fleet_enable_hint});
         return;
     }
 

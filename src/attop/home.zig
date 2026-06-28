@@ -44,7 +44,7 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
 
     if (m == null) {
         try w.print("  {f}{s}{s}\r\n", .{ t.danger, s.not_running, reset });
-        try w.print("  {s}  sudo systemctl start atty-guard\r\n", .{s.fix_start_it});
+        try w.print("  {s}\r\n", .{s.fix_start_daemon});
         return;
     }
     const metrics = m.?;

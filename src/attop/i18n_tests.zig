@@ -42,7 +42,11 @@ test "resolve honors env precedence (ATTOP_LANG > LC_ALL > LANG)" {
     _ = setenv("ATTOP_LANG", "de_DE.UTF-8", 1);
     try testing.expectEqualStrings(i18n.de.protected, i18n.resolve().protected);
 
-    // An unsupported locale falls back to English.
+    // Nothing supported set → the FINAL English fallback (clear LC_ALL/LANG
+    // first, else an unsupported ATTOP_LANG would resolve via LC_ALL and
+    // never exercise the default).
+    _ = unsetenv("LC_ALL");
+    _ = unsetenv("LANG");
     _ = setenv("ATTOP_LANG", "fr", 1);
     try testing.expectEqualStrings(i18n.en.protected, i18n.resolve().protected);
 }

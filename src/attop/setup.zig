@@ -53,7 +53,7 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void
         if (std.mem.eql(u8, metrics.guard.ebpf, "attached")) {
             try row(w, t, .ok, "eBPF", s.st_attached, "");
         } else if (std.mem.eql(u8, metrics.guard.ebpf, "off")) {
-            try row(w, t, .neutral, "eBPF", s.st_off, "install: sudo make install-guard GUARD_FEATURES=...,ebpf");
+            try row(w, t, .neutral, "eBPF", s.st_off, s.fix_ebpf_install);
         } else if (metrics.guard.ebpf.len > 0) {
             try row(w, t, .neutral, "eBPF", metrics.guard.ebpf, ""); // future status, verbatim
         } else {
@@ -66,7 +66,7 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void
             const sess = std.fmt.bufPrint(&nbuf, "{d} {s}", .{ metrics.instances, word }) catch word;
             try row(w, t, .ok, "metrics", sess, "");
         } else {
-            try row(w, t, .neutral, "metrics", s.st_no_sessions, "enable the metrics_exporter module");
+            try row(w, t, .neutral, "metrics", s.st_no_sessions, s.fix_enable_metrics);
         }
     } else {
         try row(w, t, .bad, "atty-guard", s.st_not_reachable, "sudo systemctl start atty-guard");
@@ -79,7 +79,7 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, under_atty: bool, cols: u16) !void
     if (under_atty) {
         try row(w, t, .ok, "session", s.st_in_session, "");
     } else {
-        try row(w, t, .neutral, "session", s.st_not_under_atty, "run: atty");
+        try row(w, t, .neutral, "session", s.st_not_under_atty, s.fix_run_atty);
     }
 }
 
