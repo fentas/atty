@@ -18,6 +18,14 @@ test "atty installed → ✓; not on PATH → ✗ + the install fix" {
     try testing.expect(std.mem.indexOf(u8, no, "\u{2717}") != null); // ✗
 }
 
+test "setup surfaces the enforcement depth" {
+    var buf: [4096]u8 = undefined;
+    const m = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "attached", .enforcement = "ancestry" }, .instances = 1 };
+    const out = setup.renderSetup(&buf, m, true, true, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, out, "enforce") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ancestry") != null);
+}
+
 test "daemon up, protected, ebpf, sessions, in-atty → all ok marks" {
     var buf: [4096]u8 = undefined;
     const m = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "attached" }, .instances = 3 };

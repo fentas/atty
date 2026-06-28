@@ -67,6 +67,14 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, atty_on_path: bool, under_atty: bo
             try row(w, t, .neutral, "eBPF", s.st_unknown, ""); // field absent (older daemon)
         }
 
+        // The configured eBPF enforcement depth (one_level / ancestry /
+        // propagate) — surfaced from the posture (was unshown). Informational.
+        if (metrics.guard.enforcement.len > 0) {
+            try row(w, t, .neutral, "enforce", metrics.guard.enforcement, "");
+        } else {
+            try row(w, t, .neutral, "enforce", s.st_unknown, "");
+        }
+
         if (metrics.instances > 0) {
             var nbuf: [48]u8 = undefined;
             const word = if (metrics.instances == 1) s.session_reporting_one else s.session_reporting_many;

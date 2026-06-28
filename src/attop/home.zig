@@ -63,13 +63,18 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     try w.print("  {s}  AI        \u{2014}\r\n", .{g.ai});
     try w.print("  {s}  Suggest   \u{2014}\r\n\r\n", .{g.suggest});
 
-    try w.print(
-        "  {f}{s}{s}    {d} {s} {s} {d} {s}\r\n",
-        .{ t.muted, s.today, reset, metrics.aggregate.commands, s.word_commands, g.bullet, metrics.aggregate.guard_block, s.word_threats_blocked },
-    );
-
-    const term = if (metrics.instances == 1) s.terminals_active_one else s.terminals_active_many;
-    try w.print("  {d} {s}\r\n", .{ metrics.instances, term });
+    if (metrics.instances == 0) {
+        // No session reporting metrics — the counters would all be 0, which
+        // reads as "nothing happened" rather than "metrics aren't on". Say so.
+        try w.print("  {f}{s}{s}\r\n", .{ t.muted, s.metrics_off, reset });
+    } else {
+        try w.print(
+            "  {f}{s}{s}    {d} {s} {s} {d} {s}\r\n",
+            .{ t.muted, s.today, reset, metrics.aggregate.commands, s.word_commands, g.bullet, metrics.aggregate.guard_block, s.word_threats_blocked },
+        );
+        const term = if (metrics.instances == 1) s.terminals_active_one else s.terminals_active_many;
+        try w.print("  {d} {s}\r\n", .{ metrics.instances, term });
+    }
 }
 
 test {

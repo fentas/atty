@@ -28,6 +28,16 @@ test "render shows protected status + the counts row" {
     try testing.expect(std.mem.indexOf(u8, out, "5 terminals active") != null);
 }
 
+test "metrics off (no sessions) → honest hint, not zero counters" {
+    var buf: [4096]u8 = undefined;
+    const m = uds.Metrics{ .guard = .{ .profile = "session" }, .instances = 0 };
+    const out = home.renderHome(&buf, m, 120, 30);
+    try testing.expect(std.mem.indexOf(u8, out, "metrics off") != null);
+    // No misleading zero counters / "0 terminals active".
+    try testing.expect(std.mem.indexOf(u8, out, "commands") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "terminals active") == null);
+}
+
 test "render shows unguarded for prompt" {
     var buf: [4096]u8 = undefined;
     const out = home.renderHome(&buf, sample("prompt"), 120, 30);
