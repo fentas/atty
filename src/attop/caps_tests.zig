@@ -29,19 +29,35 @@ test "attyOnPath finds an executable atty on PATH" {
     // libc — 0.16's std.fs.createFile is io-threaded, awkward in a unit test).
     var tmpl = "/tmp/atty-caps-XXXXXX".*;
     const dir = mkdtemp(&tmpl) orelse return error.MkdtempFailed;
-    const dir_s = std.mem.span(dir);
+    defer _ = rmdir(dir); // registered before any `try` so the dir can't leak
     var fbuf: [256]u8 = undefined;
-    const fpath = try std.fmt.bufPrintZ(&fbuf, "{s}/atty", .{dir_s});
+    const fpath = try std.fmt.bufPrintZ(&fbuf, "{s}/atty", .{std.mem.span(dir)});
     const fd = open(fpath.ptr, O_CREAT | O_WRONLY, 0o755);
     try testing.expect(fd >= 0);
     _ = std.c.close(fd);
-    defer {
-        _ = unlink(fpath.ptr);
-        _ = rmdir(dir);
-    }
+    defer _ = unlink(fpath.ptr);
 
     _ = setenv("PATH", dir, 1);
     try testing.expect(caps.attyOnPath());
+}
+
+test "attyOnPath is false for a present-but-non-executable atty" {
+    var save_buf: [4096]u8 = undefined;
+    const saved = savePath(&save_buf);
+    defer restorePath(saved);
+
+    var tmpl = "/tmp/atty-caps-XXXXXX".*;
+    const dir = mkdtemp(&tmpl) orelse return error.MkdtempFailed;
+    defer _ = rmdir(dir);
+    var fbuf: [256]u8 = undefined;
+    const fpath = try std.fmt.bufPrintZ(&fbuf, "{s}/atty", .{std.mem.span(dir)});
+    const fd = open(fpath.ptr, O_CREAT | O_WRONLY, 0o644); // no execute bits
+    try testing.expect(fd >= 0);
+    _ = std.c.close(fd);
+    defer _ = unlink(fpath.ptr);
+
+    _ = setenv("PATH", dir, 1);
+    try testing.expect(!caps.attyOnPath()); // present but not executable → not "installed"
 }
 
 test "attyOnPath is false when atty is not on PATH" {

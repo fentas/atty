@@ -42,7 +42,7 @@ pub fn main() void {
     // escapes into a pipe.
     if (!term.isatty(posix.STDOUT_FILENO)) {
         var buf: [160]u8 = undefined;
-        const line = banner(&buf, std.c.getenv("ATTY") != null);
+        const line = banner(&buf, caps.underAtty());
         _ = std.c.write(posix.STDOUT_FILENO, line.ptr, line.len);
         return;
     }
@@ -88,7 +88,7 @@ fn runLoop() void {
 
     const sock = uds.socketPath();
     // Fixed for the session — attop is launched once, in or out of atty.
-    const under_atty = std.c.getenv("ATTY") != null;
+    const under_atty = caps.underAtty();
     const atty_on_path = caps.attyOnPath();
     // Sized to hold a full Fleet render of a large reply (matches uds's
     // 64KiB read buffer). Per-row capping to the visible height is a future
