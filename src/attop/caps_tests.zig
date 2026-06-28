@@ -11,18 +11,24 @@ extern "c" fn rmdir(path: [*:0]const u8) c_int;
 const O_CREAT: c_int = 0o100;
 const O_WRONLY: c_int = 0o1;
 
-// Save/restore $PATH around a test that mutates it.
-fn savePath(buf: []u8) ?[:0]const u8 {
+// Save/restore $PATH around a test that mutates it. Allocator-owned (no
+// fixed buffer) so a long real PATH is preserved exactly, not truncated to
+// null — which would otherwise leave $PATH unset after the test.
+fn savePath() ?[:0]u8 {
     const cur = std.c.getenv("PATH") orelse return null;
-    return std.fmt.bufPrintZ(buf, "{s}", .{std.mem.span(cur)}) catch null;
+    return testing.allocator.dupeZ(u8, std.mem.span(cur)) catch null;
 }
-fn restorePath(saved: ?[:0]const u8) void {
-    if (saved) |s| _ = setenv("PATH", s.ptr, 1) else _ = unsetenv("PATH");
+fn restorePath(saved: ?[:0]u8) void {
+    if (saved) |s| {
+        _ = setenv("PATH", s.ptr, 1);
+        testing.allocator.free(s);
+    } else {
+        _ = unsetenv("PATH");
+    }
 }
 
 test "attyOnPath finds an executable atty on PATH" {
-    var save_buf: [4096]u8 = undefined;
-    const saved = savePath(&save_buf);
+    const saved = savePath();
     defer restorePath(saved);
 
     // A unique temp dir + an executable file named `atty` in it (all via
@@ -42,8 +48,7 @@ test "attyOnPath finds an executable atty on PATH" {
 }
 
 test "attyOnPath is false for a present-but-non-executable atty" {
-    var save_buf: [4096]u8 = undefined;
-    const saved = savePath(&save_buf);
+    const saved = savePath();
     defer restorePath(saved);
 
     var tmpl = "/tmp/atty-caps-XXXXXX".*;
@@ -61,8 +66,7 @@ test "attyOnPath is false for a present-but-non-executable atty" {
 }
 
 test "attyOnPath is false when atty is not on PATH" {
-    var save_buf: [4096]u8 = undefined;
-    const saved = savePath(&save_buf);
+    const saved = savePath();
     defer restorePath(saved);
 
     _ = setenv("PATH", "/nonexistent-atty-test-dir", 1);
@@ -70,8 +74,7 @@ test "attyOnPath is false when atty is not on PATH" {
 }
 
 test "attyOnPath is false on an empty PATH" {
-    var save_buf: [4096]u8 = undefined;
-    const saved = savePath(&save_buf);
+    const saved = savePath();
     defer restorePath(saved);
 
     _ = setenv("PATH", "", 1);
