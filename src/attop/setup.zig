@@ -1,8 +1,8 @@
 //! attop Setup/Doctor screen (docs/dashboard.md Setup) — the embedded
 //! health check. Answers "is my atty stack wired up?" with a checklist + a
 //! one-line fix per failing/optional item, so onboarding + troubleshooting
-//! live in the dashboard. PURE render (no I/O): the daemon metrics + the
-//! under-atty flag are passed in.
+//! live in the dashboard. PURE render (no I/O): the daemon metrics, the
+//! atty-on-PATH flag, and the under-atty flag are passed in.
 
 const std = @import("std");
 const atty = @import("atty");

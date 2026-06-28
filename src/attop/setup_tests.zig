@@ -9,6 +9,7 @@ test "atty installed → ✓; not on PATH → ✗ + the install fix" {
 
     const yes = setup.renderSetup(&buf, m, true, true, 120, 40); // atty_on_path = true
     try testing.expect(std.mem.indexOf(u8, yes, "installed") != null);
+    try testing.expect(std.mem.indexOf(u8, yes, "not installed") == null); // ✓, not the ✗ wording
 
     var buf2: [4096]u8 = undefined;
     const no = setup.renderSetup(&buf2, m, false, true, 120, 40); // not on PATH
