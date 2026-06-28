@@ -89,6 +89,11 @@ pub fn serve(
         threat = threat.with_ebpf(es);
     }
 
+    // Seed the live armed-rule counts from the startup posture (which
+    // reflects the load-time arming); SetProfile updates them per switch.
+    let init_deny_path = guard_posture.deny_path;
+    let init_deny_basename = guard_posture.deny_basename;
+
     let state = Arc::new(State {
         classifier,
         threat,
@@ -105,6 +110,8 @@ pub fn serve(
         deny_binaries,
         deny_basenames,
         switch_lock: std::sync::Mutex::new(()),
+        deny_path_armed: std::sync::atomic::AtomicU32::new(init_deny_path),
+        deny_basename_armed: std::sync::atomic::AtomicU32::new(init_deny_basename),
     });
 
     // Bounded-resources gate: shared atomic counter ticks up on
@@ -260,6 +267,12 @@ struct State {
     /// Serializes a profile switch's atomic-swap + deny-map mutation so
     /// concurrent SetProfile callers can't desync the kernel deny-map.
     switch_lock: std::sync::Mutex<()>,
+    /// Count of deny-rules ACTUALLY armed in the kernel (not the configured
+    /// length — an encode failure arms fewer). Seeded from the startup
+    /// posture, updated on each switch; GetMetrics reports these so attop's
+    /// count reflects the kernel, post-switch included.
+    deny_path_armed: std::sync::atomic::AtomicU32,
+    deny_basename_armed: std::sync::atomic::AtomicU32,
 }
 
 /// Caps for `SubscribeWarnEvents` connections. Kept separate from
@@ -1097,21 +1110,16 @@ fn handle_list_instances(state: &State, peer: PeerCred) -> ResponseBody {
 fn handle_get_metrics(state: &State, peer: PeerCred) -> ResponseBody {
     let (aggregate, instances) = state.metrics.aggregate(peer.uid, peer.is_root);
     let mut guard = state.guard_posture.clone();
-    let live = live_profile(state);
-    guard.profile = live.as_str().to_string();
-    // Deny counts follow the LIVE profile (only strict arms the deny-map),
-    // so a runtime switch is reflected rather than the startup count.
-    let strict = live == crate::profile::SecurityProfile::Strict;
-    guard.deny_path = if strict {
-        state.deny_binaries.len() as u32
-    } else {
-        0
-    };
-    guard.deny_basename = if strict {
-        state.deny_basenames.len() as u32
-    } else {
-        0
-    };
+    guard.profile = live_profile(state).as_str().to_string();
+    // Report the ACTUAL armed-rule counts (seeded at startup, updated per
+    // switch) — reflects the kernel deny-map, not the configured length,
+    // after a runtime switch to/away from strict.
+    guard.deny_path = state
+        .deny_path_armed
+        .load(std::sync::atomic::Ordering::Relaxed);
+    guard.deny_basename = state
+        .deny_basename_armed
+        .load(std::sync::atomic::Ordering::Relaxed);
     ResponseBody::Metrics {
         aggregate,
         guard,
@@ -1228,6 +1236,12 @@ fn handle_set_profile(
                 if let Err(e) = es.set_basename_gate(armed_names > 0) {
                     eprintln!("atty-guard: switch->strict basename_gate failed — {e}");
                 }
+                state
+                    .deny_path_armed
+                    .store(armed_bins as u32, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .deny_basename_armed
+                    .store(armed_names as u32, std::sync::atomic::Ordering::Relaxed);
                 if state.verbosity >= 1 {
                     eprintln!(
                         "atty-guard: switched to strict — armed {armed_bins} path + {armed_names} basename kernel deny-rule(s)"
@@ -1250,6 +1264,12 @@ fn handle_set_profile(
                         "atty-guard: switch-away-from-strict basename_gate clear failed — {e}"
                     );
                 }
+                state
+                    .deny_path_armed
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .deny_basename_armed
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 if state.verbosity >= 1 {
                     eprintln!(
                         "atty-guard: switched away from strict — cleared the kernel deny-map"
