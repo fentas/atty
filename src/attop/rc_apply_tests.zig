@@ -4,6 +4,7 @@ const rc_apply = @import("rc_apply.zig");
 const rc_writer = @import("rc_writer.zig");
 
 extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
 const O_CREAT: c_int = 0o100;
 const O_WRONLY: c_int = 0o1;
@@ -85,6 +86,27 @@ test "wireShell writes the init file, upserts the rc, backs it up, idempotent" {
     const rc2 = readBack(rc_path) orelse return error.NoRc2;
     defer testing.allocator.free(rc2);
     try testing.expectEqual(@as(usize, 1), countMarkers(rc2));
+}
+
+test "wireShell aborts on a read error, leaving the target untouched" {
+    var tmpl = "/tmp/atty-rcw3-XXXXXX".*;
+    const dir = mkdtemp(&tmpl) orelse return error.MkdtempFailed;
+    const ds = std.mem.span(dir);
+
+    // rc_path points at a DIRECTORY → open succeeds, read fails (EISDIR) → a
+    // genuine read error, NOT "absent". wireShell must abort, not blank it.
+    var rcbuf: [256]u8 = undefined;
+    const rc_dir = try std.fmt.bufPrintZ(&rcbuf, "{s}/as-a-dir", .{ds});
+    try testing.expect(mkdir(rc_dir.ptr, 0o755) == 0);
+    var cfgbuf: [256]u8 = undefined;
+    const cfg = try std.fmt.bufPrint(&cfgbuf, "{s}/cfg", .{ds});
+
+    try testing.expectError(error.ReadFailed, rc_apply.wireShell(testing.allocator, cfg, "bash", rc_dir));
+
+    // aborted before backup → no .atty.bak
+    var bakbuf: [256]u8 = undefined;
+    const bak = try std.fmt.bufPrint(&bakbuf, "{s}.atty.bak", .{rc_dir});
+    try testing.expect(readBack(bak) == null);
 }
 
 test "wireShell creates the rc when it does not exist (no backup)" {

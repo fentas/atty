@@ -126,7 +126,7 @@ fn runLoop() void {
             // arena; the render copies into framebuf before it's freed.
             const frame = if (wire) |ws| wb: {
                 const wp = wirePaths(a) orelse break :wb setup.renderWire(&framebuf, ws, "", "", "", sz.cols, sz.rows);
-                const block = rc_writer.buildBlock(a, wp.init_path) catch "";
+                const block = rc_writer.buildBlock(a, wp.init_path, wp.shell) catch "";
                 break :wb setup.renderWire(&framebuf, ws, wp.init_path, wp.rc_path, block, sz.cols, sz.rows);
             } else switch (screen) {
                 .home => home.renderHome(&framebuf, metricsOf(uds.fetch(a, sock, fetch_timeout_ms)), sz.cols, sz.rows),

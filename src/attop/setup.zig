@@ -60,7 +60,11 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
         try row(w, t, .neutral, "shell", s.st_not_wired, s.wire_hint);
     } else {
         var fixbuf: [128]u8 = undefined;
-        const fix = std.fmt.bufPrint(&fixbuf, "{s}eval \"$(atty init {s})\"", .{ s.fix_wire_shell, host.shell_name }) catch s.fix_wire_shell;
+        // fish has no `eval "$(...)"`; it pipes to source.
+        const fix = if (std.mem.eql(u8, host.shell_name, "fish"))
+            std.fmt.bufPrint(&fixbuf, "{s}atty init fish | source", .{s.fix_wire_shell}) catch s.fix_wire_shell
+        else
+            std.fmt.bufPrint(&fixbuf, "{s}eval \"$(atty init {s})\"", .{ s.fix_wire_shell, host.shell_name }) catch s.fix_wire_shell;
         try row(w, t, .neutral, "shell", s.st_not_wired, fix);
     }
 
