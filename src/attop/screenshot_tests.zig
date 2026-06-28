@@ -124,9 +124,11 @@ test "Help renders the key + env reference across widths" {
     for (widths) |cols| {
         const out = try screen(testing.allocator, help.renderHelp(&buf, cols, 40), 40, cols);
         defer testing.allocator.free(out);
-        // Full env strings as needles so a wrap at the narrow width (which
-        // would split them across grid rows) fails the test.
-        try expectOnScreen(out, &.{ "Keys", "Home", "Guard", "Fleet", "Setup", "ATTOP_THEME=dark|light|high-contrast|mono|ascii", "NO_COLOR forces mono", "atty-guard daemon" });
+        // Contiguous key→screen pairs (the grid is SGR-stripped, so the key
+        // sits next to its screen) — proves each key is rendered as a key,
+        // not matched in unrelated text. Plus full env strings as needles so
+        // a wrap at the narrow width (which splits them across rows) fails.
+        try expectOnScreen(out, &.{ "Keys", "h   Home", "g   Guard", "f   Fleet", "s   Setup", "?   Help", "q   Quit", "ATTOP_THEME=dark|light|high-contrast|mono|ascii", "NO_COLOR forces mono", "atty-guard daemon" });
     }
 }
 

@@ -3,13 +3,12 @@ const testing = std.testing;
 const help = @import("help.zig");
 const i18n = @import("i18n.zig");
 
-test "Help lists every screen key + the env reference" {
+test "Help lists every screen + the env reference" {
     var buf: [4096]u8 = undefined;
     const out = help.renderHelp(&buf, 120, 40);
-    // Every nav key + its screen.
-    for ([_][]const u8{ "h", "g", "f", "s", "?", "q" }) |k| {
-        try testing.expect(std.mem.indexOf(u8, out, k) != null);
-    }
+    // Each screen name (multi-char → robust; single-char keys would match
+    // unrelated text, so the key→screen pairing is asserted in the
+    // screenshot test against the SGR-stripped grid instead).
     for ([_][]const u8{ "Home", "Guard", "Fleet", "Setup", "Help", "Quit" }) |scr| {
         try testing.expect(std.mem.indexOf(u8, out, scr) != null);
     }
