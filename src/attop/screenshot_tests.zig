@@ -1,12 +1,8 @@
-//! attop screenshot tests — the docs/dashboard.md "screenshots end-to-end
-//! tested" guarantee. Each pure screen render is fed through the SAME VT
-//! emulator the proxy's e2e harness uses (src/test/e2e/vt.zig), and we
-//! assert against the resulting on-screen grid — the actual terminal text,
-//! not the raw escape bytes. The checks are content-present-and-unwrapped
-//! (each needle appears INTACT in the grid, so it fit the width without a
-//! mid-word wrap) across widths; full pixel-exact grid goldens are a
-//! follow-up. Still catches malformed escapes, wrapping, and off-screen
-//! content that a raw-byte assertion would miss.
+//! attop screenshot tests: feed each pure screen render through the VT
+//! emulator (src/test/e2e/vt.zig) and assert the on-screen grid, not the
+//! raw bytes — so wrapping / malformed escapes / off-screen content are
+//! caught. Checks are content-present-and-unwrapped; pixel-exact goldens
+//! are a follow-up.
 
 const std = @import("std");
 const testing = std.testing;
