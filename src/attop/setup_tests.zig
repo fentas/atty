@@ -67,6 +67,7 @@ test "setup lists daemon compiled features; empty → minimal build" {
     const m3 = uds.Metrics{ .guard = .{ .profile = "strict", .ebpf = "attached" }, .instances = 1 }; // features defaults null
     const out3 = setup.renderSetup(&buf3, m3, .{ .atty_on_path = true, .under_atty = true, .shell_integrated = true }, 120, 40);
     try testing.expect(std.mem.indexOf(u8, out3, "minimal build") == null);
+    try testing.expect(std.mem.indexOf(u8, out3, "unknown") != null); // features row → unknown (ebpf attached, so it's the only unknown)
 }
 
 test "renderWire confirm shows the block + paths + prompt; done/failed messages" {

@@ -22,6 +22,30 @@ test "parse a get_metrics reply into Metrics" {
     try testing.expectEqual(@as(u32, 3), m.guard.deny_basename);
 }
 
+test "guard.features wire contract: absent → null, [] → empty, list → values" {
+    // absent (older daemon) → null (the dashboard shows "unknown", not minimal)
+    const absent = "{\"type\":\"metrics\",\"guard\":{\"profile\":\"strict\"},\"instances\":1}";
+    const pa = uds.parse(testing.allocator, absent) orelse return error.ParseFailed;
+    defer pa.deinit();
+    try testing.expect(pa.value.guard.features == null);
+
+    // present-empty (new daemon, default build) → an empty (non-null) slice
+    const empty = "{\"type\":\"metrics\",\"guard\":{\"profile\":\"strict\",\"features\":[]},\"instances\":1}";
+    const pe = uds.parse(testing.allocator, empty) orelse return error.ParseFailed;
+    defer pe.deinit();
+    try testing.expect(pe.value.guard.features != null);
+    try testing.expectEqual(@as(usize, 0), pe.value.guard.features.?.len);
+
+    // present-list → the values, in order
+    const list = "{\"type\":\"metrics\",\"guard\":{\"profile\":\"strict\",\"features\":[\"ebpf\",\"osv-live\"]},\"instances\":1}";
+    const pl = uds.parse(testing.allocator, list) orelse return error.ParseFailed;
+    defer pl.deinit();
+    const f = pl.value.guard.features orelse return error.NoFeatures;
+    try testing.expectEqual(@as(usize, 2), f.len);
+    try testing.expectEqualStrings("ebpf", f[0]);
+    try testing.expectEqualStrings("osv-live", f[1]);
+}
+
 test "parse tolerates missing fields (defaults) + ignores unknown" {
     // A sparse reply with an unknown extra field — must still parse.
     const reply = "{\"type\":\"metrics\",\"guard\":{\"profile\":\"prompt\"},\"extra\":42}";
