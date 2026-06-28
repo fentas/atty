@@ -432,22 +432,11 @@ fn default_socket_path() -> PathBuf {
     PathBuf::from("/run/atty-guard/atty-guard.sock")
 }
 
-/// Emit one feature name per stdout line for each Cargo feature
-/// compiled into this binary. Static — relies on `#[cfg(feature)]`
-/// at compile time so the output is exactly the set baked in (no
-/// runtime detection / kernel probing).
+/// Emit one feature name per stdout line for each Cargo feature compiled into
+/// this binary (the set baked in at compile time — no runtime/kernel probing).
+/// Shares `enabled_features()` with the guard posture so the two can't drift.
 fn print_compiled_features() {
-    let mut features: Vec<&'static str> = Vec::new();
-    #[cfg(feature = "tier2-onnx")]
-    features.push("tier2-onnx");
-    #[cfg(feature = "osv-live")]
-    features.push("osv-live");
-    #[cfg(feature = "atoms-fetch")]
-    features.push("atoms-fetch");
-    #[cfg(feature = "ebpf")]
-    features.push("ebpf");
-    features.sort();
-    for f in &features {
+    for f in enabled_features() {
         println!("{f}");
     }
 }
@@ -671,9 +660,9 @@ fn remove_socket_if_safe(path: &std::path::Path) -> Result<(), SocketRemoveError
     std::fs::remove_file(&resolved).map_err(SocketRemoveError::Io)
 }
 
-/// The Cargo features compiled into this daemon — surfaced in the guard
-/// posture so the dashboard can show what's available (eBPF / SLM / OSV / atom
-/// fetch) rather than inferring it from behaviour. Order = install relevance.
+/// The Cargo features compiled into this daemon — the single source for both
+/// the guard posture (so the dashboard shows what's available: eBPF / SLM /
+/// OSV / atom fetch) and `--print-features`. Sorted for a stable order.
 fn enabled_features() -> Vec<String> {
     let mut f = Vec::new();
     if cfg!(feature = "ebpf") {
@@ -688,6 +677,7 @@ fn enabled_features() -> Vec<String> {
     if cfg!(feature = "atoms-fetch") {
         f.push("atoms-fetch".to_string());
     }
+    f.sort();
     f
 }
 

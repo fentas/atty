@@ -110,7 +110,9 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, host: Host, cols: u16) !void {
             }
             try row(w, t, .ok, "features", fbuf[0..fw.end], "");
         } else {
-            try row(w, t, .neutral, "features", s.st_minimal, s.fix_ebpf_install);
+            // No fix here — an empty feature set means the eBPF row above is
+            // already "off" with the GUARD_FEATURES install line; don't repeat it.
+            try row(w, t, .neutral, "features", s.st_minimal, "");
         }
 
         if (metrics.instances > 0) {
