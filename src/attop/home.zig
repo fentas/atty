@@ -64,8 +64,8 @@ fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
     try w.print("  {s}  Suggest   \u{2014}\r\n\r\n", .{g.suggest});
 
     if (metrics.instances == 0) {
-        // No session reporting metrics — the counters would all be 0, which
-        // reads as "nothing happened" rather than "metrics aren't on". Say so.
+        // Zeroed counters would mislead as "nothing happened" rather than
+        // "no metrics are being collected".
         try w.print("  {f}{s}{s}\r\n", .{ t.muted, s.metrics_off, reset });
     } else {
         try w.print(
