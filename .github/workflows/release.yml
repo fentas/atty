@@ -104,6 +104,11 @@ jobs:
           chmod +x dist/${{ steps.pkg.outputs.stem }}
           script -qfec "dist/${{ steps.pkg.outputs.stem }} bash -c 'echo atty-release-ok'" /dev/null 2>&1 | tee /tmp/out
           grep -q atty-release-ok /tmp/out
+          # attop: with stdout not a TTY it prints its banner + exits 0 — a
+          # headless runtime check that the dashboard binary actually runs.
+          chmod +x "dist/attop-${{ matrix.asset_arch }}"
+          "dist/attop-${{ matrix.asset_arch }}" </dev/null > /tmp/attop_out 2>&1
+          grep -q "atty dashboard" /tmp/attop_out
 
       - uses: actions/upload-artifact@v7
         with:
