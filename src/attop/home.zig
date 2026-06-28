@@ -6,14 +6,9 @@
 const std = @import("std");
 const atty = @import("atty");
 const uds = @import("uds.zig");
+const theme = @import("theme.zig");
 
-const style = atty.style;
-const reset = style.reset;
-const Style = atty.Style;
-
-// Local palette (themeable later). presets lacks a green, so define it.
-const ok: Style = .{ .bold = true, .fg = 2 }; // green — protected
-const warn: Style = .{ .bold = true, .fg = 3 }; // yellow — unguarded
+const reset = atty.style.reset;
 
 /// `cols` below this stacks into a tighter layout (the responsive break).
 pub const compact_cols: u16 = 80;
@@ -34,39 +29,41 @@ pub fn renderHome(buf: []u8, m: ?uds.Metrics, cols: u16, rows: u16) []const u8 {
 }
 
 fn render(w: *std.Io.Writer, m: ?uds.Metrics, cols: u16) !void {
+    const t = theme.active;
+    const g = t.glyph;
     const compact = cols < compact_cols;
     try w.writeAll("\x1b[2J\x1b[H"); // clear + home
 
     if (compact) {
-        try w.print("{f}atty{s}\r\n\r\n", .{ style.presets.emphasis, reset });
+        try w.print("{f}atty{s}\r\n\r\n", .{ t.title, reset });
     } else {
-        try w.print("{f}atty{s} — dashboard\r\n\r\n", .{ style.presets.emphasis, reset });
+        try w.print("{f}atty{s} — dashboard\r\n\r\n", .{ t.title, reset });
     }
 
     if (m == null) {
-        try w.print("  {f}atty-guard not running{s}\r\n", .{ style.presets.danger, reset });
+        try w.print("  {f}atty-guard not running{s}\r\n", .{ t.danger, reset });
         try w.writeAll("  start it:  sudo systemctl start atty-guard\r\n");
         return;
     }
     const metrics = m.?;
 
     if (isProtected(metrics)) {
-        try w.print("  {f}\u{25CF} Protected{s}\r\n\r\n", .{ ok, reset });
+        try w.print("  {f}{s} Protected{s}\r\n\r\n", .{ t.ok, g.protected, reset });
     } else {
-        try w.print("  {f}\u{25CB} Unguarded{s}\r\n\r\n", .{ warn, reset });
+        try w.print("  {f}{s} Unguarded{s}\r\n\r\n", .{ t.warn, g.unguarded, reset });
     }
 
     // AI/Suggest aren't wired into the metrics yet — show an honest
     // em-dash rather than faking activity.
     const prof = if (metrics.guard.profile.len > 0) metrics.guard.profile else "\u{2014}";
     const ebpf = if (metrics.guard.ebpf.len > 0) metrics.guard.ebpf else "\u{2014}";
-    try w.print("  \u{1F6E1}  Guard     {s}     kernel: {s}\r\n", .{ prof, ebpf });
-    try w.writeAll("  \u{1F916}  AI        \u{2014}\r\n");
-    try w.writeAll("  \u{2728}  Suggest   \u{2014}\r\n\r\n");
+    try w.print("  {s}  Guard     {s}     kernel: {s}\r\n", .{ g.shield, prof, ebpf });
+    try w.print("  {s}  AI        \u{2014}\r\n", .{g.ai});
+    try w.print("  {s}  Suggest   \u{2014}\r\n\r\n", .{g.suggest});
 
     try w.print(
-        "  {f}Today{s}    {d} commands \u{B7} {d} threats blocked\r\n",
-        .{ style.presets.muted, reset, metrics.aggregate.commands, metrics.aggregate.guard_block },
+        "  {f}Today{s}    {d} commands {s} {d} threats blocked\r\n",
+        .{ t.muted, reset, metrics.aggregate.commands, g.bullet, metrics.aggregate.guard_block },
     );
 
     const plural: []const u8 = if (metrics.instances == 1) "" else "s";

@@ -17,6 +17,7 @@ const uds = @import("uds.zig");
 const home = @import("home.zig");
 const guard = @import("guard.zig");
 const fleet = @import("fleet.zig");
+const theme = @import("theme.zig");
 const posix = std.posix;
 
 // Force-analyze the atty-module reuse so the cross-binary import wiring
@@ -45,6 +46,9 @@ pub fn main() void {
 }
 
 fn runLoop() void {
+    // Resolve the palette/glyph set once ($ATTOP_THEME / NO_COLOR / a
+    // light-bg COLORFGBG / dark). The renders read theme.active.
+    theme.active = theme.resolve();
     const out = posix.STDOUT_FILENO;
     // Raw mode on stdin. If stdin isn't a tty (e.g. `echo x | attop`),
     // say so instead of exiting silently — the stdout-tty guard alone
@@ -187,4 +191,5 @@ test {
     _ = @import("guard.zig");
     _ = @import("fleet.zig");
     _ = @import("screenshot_tests.zig");
+    _ = @import("theme.zig");
 }
