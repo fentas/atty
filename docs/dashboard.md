@@ -164,6 +164,7 @@ pub fn attach(allocator) !Runtime           // required
 pub fn title() []const u8                    // required — tab label
 pub fn navKey() u8                           // required — global hotkey
 pub fn render(rt, ctx, w) !void              // required — draw content
+pub fn detach(rt) void                       // optional — teardown (free attach's resources)
 pub fn onKey(rt, ctx, key) !panel.Action     // optional — handled | pass | quit | refresh
 pub fn onTick(rt, ctx, elapsed_ms) !void     // optional — periodic work
 pub fn footerHint(rt, ctx) ?[]const u8       // optional — panel key legend
