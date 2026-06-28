@@ -79,6 +79,10 @@ test "Guard renders the ladder + active rung across widths" {
         const t = try screen(testing.allocator, guard.renderGuard(&buf, homeMetrics("strict"), cols, 40), 40, cols);
         defer testing.allocator.free(t);
         try expectOnScreen(t, &.{ "prompt", "audit", "session", "strict", "lockdown", "smart", "kernel" });
+        // The ACTIVE rung carries the ▸ marker (the fixture is "strict");
+        // a non-active rung must not.
+        try expectOnScreen(t, &.{"\u{25B8} strict"});
+        try testing.expect(std.mem.indexOf(u8, t, "\u{25B8} prompt") == null);
         // A long TL;DR must render intact (not wrapped mid-line) at full
         // width — the wrap the VT grid would expose.
         if (cols >= 120) try expectOnScreen(t, &.{"freezes anything ambiguous"});
@@ -107,7 +111,8 @@ test "Fleet renders rows + total across widths" {
     for (widths) |cols| {
         const t = try screen(testing.allocator, fleet.renderFleet(&buf, &list, cols, 40), 40, cols);
         defer testing.allocator.free(t);
-        try expectOnScreen(t, &.{ "Fleet", "4242", "bash", "2 terminals" });
+        // Both rows (incl. the incognito 🔒 on the 2nd) + the total.
+        try expectOnScreen(t, &.{ "Fleet", "4242", "bash", "99", "zsh", "\u{1F512}", "2 terminals" });
     }
 }
 
