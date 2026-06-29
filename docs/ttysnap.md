@@ -154,8 +154,9 @@ reproducible across machines.
 time, pumping the inter-key delay so the echo renders per-char and a recording
 animates realistic typing. Patterns: `instant` (the default — same as `send`),
 `fast`, `consistent`, `slow`, `irregular` (human-like jitter + a beat after
-spaces/punctuation), `random`. The jitter is a fixed-seed PRNG, so a recording
-regenerates byte-for-byte.
+spaces/punctuation), `random`. The jitter is a fixed-seed PRNG, so the typing
+cadence is identical run-to-run (the cast's wall-clock timestamps still vary by
+a few ms).
 
 ### Demo GIFs
 

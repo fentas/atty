@@ -16,6 +16,13 @@ export PATH="$HOME/.cargo/bin:$PATH"
 TARGET="${ZIG_TARGET:--Dtarget=x86_64-linux-gnu}"
 THEME="${AGG_THEME:-monokai}"
 
+# The e2e runner rebuilds atty once per scenario via a fresh `zig build install`;
+# that child reads ATTY_E2E_BUILD_FLAGS (not -Dtarget), so propagate the target
+# to it too — otherwise ZIG_TARGET would only affect the outer build and the
+# per-scenario atty would link natively (which fails on some toolchains, e.g.
+# Arch's gcc-16 crt1). Respect an already-exported value.
+export ATTY_E2E_BUILD_FLAGS="${ATTY_E2E_BUILD_FLAGS:-$TARGET}"
+
 if ! command -v agg >/dev/null 2>&1; then
   echo "error: agg not found — cargo install --locked --git https://github.com/asciinema/agg --tag v1.9.0" >&2
   exit 1
