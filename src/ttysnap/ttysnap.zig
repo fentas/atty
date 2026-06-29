@@ -115,14 +115,18 @@ pub fn Harness(comptime modules: anytype) type {
             };
         }
 
-        /// Resize the child's terminal (SIGWINCH via TIOCSWINSZ). NOTE: ttysnap's
-        /// grid stays at the spawn size (vt.Grid has no resize yet), so after a
-        /// resize the child's wider/taller output wraps into the old grid —
-        /// gridContains / waitFor / snapshot can then miss strings that cross
-        /// the stale wrap. Use this to stress SIGWINCH handling, not to assert a
-        /// resized screen; grid-resize is a follow-on.
-        pub fn resize(self: *Self, cols: u16, rows: u16) void {
+        /// Resize the session: tell the child (SIGWINCH via TIOCSWINSZ) AND
+        /// resize ttysnap's grid + render buffer so post-resize assertions see
+        /// the new geometry. The grid keeps its overlapping top-left content.
+        pub fn resize(self: *Self, cols: u16, rows: u16) !void {
             _ = pty.setSize(self.child.master, cols, rows);
+            try self.grid.resize(rows, cols);
+            // Keep the recorded dims in lockstep with the grid BEFORE the
+            // (fallible) realloc, so an OOM there can't leave them disagreeing.
+            self.cols = cols;
+            self.rows = rows;
+            const need = (@as(usize, cols) * 4 + 1) * (@as(usize, rows) + 1);
+            if (need > self.text_buf.len) self.text_buf = try self.allocator.realloc(self.text_buf, need);
         }
 
         pub fn deinit(self: *Self) void {

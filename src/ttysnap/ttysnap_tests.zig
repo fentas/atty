@@ -37,6 +37,22 @@ test "ttysnap: waitFor times out (returns false) on absent text" {
     try testing.expect(!(try h.waitFor("never-appears", 200)));
 }
 
+test "ttysnap: resize grows the grid + preserves rendered content" {
+    const H = ttysnap.Harness(.{});
+    var h = try H.spawn(testing.allocator, .{ .argv = &.{"cat"}, .cols = 20, .rows = 5, .env = &test_env });
+    defer h.deinit();
+
+    try h.send("hello-resize\r");
+    try testing.expect(try h.waitFor("hello-resize", 3000));
+
+    try h.resize(40, 12);
+    try testing.expectEqual(@as(u16, 40), h.cols);
+    try testing.expectEqual(@as(u16, 12), h.rows);
+    try testing.expectEqual(@as(u16, 12), h.grid.rows);
+    try testing.expectEqual(@as(u16, 40), h.grid.cols);
+    try testing.expect(h.gridContains("hello-resize")); // content survived the resize
+}
+
 // ---- hook-fanning probe module --------------------------------------------
 // File-scope recorders (the runtime is heap-pinned; this is the same pattern
 // attop's panel tests use). Reset at the top of the test that reads them.

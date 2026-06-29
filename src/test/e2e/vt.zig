@@ -121,6 +121,39 @@ pub const Grid = struct {
         self.* = undefined;
     }
 
+    /// Resize the grid, preserving the overlapping top-left content. A shrink
+    /// drops the BOTTOM rows / RIGHT columns (xterm scrolls content up instead —
+    /// the witness keeps top-left, which is simpler and sufficient here). Both
+    /// the live AND saved (DECSC/SCO) cursors are clamped into the new bounds so
+    /// a later DECRC can't strand the cursor out of range. The child must be
+    /// told the new size via TIOCSWINSZ separately — ttysnap's `Harness.resize`
+    /// does both. Dimensions are clamped to >= 1.
+    pub fn resize(self: *Grid, new_rows_in: u16, new_cols_in: u16) !void {
+        const new_rows = @max(new_rows_in, 1);
+        const new_cols = @max(new_cols_in, 1);
+        if (new_rows == self.rows and new_cols == self.cols) return;
+        const new_cells = try self.allocator.alloc(Cell, @as(usize, new_rows) * new_cols);
+        @memset(new_cells, .{});
+        const copy_rows = @min(self.rows, new_rows);
+        const copy_cols = @min(self.cols, new_cols);
+        var r: u16 = 0;
+        while (r < copy_rows) : (r += 1) {
+            @memcpy(
+                new_cells[@as(usize, r) * new_cols ..][0..copy_cols],
+                self.cells[self.idx(r, 0)..][0..copy_cols],
+            );
+        }
+        self.allocator.free(self.cells);
+        self.cells = new_cells;
+        self.rows = new_rows;
+        self.cols = new_cols;
+        if (self.cur_row >= new_rows) self.cur_row = new_rows - 1;
+        if (self.cur_col >= new_cols) self.cur_col = new_cols - 1;
+        if (self.saved_row >= new_rows) self.saved_row = new_rows - 1;
+        if (self.saved_col >= new_cols) self.saved_col = new_cols - 1;
+        self.wrap_pending = false;
+    }
+
     inline fn idx(self: *const Grid, r: u16, c: u16) usize {
         return @as(usize, r) * self.cols + c;
     }
