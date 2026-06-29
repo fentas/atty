@@ -15,10 +15,6 @@ cols 60
 rows 8
 timeout_ms 5000
 
-# Cap master reads so OSC-133 markers split at read boundaries, making the
-# capture-bleed race deterministic without needing CI load.
-env ATTY_TEST_FRAGMENT_READS=16
-
 spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
 
