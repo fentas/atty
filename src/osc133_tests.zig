@@ -20,11 +20,14 @@ test "Osc133: active stays false until any 133 marker arrives" {
     try testing.expectEqual(@as(usize, 0), o.currentInput().len);
 }
 
-test "Osc133: REPRO — prior command output must not bleed into the next capture under fragmentation" {
-    // Integration with no ;C (starship-style): phase stays .in_input from ;B
-    // through command execution, so the echo OUTPUT is captured; the next
-    // prompt's ;A + ;B must clear it. This must hold no matter how the byte
-    // stream is chunked across feed() calls.
+test "Osc133: tracker invariant — ;A/;B clear the capture regardless of feed() chunking" {
+    // NOTE: this guards the TRACKER's split-marker handling, not the #525
+    // regression itself — the bug lives in the proxy's per-read
+    // syncFromCapture interleaving (captured output absorbed by an
+    // intermediate read before ;A/;B arrive), which the N=16 e2e scenarios
+    // guard. Here: with no ;C, phase stays .in_input from ;B through command
+    // execution so the echo OUTPUT is captured; the next prompt's ;A + ;B must
+    // still clear it no matter how the byte stream is chunked across feed().
     const seq =
         "\x1b]133;B\x07" ++ // input phase opens
         "starship-survived-" ++ // prior command's OUTPUT (captured, no ;C)

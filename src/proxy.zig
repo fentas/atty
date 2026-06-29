@@ -1649,17 +1649,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
-                // End OSC 133 input capture on submit. The shell integration
-                // emits ;A/;B but may omit ;C (Ghostty default, starship-style
-                // PROMPT_COMMAND wrappers); without a ;C the tracker would stay
-                // in INPUT phase through command execution and capture the
-                // command's OUTPUT. A fragmented master read can then leave
-                // that output in the capture, where the next line's commit
-                // override (above) / syncFromCapture absorbs it — recording
-                // e.g. "<prev output><next cmd>" (#525). We just saw the user
+                // End OSC 133 input capture on submit. An integration that
+                // emits ;A/;B but omits ;C (a starship-style PROMPT_COMMAND
+                // wrapper, or an init that lost its DEBUG-trap ;C — NOT atty's
+                // shipped full-emitter init) leaves the tracker in INPUT phase
+                // through command execution, capturing the command's OUTPUT. A
+                // fragmented master read can then leave that output in the
+                // capture, where the next line's commit override (above) /
+                // syncFromCapture absorbs it — recording e.g.
+                // "<prev output><next cmd>" (#525). We just saw the user
                 // submit, so end capture ourselves — the ;C the shell omitted.
-                // After the inInputPhase-gated logic above so it doesn't
-                // perturb this line's commit / launch-push / recording.
+                // MUST stay after the inInputPhase-gated logic above so it
+                // doesn't perturb this line's commit / launch-push / recording.
                 if (shell_will_execute) osc133_tracker.endInputCapture();
 
                 // Deliberately NO renderGhost here. The shell hasn't
