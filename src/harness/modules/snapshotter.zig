@@ -49,7 +49,8 @@ pub fn snapshotter(comptime cfg: struct {
                 return;
             }
 
-            const prior = fio.readFileAlloc(rt.allocator, golden, 1 << 20) catch {
+            const prior = fio.readFileAlloc(rt.allocator, golden, 1 << 20) catch |e| {
+                if (e != error.FileNotFound) return e; // a real IO error ≠ "no golden yet"
                 try writeActual(cfg.dir, name, text);
                 return Error.SnapshotGoldenMissing;
             };

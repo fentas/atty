@@ -34,6 +34,7 @@ const F_GETFL: c_int = 3;
 const F_SETFL: c_int = 4;
 
 pub const Error = error{
+    EmptyArgv,
     OpenPtFailed,
     GrantPtFailed,
     UnlockPtFailed,
@@ -71,6 +72,7 @@ pub const Child = struct {
 };
 
 pub fn spawn(allocator: Allocator, opts: Opts) Error!Child {
+    if (opts.argv.len == 0) return Error.EmptyArgv; // argv[0] is the program
     const master = posix_openpt(O_RDWR_NOCTTY);
     if (master < 0) return Error.OpenPtFailed;
     errdefer _ = std.c.close(master);

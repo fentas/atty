@@ -3,7 +3,9 @@ const testing = std.testing;
 const fio = @import("io.zig");
 
 test "io: writeFile then readFileAlloc round-trips (incl. mkdir of the parent)" {
-    const path = "/tmp/atty-harness-io-test/sub/round-trip.txt";
+    // PID-unique path so concurrent test processes can't collide in /tmp.
+    var pbuf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&pbuf, "/tmp/atty-harness-io-{d}/sub/round-trip.txt", .{std.c.getpid()});
     try fio.writeFile(path, "hello\nworld\x00binary");
     const got = try fio.readFileAlloc(testing.allocator, path, 1 << 20);
     defer testing.allocator.free(got);
