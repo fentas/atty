@@ -7,7 +7,7 @@
 //! rendered screen is reproducible across machines. The parent keeps the
 //! non-blocking master fd to drive input + read output.
 //!
-//! Self-contained POSIX (its own externs) so the harness depends only on the
+//! Self-contained POSIX (its own externs) so the ttysnap depends only on the
 //! `vt` grid — not on atty's proxy PTY, whose `spawn` is purpose-built for the
 //! proxy (injects ATTY env markers, inherits the parent env). A future cleanup
 //! can fold the proxy e2e harness's near-identical spawn onto this.

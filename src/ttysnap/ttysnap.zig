@@ -12,7 +12,7 @@
 //! into one binary — "menuconfig, not runtime config."
 //!
 //! Usage:
-//!   const H = harness.Harness(config.modules);
+//!   const H = ttysnap.Harness(config.modules);
 //!   var h = try H.spawn(alloc, .{ .argv = &.{"bash","--norc","-i"}, .env = ... });
 //!   defer h.deinit();
 //!   _ = try h.waitFor("$", 2000);
@@ -33,7 +33,7 @@ const module = @import("module.zig");
 /// (fault injection); they can never grow it past this.
 pub const read_buf_size: usize = 4096;
 
-/// Convenience re-exports so callers import only `harness`.
+/// Convenience re-exports so callers import only `ttysnap`.
 pub const KV = pty.KV;
 pub const SessionInfo = module.SessionInfo;
 pub const Grid = module.Grid;
@@ -338,5 +338,5 @@ pub fn Harness(comptime modules: anytype) type {
 pub const monoMillis = module.nowMs;
 
 test {
-    _ = @import("harness_tests.zig");
+    _ = @import("ttysnap_tests.zig");
 }

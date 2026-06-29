@@ -6,7 +6,7 @@ const vt = @import("vt");
 
 // The snapshotter's dir is comptime (factory config); make the snapshot NAMES
 // PID-unique so concurrent test processes don't collide on golden files.
-const dir = "/tmp/atty-harness-snap-test";
+const dir = "/tmp/atty-ttysnap-snap-test";
 
 fn uniq(buf: []u8, prefix: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}-{d}", .{ prefix, std.c.getpid() }) catch prefix;

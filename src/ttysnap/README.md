@@ -1,20 +1,20 @@
-# harness — a composable TTY test framework ("Playwright for the terminal")
+# ttysnap — a composable TTY test framework ("Playwright for the terminal")
 
 Drive a real terminal program under a PTY, assert on the **rendered screen**,
 record the session, and inject faults — composed Suckless-style from a module
-tuple in `config.zig`. Full docs: [`docs/harness.md`](../../docs/harness.md).
+tuple in `config.zig`. Full docs: [`docs/ttysnap.md`](../../docs/ttysnap.md).
 
 ```sh
-zig build harness        # build the configured binary
-zig build run-harness    # run the example (drives bash, asserts on screen)
-zig build test-harness   # run the unit tests
+zig build ttysnap        # build the configured binary
+zig build run-ttysnap    # run the example (drives bash, asserts on screen)
+zig build test-ttysnap   # run the unit tests
 ```
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `harness.zig` | `Harness(modules)` — the composed driver (engine + pump + lifecycle fan). `Harness(.{})` is the bare engine. |
+| `ttysnap.zig` | `Harness(modules)` — the composed driver (engine + pump + lifecycle fan). `Harness(.{})` is the bare engine. |
 | `module.zig` | the module contract (the `@hasDecl`-gated hook set) + `SessionInfo` + the clock. |
 | `pty.zig` | open a PTY, fork, controlled-env `execvpe`. |
 | `io.zig` | tiny runtime file helpers over `std.c` (0.16 has no `std.fs.cwd()`). |

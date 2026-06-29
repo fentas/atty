@@ -29,8 +29,8 @@ pub fn build(b: *std.Build) void {
     // attop's panel config — same dwm-style def/user split. Idempotent, so
     // it's safe to seed unconditionally (only the `attop` steps read it).
     seedConfig(b, "src/attop/config.def.zig", "src/attop/config.zig");
-    // The TTY-test harness's module config — same def/user split.
-    seedConfig(b, "src/harness/config.def.zig", "src/harness/config.zig");
+    // The ttysnap module config — same dwm-style def/user split.
+    seedConfig(b, "src/ttysnap/config.def.zig", "src/ttysnap/config.zig");
 
     // atty library module — owns every source file under src/ except
     // config.zig. Keeping them in a single named module avoids
@@ -155,13 +155,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(attop_tests).step);
 
     // -------------------------------------------------------------------------
-    // harness — the composable "Playwright for TTY" test framework
-    // (docs/harness.md). A standalone binary built from its own `config.zig`
-    // module tuple, reusing the `vt` grid. `zig build harness` builds it,
-    // `zig build run-harness` runs the configured example.
+    // ttysnap — the composable "Playwright for TTY" test framework
+    // (docs/ttysnap.md). A standalone binary built from its own `config.zig`
+    // module tuple, reusing the `vt` grid. `zig build ttysnap` builds it,
+    // `zig build run-ttysnap` runs the configured example.
     // -------------------------------------------------------------------------
-    const harness_module = b.createModule(.{
-        .root_source_file = b.path("src/harness/main.zig"),
+    const ttysnap_module = b.createModule(.{
+        .root_source_file = b.path("src/ttysnap/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true, // pty.zig + io.zig use std.c.*
@@ -169,22 +169,22 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vt", .module = vt_module },
         },
     });
-    const harness_exe = b.addExecutable(.{ .name = "harness", .root_module = harness_module });
-    const harness_step = b.step("harness", "Build the TTY-test harness binary");
-    harness_step.dependOn(&b.addInstallArtifact(harness_exe, .{}).step);
+    const ttysnap_exe = b.addExecutable(.{ .name = "ttysnap", .root_module = ttysnap_module });
+    const ttysnap_step = b.step("ttysnap", "Build the ttysnap test-harness binary");
+    ttysnap_step.dependOn(&b.addInstallArtifact(ttysnap_exe, .{}).step);
 
-    const run_harness = b.addRunArtifact(harness_exe);
-    if (b.args) |args| run_harness.addArgs(args);
-    const run_harness_step = b.step("run-harness", "Run the harness example");
-    run_harness_step.dependOn(&run_harness.step);
+    const run_ttysnap = b.addRunArtifact(ttysnap_exe);
+    if (b.args) |args| run_ttysnap.addArgs(args);
+    const run_ttysnap_step = b.step("run-ttysnap", "Run the ttysnap example");
+    run_ttysnap_step.dependOn(&run_ttysnap.step);
 
-    // harness unit tests: fold into `zig build test`, plus a focused
-    // `zig build test-harness` for fast iteration.
-    const harness_tests = b.addTest(.{ .root_module = harness_module });
-    const run_harness_tests = b.addRunArtifact(harness_tests);
-    test_step.dependOn(&run_harness_tests.step);
-    const harness_test_step = b.step("test-harness", "Run only the harness unit tests");
-    harness_test_step.dependOn(&run_harness_tests.step);
+    // ttysnap unit tests: fold into `zig build test`, plus a focused
+    // `zig build test-ttysnap` for fast iteration.
+    const ttysnap_tests = b.addTest(.{ .root_module = ttysnap_module });
+    const run_ttysnap_tests = b.addRunArtifact(ttysnap_tests);
+    test_step.dependOn(&run_ttysnap_tests.step);
+    const ttysnap_test_step = b.step("test-ttysnap", "Run only the ttysnap unit tests");
+    ttysnap_test_step.dependOn(&run_ttysnap_tests.step);
 
     // -------------------------------------------------------------------------
     // Integration tests

@@ -8,7 +8,7 @@
 //! being a composable module rather than a global switch.
 //!
 //! Compose: `fragment_injector(.{ .bytes = 16 })` in the `modules` tuple. It
-//! composes with other `beforeRead` modules — the harness applies the smallest
+//! composes with other `beforeRead` modules — the ttysnap applies the smallest
 //! cap any of them requests.
 
 const std = @import("std");
