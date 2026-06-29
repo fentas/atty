@@ -27,6 +27,7 @@ const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const vt = @import("vt");
 const pty = @import("pty");
+const wait = @import("wait");
 const module = @import("module.zig");
 
 /// Max bytes per master read. `beforeRead` modules may shrink it per-read
@@ -235,56 +236,20 @@ pub fn Harness(comptime modules: anytype) type {
             return self.text_buf[0..w.end];
         }
 
-        /// True if `needle` is anywhere on the current rendered screen.
+        /// Screen queries + poll-until-condition waits — shared with the e2e
+        /// Session via the generic `wait` module (this driver supplies
+        /// `gridText` + `pumpMs` + `exited`).
         pub fn gridContains(self: *Self, needle: []const u8) bool {
-            return std.mem.indexOf(u8, self.gridText(), needle) != null;
+            return wait.gridContains(self, needle);
         }
-
-        /// Pump until `needle` appears on screen or `timeout_ms` elapses.
         pub fn waitFor(self: *Self, needle: []const u8, timeout_ms: u32) !bool {
-            const deadline = monoMillis() + @as(i64, timeout_ms);
-            while (true) {
-                if (self.gridContains(needle)) return true;
-                const remaining = deadline - monoMillis();
-                if (remaining <= 0) return self.gridContains(needle);
-                _ = try self.pumpMs(@intCast(@min(remaining, 50)));
-                if (self.exited and !self.gridContains(needle)) {
-                    // One last drain so output racing the exit is still seen.
-                    while (try self.pumpMs(0)) {}
-                    return self.gridContains(needle);
-                }
-            }
+            return wait.waitFor(self, needle, timeout_ms);
         }
-
-        /// Pump until `needle` is ABSENT or `timeout_ms` elapses.
         pub fn waitForAbsent(self: *Self, needle: []const u8, timeout_ms: u32) !bool {
-            const deadline = monoMillis() + @as(i64, timeout_ms);
-            while (self.gridContains(needle)) {
-                if (monoMillis() >= deadline) return !self.gridContains(needle);
-                if (self.exited) { // child gone: drain, then the screen can't change
-                    while (try self.pumpMs(0)) {}
-                    return !self.gridContains(needle);
-                }
-                _ = try self.pumpMs(@intCast(@min(deadline - monoMillis(), 50)));
-            }
-            return true;
+            return wait.waitForAbsent(self, needle, timeout_ms);
         }
-
-        /// Pump until the output has been quiet for `quiet_ms`, or `timeout_ms`
-        /// elapses. Returns true if it settled (false = timed out still noisy).
         pub fn waitStable(self: *Self, quiet_ms: u32, timeout_ms: u32) !bool {
-            const deadline = monoMillis() + @as(i64, timeout_ms);
-            var quiet_since = monoMillis();
-            while (true) {
-                if (monoMillis() - quiet_since >= quiet_ms) return true;
-                if (monoMillis() >= deadline) return false;
-                const got = try self.pumpMs(@intCast(@min(quiet_ms, 25)));
-                if (got) quiet_since = monoMillis();
-                if (self.exited) {
-                    while (try self.pumpMs(0)) {} // drain final output
-                    return true; // child gone → the screen is permanently stable
-                }
-            }
+            return wait.waitStable(self, quiet_ms, timeout_ms);
         }
 
         /// A named checkpoint: fan `onSnapshot` to every module (recorders
