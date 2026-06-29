@@ -1,0 +1,24 @@
+# atty ghost-text — history autosuggestions, accepted with the Right arrow.
+cols 80
+rows 12
+timeout_ms 18000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 800
+type "echo hello-from-atty" irregular
+key Enter
+wait_for "hello-from-atty"
+sleep 1000
+type "echo hello-f" irregular
+wait_for_count "echo hello-from-atty" 2
+wait_stable 200
+sleep 1700
+key Right
+wait_stable 250
+sleep 800
+key Enter
+wait_for_count "hello-from-atty" 3
+sleep 1300
+type "exit\r"
+exit_code 0

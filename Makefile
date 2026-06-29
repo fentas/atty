@@ -42,7 +42,7 @@ endif
 # shell agree on what to touch.
 ATTY_BIN := $(PREFIX)/bin/atty
 
-.PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update integration-test integration-test-full run \
+.PHONY: help build build-atty build-guard debug test test-atty test-guard itest e2e e2e-update demo-gifs integration-test integration-test-full run \
         install install-atty install-guard link link-atty link-guard unlink unlink-atty unlink-guard \
         register-shell unregister-shell \
         clean clean-atty clean-guard docker docker-binary fmt fmt-atty fmt-guard reload-guard \
@@ -133,6 +133,12 @@ e2e:
 # Refresh goldens to match current output. Review the diff before committing.
 e2e-update:
 	$(ZIG) build e2e -Dtarget=$(TARGET) -- --update
+
+# Regenerate the per-feature demo GIFs (docs/assets/atty-<feature>.gif) from the
+# tests/demo scenarios — record the casts, then render with agg. Needs agg
+# (cargo install --locked --git https://github.com/asciinema/agg).
+demo-gifs:
+	./scripts/gen-demo-gifs.sh
 
 # Integration suite: end-to-end scenarios that boot a real atty-guard
 # daemon (+ optionally talk to Ollama and pull atom corpora over the

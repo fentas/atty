@@ -1,0 +1,18 @@
+# atty guardrail — a confirmation gate before a dangerous command runs.
+cols 80
+rows 12
+timeout_ms 15000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 900
+type "rm -rf /tmp/atty-nonexist" irregular
+sleep 500
+key Enter
+wait_for "guardrail"
+sleep 2200
+key ^C
+wait_stable 250
+sleep 1300
+type "exit\r"
+exit_code 0

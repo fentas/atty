@@ -603,6 +603,8 @@ consumer wants it.
 
 ## Status bar + incognito
 
+![atty status bar: a persistent bottom row (DECSTBM-reserved) that survives shell scrolling]({{ '/assets/atty-statusbar.gif' | relative_url }})
+
 Off by default (`config.statusbar.enabled = false`); opt in if you
 want a persistent indicator. When enabled:
 

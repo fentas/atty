@@ -12,6 +12,8 @@ module_default: true
 
 Shell-native command history with fish-style ghost suggestions — no daemon, no shell plugin. Reads and writes the file your shell already uses (`~/.bash_history`, `~/.zsh_history`, `~/.history`), so commands typed through atty are visible to everything else that reads the file (and vice-versa).
 
+![atty ghost-text: a dim suggestion completes the line as you type; the Right arrow accepts it]({{ '/assets/atty-ghost.gif' | relative_url }})
+
 * TOC
 {:toc}
 
