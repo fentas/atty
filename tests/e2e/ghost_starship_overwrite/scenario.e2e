@@ -15,6 +15,10 @@ cols 60
 rows 8
 timeout_ms 5000
 
+# Cap master reads so every ~8-byte OSC-133 marker splits across reads —
+# makes the sub-marker ghost-render glitch (#528) deterministic.
+env ATTY_TEST_FRAGMENT_READS=8
+
 spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
 

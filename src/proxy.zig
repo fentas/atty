@@ -321,6 +321,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // before keymap matching / dispatch / pty.master forward so the
     // shell never sees it as user input.
     var dsr_parser = DsrParser{};
+    // A cmd_end DSR-6n re-anchor emitted from inside the edge loop splits the
+    // `;D` OSC when that marker straddles a read boundary; latch it and emit at
+    // ground state after the output forward instead.
+    var dsr_pending = false;
     // Scratch buffer the parser writes filtered stdin bytes into.
     // Sized to match `read_buf` since the filtered output is at most
     // as long as the input. The second-pass CPR scrub runs in-place
@@ -1862,15 +1866,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 // Command just finished — its output
                                 // may have scrolled the cursor wildly
                                 // (or left it mid-screen via raw mode).
-                                // Fire DSR-6n so the tracker
-                                // re-anchors on the new prompt's row
-                                // before the next sensitive op.
-                                if (args.is_tty) {
-                                    var w_dsr: std.Io.Writer = .fixed(&out_buf);
-                                    if (dsr_parser.writeQuery(&w_dsr)) {
-                                        if (w_dsr.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_dsr.end]) catch {};
-                                    } else |_| {}
-                                }
+                                // Want a DSR-6n re-anchor on the new
+                                // prompt's row — but DEFER the query past
+                                // the output forward + a ground gate: the
+                                // `;D` OSC can straddle a read boundary, and
+                                // a `\x1B[6n` emitted here would land between
+                                // its halves, abort it terminal-side, and leak
+                                // the exit-code byte to the screen.
+                                if (args.is_tty) dsr_pending = true;
                             },
                             .prompt_start_implicit_end => {
                                 // Partial-emitter implicit close
@@ -2023,6 +2026,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     overlay_ring_state.push(output);
                 } else {
                     try writeAll(posix.STDOUT_FILENO, output);
+                }
+
+                // Emit the latched cmd_end DSR now that this chunk's output —
+                // possibly the tail of the `;D` OSC — is on the wire, and only
+                // at ground state so the query can't split an escape that
+                // straddled the read boundary. If still mid-escape, it stays
+                // latched for the next ground-ending chunk.
+                if (dsr_pending and args.is_tty and !cursor_tracker.inEscape()) {
+                    var w_dsr: std.Io.Writer = .fixed(&out_buf);
+                    if (dsr_parser.writeQuery(&w_dsr)) {
+                        if (w_dsr.end > 0) writeAll(posix.STDOUT_FILENO, out_buf[0..w_dsr.end]) catch {};
+                    } else |_| {}
+                    dsr_pending = false;
                 }
 
                 // Deferred alt-screen side effects — see the captured
