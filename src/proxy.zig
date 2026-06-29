@@ -482,6 +482,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
     var read_buf: [buf_size]u8 = undefined;
 
+    // Test-only: `ATTY_TEST_FRAGMENT_READS=N` caps each master read to N
+    // bytes so the shell's escape sequences split across reads
+    // deterministically — this reproduces, without load, the fragmentation
+    // race CI hits intermittently (a read starting mid-escape defers the
+    // gated ghost clear; see the master-read path below). Unset/0 = normal
+    // full-size reads, so it is inert in production.
+    const master_read_cap: usize = blk: {
+        const p = std.c.getenv("ATTY_TEST_FRAGMENT_READS") orelse break :blk read_buf.len;
+        const n = std.fmt.parseInt(usize, std.mem.sliceTo(p, 0), 10) catch break :blk read_buf.len;
+        break :blk if (n > 0) @min(n, read_buf.len) else read_buf.len;
+    };
+
     // Stdout assembly buffer + fixed Writer.
     //   • ANSI sequences (ghost overlay show/clear) are written into
     //     `out_buf` via the Writer, then flushed in one std.c.write.
@@ -1637,6 +1649,19 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
+                // End OSC 133 input capture on submit. The shell integration
+                // emits ;A/;B but may omit ;C (Ghostty default, starship-style
+                // PROMPT_COMMAND wrappers); without a ;C the tracker would stay
+                // in INPUT phase through command execution and capture the
+                // command's OUTPUT. A fragmented master read can then leave
+                // that output in the capture, where the next line's commit
+                // override (above) / syncFromCapture absorbs it — recording
+                // e.g. "<prev output><next cmd>" (#525). We just saw the user
+                // submit, so end capture ourselves — the ;C the shell omitted.
+                // After the inInputPhase-gated logic above so it doesn't
+                // perturb this line's commit / launch-push / recording.
+                if (shell_will_execute) osc133_tracker.endInputCapture();
+
                 // Deliberately NO renderGhost here. The shell hasn't
                 // echoed yet, so the terminal cursor is still at its
                 // pre-keystroke position. Painting the ghost now lands
@@ -1668,7 +1693,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
         // ---- master → dispatch → stdout ----------------------------------
         if (pfds[1].revents & POLLIN != 0) {
-            const read_n = posix.read(pty.master, &read_buf) catch 0;
+            const read_n = posix.read(pty.master, read_buf[0..master_read_cap]) catch 0;
             if (read_n > 0) {
                 const output = read_buf[0..read_n];
                 trace.logBytes(.input, "master_read", output);

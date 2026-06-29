@@ -7,6 +7,13 @@ cols 60
 rows 8
 timeout_ms 5000
 
+# Cap master reads so OSC-133 markers split at read boundaries — makes the
+# fragmentation race deterministic (the ghost/history capture bug #525
+# reproduced only under CI load otherwise). 16 matches a realistic
+# marker-straddles-a-read split without the sub-marker, harness-desyncing
+# extreme of 1-byte reads.
+env ATTY_TEST_FRAGMENT_READS=16
+
 spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
 

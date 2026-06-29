@@ -196,6 +196,26 @@ pub const Osc133 = struct {
         return self.phase == .in_input;
     }
 
+    /// Synthesize the command-start the shell omitted. Some integrations emit
+    /// `;A`/`;B` but no `;C` (Ghostty's default; starship-style
+    /// PROMPT_COMMAND wrappers) — without a `;C` the tracker stays in
+    /// `.in_input` through command execution and CAPTURES the command's
+    /// OUTPUT. Normally the next prompt's `;A`/`;B` clears that before anyone
+    /// reads it, but a master read fragmented mid-stream can leave the output
+    /// sitting in `input`, where the next line's commit / `syncFromCapture`
+    /// absorbs it (#525). The proxy calls this on stdin submit — when it KNOWS
+    /// a command started — to end capture deterministically. Clears `input`
+    /// too: the submitted line has already been read for the commit, and
+    /// leaving it would let `syncFromCapture` re-absorb a stale line.
+    /// No-op outside `.in_input`; mirrors `;C`'s phase move so a real `;C`
+    /// that follows (full emitters) is harmless.
+    pub fn endInputCapture(self: *Osc133) void {
+        if (self.phase == .in_input) {
+            self.phase = .in_command;
+            self.input.clearRetainingCapacity();
+        }
+    }
+
     /// True iff the next escape-free byte chunk is a guaranteed
     /// no-op — the proxy can fast-path past it without invoking
     /// the per-byte state machine.
