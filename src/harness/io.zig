@@ -18,7 +18,11 @@ pub fn writeFile(path: [:0]const u8, bytes: []const u8) !void {
     var off: usize = 0;
     while (off < bytes.len) {
         const rc = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
-        if (rc <= 0) return error.WriteFailed;
+        if (rc < 0) {
+            if (std.posix.errno(rc) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (rc == 0) return error.WriteFailed;
         off += @intCast(rc);
     }
 }
@@ -33,7 +37,10 @@ pub fn readFileAlloc(allocator: Allocator, path: [:0]const u8, max: usize) ![]u8
     var buf: [4096]u8 = undefined;
     while (list.items.len < max) {
         const rc = std.c.read(fd, &buf, buf.len);
-        if (rc < 0) return error.ReadFailed;
+        if (rc < 0) {
+            if (std.posix.errno(rc) == .INTR) continue;
+            return error.ReadFailed;
+        }
         if (rc == 0) break;
         try list.appendSlice(allocator, buf[0..@intCast(rc)]);
     }
@@ -58,4 +65,8 @@ fn mkdirParent(path: [:0]const u8) void {
             if (i < end) buf[i] = '/';
         }
     }
+}
+
+test {
+    _ = @import("io_tests.zig");
 }

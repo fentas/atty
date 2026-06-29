@@ -105,3 +105,7 @@ fn appendJsonEscaped(allocator: Allocator, out: *std.ArrayList(u8), data: []cons
         },
     };
 }
+
+test {
+    _ = @import("cast_recorder_tests.zig");
+}

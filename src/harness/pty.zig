@@ -83,7 +83,7 @@ pub fn spawn(allocator: Allocator, opts: Opts) Error!Child {
 
     // Non-blocking master: the poll-driven pump must never wedge on a read.
     const fl = std.c.fcntl(master, F_GETFL, @as(c_int, 0));
-    _ = std.c.fcntl(master, F_SETFL, fl | O_NONBLOCK);
+    if (fl >= 0) _ = std.c.fcntl(master, F_SETFL, fl | O_NONBLOCK);
 
     const ws = posix.winsize{ .row = opts.rows, .col = opts.cols, .xpixel = 0, .ypixel = 0 };
     if (@as(isize, @bitCast(linux.ioctl(master, TIOCSWINSZ, @intFromPtr(&ws)))) < 0) return Error.IoctlFailed;

@@ -42,7 +42,10 @@ pub fn main() !void {
     try h.snapshot("hello");
 
     try h.send("exit\r");
-    const status = try h.waitExit(3000);
+    const status = (try h.waitExit(3000)) orelse {
+        std.debug.print("harness example: FAIL — child did not exit in time\n", .{});
+        return error.AssertionFailed;
+    };
     std.debug.print("harness example: OK (child wait status {d})\n", .{status});
 }
 
@@ -54,7 +57,8 @@ fn check(label: []const u8, ok: bool) !void {
 }
 
 test {
-    // Compile + run every module's tests under `zig build test`.
+    // Import the source files; each with tests carries a sibling
+    // `test { _ = @import("..._tests.zig"); }` stub that cascades (house style).
     _ = @import("harness.zig");
     _ = @import("pty.zig");
     _ = @import("io.zig");
@@ -62,8 +66,4 @@ test {
     _ = @import("modules/fragment_injector.zig");
     _ = @import("modules/cast_recorder.zig");
     _ = @import("modules/snapshotter.zig");
-    _ = @import("harness_tests.zig");
-    _ = @import("io_tests.zig");
-    _ = @import("modules/cast_recorder_tests.zig");
-    _ = @import("modules/snapshotter_tests.zig");
 }

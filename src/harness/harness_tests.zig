@@ -43,6 +43,7 @@ test "harness: waitFor times out (returns false) on absent text" {
 var probe_max_chunk: usize = 0;
 var probe_output_calls: usize = 0;
 var probe_snaps: usize = 0;
+var probe_exits: usize = 0;
 
 const Probe = struct {
     pub const Runtime = struct {};
@@ -59,12 +60,16 @@ const Probe = struct {
     pub fn onSnapshot(_: *Runtime, _: []const u8, _: *const harness.Grid) !void {
         probe_snaps += 1;
     }
+    pub fn onExit(_: *Runtime, _: u32) void {
+        probe_exits += 1;
+    }
 };
 
-test "harness: beforeRead caps reads, onOutput + onSnapshot fan to modules" {
+test "harness: beforeRead caps reads, onOutput/onSnapshot/onExit fan to modules" {
     probe_max_chunk = 0;
     probe_output_calls = 0;
     probe_snaps = 0;
+    probe_exits = 0;
 
     const H = harness.Harness(.{Probe});
     var h = try H.spawn(testing.allocator, .{ .argv = &.{"cat"}, .cols = 40, .rows = 10, .env = &test_env });
@@ -82,4 +87,14 @@ test "harness: beforeRead caps reads, onOutput + onSnapshot fan to modules" {
 
     try h.send("\x04");
     _ = try h.waitExit(3000);
+    try testing.expectEqual(@as(usize, 1), probe_exits); // onExit fired exactly once
+}
+
+test "harness: terminate (deinit on a live child) reaps it + fires onExit once" {
+    probe_exits = 0;
+    const H = harness.Harness(.{Probe});
+    var h = try H.spawn(testing.allocator, .{ .argv = &.{ "sleep", "30" }, .cols = 40, .rows = 10, .env = &test_env });
+    try testing.expect(!h.exited);
+    h.deinit(); // no waitExit → drives the terminate() teardown path
+    try testing.expectEqual(@as(usize, 1), probe_exits); // reaped + onExit once, not double
 }

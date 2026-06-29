@@ -31,8 +31,10 @@ pub fn snapshotter(comptime cfg: struct {
         }
 
         pub fn onSnapshot(rt: *Runtime, name: []const u8, grid: *const mod.Grid) !void {
-            // Render the current screen to text.
-            const cap = (@as(usize, rt.cols) + 1) * (@as(usize, rt.rows) + 1);
+            // Render the current screen to text. 4 bytes/cell is the max for
+            // one UTF-8 codepoint (one codepoint per cell) + a newline per row,
+            // so a full screen of multi-byte glyphs never silently truncates.
+            const cap = (@as(usize, rt.cols) * 4 + 1) * (@as(usize, rt.rows) + 1);
             const text_buf = try rt.allocator.alloc(u8, cap);
             defer rt.allocator.free(text_buf);
             var w = std.Io.Writer.fixed(text_buf);
@@ -65,4 +67,8 @@ pub fn snapshotter(comptime cfg: struct {
             try fio.writeFile(actual, text);
         }
     };
+}
+
+test {
+    _ = @import("snapshotter_tests.zig");
 }

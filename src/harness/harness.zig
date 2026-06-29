@@ -84,7 +84,10 @@ pub fn Harness(comptime modules: anytype) type {
             var grid = try vt.Grid.init(allocator, opts.rows, opts.cols);
             errdefer grid.deinit();
 
-            const text_buf = try allocator.alloc(u8, (@as(usize, opts.cols) + 1) * (@as(usize, opts.rows) + 1));
+            // 4 bytes/cell is the max for one UTF-8 codepoint (vt renders one
+            // codepoint per cell) + a newline per row — so renderText never
+            // truncates, even on a screen full of multi-byte glyphs.
+            const text_buf = try allocator.alloc(u8, (@as(usize, opts.cols) * 4 + 1) * (@as(usize, opts.rows) + 1));
             errdefer allocator.free(text_buf);
 
             const info = module.SessionInfo{ .argv = opts.argv, .cols = opts.cols, .rows = opts.rows };
@@ -138,6 +141,7 @@ pub fn Harness(comptime modules: anytype) type {
             inline for (modules, 0..) |M, i| {
                 if (comptime @hasDecl(M, "onInput")) M.onInput(self.rts[i], bytes);
             }
+            const deadline = monoMillis() + 2000;
             var written: usize = 0;
             while (written < bytes.len) {
                 const rem = bytes[written..];
@@ -145,6 +149,7 @@ pub fn Harness(comptime modules: anytype) type {
                 if (rc < 0) {
                     const err = posix.errno(rc);
                     if (err == .AGAIN or err == .INTR) {
+                        if (monoMillis() >= deadline) return error.WriteTimeout;
                         _ = try self.pumpMs(10);
                         continue;
                     }
@@ -242,6 +247,10 @@ pub fn Harness(comptime modules: anytype) type {
             const deadline = monoMillis() + @as(i64, timeout_ms);
             while (self.gridContains(needle)) {
                 if (monoMillis() >= deadline) return !self.gridContains(needle);
+                if (self.exited) { // child gone: drain, then the screen can't change
+                    while (try self.pumpMs(0)) {}
+                    return !self.gridContains(needle);
+                }
                 _ = try self.pumpMs(@intCast(@min(deadline - monoMillis(), 50)));
             }
             return true;
@@ -258,8 +267,8 @@ pub fn Harness(comptime modules: anytype) type {
                 const got = try self.pumpMs(@intCast(@min(quiet_ms, 25)));
                 if (got) quiet_since = monoMillis();
                 if (self.exited) {
-                    while (try self.pumpMs(0)) quiet_since = monoMillis();
-                    return monoMillis() - quiet_since >= quiet_ms;
+                    while (try self.pumpMs(0)) {} // drain final output
+                    return true; // child gone → the screen is permanently stable
                 }
             }
         }
@@ -275,14 +284,15 @@ pub fn Harness(comptime modules: anytype) type {
 
         // ---- exit ---------------------------------------------------------
 
-        /// Pump until the child exits or `timeout_ms` elapses; returns the
-        /// raw wait status. Fans `onExit` once when the child is reaped.
-        pub fn waitExit(self: *Self, timeout_ms: u32) !u32 {
+        /// Pump until the child exits or `timeout_ms` elapses. Returns the raw
+        /// wait status, or null on timeout — so a hung child is distinguishable
+        /// from a clean exit 0. Fans `onExit` once when the child is reaped.
+        pub fn waitExit(self: *Self, timeout_ms: u32) !?u32 {
             const deadline = monoMillis() + @as(i64, timeout_ms);
             while (!self.exited and monoMillis() < deadline) {
                 _ = try self.pumpMs(@intCast(@min(deadline - monoMillis(), 50)));
             }
-            return self.exit_status;
+            return if (self.exited) self.exit_status else null;
         }
 
         fn reapIfDone(self: *Self) void {
@@ -294,6 +304,7 @@ pub fn Harness(comptime modules: anytype) type {
         }
 
         fn markExited(self: *Self, status: u32) void {
+            if (self.exited) return; // idempotent — onExit fires once, status set once
             self.exited = true;
             self.exit_status = status;
             inline for (modules, 0..) |M, i| {
@@ -312,6 +323,8 @@ pub fn Harness(comptime modules: anytype) type {
                     return;
                 }
                 _ = self.pumpMs(20) catch {};
+                if (self.exited) return; // pumpMs's reapIfDone may have caught it —
+                // don't fall through to KILL + a second reap of a dead PID
             }
             _ = posix.kill(self.child.pid, posix.SIG.KILL) catch {};
             var status: u32 = 0;
@@ -323,3 +336,7 @@ pub fn Harness(comptime modules: anytype) type {
 
 /// Monotonic milliseconds for deadlines — aliases the contract's clock.
 pub const monoMillis = module.nowMs;
+
+test {
+    _ = @import("harness_tests.zig");
+}
