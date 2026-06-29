@@ -287,9 +287,10 @@ fn draw(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void {
 /// push the line past the width. Reserves the worst case (unicode " 🔒" ≈ 3
 /// cols); the ascii " P" (2) just over-reserves harmlessly.
 fn cwdBudget(cols: u16, wide: bool) usize {
+    const c: usize = cols;
     const uid_w: usize = if (wide) 8 else 0; // " {d:>7}" uid column (fits 7-digit container/LDAP uids)
     const reserved: usize = 26 + 3 + uid_w; // prefix (2+7+1+8+1+5+2) + marker (+uid)
-    return if (cols > reserved + 8) cols - reserved else 8;
+    return if (c > reserved + 8) c - reserved else 8;
 }
 
 const Cwd = struct { ellipsis: bool, text: []const u8 };
