@@ -33,12 +33,14 @@ pub fn gif_recorder(comptime cfg: struct {
         }
 
         pub fn detach(rt: *Runtime) void {
+            defer {
+                for (rt.frames.items) |f| rt.allocator.free(f);
+                rt.frames.deinit(rt.allocator);
+            }
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(rt.allocator);
-            render(rt, rt.allocator, &buf) catch {};
+            render(rt, rt.allocator, &buf) catch return; // don't write a truncated SVG
             fio.writeFile(cfg.path, buf.items) catch {};
-            for (rt.frames.items) |f| rt.allocator.free(f);
-            rt.frames.deinit(rt.allocator);
         }
 
         pub fn onFrame(rt: *Runtime, grid: *const mod.Grid) void {
@@ -98,7 +100,10 @@ pub fn gif_recorder(comptime cfg: struct {
     };
 }
 
-/// Append `data` to `out` with the XML text metacharacters escaped.
+/// Append `data` to `out` with the XML metacharacters escaped. The vt grid
+/// never stores C0/DEL bytes in a cell, so renderText output is valid XML in
+/// practice (a UTF-8 noncharacter would slip through, but that's unreachable
+/// from real terminal output — same stance as cast_recorder's escaping).
 fn appendXmlEscaped(allocator: Allocator, out: *std.ArrayList(u8), data: []const u8) !void {
     for (data) |b| switch (b) {
         '&' => try out.appendSlice(allocator, "&amp;"),

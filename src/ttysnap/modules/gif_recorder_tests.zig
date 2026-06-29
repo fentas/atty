@@ -49,4 +49,6 @@ test "gif_recorder: XML metacharacters in the screen are escaped" {
     try testing.expect(std.mem.indexOf(u8, out.items, "&lt;b&gt;") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "&amp;") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "&quot;") != null);
+    // The raw tag must NOT survive into the SVG text content.
+    try testing.expect(std.mem.indexOf(u8, out.items, "<b>") == null);
 }

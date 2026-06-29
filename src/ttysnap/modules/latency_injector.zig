@@ -23,11 +23,19 @@ pub fn latency_injector(comptime cfg: struct {
         }
 
         pub fn beforeRead(_: *Runtime, want: usize) usize {
-            if (cfg.read_ms > 0)
-                std.posix.nanosleep(cfg.read_ms / 1000, (cfg.read_ms % 1000) * std.time.ns_per_ms);
+            if (cfg.read_ms > 0) {
+                const s = split(cfg.read_ms);
+                std.posix.nanosleep(s.sec, s.nsec);
+            }
             return want; // delay only — never cap
         }
     };
+}
+
+/// Split milliseconds into the (seconds, nanoseconds) `nanosleep` wants. Pure +
+/// file-level so the conversion is unit-testable without sleeping.
+pub fn split(ms: u64) struct { sec: u64, nsec: u64 } {
+    return .{ .sec = ms / 1000, .nsec = (ms % 1000) * std.time.ns_per_ms };
 }
 
 test {

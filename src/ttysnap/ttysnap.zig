@@ -116,9 +116,11 @@ pub fn Harness(comptime modules: anytype) type {
         }
 
         /// Resize the child's terminal (SIGWINCH via TIOCSWINSZ). NOTE: ttysnap's
-        /// grid stays at the spawn size (vt.Grid has no resize yet), so this
-        /// stresses the child's SIGWINCH handling but the rendered grid won't
-        /// reflect the new geometry. Grid-resize is a follow-on.
+        /// grid stays at the spawn size (vt.Grid has no resize yet), so after a
+        /// resize the child's wider/taller output wraps into the old grid —
+        /// gridContains / waitFor / snapshot can then miss strings that cross
+        /// the stale wrap. Use this to stress SIGWINCH handling, not to assert a
+        /// resized screen; grid-resize is a follow-on.
         pub fn resize(self: *Self, cols: u16, rows: u16) void {
             _ = pty.setSize(self.child.master, cols, rows);
         }

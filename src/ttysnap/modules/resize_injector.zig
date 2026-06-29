@@ -38,8 +38,9 @@ pub fn resize_injector(comptime cfg: struct {
         }
 
         /// Advance the chunk counter and, on a trigger chunk, return the next
-        /// size to apply (cycling `sizes`). Pub so the cadence is unit-testable
-        /// without a live PTY.
+        /// size to apply (cycling `sizes`). NOT a lifecycle hook — it's `pub`
+        /// only so the cadence is unit-testable without a live PTY; `onOutput`
+        /// is the real driver.
         pub fn shouldResize(rt: *Runtime) ?Size {
             if (cfg.sizes.len == 0) return null;
             rt.chunk += 1;
