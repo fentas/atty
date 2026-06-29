@@ -20,26 +20,13 @@ const Allocator = std.mem.Allocator;
 const vt = @import("vt.zig");
 const snapshot = @import("snapshot.zig");
 
-extern "c" fn posix_openpt(flags: c_int) c_int;
-extern "c" fn grantpt(fd: c_int) c_int;
-extern "c" fn unlockpt(fd: c_int) c_int;
-extern "c" fn ptsname(fd: c_int) ?[*:0]u8;
-extern "c" fn fork() c_int;
-extern "c" fn setsid() c_int;
-extern "c" fn execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
+// The low-level controlled-env PTY spawn (openpt/grantpt/fork/execvpe +
+// childSetup) lives in ttysnap's shared `pty` module — one spawner for both the
+// ttysnap framework and this harness. This file is just the vt-backed Session
+// that wraps a pty.Child for golden-screen scenarios.
+const pty = @import("pty");
 
-const TIOCSCTTY: u32 = 0x540E;
-const TIOCSWINSZ: u32 = 0x5414;
-const open_flags: std.c.O = .{ .ACCMODE = .RDWR, .NOCTTY = true };
-const O_RDWR_NOCTTY: c_int = 0o2 | 0o400;
-const O_NONBLOCK: c_int = 0o4000;
-const F_GETFL: c_int = 3;
-const F_SETFL: c_int = 4;
-
-pub const KV = struct {
-    key: []const u8,
-    value: []const u8,
-};
+pub const KV = pty.KV;
 
 pub const SpawnOpts = struct {
     atty_bin: []const u8,
@@ -276,67 +263,31 @@ pub const Session = struct {
     }
 };
 
-/// Open a master/slave PTY pair, set the slave size, fork, and exec the
-/// scenario's argv with the controlled environment.
+/// Open a PTY, fork, and exec the scenario's argv (with `$ATTY` resolved to the
+/// per-scenario binary) under the controlled environment — via ttysnap's shared
+/// `pty.spawn`. The returned Session wraps the child in a `vt.Grid` + cast so a
+/// scenario asserts the *rendered* screen.
 pub fn spawn(allocator: Allocator, opts: SpawnOpts) !Session {
-    // ── Open master ────────────────────────────────────────────────────
-    const master = posix_openpt(O_RDWR_NOCTTY);
-    if (master < 0) return error.OpenPtFailed;
+    // Resolve `$ATTY` → the per-scenario binary.
+    const argv = try allocator.alloc([]const u8, opts.argv.len);
+    defer allocator.free(argv);
+    for (opts.argv, 0..) |a, i| {
+        argv[i] = if (std.mem.eql(u8, a, "$ATTY")) opts.atty_bin else a;
+    }
+    // The child sees forced_env + the scenario's extra_env, nothing inherited.
+    const env = try allocator.alloc(pty.KV, opts.forced_env.len + opts.extra_env.len);
+    defer allocator.free(env);
+    @memcpy(env[0..opts.forced_env.len], opts.forced_env);
+    @memcpy(env[opts.forced_env.len..], opts.extra_env);
+
+    const child = try pty.spawn(allocator, .{ .argv = argv, .cols = opts.cols, .rows = opts.rows, .env = env });
+    // The Session owns the master fd directly (it closes it in `deinit`); take
+    // the fd + pid and release the Child's owned slave_path now.
+    const master = child.master;
+    const pid = child.pid;
+    allocator.free(child.slave_path);
     errdefer _ = std.c.close(master);
 
-    if (grantpt(master) != 0) return error.GrantPtFailed;
-    if (unlockpt(master) != 0) return error.UnlockPtFailed;
-
-    const name_ptr = ptsname(master) orelse return error.PtsnameFailed;
-    const slave_path_slice = std.mem.sliceTo(name_ptr, 0);
-    const slave_path = try allocator.dupeZ(u8, slave_path_slice);
-    defer allocator.free(slave_path);
-
-    // ── Set master non-blocking so poll-driven I/O works cleanly ───────
-    const fl = std.c.fcntl(master, F_GETFL, @as(c_int, 0));
-    _ = std.c.fcntl(master, F_SETFL, fl | O_NONBLOCK);
-
-    // ── Set window size on the master (slave inherits) ─────────────────
-    const ws = posix.winsize{ .row = opts.rows, .col = opts.cols, .xpixel = 0, .ypixel = 0 };
-    const ws_rc = linux.ioctl(master, TIOCSWINSZ, @intFromPtr(&ws));
-    if (@as(isize, @bitCast(ws_rc)) < 0) return error.IoctlFailed;
-
-    // ── Build argv (NUL-terminated) ────────────────────────────────────
-    var argv_owned: std.ArrayList(?[*:0]const u8) = .empty;
-    defer {
-        for (argv_owned.items) |maybe| if (maybe) |p| allocator.free(std.mem.sliceTo(p, 0));
-        argv_owned.deinit(allocator);
-    }
-    for (opts.argv) |a| {
-        const resolved: []const u8 = if (std.mem.eql(u8, a, "$ATTY")) opts.atty_bin else a;
-        const z = try allocator.dupeZ(u8, resolved);
-        try argv_owned.append(allocator, z.ptr);
-    }
-    try argv_owned.append(allocator, null);
-
-    // ── Build envp (NUL-terminated) ────────────────────────────────────
-    var envp_owned: std.ArrayList(?[*:0]const u8) = .empty;
-    defer {
-        for (envp_owned.items) |maybe| if (maybe) |p| allocator.free(std.mem.sliceTo(p, 0));
-        envp_owned.deinit(allocator);
-    }
-    for (opts.forced_env) |kv| try envp_owned.append(allocator, try fmtKvZ(allocator, kv));
-    for (opts.extra_env) |kv| try envp_owned.append(allocator, try fmtKvZ(allocator, kv));
-    try envp_owned.append(allocator, null);
-
-    // ── Fork ───────────────────────────────────────────────────────────
-    const pid = fork();
-    if (pid < 0) return error.ForkFailed;
-    if (pid == 0) {
-        // Child.
-        childSetup(master, slave_path) catch std.c._exit(127);
-        const argv_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(argv_owned.items.ptr);
-        const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(envp_owned.items.ptr);
-        _ = execvpe(argv_ptr[0].?, argv_ptr, envp_ptr);
-        std.c._exit(127);
-    }
-
-    // Parent.
     var grid = try vt.Grid.init(allocator, opts.rows, opts.cols);
     errdefer grid.deinit();
     var cast = snapshot.Cast.init(allocator, opts.cols, opts.rows);
@@ -354,29 +305,4 @@ pub fn spawn(allocator: Allocator, opts: SpawnOpts) !Session {
         .cast = cast,
         .text_buf = text_buf,
     };
-}
-
-fn fmtKvZ(allocator: Allocator, kv: KV) ![*:0]const u8 {
-    const buf = try allocator.allocSentinel(u8, kv.key.len + 1 + kv.value.len, 0);
-    @memcpy(buf[0..kv.key.len], kv.key);
-    buf[kv.key.len] = '=';
-    @memcpy(buf[kv.key.len + 1 ..][0..kv.value.len], kv.value);
-    return buf.ptr;
-}
-
-fn childSetup(master_fd: posix.fd_t, slave_path: [:0]const u8) !void {
-    if (setsid() == -1) return error.SetCtrlTtyFailed;
-
-    const slave_fd = std.c.open(slave_path.ptr, open_flags, @as(std.c.mode_t, 0));
-    if (slave_fd < 0) return error.OpenSlaveFailed;
-
-    const rc = linux.ioctl(slave_fd, TIOCSCTTY, 0);
-    if (@as(isize, @bitCast(rc)) < 0) return error.SetCtrlTtyFailed;
-
-    if (std.c.dup2(slave_fd, 0) < 0) return error.OpenSlaveFailed;
-    if (std.c.dup2(slave_fd, 1) < 0) return error.OpenSlaveFailed;
-    if (std.c.dup2(slave_fd, 2) < 0) return error.OpenSlaveFailed;
-
-    if (slave_fd > 2) _ = std.c.close(slave_fd);
-    _ = std.c.close(master_fd);
 }

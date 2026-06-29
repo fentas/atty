@@ -60,7 +60,7 @@ test {
     // Import the source files; each with tests carries a sibling
     // `test { _ = @import("..._tests.zig"); }` stub that cascades (house style).
     _ = @import("ttysnap.zig");
-    _ = @import("pty.zig");
+    _ = @import("pty");
     _ = @import("io.zig");
     _ = @import("module.zig");
     _ = @import("modules/fragment_injector.zig");

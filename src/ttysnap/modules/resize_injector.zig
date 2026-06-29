@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const mod = @import("../module.zig");
-const pty = @import("../pty.zig");
+const pty = @import("pty");
 
 pub const Size = struct { cols: u16, rows: u16 };
 
