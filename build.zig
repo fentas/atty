@@ -128,6 +128,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // The low-level PTY spawn (openpt/grantpt/fork/execvpe + childSetup), shared
+    // by ttysnap and the e2e harness so there's ONE controlled-env spawner. Its
+    // home stays under src/ttysnap/ (ttysnap remains self-contained for spinout).
+    const pty_module = b.createModule(.{
+        .root_source_file = b.path("src/ttysnap/pty.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true, // own externs + std.c.*
+    });
     const attop_module = b.createModule(.{
         .root_source_file = b.path("src/attop/main.zig"),
         .target = target,
@@ -164,9 +173,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/ttysnap/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true, // pty.zig + io.zig use std.c.*
+        .link_libc = true, // io.zig uses std.c.*
         .imports = &.{
             .{ .name = "vt", .module = vt_module },
+            .{ .name = "pty", .module = pty_module },
         },
     });
     const ttysnap_exe = b.addExecutable(.{ .name = "ttysnap", .root_module = ttysnap_module });
@@ -257,6 +267,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "atty", .module = atty_module },
+                .{ .name = "pty", .module = pty_module },
             },
         }),
     });

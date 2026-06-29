@@ -26,7 +26,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const vt = @import("vt");
-const pty = @import("pty.zig");
+const pty = @import("pty");
 const module = @import("module.zig");
 
 /// Max bytes per master read. `beforeRead` modules may shrink it per-read
