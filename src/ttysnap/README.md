@@ -19,7 +19,7 @@ zig build test-ttysnap   # run the unit tests
 | `pty.zig` | open a PTY, fork, controlled-env `execvpe`. |
 | `io.zig` | tiny runtime file helpers over `std.c` (0.16 has no `std.fs.cwd()`). |
 | `config.def.zig` → `config.zig` | the dwm-style module-tuple template / gitignored override. |
-| `modules/` | built-ins: `snapshotter`, `cast_recorder`, `fragment_injector`. |
+| `modules/` | built-ins: `snapshotter`, `cast_recorder`, `fragment_injector`, `latency_injector`, `resize_injector`, `gif_recorder`. |
 | `main.zig` | the configured binary — the example scenario (driving bash). |
 
 Depends only on the `vt` grid module (self-contained PTY; its own small

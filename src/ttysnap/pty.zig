@@ -71,6 +71,14 @@ pub const Child = struct {
     }
 };
 
+/// Set the terminal window size on the master; the child gets SIGWINCH. Returns
+/// false if the ioctl failed. Used both for the initial size and for runtime
+/// resizes (Harness.resize / resize_injector), where the result is ignored.
+pub fn setSize(master: posix.fd_t, cols: u16, rows: u16) bool {
+    const ws = posix.winsize{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
+    return @as(isize, @bitCast(linux.ioctl(master, TIOCSWINSZ, @intFromPtr(&ws)))) >= 0;
+}
+
 pub fn spawn(allocator: Allocator, opts: Opts) Error!Child {
     if (opts.argv.len == 0) return Error.EmptyArgv; // argv[0] is the program
     const master = posix_openpt(O_RDWR_NOCTTY);
@@ -87,8 +95,7 @@ pub fn spawn(allocator: Allocator, opts: Opts) Error!Child {
     const fl = std.c.fcntl(master, F_GETFL, @as(c_int, 0));
     if (fl >= 0) _ = std.c.fcntl(master, F_SETFL, fl | O_NONBLOCK);
 
-    const ws = posix.winsize{ .row = opts.rows, .col = opts.cols, .xpixel = 0, .ypixel = 0 };
-    if (@as(isize, @bitCast(linux.ioctl(master, TIOCSWINSZ, @intFromPtr(&ws)))) < 0) return Error.IoctlFailed;
+    if (!setSize(master, opts.cols, opts.rows)) return Error.IoctlFailed;
 
     // argv → NUL-terminated array of NUL-terminated strings.
     var argv_owned: std.ArrayList(?[*:0]const u8) = .empty;

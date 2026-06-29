@@ -84,6 +84,10 @@ pub const SessionInfo = struct {
     argv: []const []const u8,
     cols: u16,
     rows: u16,
+    /// The PTY master fd — a control handle for modules that act on the
+    /// terminal (e.g. resize_injector's TIOCSWINSZ). -1 in unit tests that
+    /// construct a SessionInfo without a real PTY.
+    master: std.posix.fd_t = -1,
 };
 
 /// Monotonic milliseconds — the ttysnap's deadline + the recorder's event

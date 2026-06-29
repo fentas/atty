@@ -124,6 +124,9 @@ pub const modules = .{
 | `snapshotter(.{ .dir, .update })` | `onSnapshot` | render the grid → compare to `<dir>/<name>.txt`; on mismatch write `<name>.actual.txt` + fail. `update` (re)writes goldens. |
 | `cast_recorder(.{ .path })` | `onOutput`/`onInput` | record an asciinema v2 cast (`asciinema play`, or `agg` → GIF). |
 | `fragment_injector(.{ .bytes })` | `beforeRead` | cap each read so escapes split across reads — deterministic fragmentation, no load needed. |
+| `latency_injector(.{ .read_ms })` | `beforeRead` | sleep before each read — spread output in time to surface timing races. |
+| `resize_injector(.{ .every, .sizes })` | `onOutput` | SIGWINCH storm: resize the child on a cadence (stresses resize handling; the grid stays put — grid-resize is a follow-on). |
+| `gif_recorder(.{ .path, .frame_ms })` | `onFrame` | capture distinct frames → a play-once animated SVG (browser/Inkscape; for a GitHub GIF convert the cast with `agg`). |
 
 ## Programmatic API
 

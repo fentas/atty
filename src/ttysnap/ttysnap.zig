@@ -90,7 +90,7 @@ pub fn Harness(comptime modules: anytype) type {
             const text_buf = try allocator.alloc(u8, (@as(usize, opts.cols) * 4 + 1) * (@as(usize, opts.rows) + 1));
             errdefer allocator.free(text_buf);
 
-            const info = module.SessionInfo{ .argv = opts.argv, .cols = opts.cols, .rows = opts.rows };
+            const info = module.SessionInfo{ .argv = opts.argv, .cols = opts.cols, .rows = opts.rows, .master = child.master };
             var rts: Runtimes = undefined;
             var attached: usize = 0;
             errdefer detachUpTo(allocator, &rts, attached);
@@ -113,6 +113,16 @@ pub fn Harness(comptime modules: anytype) type {
                 .rts = rts,
                 .text_buf = text_buf,
             };
+        }
+
+        /// Resize the child's terminal (SIGWINCH via TIOCSWINSZ). NOTE: ttysnap's
+        /// grid stays at the spawn size (vt.Grid has no resize yet), so after a
+        /// resize the child's wider/taller output wraps into the old grid —
+        /// gridContains / waitFor / snapshot can then miss strings that cross
+        /// the stale wrap. Use this to stress SIGWINCH handling, not to assert a
+        /// resized screen; grid-resize is a follow-on.
+        pub fn resize(self: *Self, cols: u16, rows: u16) void {
+            _ = pty.setSize(self.child.master, cols, rows);
         }
 
         pub fn deinit(self: *Self) void {

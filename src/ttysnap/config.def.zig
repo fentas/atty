@@ -15,6 +15,9 @@
 const cast_recorder = @import("modules/cast_recorder.zig").cast_recorder;
 const snapshotter = @import("modules/snapshotter.zig").snapshotter;
 const fragment_injector = @import("modules/fragment_injector.zig").fragment_injector;
+const latency_injector = @import("modules/latency_injector.zig").latency_injector;
+const resize_injector = @import("modules/resize_injector.zig").resize_injector;
+const gif_recorder = @import("modules/gif_recorder.zig").gif_recorder;
 
 /// The composed ttysnap — observers + fault injectors, comptime-walked by
 /// `Harness(modules)`. Tuple ORDER is the fan order for the output / snapshot
@@ -29,4 +32,16 @@ pub const modules = .{
     // Fault injection: split the child's output across small reads so
     // fragmentation races reproduce deterministically (no CI load needed).
     // fragment_injector(.{ .bytes = 16 }),
+
+    // Fault injection: sleep before each read to spread output in time and
+    // surface timing races a fast local run would hide.
+    // latency_injector(.{ .read_ms = 5 }),
+
+    // Fault injection: a SIGWINCH storm — resize the child every Nth chunk,
+    // cycling sizes. Stresses resize handling (the grid itself stays put).
+    // resize_injector(.{ .every = 4, .sizes = &.{ .{ .cols = 120, .rows = 40 }, .{ .cols = 80, .rows = 24 } } }),
+
+    // Record distinct screen frames to a play-once animated SVG (browser /
+    // Inkscape; for a GitHub GIF convert the cast with `agg`).
+    // gif_recorder(.{ .path = "ttysnap-run.svg", .frame_ms = 120 }),
 };
