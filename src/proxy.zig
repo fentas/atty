@@ -321,10 +321,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // before keymap matching / dispatch / pty.master forward so the
     // shell never sees it as user input.
     var dsr_parser = DsrParser{};
-    // A cmd_end (`;D`) edge wants a DSR-6n re-anchor, but the query must not be
-    // written from inside the edge loop — that lands it mid-OSC when the `;D`
-    // marker straddles a read boundary. Latch it here and emit after the chunk's
-    // output is forwarded, at ground state. See the master-output path.
+    // A cmd_end DSR-6n re-anchor emitted from inside the edge loop splits the
+    // `;D` OSC when that marker straddles a read boundary; latch it and emit at
+    // ground state after the output forward instead.
     var dsr_pending = false;
     // Scratch buffer the parser writes filtered stdin bytes into.
     // Sized to match `read_buf` since the filtered output is at most
@@ -1872,8 +1871,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 // the output forward + a ground gate: the
                                 // `;D` OSC can straddle a read boundary, and
                                 // a `\x1B[6n` emitted here would land between
-                                // its halves, abort it terminal-side, and
-                                // leak the exit-code byte to the screen (#528).
+                                // its halves, abort it terminal-side, and leak
+                                // the exit-code byte to the screen.
                                 if (args.is_tty) dsr_pending = true;
                             },
                             .prompt_start_implicit_end => {
