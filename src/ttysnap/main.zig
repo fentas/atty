@@ -66,4 +66,7 @@ test {
     _ = @import("modules/fragment_injector.zig");
     _ = @import("modules/cast_recorder.zig");
     _ = @import("modules/snapshotter.zig");
+    _ = @import("modules/latency_injector.zig");
+    _ = @import("modules/resize_injector.zig");
+    _ = @import("modules/gif_recorder.zig");
 }
