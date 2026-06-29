@@ -86,7 +86,11 @@ pub fn gif_recorder(comptime cfg: struct {
                     try out.appendSlice(allocator, try std.fmt.bufPrint(&line, "<set attributeName=\"visibility\" to=\"visible\" begin=\"{d:.3}s\" dur=\"{d:.3}s\"/>", .{ begin, dur }));
                 }
                 var y: u32 = lh;
-                var rows = std.mem.splitScalar(u8, frame, '\n');
+                // renderText emits a trailing '\n' after the last row; drop that
+                // ONE '\n' so the split doesn't yield a spurious empty final
+                // <text> (a trailing blank row, also '\n'-terminated, survives).
+                const body = if (frame.len > 0 and frame[frame.len - 1] == '\n') frame[0 .. frame.len - 1] else frame;
+                var rows = std.mem.splitScalar(u8, body, '\n');
                 while (rows.next()) |row| {
                     try out.appendSlice(allocator, try std.fmt.bufPrint(&line, "<text x=\"0\" y=\"{d}\" xml:space=\"preserve\" fill=\"#dddddd\">", .{y}));
                     try appendXmlEscaped(allocator, out, row);

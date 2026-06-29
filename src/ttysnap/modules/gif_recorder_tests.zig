@@ -29,6 +29,9 @@ test "gif_recorder: dedups frames + renders one animated group per distinct fram
     const svg = out.items;
     try testing.expect(std.mem.indexOf(u8, svg, "<svg") != null);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, svg, "<g visibility"));
+    // 2 rows/frame × 2 frames = 4 <text> — no spurious empty row from the
+    // trailing newline renderText emits.
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, svg, "<text"));
     try testing.expect(std.mem.indexOf(u8, svg, "fill=\"freeze\"") != null); // last frame stays
     try testing.expect(std.mem.indexOf(u8, svg, "frame-one") != null);
 }
