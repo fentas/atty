@@ -28,7 +28,11 @@ const Allocator = std.mem.Allocator;
 const vt = @import("vt");
 const pty = @import("pty");
 const wait = @import("wait");
+const typing = @import("typing");
 const module = @import("module.zig");
+
+/// Re-export so a scenario writes `ttysnap.Pattern.irregular`, etc.
+pub const Pattern = typing.Pattern;
 
 /// Max bytes per master read. `beforeRead` modules may shrink it per-read
 /// (fault injection); they can never grow it past this.
@@ -173,6 +177,13 @@ pub fn Harness(comptime modules: anytype) type {
                 if (rc == 0) break;
                 written += @intCast(rc);
             }
+        }
+
+        /// Type `text` at a chosen cadence (`.irregular` for human-like input,
+        /// `.instant` == `send`). Sends a keystroke at a time, pumping between so
+        /// the echo renders per-char — a recording then animates the typing.
+        pub fn typeWith(self: *Self, text: []const u8, pattern: typing.Pattern) !void {
+            return typing.typeText(self, text, pattern);
         }
 
         /// Pump output for up to `ms`. Returns true if any bytes were read.

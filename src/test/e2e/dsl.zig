@@ -8,7 +8,10 @@
 //!   env KEY=VALUE
 //!   spawn <argv...>             # argv0 is the binary (token-split, no quoting yet)
 //!                               # if argv0 is "$ATTY", harness substitutes the binary
-//!   type "string"               # quoted; \n \r \t \\ \" \xNN supported
+//!   type "string" [pattern]     # quoted; \n \r \t \\ \" \xNN supported.
+//!                               # optional cadence: instant (default) | fast |
+//!                               # consistent | slow | irregular | random —
+//!                               # paces keystrokes so a recording animates.
 //!   send "string"               # alias
 //!   key Enter|Tab|Up|Down|Left|Right|Escape|Backspace|^C|^D|^L|^[
 //!   sleep <ms>
@@ -34,6 +37,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const typing = @import("typing");
 
 pub const Kind = enum {
     set_cols,
@@ -139,7 +143,21 @@ pub fn parse(allocator: Allocator, source: []const u8) ParseError!Script {
                 .argv = &.{}, // patched after pool stabilises
             });
         } else if (eq(head, "type") or eq(head, "send")) {
-            try cmds.append(allocator, .{ .kind = .type_str, .line = line_no, .str_arg = try parseString(tail) });
+            // type "string" [pattern] — split the quoted string from an optional
+            // trailing cadence word (default instant = send all at once).
+            if (tail.len < 2 or tail[0] != '"') return ParseError.BadString;
+            var j: usize = 1;
+            while (j < tail.len and tail[j] != '"') : (j += 1) {
+                if (tail[j] == '\\' and j + 1 < tail.len) j += 1;
+            }
+            if (j >= tail.len) return ParseError.BadString;
+            const str = try parseString(tail[0 .. j + 1]);
+            const rest = std.mem.trim(u8, tail[j + 1 ..], " \t");
+            const pat: i64 = if (rest.len == 0)
+                @intFromEnum(typing.Pattern.instant)
+            else
+                @intFromEnum(typing.Pattern.fromName(rest) orelse return ParseError.BadString);
+            try cmds.append(allocator, .{ .kind = .type_str, .line = line_no, .str_arg = str, .int_arg = pat });
         } else if (eq(head, "key")) {
             try cmds.append(allocator, .{ .kind = .key, .line = line_no, .str_arg = tail });
         } else if (eq(head, "sleep")) {

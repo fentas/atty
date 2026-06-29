@@ -146,6 +146,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true, // std.c.clock_gettime
     });
+    // Char-by-char typing with selectable cadence — the input-side sibling of
+    // `wait`, shared by the same drivers. Pulls `wait` for the inter-key sleep.
+    const typing_module = b.createModule(.{
+        .root_source_file = b.path("src/ttysnap/typing.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "wait", .module = wait_module }},
+    });
+    // unit_tests pulls test/e2e/dsl.zig relatively, which now imports `typing`;
+    // make the module resolvable in that graph too (it carries its own `wait`).
+    unit_tests.root_module.addImport("typing", typing_module);
+
     const attop_module = b.createModule(.{
         .root_source_file = b.path("src/attop/main.zig"),
         .target = target,
@@ -187,6 +200,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vt", .module = vt_module },
             .{ .name = "pty", .module = pty_module },
             .{ .name = "wait", .module = wait_module },
+            .{ .name = "typing", .module = typing_module },
         },
     });
     const ttysnap_exe = b.addExecutable(.{ .name = "ttysnap", .root_module = ttysnap_module });
@@ -209,6 +223,9 @@ pub fn build(b: *std.Build) void {
     // The shared wait/grid helpers test against a fake driver (no PTY).
     const wait_tests = b.addTest(.{ .root_module = wait_module });
     test_step.dependOn(&b.addRunArtifact(wait_tests).step);
+    // The typing helper tests against a fake driver too.
+    const typing_tests = b.addTest(.{ .root_module = typing_module });
+    test_step.dependOn(&b.addRunArtifact(typing_tests).step);
 
     // -------------------------------------------------------------------------
     // Integration tests
@@ -283,6 +300,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "atty", .module = atty_module },
                 .{ .name = "pty", .module = pty_module },
                 .{ .name = "wait", .module = wait_module },
+                .{ .name = "typing", .module = typing_module },
             },
         }),
     });

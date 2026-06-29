@@ -40,6 +40,27 @@ test "DSL parses a minimal script" {
     try std.testing.expectEqualStrings("first", s.cmds[5].str_arg);
 }
 
+test "DSL type parses an optional cadence pattern" {
+    const src =
+        \\type "echo hi"
+        \\type "echo hi" irregular
+        \\type "echo hi" fast
+        \\
+    ;
+    var s = try parse(std.testing.allocator, src);
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 3), s.cmds.len);
+    // No pattern → instant (ordinal 0); the trailing word isn't consumed wrong.
+    try std.testing.expectEqual(Kind.type_str, s.cmds[0].kind);
+    try std.testing.expectEqual(@as(i64, 0), s.cmds[0].int_arg);
+    try std.testing.expectEqualStrings("echo hi", s.cmds[0].str_arg);
+    // Named cadences → distinct non-zero ordinals; the string stays clean.
+    try std.testing.expect(s.cmds[1].int_arg != 0);
+    try std.testing.expect(s.cmds[2].int_arg != 0);
+    try std.testing.expect(s.cmds[1].int_arg != s.cmds[2].int_arg);
+    try std.testing.expectEqualStrings("echo hi", s.cmds[1].str_arg);
+}
+
 test "DSL parses wait_stable (default + explicit quiet_ms)" {
     const src =
         \\wait_stable

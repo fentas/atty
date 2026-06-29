@@ -361,7 +361,7 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
             .set_cols, .set_rows, .set_timeout_ms, .set_env, .spawn => {
                 // Config directives must come before spawn; ignore here.
             },
-            .type_str => try session.writeInput(c.str_arg),
+            .type_str => try session.typeWith(c.str_arg, @enumFromInt(c.int_arg)),
             .key => {
                 const bytes = dsl.keyBytes(c.str_arg) orelse {
                     first_failure = "unknown key";
