@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const vt = @import("vt.zig");
 const snapshot = @import("snapshot.zig");
 const pty = @import("pty");
+const wait = @import("wait");
 
 pub const KV = pty.KV;
 
@@ -136,102 +137,35 @@ pub const Session = struct {
     }
 
     /// Pump until `needle` appears in the rendered grid, or until timeout.
+    // Screen queries + poll-until-condition waits — shared with ttysnap's
+    // Harness via the generic `wait` module (this Session supplies gridText +
+    // pumpMs + the `exited` flag). The DSL calls these; the loops live once.
     pub fn waitFor(self: *Session, needle: []const u8, timeout_ms: u32) !bool {
-        const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
-        while (true) {
-            if (self.gridContains(needle)) return true;
-            if (snapshot.monoMillis() >= deadline) return false;
-            _ = try self.pumpMs(50);
-        }
+        return wait.waitFor(self, needle, timeout_ms);
     }
-
-    /// Pump until `needle` is NO LONGER on the grid, capped at `timeout_ms`.
-    /// The inverse of waitFor — for "wait until the old screen is gone" before
-    /// a snapshot (e.g. a `clear` that must wipe a prior line before the new
-    /// output is captured). Returns false on timeout (still present).
     pub fn waitForAbsent(self: *Session, needle: []const u8, timeout_ms: u32) !bool {
-        const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
-        while (true) {
-            if (!self.gridContains(needle)) return true;
-            if (snapshot.monoMillis() >= deadline) return false;
-            _ = try self.pumpMs(50);
-        }
+        return wait.waitForAbsent(self, needle, timeout_ms);
     }
-
-    /// Sleep, while pumping output so the grid stays current.
-    pub fn sleepMs(self: *Session, ms: u32) !void {
-        const deadline = snapshot.monoMillis() + @as(i64, @intCast(ms));
-        while (snapshot.monoMillis() < deadline) {
-            const remaining: i64 = deadline - snapshot.monoMillis();
-            const slice: i32 = @intCast(@min(remaining, 50));
-            _ = try self.pumpMs(slice);
-        }
-    }
-
-    /// Pump until the child's output goes quiet for `quiet_ms` (a poll of
-    /// that length reads nothing), capped at `timeout_ms`. A deterministic
-    /// replacement for a fixed `sleep` before a snapshot: it waits exactly
-    /// until the screen settles, regardless of how slow/loaded the host is,
-    /// and the quiet window resets on every byte — so a late async repaint
-    /// (e.g. ghost text computed off the keystroke) is still awaited.
-    /// Returns true if it observed a full quiet window (settled), false if it
-    /// hit `timeout_ms` first (the screen never went quiet — likely a
-    /// too-long quiet_ms or continuous output; the caller proceeds but should
-    /// surface it).
     pub fn waitStable(self: *Session, quiet_ms: u32, timeout_ms: u32) !bool {
-        const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
-        const quiet: i64 = @max(@as(i64, @intCast(quiet_ms)), 1);
-        while (true) {
-            const remaining = deadline - snapshot.monoMillis();
-            if (remaining <= 0) return false; // hit timeout_ms before settling
-            // Clamp the poll to the remaining budget so the total never
-            // exceeds timeout_ms. Only a FULL quiet window with no bytes
-            // counts as settled — a clamped final slice elapsing just loops
-            // back to the timeout check above.
-            const full = remaining >= quiet;
-            const slice: i32 = @intCast(if (full) quiet else remaining);
-            if (!try self.pumpMs(slice) and full) return true;
-        }
+        return wait.waitStable(self, quiet_ms, timeout_ms);
     }
-
-    /// Render the current grid text and check for substring.
-    pub fn gridContains(self: *Session, needle: []const u8) bool {
-        const text = self.renderTextInto(self.text_buf) catch return false;
-        return std.mem.indexOf(u8, text, needle) != null;
-    }
-
-    /// How many (non-overlapping) times `needle` appears in the grid text.
-    pub fn gridCount(self: *Session, needle: []const u8) usize {
-        if (needle.len == 0) return 0;
-        const text = self.renderTextInto(self.text_buf) catch return 0;
-        var n: usize = 0;
-        var i: usize = 0;
-        while (std.mem.indexOfPos(u8, text, i, needle)) |pos| {
-            n += 1;
-            i = pos + needle.len;
-        }
-        return n;
-    }
-
-    /// Pump until `needle` appears at least `count` times, capped at
-    /// `timeout_ms`. For an async paint whose text ALSO appears elsewhere on
-    /// screen (a ghost completing a command that's still in scrollback): the
-    /// count rises when the new occurrence lands, so this waits for the paint
-    /// deterministically — where waitFor (any occurrence) returns immediately
-    /// on the pre-existing copy and wait_stable can settle before the worker
-    /// paints. Returns false on timeout.
     pub fn waitForCount(self: *Session, needle: []const u8, count: usize, timeout_ms: u32) !bool {
-        const deadline = snapshot.monoMillis() + @as(i64, @intCast(timeout_ms));
-        while (true) {
-            if (self.gridCount(needle) >= count) return true;
-            if (snapshot.monoMillis() >= deadline) return false;
-            _ = try self.pumpMs(50);
-        }
+        return wait.waitForCount(self, needle, count, timeout_ms);
+    }
+    pub fn gridContains(self: *Session, needle: []const u8) bool {
+        return wait.gridContains(self, needle);
+    }
+    pub fn gridCount(self: *Session, needle: []const u8) usize {
+        return wait.gridCount(self, needle);
+    }
+    pub fn sleepMs(self: *Session, ms: u32) !void {
+        return wait.sleepMs(self, ms);
     }
 
-    fn renderTextInto(self: *Session, buf: []u8) ![]u8 {
-        var w = std.Io.Writer.fixed(buf);
-        try self.grid.renderText(&w);
+    /// Render the current grid into the reusable text buffer.
+    pub fn gridText(self: *Session) []const u8 {
+        var w = std.Io.Writer.fixed(self.text_buf);
+        self.grid.renderText(&w) catch {};
         return w.buffered();
     }
 

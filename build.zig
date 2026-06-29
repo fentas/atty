@@ -137,6 +137,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true, // own externs + std.c.*
     });
+    // Generic poll-until + grid-query helpers, shared by the same two drivers so
+    // the wait loops live once. Generic over the driver (anytype), depends on
+    // nothing but std (+ libc for the monotonic clock).
+    const wait_module = b.createModule(.{
+        .root_source_file = b.path("src/ttysnap/wait.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true, // std.c.clock_gettime
+    });
     const attop_module = b.createModule(.{
         .root_source_file = b.path("src/attop/main.zig"),
         .target = target,
@@ -177,6 +186,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "vt", .module = vt_module },
             .{ .name = "pty", .module = pty_module },
+            .{ .name = "wait", .module = wait_module },
         },
     });
     const ttysnap_exe = b.addExecutable(.{ .name = "ttysnap", .root_module = ttysnap_module });
@@ -195,6 +205,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ttysnap_tests.step);
     const ttysnap_test_step = b.step("test-ttysnap", "Run only the ttysnap unit tests");
     ttysnap_test_step.dependOn(&run_ttysnap_tests.step);
+
+    // The shared wait/grid helpers test against a fake driver (no PTY).
+    const wait_tests = b.addTest(.{ .root_module = wait_module });
+    test_step.dependOn(&b.addRunArtifact(wait_tests).step);
 
     // -------------------------------------------------------------------------
     // Integration tests
@@ -268,6 +282,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "atty", .module = atty_module },
                 .{ .name = "pty", .module = pty_module },
+                .{ .name = "wait", .module = wait_module },
             },
         }),
     });
