@@ -12,6 +12,8 @@ module_default: true
 
 Confirmation prompt for dangerous commands.
 
+![atty guardrail: typing `rm -rf …` and pressing Enter raises a confirmation gate before the command runs; any key other than Enter cancels]({{ '/assets/atty-guardrail.gif' | relative_url }})
+
 * TOC
 {:toc}
 

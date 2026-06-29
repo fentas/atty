@@ -1,0 +1,24 @@
+# atty statusbar — the always-present bottom bar that survives shell scrolling.
+# A short command, then enough output to scroll the region: the bar stays pinned
+# to the bottom row (DECSTBM-reserved) while the numbers scroll underneath it.
+cols 80
+rows 12
+timeout_ms 15000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 900
+type "echo atty wraps your shell, transparently" irregular
+sleep 300
+key Enter
+wait_for "transparently"
+sleep 1300
+# More lines than the scroll region is tall → the screen scrolls; the bar holds.
+type "seq 1 30" irregular
+sleep 300
+key Enter
+wait_for "30"
+wait_stable 300
+sleep 1800
+type "exit\r"
+exit_code 0

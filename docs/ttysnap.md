@@ -135,7 +135,8 @@ const H = ttysnap.Harness(config.modules);
 var h = try H.spawn(alloc, .{ .argv = &.{ "vim", "file" }, .cols = 80, .rows = 24, .env = env });
 defer h.deinit();
 
-try h.send("ihello\x1b");          // send input
+try h.send("ihello\x1b");          // send input (instant)
+try h.typeWith("git status", .irregular); // type char-by-char, human cadence
 _ = try h.waitFor("hello", 2000);  // auto-wait for it on screen
 _ = try h.waitStable(150, 2000);   // settle (no output for 150ms)
 if (h.gridContains("ERROR")) { … } // query the rendered screen
@@ -146,6 +147,25 @@ const status = try h.waitExit(2000);
 
 `env` is the **complete** environment (nothing is inherited) so a run is
 reproducible across machines.
+
+### Typing cadence
+
+`typeWith` (and the e2e DSL's `type "…" <pattern>`) sends one codepoint at a
+time, pumping the inter-key delay so the echo renders per-char and a recording
+animates realistic typing. Patterns: `instant` (the default — same as `send`),
+`fast`, `consistent`, `slow`, `irregular` (human-like jitter + a beat after
+spaces/punctuation), `random`. The jitter is a fixed-seed PRNG, so the typing
+cadence is identical run-to-run (the cast's wall-clock timestamps still vary by
+a few ms).
+
+### Demo GIFs
+
+The per-feature docs GIFs are recorded this way: the scenarios in `tests/demo/`
+type at `irregular` cadence, and `make demo-gifs` records each as an asciinema
+cast then renders it with [`agg`](https://github.com/asciinema/agg) into
+`docs/assets/atty-<feature>.gif`. They live outside the regression e2e suite
+(they're paced with sleeps), so a feature GIF stays reproducible without
+slowing CI.
 
 ## Status + roadmap
 

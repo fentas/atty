@@ -5,8 +5,8 @@
 //! Each codepoint is sent, then the screen is pumped for the pattern's inter-key
 //! delay (via `wait.sleepMs`), so the shell echo renders one char at a time and
 //! a `cast_recorder` captures one timestamped event per keystroke — `agg` then
-//! animates realistic typing. The jitter is a fixed-seed PRNG, so a recording
-//! regenerates byte-for-byte.
+//! animates realistic typing. The jitter is a fixed-seed PRNG, so the typing
+//! cadence is identical run-to-run (the cast's wall-clock timestamps still vary).
 
 const std = @import("std");
 const wait = @import("wait");

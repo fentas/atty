@@ -317,6 +317,20 @@ pub fn build(b: *std.Build) void {
     const e2e_step = b.step("e2e", "Run end-to-end scenarios (requires PTY)");
     e2e_step.dependOn(&run_e2e.step);
 
+    // The same runner over tests/demo — the per-feature showcase scenarios that
+    // back the docs GIFs (kept OUT of the regression suite: they're paced with
+    // sleeps + typed at human cadence). `zig build demo -- --update` records the
+    // casts; scripts/gen-demo-gifs.sh then runs `agg` over them.
+    const run_demo = b.addRunArtifact(e2e_runner);
+    run_demo.step.dependOn(&exe.step);
+    run_demo.addArg("--bin");
+    run_demo.addFileArg(exe.getEmittedBin());
+    run_demo.addArg("tests/demo");
+    if (b.args) |a| run_demo.addArgs(a);
+    run_demo.has_side_effects = true;
+    const demo_step = b.step("demo", "Record the demo-GIF casts (tests/demo)");
+    demo_step.dependOn(&run_demo.step);
+
     // -------------------------------------------------------------------------
     // Benchmarks (Tier A — in-process microbenchmarks)
     //
