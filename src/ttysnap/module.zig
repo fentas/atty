@@ -1,4 +1,4 @@
-//! The harness module contract — the "what can plug into a TTY test" surface.
+//! The ttysnap module contract — the "what can plug into a TTY test" surface.
 //!
 //! This is the test-lifecycle sibling of atty's proxy `module.zig` and attop's
 //! `panel.zig`. Same Suckless idea: a module is a TYPE with a `Runtime` plus a
@@ -10,7 +10,7 @@
 //!
 //! Where it DIFFERS from the proxy: the proxy's modules are stream middleware
 //! sitting in a live PTY (`onInput`/`onOutput` transform bytes in flight). A
-//! harness module is an OBSERVER + a fault INJECTOR around a child the harness
+//! ttysnap module is an OBSERVER + a fault INJECTOR around a child the ttysnap
 //! drives — it watches the output, the rendered screen, and named checkpoints,
 //! and it may perturb the read schedule. So the hook SET is different even
 //! though the composition machinery is the same.
@@ -18,9 +18,9 @@
 //! ## Lifecycle (the order hooks fire)
 //!
 //!   attach            once, right after the child is spawned
-//!   ── then, repeatedly, as the harness pumps output ──
+//!   ── then, repeatedly, as the ttysnap pumps output ──
 //!   beforeRead        before each master read — may shrink the read (fault
-//!                     injection); the harness uses the SMALLEST cap any
+//!                     injection); the ttysnap uses the SMALLEST cap any
 //!                     module asks for
 //!   onOutput          after a chunk is read + fed to the screen grid (raw
 //!                     bytes — for recorders / loggers)
@@ -31,7 +31,7 @@
 //!                     capture a golden); may return an error to fail the run
 //!   ── at teardown ──
 //!   onExit            when the child exits (with its wait status)
-//!   detach            once, as the harness tears down (free `attach`'s state)
+//!   detach            once, as the ttysnap tears down (free `attach`'s state)
 //!
 //! ## Hook shape (each guarded by `@hasDecl`)
 //!
@@ -51,14 +51,14 @@
 //! `fragment_injector(.{ .bytes = 16 })`, `cast_recorder(.{ .path = "x.cast" })`
 //! — exactly like atty's `Module(cfg)` modules. A parameter-free module is a
 //! plain `pub const`. Either way the result is a type placed in the
-//! `config.zig` `modules` tuple; the harness instantiates one `Runtime` per
+//! `config.zig` `modules` tuple; the ttysnap instantiates one `Runtime` per
 //! entry.
 //!
 //! ## Writing one (minimal)
 //!
 //!   pub const my_logger = struct {
 //!       pub const Runtime = struct { n: usize = 0 };
-//!       pub fn attach(_: std.mem.Allocator, _: harness.SessionInfo) !Runtime {
+//!       pub fn attach(_: std.mem.Allocator, _: ttysnap.SessionInfo) !Runtime {
 //!           return .{};
 //!       }
 //!       pub fn onOutput(rt: *Runtime, bytes: []const u8) void {
@@ -71,7 +71,7 @@
 const std = @import("std");
 const vt = @import("vt");
 
-/// The screen-grid emulator the harness renders output into. Re-exported so a
+/// The screen-grid emulator the ttysnap renders output into. Re-exported so a
 /// module's `onFrame` / `onSnapshot` only ever imports the contract, never the
 /// emulator directly.
 pub const Grid = vt.Grid;
@@ -86,7 +86,7 @@ pub const SessionInfo = struct {
     rows: u16,
 };
 
-/// Monotonic milliseconds — the harness's deadline + the recorder's event
+/// Monotonic milliseconds — the ttysnap's deadline + the recorder's event
 /// clock. `.MONOTONIC` resolves the OS-correct clockid_t (matches the proxy /
 /// statusbar idiom); immune to wall-clock adjustments mid-run.
 pub fn nowMs() i64 {

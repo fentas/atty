@@ -1,10 +1,10 @@
 ---
 layout: default
-title: TTY test harness
-permalink: /harness/
+title: ttysnap
+permalink: /ttysnap/
 ---
 
-# The TTY test harness — "Playwright for the terminal"
+# ttysnap — "Playwright for the terminal"
 
 A small framework for driving a real terminal program under test: send input,
 read the **rendered screen** (not just a byte stream), assert against goldens,
@@ -17,16 +17,16 @@ a real VT emulator for screen assertions + recording + fault injection** behind
 one clean, composable API. This is that, reusing atty's own VT grid.
 
 ```sh
-zig build harness          # build the configured binary → zig-out/bin/harness
-zig build run-harness      # run the example (drives bash, asserts on screen)
-zig build test-harness     # run the harness unit tests
+zig build ttysnap          # build the configured binary → zig-out/bin/ttysnap
+zig build run-ttysnap      # run the example (drives bash, asserts on screen)
+zig build test-ttysnap     # run the ttysnap unit tests
 ```
 
 ## Why it exists
 
 Terminal programs are notoriously hard to test: output is an ANSI byte stream,
 timing is load-dependent, and "what's on screen" only exists after an emulator
-interprets cursor moves, scroll regions, and SGR. The harness answers all three:
+interprets cursor moves, scroll regions, and SGR. The ttysnap answers all three:
 
 - **Real PTY** — the program runs under a pseudo-terminal exactly as it would
   in a user's emulator (controlling tty, `SIGWINCH`, job control, raw input).
@@ -39,7 +39,7 @@ interprets cursor moves, scroll regions, and SGR. The harness answers all three:
 
 ## Architecture — the atty way
 
-The harness mirrors atty's composition idiom (`Dispatcher(modules)` for the
+The ttysnap mirrors atty's composition idiom (`Dispatcher(modules)` for the
 proxy, `PanelHost(panels)` for attop):
 
 ```
@@ -49,7 +49,7 @@ config.zig  ──>  Harness(modules)  ──drives──>  child under a PTY
 modules ── observe + inject around the lifecycle (resolved by @hasDecl)
 ```
 
-- **`Harness(modules)`** (`harness.zig`) — the composed driver: spawns the
+- **`Harness(modules)`** (`ttysnap.zig`) — the composed driver: spawns the
   child, renders output into a grid, drives input, and fans the lifecycle into
   each module. `Harness(.{})` (empty tuple) is the bare engine. Every hook is
   `@hasDecl`-gated at comptime, so unused hooks cost nothing and deleting a
@@ -64,7 +64,7 @@ modules ── observe + inject around the lifecycle (resolved by @hasDecl)
 
 ```
 attach            once, right after spawn
-beforeRead        before each read — may shrink it (fault injection; harness
+beforeRead        before each read — may shrink it (fault injection; ttysnap
                   takes the smallest cap any module asks for)
 onOutput          after a chunk is read + fed to the grid (raw bytes)
 onFrame           after that chunk — the new screen state
@@ -128,7 +128,7 @@ pub const modules = .{
 ## Programmatic API
 
 ```zig
-const H = harness.Harness(config.modules);
+const H = ttysnap.Harness(config.modules);
 var h = try H.spawn(alloc, .{ .argv = &.{ "vim", "file" }, .cols = 80, .rows = 24, .env = env });
 defer h.deinit();
 

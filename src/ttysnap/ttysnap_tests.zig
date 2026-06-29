@@ -1,4 +1,4 @@
-//! Integration tests for the harness engine + the comptime hook fanning.
+//! Integration tests for the ttysnap engine + the comptime hook fanning.
 //! These drive a REAL child (`cat`, which echoes its stdin) under a PTY, so
 //! they exercise spawn → drive → render → wait end to end against a non-atty
 //! target. `cat` is used over a shell because it has no prompt/PS1 variance —
@@ -6,32 +6,32 @@
 
 const std = @import("std");
 const testing = std.testing;
-const harness = @import("harness.zig");
+const ttysnap = @import("ttysnap.zig");
 
 /// Minimal reproducible env so execvpe finds `cat` (nothing is inherited).
-const test_env = [_]harness.KV{
+const test_env = [_]ttysnap.KV{
     .{ .key = "PATH", .value = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" },
     .{ .key = "TERM", .value = "xterm-256color" },
     .{ .key = "HOME", .value = "/tmp" },
     .{ .key = "LANG", .value = "C.UTF-8" },
 };
 
-test "harness: bare engine (no modules) drives a child and waits on the screen" {
-    const H = harness.Harness(.{});
+test "ttysnap: bare engine (no modules) drives a child and waits on the screen" {
+    const H = ttysnap.Harness(.{});
     var h = try H.spawn(testing.allocator, .{ .argv = &.{"cat"}, .cols = 40, .rows = 10, .env = &test_env });
     defer h.deinit();
 
-    try h.send("ping-harness\r");
-    try testing.expect(try h.waitFor("ping-harness", 3000)); // cat echoes it back
-    try testing.expect(h.gridContains("ping-harness"));
+    try h.send("ping-ttysnap\r");
+    try testing.expect(try h.waitFor("ping-ttysnap", 3000)); // cat echoes it back
+    try testing.expect(h.gridContains("ping-ttysnap"));
 
     try h.send("\x04"); // Ctrl-D → EOF → cat exits
     _ = try h.waitExit(3000);
     try testing.expect(h.exited);
 }
 
-test "harness: waitFor times out (returns false) on absent text" {
-    const H = harness.Harness(.{});
+test "ttysnap: waitFor times out (returns false) on absent text" {
+    const H = ttysnap.Harness(.{});
     var h = try H.spawn(testing.allocator, .{ .argv = &.{"cat"}, .cols = 40, .rows = 10, .env = &test_env });
     defer h.deinit();
     try testing.expect(!(try h.waitFor("never-appears", 200)));
@@ -47,7 +47,7 @@ var probe_exits: usize = 0;
 
 const Probe = struct {
     pub const Runtime = struct {};
-    pub fn attach(_: std.mem.Allocator, _: harness.SessionInfo) !Runtime {
+    pub fn attach(_: std.mem.Allocator, _: ttysnap.SessionInfo) !Runtime {
         return .{};
     }
     pub fn beforeRead(_: *Runtime, want: usize) usize {
@@ -57,7 +57,7 @@ const Probe = struct {
         probe_output_calls += 1;
         if (bytes.len > probe_max_chunk) probe_max_chunk = bytes.len;
     }
-    pub fn onSnapshot(_: *Runtime, _: []const u8, _: *const harness.Grid) !void {
+    pub fn onSnapshot(_: *Runtime, _: []const u8, _: *const ttysnap.Grid) !void {
         probe_snaps += 1;
     }
     pub fn onExit(_: *Runtime, _: u32) void {
@@ -65,13 +65,13 @@ const Probe = struct {
     }
 };
 
-test "harness: beforeRead caps reads, onOutput/onSnapshot/onExit fan to modules" {
+test "ttysnap: beforeRead caps reads, onOutput/onSnapshot/onExit fan to modules" {
     probe_max_chunk = 0;
     probe_output_calls = 0;
     probe_snaps = 0;
     probe_exits = 0;
 
-    const H = harness.Harness(.{Probe});
+    const H = ttysnap.Harness(.{Probe});
     var h = try H.spawn(testing.allocator, .{ .argv = &.{"cat"}, .cols = 40, .rows = 10, .env = &test_env });
     defer h.deinit();
 
@@ -90,9 +90,9 @@ test "harness: beforeRead caps reads, onOutput/onSnapshot/onExit fan to modules"
     try testing.expectEqual(@as(usize, 1), probe_exits); // onExit fired exactly once
 }
 
-test "harness: terminate (deinit on a live child) reaps it + fires onExit once" {
+test "ttysnap: terminate (deinit on a live child) reaps it + fires onExit once" {
     probe_exits = 0;
-    const H = harness.Harness(.{Probe});
+    const H = ttysnap.Harness(.{Probe});
     var h = try H.spawn(testing.allocator, .{ .argv = &.{ "sleep", "30" }, .cols = 40, .rows = 10, .env = &test_env });
     try testing.expect(!h.exited);
     h.deinit(); // no waitExit → drives the terminate() teardown path
