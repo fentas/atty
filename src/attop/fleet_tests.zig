@@ -166,3 +166,14 @@ test "responsive: the live Panel.render shows uid at wide width" {
     try fleet.Panel.render(&rt, &ctx, &w);
     try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "1000") != null);
 }
+
+test "responsive: wide tier clips a long cwd so the uid row still fits" {
+    // With the uid column present at >=120, cwdBudget must shrink so a long
+    // path is truncated rather than overrunning the line.
+    var list = [_]uds.Instance{.{ .pid = 7, .uid = 1000, .shell = "bash", .cwd = "/very/deeply/nested/path/" ++ ("x/" ** 60) }};
+    var buf: [4096]u8 = undefined;
+    const wide = fleet.renderFleet(&buf, &list, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, wide, "1000") != null); // uid shown
+    try testing.expect(std.mem.indexOf(u8, wide, "\u{2026}") != null); // cwd truncated → budget applied with uid
+    try testing.expect(std.mem.indexOf(u8, wide, "/very/deeply/nested") == null); // head clipped
+}

@@ -132,7 +132,10 @@ test "renderInto: first frame fully paints, an identical frame diffs to nothing"
     app.renderInto(&w1); // first frame: full paint
     const f1 = b1[0..w1.end];
     try testing.expect(std.mem.indexOf(u8, f1, "\x1b[2J") != null); // cleared
-    try testing.expect(f1.len > 0);
+    // A paint-only needle (the tab bar) — proves paint actually ran, so the
+    // empty-diff below can't pass on a silently-failed paint + frame.diff's
+    // unconditional clear alone.
+    try testing.expect(std.mem.indexOf(u8, f1, "[h]Home") != null);
 
     var b2: [65536]u8 = undefined;
     var w2 = std.Io.Writer.fixed(&b2);

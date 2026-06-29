@@ -202,7 +202,7 @@ fn renderHeader(w: *std.Io.Writer, cols: u16, t: theme.Theme) !void {
     if (cols < compact_cols) {
         try w.print("  {f}{s:<7} {s:<8} {s:>5}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", reset });
     } else if (cols >= wide_cols) {
-        try w.print("  {f}{s:<7} {s:<8} {s:>5} {s:>6}  {s}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", "uid", "cwd", reset });
+        try w.print("  {f}{s:<7} {s:<8} {s:>5} {s:>7}  {s}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", "uid", "cwd", reset });
     } else {
         try w.print("  {f}{s:<7} {s:<8} {s:>5}  {s}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", "cwd", reset });
     }
@@ -215,7 +215,7 @@ fn renderRow(w: *std.Io.Writer, inst: uds.Instance, cols: u16, compact: bool, se
     const wide = cols >= wide_cols;
     if (selected) try w.writeAll("\x1b[7m");
     try w.print("  {d:<7} {s:<8} {d:>5}", .{ inst.pid, shell, inst.counters.commands });
-    if (wide) try w.print(" {d:>6}", .{inst.uid});
+    if (wide) try w.print(" {d:>7}", .{inst.uid});
     if (!compact) {
         const cwd = cwdShow(inst.cwd, cwdBudget(cols, wide), t.glyph.ellipsis);
         try w.writeAll("  ");
@@ -287,7 +287,7 @@ fn draw(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void {
 /// push the line past the width. Reserves the worst case (unicode " 🔒" ≈ 3
 /// cols); the ascii " P" (2) just over-reserves harmlessly.
 fn cwdBudget(cols: u16, wide: bool) usize {
-    const uid_w: usize = if (wide) 7 else 0; // " {d:>6}" uid column
+    const uid_w: usize = if (wide) 8 else 0; // " {d:>7}" uid column (fits 7-digit container/LDAP uids)
     const reserved: usize = 26 + 3 + uid_w; // prefix (2+7+1+8+1+5+2) + marker (+uid)
     return if (cols > reserved + 8) cols - reserved else 8;
 }
