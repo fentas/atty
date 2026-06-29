@@ -62,3 +62,7 @@ coverage/
 # Python bytecode (test sandbox helpers)
 __pycache__/
 *.pyc
+/src/harness/config.zig
+
+# harness recordings (generated)
+*.cast
