@@ -14,6 +14,9 @@ const box = @import("box.zig");
 const reset = atty.style.reset;
 
 pub const compact_cols: u16 = 80;
+/// At/above this width Fleet has room for an extra `uid` column (the
+/// data-dense panel earns the space; the short panels stay single-column).
+pub const wide_cols: u16 = 120;
 
 pub fn renderFleet(buf: []u8, instances: ?[]const uds.Instance, cols: u16, rows: u16) []const u8 {
     _ = rows;
@@ -111,11 +114,7 @@ pub const Panel = struct {
             return;
         }
 
-        if (compact) {
-            try w.print("  {f}{s:<7} {s:<8} {s:>5}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", reset });
-        } else {
-            try w.print("  {f}{s:<7} {s:<8} {s:>5}  {s}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", "cwd", reset });
-        }
+        try renderHeader(w, cols, t);
 
         const vis = rt.list.visible();
         var i = vis.start;
@@ -196,13 +195,29 @@ pub const Panel = struct {
     }
 };
 
-/// One session row; the selected row is wrapped in reverse video.
+/// The column header for the current width tier (compact / +cwd / +uid+cwd).
+/// Shared by the interactive render + the legacy `draw` so the two paths
+/// can't drift on the column set.
+fn renderHeader(w: *std.Io.Writer, cols: u16, t: theme.Theme) !void {
+    if (cols < compact_cols) {
+        try w.print("  {f}{s:<7} {s:<8} {s:>5}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", reset });
+    } else if (cols >= wide_cols) {
+        try w.print("  {f}{s:<7} {s:<8} {s:>5} {s:>7}  {s}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", "uid", "cwd", reset });
+    } else {
+        try w.print("  {f}{s:<7} {s:<8} {s:>5}  {s}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", "cwd", reset });
+    }
+}
+
+/// One session row; the selected row is wrapped in reverse video. At >=
+/// `wide_cols` a `uid` column sits between cmds and cwd.
 fn renderRow(w: *std.Io.Writer, inst: uds.Instance, cols: u16, compact: bool, selected: bool, t: theme.Theme) !void {
     const shell = if (inst.shell.len > 0) inst.shell else "\u{2014}";
+    const wide = cols >= wide_cols;
     if (selected) try w.writeAll("\x1b[7m");
     try w.print("  {d:<7} {s:<8} {d:>5}", .{ inst.pid, shell, inst.counters.commands });
+    if (wide) try w.print(" {d:>7}", .{inst.uid});
     if (!compact) {
-        const cwd = cwdShow(inst.cwd, cwdBudget(cols), t.glyph.ellipsis);
+        const cwd = cwdShow(inst.cwd, cwdBudget(cols, wide), t.glyph.ellipsis);
         try w.writeAll("  ");
         if (cwd.ellipsis) try w.writeAll(t.glyph.ellipsis);
         try w.print("{s}", .{cwd.text});
@@ -260,25 +275,8 @@ fn draw(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void {
         return;
     }
 
-    if (compact) {
-        try w.print("  {f}{s:<7} {s:<8} {s:>5}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", reset });
-    } else {
-        try w.print("  {f}{s:<7} {s:<8} {s:>5}  {s}{s}\r\n", .{ t.muted, "pid", "shell", "cmds", "cwd", reset });
-    }
-
-    for (list) |inst| {
-        const shell = if (inst.shell.len > 0) inst.shell else "\u{2014}";
-        if (compact) {
-            try w.print("  {d:<7} {s:<8} {d:>5}", .{ inst.pid, shell, inst.counters.commands });
-        } else {
-            const cwd = cwdShow(inst.cwd, cwdBudget(cols), t.glyph.ellipsis);
-            try w.print("  {d:<7} {s:<8} {d:>5}  ", .{ inst.pid, shell, inst.counters.commands });
-            if (cwd.ellipsis) try w.writeAll(t.glyph.ellipsis);
-            try w.print("{s}", .{cwd.text});
-        }
-        if (inst.incognito) try w.print(" {s}", .{t.glyph.incognito});
-        try w.writeAll("\r\n");
-    }
+    try renderHeader(w, cols, t);
+    for (list) |inst| try renderRow(w, inst, cols, compact, false, t);
 
     const term = if (list.len == 1) s.fleet_terminals_one else s.fleet_terminals_many;
     try w.print("\r\n  {d} {s}\r\n", .{ list.len, term });
@@ -288,9 +286,11 @@ fn draw(w: *std.Io.Writer, instances: ?[]const uds.Instance, cols: u16) !void {
 /// room for the trailing incognito marker so an incognito row's cwd can't
 /// push the line past the width. Reserves the worst case (unicode " 🔒" ≈ 3
 /// cols); the ascii " P" (2) just over-reserves harmlessly.
-fn cwdBudget(cols: u16) usize {
-    const reserved: usize = 26 + 3; // prefix (2+7+1+8+1+5+2) + marker
-    return if (cols > reserved + 8) cols - reserved else 8;
+fn cwdBudget(cols: u16, wide: bool) usize {
+    const c: usize = cols;
+    const uid_w: usize = if (wide) 8 else 0; // " {d:>7}" uid column (fits 7-digit container/LDAP uids)
+    const reserved: usize = 26 + 3 + uid_w; // prefix (2+7+1+8+1+5+2) + marker (+uid)
+    return if (c > reserved + 8) c - reserved else 8;
 }
 
 const Cwd = struct { ellipsis: bool, text: []const u8 };

@@ -177,8 +177,9 @@ test "Fleet renders the negative states across widths" {
 
 test "Fleet truncates a long cwd through the grid (tail kept, head dropped)" {
     var buf: [65536]u8 = undefined;
-    // The cwd must exceed cwdBudget(120)=91 so truncation ACTUALLY fires
-    // (a shorter path renders whole and would test nothing).
+    // The cwd must exceed cwdBudget at 120 (the wide tier, with the uid
+    // column = 120-36 = 84) so truncation ACTUALLY fires (a shorter path
+    // renders whole and would test nothing).
     const cwd = "/HEADXYZ" ++ ("/abcdefghij" ** 12) ++ "/tail-marker"; // ~152 chars
     var list = [_]uds.Instance{.{ .pid = 1, .shell = "bash", .cwd = cwd }};
     const t = try screen(testing.allocator, fleet.renderFleet(&buf, &list, 120, 40), 40, 120);

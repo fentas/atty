@@ -142,3 +142,38 @@ test "Fleet.Panel: onClick selects the row under the cursor" {
     // A click past the last row is ignored.
     try testing.expectEqual(panel.Action.pass, try fleet.Panel.onClick(&rt, &ctx, 5, 50));
 }
+
+test "responsive: a uid column appears at >=120 cols, hidden below" {
+    var list = [_]uds.Instance{.{ .pid = 7, .uid = 1000, .shell = "bash", .cwd = "/x" }};
+    var buf: [4096]u8 = undefined;
+    const wide = fleet.renderFleet(&buf, &list, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, wide, "uid") != null); // header
+    try testing.expect(std.mem.indexOf(u8, wide, "1000") != null); // value
+    var buf2: [4096]u8 = undefined;
+    const mid = fleet.renderFleet(&buf2, &list, 100, 40);
+    try testing.expect(std.mem.indexOf(u8, mid, "uid") == null);
+    try testing.expect(std.mem.indexOf(u8, mid, "1000") == null);
+}
+
+test "responsive: the live Panel.render shows uid at wide width" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var list = [_]uds.Instance{.{ .pid = 7, .uid = 1000, .shell = "bash", .cwd = "/x" }};
+    var rt = try fleet.Panel.attach(testing.allocator);
+    var ctx = panel.Ctx{ .instances = &list, .cols = 120, .rows = 24, .arena = arena.allocator() };
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try fleet.Panel.render(&rt, &ctx, &w);
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "1000") != null);
+}
+
+test "responsive: wide tier clips a long cwd so the uid row still fits" {
+    // With the uid column present at >=120, cwdBudget must shrink so a long
+    // path is truncated rather than overrunning the line.
+    var list = [_]uds.Instance{.{ .pid = 7, .uid = 1000, .shell = "bash", .cwd = "/very/deeply/nested/path/" ++ ("x/" ** 60) }};
+    var buf: [4096]u8 = undefined;
+    const wide = fleet.renderFleet(&buf, &list, 120, 40);
+    try testing.expect(std.mem.indexOf(u8, wide, "1000") != null); // uid shown
+    try testing.expect(std.mem.indexOf(u8, wide, "\u{2026}") != null); // cwd truncated → budget applied with uid
+    try testing.expect(std.mem.indexOf(u8, wide, "/very/deeply/nested") == null); // head clipped
+}
