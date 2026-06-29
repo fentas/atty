@@ -176,12 +176,32 @@ test "Grid resize preserves top-left content and clamps the cursor" {
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "hello") != null);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "world") != null);
 
-    try g.resize(2, 3); // shrink — cols clamp content, cursor clamps in-bounds
-    try testing.expectEqual(@as(u16, 2), g.rows);
+    try g.resize(1, 3); // shrink to 1 row — exercises BOTH clamps (cur_row 1→0)
+    try testing.expectEqual(@as(u16, 1), g.rows);
     try testing.expectEqual(@as(u16, 3), g.cols);
-    try testing.expect(g.cur_row < 2 and g.cur_col < 3);
+    try testing.expectEqual(@as(u16, 0), g.cur_row); // row clamp fired
+    try testing.expect(g.cur_col < 3); // col clamp fired
     var buf2: [64]u8 = undefined;
     var w2 = std.Io.Writer.fixed(&buf2);
     try g.renderText(&w2);
     try testing.expect(std.mem.indexOf(u8, w2.buffered(), "hel") != null); // row 0, first 3 cols
+}
+
+test "Grid resize clamps the SAVED cursor so a later DECRC can't OOB" {
+    var g = try Grid.init(std.testing.allocator, 6, 10);
+    defer g.deinit();
+    g.feed("\x1B[6;8H"); // cursor → row 6, col 8 (1-indexed) = (5,7)
+    g.feed("\x1B7"); // DECSC — save (5,7)
+    try g.resize(2, 4); // shrink: the saved cursor is now out of bounds
+    g.feed("\x1B8"); // DECRC — restore; must clamp, not strand at (5,7)
+    g.feed("\x1B[P"); // DCH — would index OOB if the restored cursor were stranded
+    try testing.expect(g.cur_row < 2 and g.cur_col < 4); // no panic + in bounds
+}
+
+test "Grid resize clamps to >= 1 (a zero dimension does not underflow)" {
+    var g = try Grid.init(std.testing.allocator, 3, 5);
+    defer g.deinit();
+    try g.resize(0, 0); // clamped to 1x1 — must not underflow new_rows-1
+    try testing.expectEqual(@as(u16, 1), g.rows);
+    try testing.expectEqual(@as(u16, 1), g.cols);
 }
