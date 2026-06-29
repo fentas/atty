@@ -66,6 +66,7 @@ help:
 	@printf "  itest           Run atty integration tests (real PTY).\n"
 	@printf "  e2e             Run end-to-end scenarios under tests/e2e/.\n"
 	@printf "  e2e-update      Refresh e2e goldens from current output.\n"
+	@printf "  demo-gifs       Regenerate the docs demo GIFs (tests/demo → agg; needs agg).\n"
 	@printf "  integration-test       Run atty ↔ guard ↔ SLM integration tests (no external deps).\n"
 	@printf "  integration-test-full  Same + Ollama / ONNX / atom-fetcher scenarios (skip when deps absent).\n\n"
 	@printf "Install (default = both subprojects)\n"

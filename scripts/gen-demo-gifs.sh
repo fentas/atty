@@ -7,7 +7,7 @@
 # `typing` module) so the GIFs animate naturally; agg caps idle gaps so the
 # pauses stay snappy.
 #
-# Requires agg:  cargo install --locked --git https://github.com/asciinema/agg
+# Requires agg:  cargo install --locked --git https://github.com/asciinema/agg --tag v1.9.0
 # Optional env:  ZIG_TARGET (default -Dtarget=x86_64-linux-gnu), AGG_THEME (monokai).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,7 +17,7 @@ TARGET="${ZIG_TARGET:--Dtarget=x86_64-linux-gnu}"
 THEME="${AGG_THEME:-monokai}"
 
 if ! command -v agg >/dev/null 2>&1; then
-  echo "error: agg not found — cargo install --locked --git https://github.com/asciinema/agg" >&2
+  echo "error: agg not found — cargo install --locked --git https://github.com/asciinema/agg --tag v1.9.0" >&2
   exit 1
 fi
 
