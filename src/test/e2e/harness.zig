@@ -16,6 +16,7 @@ const vt = @import("vt.zig");
 const snapshot = @import("snapshot.zig");
 const pty = @import("pty");
 const wait = @import("wait");
+const typing = @import("typing");
 
 pub const KV = pty.KV;
 
@@ -69,6 +70,16 @@ pub const Session = struct {
         _ = linux.waitpid(self.pid, &status, 0);
         self.exited = true;
         self.exit_status = status;
+    }
+
+    /// Alias for the generic `typing`/driver interface (mirrors Harness.send).
+    pub fn send(self: *Session, bytes: []const u8) !void {
+        return self.writeInput(bytes);
+    }
+
+    /// Type `text` at a chosen cadence via the shared `typing` helper.
+    pub fn typeWith(self: *Session, text: []const u8, pattern: typing.Pattern) !void {
+        return typing.typeText(self, text, pattern);
     }
 
     /// Write bytes to the PTY master (i.e. send to the child's stdin).
