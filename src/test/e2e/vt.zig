@@ -100,6 +100,9 @@ pub const Grid = struct {
     saved_screen: ?[]Cell = null,
     alt_row: u16 = 0,
     alt_col: u16 = 0,
+    alt_attrs: Attrs = .{},
+    alt_fg: Color = .default,
+    alt_bg: Color = .default,
 
     state: ParseState = .ground,
     // CSI parameter buffer.
@@ -256,8 +259,13 @@ pub const Grid = struct {
             if (self.saved_screen != null) return; // already on alt
             const save = self.allocator.dupe(Cell, self.cells) catch return;
             self.saved_screen = save;
+            // ?1049 saves the cursor (DECSC) — position AND the active SGR — so
+            // attrs/colors set in the alt app don't leak back to the primary.
             self.alt_row = self.cur_row;
             self.alt_col = self.cur_col;
+            self.alt_attrs = self.cur_attrs;
+            self.alt_fg = self.cur_fg;
+            self.alt_bg = self.cur_bg;
             @memset(self.cells, .{});
             self.cur_row = 0;
             self.cur_col = 0;
@@ -268,6 +276,9 @@ pub const Grid = struct {
             self.saved_screen = null;
             self.cur_row = @min(self.alt_row, self.rows - 1);
             self.cur_col = @min(self.alt_col, self.cols - 1);
+            self.cur_attrs = self.alt_attrs;
+            self.cur_fg = self.alt_fg;
+            self.cur_bg = self.alt_bg;
         }
         self.scroll_top = 0;
         self.scroll_bottom = self.rows - 1;

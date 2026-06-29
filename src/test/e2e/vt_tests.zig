@@ -181,12 +181,13 @@ test "Grid alt screen saves + restores the primary buffer" {
     var w1 = std.Io.Writer.fixed(&b1);
     try g.renderText(&w1);
     try std.testing.expectEqualStrings("\n\n\n", w1.buffered()); // alt is blank
-    g.feed("ALT");
-    g.feed("\x1B[?1049l"); // leave alt → primary restored
+    g.feed("\x1B[1mALT"); // set bold inside the alt app
+    g.feed("\x1B[?1049l"); // leave alt → primary buffer + SGR restored
     var b2: [64]u8 = undefined;
     var w2 = std.Io.Writer.fixed(&b2);
     try g.renderText(&w2);
     try std.testing.expectEqualStrings("primar\ny\n\n", w2.buffered());
+    try std.testing.expect(!g.cur_attrs.bold); // alt SGR didn't leak to primary
 }
 
 test "Grid resize while on the alt screen keeps the primary restorable" {
