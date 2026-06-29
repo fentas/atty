@@ -28,3 +28,9 @@ pub const panels = .{
     setup.Panel,
     help.Panel,
 };
+
+/// Mouse support: click a tab to focus it, click a list row to select it,
+/// wheel to scroll. Set false for a keyboard-only dashboard (or terminals
+/// where mouse reporting fights text selection). attop reads this defensively
+/// (`@hasDecl`), so an older `config.zig` without it defaults to enabled.
+pub const mouse = true;

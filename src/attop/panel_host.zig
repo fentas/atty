@@ -84,6 +84,19 @@ pub fn PanelHost(comptime panels: anytype) type {
             return .pass;
         }
 
+        /// Deliver a mouse click (1-based col/row) to the panel at `idx`.
+        /// `.pass` (its default, and for panels without `onClick`) lets the
+        /// host fall back to global handling.
+        pub fn clickAt(rts: *Runtimes, ctx: *Ctx, idx: usize, col: u16, row: u16) !Action {
+            inline for (panels, 0..) |P, i| {
+                if (i == idx) {
+                    if (comptime @hasDecl(P, "onClick")) return P.onClick(rts[i], ctx, col, row);
+                    return .pass;
+                }
+            }
+            return .pass;
+        }
+
         /// The panel at `idx`'s footer hint (panel-specific key legend),
         /// or null.
         pub fn footerHintAt(rts: *Runtimes, ctx: *Ctx, idx: usize) ?[]const u8 {

@@ -64,6 +64,18 @@ pub const Panel = struct {
         if (rt.list.handleKey(k)) return .handled;
         return .pass;
     }
+    /// Click a rung to move the browse cursor onto it. Rungs start
+    /// `content_row` + 2 rows down (Guard's header: title + blank).
+    pub fn onClick(rt: *Runtime, ctx: *panel.Ctx, _: u16, row: u16) !panel.Action {
+        const origin = ctx.content_row + 2;
+        if (row < origin) return .pass;
+        const idx = rt.list.offset + (row - origin);
+        if (idx < rt.list.len) {
+            rt.list.selected = idx;
+            return .handled;
+        }
+        return .pass;
+    }
     pub fn footerHint(_: *Runtime, _: *panel.Ctx) ?[]const u8 {
         return "j/k browse rungs \u{b7} switch via Alt+P / sudo atty-guard profile set";
     }

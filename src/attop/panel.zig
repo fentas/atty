@@ -18,6 +18,7 @@
 //!   pub fn navKey() u8                                 // required — global hotkey
 //!   pub fn render(rt, ctx, w: *std.Io.Writer) !void    // required
 //!   pub fn onKey(rt, ctx, k: Key) !Action             // optional
+//!   pub fn onClick(rt, ctx, col, row: u16) !Action     // optional — mouse
 //!   pub fn onTick(rt, ctx, elapsed_ms: u64) !void      // optional
 //!   pub fn footerHint(rt, ctx) ?[]const u8            // optional — panel keys
 //!   pub fn wantsFocusAtStart(ctx) bool                // optional — landing vote
@@ -51,6 +52,11 @@ pub const Ctx = struct {
     host: Host = .{},
     cols: u16 = 80,
     rows: u16 = 24,
+    /// 1-based screen row where THIS panel's content begins (just below the
+    /// tab bar). A panel maps a mouse click's row to a list index with
+    /// `content_row + own_header_height` — no hard-coded screen offsets, so
+    /// the mapping survives tab-bar layout changes.
+    content_row: u16 = 3,
     /// True when this panel currently has focus (drives selection paint).
     focused: bool = true,
     /// Per-frame scratch arena (freed after the frame). Panels write
