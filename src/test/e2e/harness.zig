@@ -1,17 +1,12 @@
-//! PTY harness for e2e scenarios.
+//! PTY harness for e2e scenarios — the `Session` driver.
 //!
-//! Conceptually identical to what a user's terminal emulator does:
-//!   - open a master/slave PTY pair
-//!   - fork; child dup2's the slave to stdio and execvp's atty
-//!   - parent reads master output, writes input, pumps until done
+//! The controlled-env spawn (open a PTY, fork, dup2 the slave, execvpe) lives in
+//! the `pty` module; this file wraps the resulting child in a `vt.Grid` + cast so
+//! a scenario writes input, pumps master output, and compares a *rendered*
+//! screen against goldens rather than a raw byte stream.
 //!
-//! All output is fed to a `vt.Grid` so we can compare a *rendered* screen
-//! state against goldens, not a raw byte stream.
-//!
-//! Environment is locked down: by default the child sees only PATH, TERM,
-//! LANG, LC_ALL, HOME, SHELL, USER set to known values, plus whatever
-//! the scenario added via `env KEY=VALUE`. Inherited env is discarded so
-//! goldens are reproducible across machines.
+//! Environment is locked down to the scenario's forced + extra env
+//! (PATH/TERM/LANG/…), nothing inherited, so goldens reproduce across machines.
 
 const std = @import("std");
 const posix = std.posix;
@@ -19,11 +14,6 @@ const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const vt = @import("vt.zig");
 const snapshot = @import("snapshot.zig");
-
-// The low-level controlled-env PTY spawn (openpt/grantpt/fork/execvpe +
-// childSetup) lives in ttysnap's shared `pty` module — one spawner for both the
-// ttysnap framework and this harness. This file is just the vt-backed Session
-// that wraps a pty.Child for golden-screen scenarios.
 const pty = @import("pty");
 
 pub const KV = pty.KV;
@@ -263,10 +253,9 @@ pub const Session = struct {
     }
 };
 
-/// Open a PTY, fork, and exec the scenario's argv (with `$ATTY` resolved to the
-/// per-scenario binary) under the controlled environment — via ttysnap's shared
-/// `pty.spawn`. The returned Session wraps the child in a `vt.Grid` + cast so a
-/// scenario asserts the *rendered* screen.
+/// Spawn the scenario under its controlled environment via the shared
+/// `pty.spawn`, wrapping the child in a `vt.Grid` + cast so a scenario asserts
+/// the *rendered* screen.
 pub fn spawn(allocator: Allocator, opts: SpawnOpts) !Session {
     // Resolve `$ATTY` → the per-scenario binary.
     const argv = try allocator.alloc([]const u8, opts.argv.len);
@@ -287,6 +276,13 @@ pub fn spawn(allocator: Allocator, opts: SpawnOpts) !Session {
     const pid = child.pid;
     allocator.free(child.slave_path);
     errdefer _ = std.c.close(master);
+    // Reap the child if a later init fails — closing the master alone only
+    // SIGHUPs it (racily), so kill + wait to avoid an orphan on the OOM window.
+    errdefer {
+        _ = posix.kill(pid, posix.SIG.KILL) catch {};
+        var st: u32 = 0;
+        _ = linux.waitpid(pid, &st, 0);
+    }
 
     var grid = try vt.Grid.init(allocator, opts.rows, opts.cols);
     errdefer grid.deinit();
