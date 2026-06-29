@@ -121,3 +121,24 @@ test "singular terminal" {
     const out = fleet.renderFleet(&buf, &list, 120, 40);
     try testing.expect(std.mem.indexOf(u8, out, "1 terminal\r\n") != null);
 }
+
+test "Fleet.Panel: onClick selects the row under the cursor" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var list = instances(); // 2 sessions
+    var rt = try fleet.Panel.attach(testing.allocator);
+    var ctx = panel.Ctx{ .instances = &list, .cols = 100, .rows = 24, .content_row = 3, .arena = arena.allocator() };
+
+    // Render once so the list's len/offset are populated.
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try fleet.Panel.render(&rt, &ctx, &w);
+
+    // content_row(3) + 3 header rows → first session at row 6; row 7 = 2nd.
+    try testing.expectEqual(panel.Action.handled, try fleet.Panel.onClick(&rt, &ctx, 5, 7));
+    try testing.expectEqual(@as(usize, 1), rt.list.selected);
+    // A click in the header (above the list) is ignored.
+    try testing.expectEqual(panel.Action.pass, try fleet.Panel.onClick(&rt, &ctx, 5, 4));
+    // A click past the last row is ignored.
+    try testing.expectEqual(panel.Action.pass, try fleet.Panel.onClick(&rt, &ctx, 5, 50));
+}

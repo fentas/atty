@@ -21,6 +21,7 @@ pub const proxy = @import("proxy.zig");
 pub const keymap = @import("keymap.zig");
 pub const style = @import("style.zig");
 pub const Style = style.Style;
+pub const mouse = @import("mouse.zig");
 pub const statusbar = @import("statusbar.zig");
 pub const status_text = @import("status_text.zig");
 pub const args = @import("args.zig");

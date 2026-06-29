@@ -83,3 +83,21 @@ test "compact title drops the suffix below the break" {
     const narrow = guard.renderGuard(&buf2, metrics("session"), 70, 40);
     try testing.expect(std.mem.indexOf(u8, narrow, "security profile") == null);
 }
+
+test "Guard.Panel: onClick selects the rung under the cursor" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var rt = try guard.Panel.attach(testing.allocator);
+    const m = metrics("session");
+    var ctx = panel.Ctx{ .metrics = m, .cols = 100, .rows = 24, .content_row = 3, .arena = arena.allocator() };
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try guard.Panel.render(&rt, &ctx, &w); // populates list.len = rungs.len
+
+    // content_row(3) + 2 header rows → first rung at row 5; row 7 = 3rd (idx 2).
+    try testing.expectEqual(panel.Action.handled, try guard.Panel.onClick(&rt, &ctx, 3, 7));
+    try testing.expectEqual(@as(usize, 2), rt.list.selected);
+    // A click in the header is ignored.
+    try testing.expectEqual(panel.Action.pass, try guard.Panel.onClick(&rt, &ctx, 3, 4));
+}

@@ -173,6 +173,20 @@ pub const Panel = struct {
         }
     }
 
+    /// Click a session row to select it. The list starts `content_row` + 3
+    /// rows down (Fleet's header: title + search/blank + column-header).
+    pub fn onClick(rt: *Runtime, ctx: *panel.Ctx, _: u16, row: u16) !panel.Action {
+        if (rt.mode != .browse) return .pass;
+        const origin = ctx.content_row + 3;
+        if (row < origin) return .pass;
+        const idx = rt.list.offset + (row - origin);
+        if (idx < rt.list.len) {
+            rt.list.selected = idx;
+            return .handled;
+        }
+        return .pass;
+    }
+
     pub fn footerHint(rt: *Runtime, _: *panel.Ctx) ?[]const u8 {
         return switch (rt.mode) {
             .detail => "any key closes detail",

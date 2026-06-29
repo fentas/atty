@@ -52,6 +52,15 @@ const fetch_timeout_ms: u32 = 200;
 const begin_sync = "\x1b[?2026h";
 const end_sync = "\x1b[?2026l";
 
+/// Rows the tab bar occupies (the tab line + a blank). The focused panel's
+/// content begins just below — `paintTabBar` must emit exactly this many
+/// newlines (a test pins it). `Ctx.content_row` is derived from this.
+const tab_bar_rows: u16 = 2;
+
+/// Mouse support, read defensively so an older seeded `config.zig` (which
+/// predates the knob) still compiles — defaults to on.
+const mouse_enabled: bool = if (@hasDecl(config, "mouse")) config.mouse else true;
+
 pub fn main() void {
     // attop is a full-screen TUI — it needs a real terminal. Without one
     // (piped / redirected) print the banner + bail rather than emit raw
@@ -90,6 +99,7 @@ const App = struct {
             .host = self.host,
             .cols = self.sz.cols,
             .rows = self.sz.rows,
+            .content_row = tab_bar_rows + 1,
             .focused = focused,
             .arena = frame_arena,
         };
@@ -176,6 +186,13 @@ fn runLoop() void {
     defer raw.deinit();
     _ = std.c.write(out, term.enter_screen.ptr, term.enter_screen.len);
     defer _ = std.c.write(out, term.exit_screen.ptr, term.exit_screen.len);
+    // SGR-1006 mouse reporting (reuses atty's proxy-side parser). The disable
+    // defer is registered after exit_screen's, so LIFO runs it FIRST — mouse
+    // off while still on the alt-screen, then leave it.
+    if (mouse_enabled) _ = std.c.write(out, atty.mouse.enable_sequence.ptr, atty.mouse.enable_sequence.len);
+    defer if (mouse_enabled) {
+        _ = std.c.write(out, atty.mouse.disable_sequence.ptr, atty.mouse.disable_sequence.len);
+    };
     term.installWinch();
 
     // Self-pipe so terminating signals wake the loop → it returns on its
@@ -261,11 +278,64 @@ fn runLoop() void {
 /// focus navigation. Ctrl-C always quits.
 fn handleRead(app: *App, bytes: []const u8) bool {
     var i: usize = 0;
-    while (key.decode(bytes[i..])) |d| {
-        i += d.len;
-        if (handleKey(app, d.key)) return true;
+    while (i < bytes.len) {
+        // Mouse (SGR-1006) is checked before key decode — its `\x1b[<…`
+        // shape would otherwise be eaten as an unknown CSI.
+        if (mouse_enabled and atty.mouse.peekIsMouse(bytes[i..])) {
+            if (atty.mouse.parse(bytes[i..])) |m| {
+                if (handleMouse(app, m.event)) return true;
+                i += m.consumed;
+                continue;
+            } else |_| {
+                i += 1; // malformed → skip a byte and resync
+                continue;
+            }
+        }
+        if (key.decode(bytes[i..])) |d| {
+            i += d.len;
+            if (handleKey(app, d.key)) return true;
+        } else break;
     }
     return false;
+}
+
+/// Route a mouse event. Left-press on the tab bar focuses that tab; on a
+/// panel row it's delivered to the focused panel's `onClick` (→ select).
+/// Wheel ticks become up/down keys so the focused list scrolls through the
+/// normal key path. Returns true if the user asked to quit.
+fn handleMouse(app: *App, e: atty.mouse.Event) bool {
+    switch (e.button) {
+        .wheel_up => return handleKey(app, .up),
+        .wheel_down => return handleKey(app, .down),
+        .left => {
+            if (e.kind != .press) return false;
+            if (e.row == 1) { // the tab line
+                if (tabAtCol(app.focus, e.col)) |idx| app.focus = idx;
+                return false;
+            }
+            var fa = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer fa.deinit();
+            var pctx = app.ctx(fa.allocator(), true);
+            const action = Host.clickAt(&app.rts, &pctx, app.focus, e.col, e.row) catch panel.Action.pass;
+            return action == .quit;
+        },
+        else => return false,
+    }
+}
+
+/// Which tab a 1-based click column lands on, or null past the last tab.
+/// MUST track `paintTabBar`'s widths: leading space + `[k]` (3) + title,
+/// plus the focused tab's reverse-video padding (a space each side, +2).
+pub fn tabAtCol(focus: usize, col: u16) ?usize {
+    var c: u16 = 1;
+    var i: usize = 0;
+    while (i < Host.count) : (i += 1) {
+        const pad: u16 = if (i == focus) 6 else 4; // " [k]" + title + (focused: " "×2)
+        const w: u16 = @intCast(Host.titleAt(i).len + pad);
+        if (col >= c and col < c + w) return i;
+        c += w;
+    }
+    return null;
 }
 
 fn handleKey(app: *App, k: panel.Key) bool {
