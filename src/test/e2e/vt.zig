@@ -91,6 +91,15 @@ pub const Grid = struct {
     saved_bg: Color = .default,
     autowrap: bool = true,
     wrap_pending: bool = false,
+    // DECSTBM scroll region (inclusive rows); scroll_bottom set to rows-1 in
+    // init/resize. lineFeed / RI / scrollUp|Down honour it.
+    scroll_top: u16 = 0,
+    scroll_bottom: u16 = 0,
+    // Alt-screen: the saved PRIMARY buffer + cursor while in alt mode (null =
+    // on the primary screen). ?1049 / ?47 / ?1047 toggle it.
+    saved_screen: ?[]Cell = null,
+    alt_row: u16 = 0,
+    alt_col: u16 = 0,
 
     state: ParseState = .ground,
     // CSI parameter buffer.
@@ -112,11 +121,13 @@ pub const Grid = struct {
             .rows = rows,
             .cols = cols,
             .cells = cells,
+            .scroll_bottom = rows - 1,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Grid) void {
+        if (self.saved_screen) |s| self.allocator.free(s);
         self.allocator.free(self.cells);
         self.* = undefined;
     }
@@ -151,6 +162,14 @@ pub const Grid = struct {
         if (self.cur_col >= new_cols) self.cur_col = new_cols - 1;
         if (self.saved_row >= new_rows) self.saved_row = new_rows - 1;
         if (self.saved_col >= new_cols) self.saved_col = new_cols - 1;
+        // The scroll region is sized to the grid — reset it to full. Drop any
+        // alt-screen save (it's the old geometry; a resize mid-alt is rare).
+        self.scroll_top = 0;
+        self.scroll_bottom = new_rows - 1;
+        if (self.saved_screen) |s| {
+            self.allocator.free(s);
+            self.saved_screen = null;
+        }
         self.wrap_pending = false;
     }
 
@@ -184,15 +203,64 @@ pub const Grid = struct {
     }
 
     fn lineFeed(self: *Grid) void {
-        if (self.cur_row + 1 >= self.rows) {
-            // Scroll up by one row.
-            const row_bytes = self.cols;
-            const cells = self.cells;
-            std.mem.copyForwards(Cell, cells[0 .. (self.rows - 1) * row_bytes], cells[row_bytes .. self.rows * row_bytes]);
-            for (cells[(self.rows - 1) * row_bytes .. self.rows * row_bytes]) |*c| c.* = .{};
-        } else {
+        // At the region bottom → scroll the region; otherwise just advance
+        // (a cursor below the region advances to the last row, xterm-style).
+        if (self.cur_row == self.scroll_bottom) {
+            self.scrollUp(1);
+        } else if (self.cur_row + 1 < self.rows) {
             self.cur_row += 1;
         }
+    }
+
+    /// Scroll the [scroll_top, scroll_bottom] region up by `n`, clearing the
+    /// newly exposed bottom rows (default cells, matching the old whole-grid
+    /// scroll). Rows outside the region are untouched (e.g. a statusbar row).
+    fn scrollUp(self: *Grid, n: u16) void {
+        if (self.scroll_top > self.scroll_bottom) return;
+        const cols = self.cols;
+        const region = self.scroll_bottom - self.scroll_top + 1;
+        const cnt = @min(n, region);
+        const base = self.idx(self.scroll_top, 0);
+        const moved = @as(usize, region - cnt) * cols;
+        if (moved > 0) std.mem.copyForwards(Cell, self.cells[base .. base + moved], self.cells[base + @as(usize, cnt) * cols .. base + @as(usize, cnt) * cols + moved]);
+        for (self.cells[base + moved .. base + @as(usize, region) * cols]) |*c| c.* = .{};
+    }
+
+    /// Scroll the region down by `n` (RI at the top), clearing the top rows.
+    fn scrollDown(self: *Grid, n: u16) void {
+        if (self.scroll_top > self.scroll_bottom) return;
+        const cols = self.cols;
+        const region = self.scroll_bottom - self.scroll_top + 1;
+        const cnt = @min(n, region);
+        const base = self.idx(self.scroll_top, 0);
+        const moved = @as(usize, region - cnt) * cols;
+        if (moved > 0) std.mem.copyBackwards(Cell, self.cells[base + @as(usize, cnt) * cols .. base + @as(usize, cnt) * cols + moved], self.cells[base .. base + moved]);
+        for (self.cells[base .. base + @as(usize, cnt) * cols]) |*c| c.* = .{};
+    }
+
+    /// Enter (`on`) or leave the alt screen: save/restore the primary buffer +
+    /// cursor, reset the scroll region to full (apps re-set DECSTBM as needed).
+    fn setAltScreen(self: *Grid, on: bool) void {
+        if (on) {
+            if (self.saved_screen != null) return; // already on alt
+            const save = self.allocator.dupe(Cell, self.cells) catch return;
+            self.saved_screen = save;
+            self.alt_row = self.cur_row;
+            self.alt_col = self.cur_col;
+            @memset(self.cells, .{});
+            self.cur_row = 0;
+            self.cur_col = 0;
+        } else {
+            const save = self.saved_screen orelse return; // already on primary
+            if (save.len == self.cells.len) @memcpy(self.cells, save);
+            self.allocator.free(save);
+            self.saved_screen = null;
+            self.cur_row = @min(self.alt_row, self.rows - 1);
+            self.cur_col = @min(self.alt_col, self.cols - 1);
+        }
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows - 1;
+        self.wrap_pending = false;
     }
 
     fn carriageReturn(self: *Grid) void {
@@ -314,8 +382,12 @@ pub const Grid = struct {
                 self.lineFeed();
                 self.state = .ground;
             },
-            'M' => { // RI — reverse line feed
-                if (self.cur_row > 0) self.cur_row -= 1;
+            'M' => { // RI — reverse line feed (scroll down at the region top)
+                if (self.cur_row == self.scroll_top) {
+                    self.scrollDown(1);
+                } else if (self.cur_row > 0) {
+                    self.cur_row -= 1;
+                }
                 self.state = .ground;
             },
             'E' => { // NEL — next line
@@ -396,8 +468,14 @@ pub const Grid = struct {
                 'h', 'l' => {
                     var i: usize = 0;
                     while (i < n) : (i += 1) {
-                        if (params[i] == 7) self.autowrap = (final == 'h');
-                        // ?25 cursor visibility, ?1049 alt screen, etc. — ignored
+                        switch (params[i]) {
+                            7 => self.autowrap = (final == 'h'),
+                            // Alt screen: ?1049 (save/clear/restore), ?47 / ?1047
+                            // (bare switch). Treated alike — a witness only needs
+                            // the primary buffer preserved under the alt app.
+                            47, 1047, 1049 => self.setAltScreen(final == 'h'),
+                            else => {}, // ?25 cursor visibility etc. — ignored
+                        }
                     }
                 },
                 else => {},
@@ -510,6 +588,27 @@ pub const Grid = struct {
                 self.wrap_pending = false;
             },
             'm' => self.sgr(params[0..n]),
+            'r' => { // DECSTBM — set scroll region (top;bottom, 1-indexed)
+                const top: u16 = if (p0 > 0) @intCast(p0 - 1) else 0;
+                const bot: u16 = if (p1 > 0) @min(@as(u16, @intCast(p1)), self.rows) - 1 else self.rows - 1;
+                if (top < bot) {
+                    self.scroll_top = top;
+                    self.scroll_bottom = bot;
+                } else { // empty / invalid → full screen
+                    self.scroll_top = 0;
+                    self.scroll_bottom = self.rows - 1;
+                }
+                // DECSTBM homes the cursor (no origin mode = absolute 0,0).
+                self.cur_row = 0;
+                self.cur_col = 0;
+                self.wrap_pending = false;
+            },
+            'S' => { // SU — scroll region up
+                self.scrollUp(@intCast(@max(p0, 1)));
+            },
+            'T' => { // SD — scroll region down
+                self.scrollDown(@intCast(@max(p0, 1)));
+            },
             else => {},
         }
     }
