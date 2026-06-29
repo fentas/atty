@@ -121,6 +121,32 @@ pub const Grid = struct {
         self.* = undefined;
     }
 
+    /// Resize the grid, preserving the overlapping top-left content; the cursor
+    /// is clamped into the new bounds. The child must be told the new size via
+    /// TIOCSWINSZ separately — ttysnap's `Harness.resize` does both. `new_rows`
+    /// and `new_cols` must be >= 1.
+    pub fn resize(self: *Grid, new_rows: u16, new_cols: u16) !void {
+        if (new_rows == self.rows and new_cols == self.cols) return;
+        const new_cells = try self.allocator.alloc(Cell, @as(usize, new_rows) * new_cols);
+        @memset(new_cells, .{});
+        const copy_rows = @min(self.rows, new_rows);
+        const copy_cols = @min(self.cols, new_cols);
+        var r: u16 = 0;
+        while (r < copy_rows) : (r += 1) {
+            @memcpy(
+                new_cells[@as(usize, r) * new_cols ..][0..copy_cols],
+                self.cells[self.idx(r, 0)..][0..copy_cols],
+            );
+        }
+        self.allocator.free(self.cells);
+        self.cells = new_cells;
+        self.rows = new_rows;
+        self.cols = new_cols;
+        if (self.cur_row >= new_rows) self.cur_row = new_rows - 1;
+        if (self.cur_col >= new_cols) self.cur_col = new_cols - 1;
+        self.wrap_pending = false;
+    }
+
     inline fn idx(self: *const Grid, r: u16, c: u16) usize {
         return @as(usize, r) * self.cols + c;
     }

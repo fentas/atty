@@ -161,3 +161,27 @@ test "Grid DECSTBM is parsed without crashing (no grid effect today)" {
     // "abc" lands on row 0; DECSTBM is silently consumed.
     try std.testing.expectEqualStrings("abc\n\n\n\n", w.buffered());
 }
+
+test "Grid resize preserves top-left content and clamps the cursor" {
+    var g = try Grid.init(std.testing.allocator, 3, 10);
+    defer g.deinit();
+    g.feed("hello\r\nworld"); // cursor → row 1, col 5
+
+    try g.resize(5, 20); // grow
+    try testing.expectEqual(@as(u16, 5), g.rows);
+    try testing.expectEqual(@as(u16, 20), g.cols);
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderText(&w);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "hello") != null);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "world") != null);
+
+    try g.resize(2, 3); // shrink — cols clamp content, cursor clamps in-bounds
+    try testing.expectEqual(@as(u16, 2), g.rows);
+    try testing.expectEqual(@as(u16, 3), g.cols);
+    try testing.expect(g.cur_row < 2 and g.cur_col < 3);
+    var buf2: [64]u8 = undefined;
+    var w2 = std.Io.Writer.fixed(&buf2);
+    try g.renderText(&w2);
+    try testing.expect(std.mem.indexOf(u8, w2.buffered(), "hel") != null); // row 0, first 3 cols
+}

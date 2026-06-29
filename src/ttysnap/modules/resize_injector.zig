@@ -3,10 +3,11 @@
 //! races and broken redraw-on-resize handling.
 //!
 //! It cycles through `sizes`, applying the next one on every Nth output chunk.
-//! NOTE: ttysnap's grid stays at the spawn size (vt.Grid has no resize yet), so
-//! this STRESSES the child's SIGWINCH handling — "does the TUI survive a resize
-//! storm" — but the rendered grid won't reflect the new geometry. Asserting the
-//! post-resize screen needs grid-resize (a follow-on).
+//! NOTE: a module only gets the master fd, not ttysnap's grid, so this resizes
+//! the CHILD's terminal (the SIGWINCH stressor — "does the TUI survive a resize
+//! storm") but leaves the observer grid at the spawn size. To resize the grid
+//! too (and assert the post-resize screen), call `Harness.resize` from the
+//! scenario instead.
 //!
 //! Compose: `resize_injector(.{ .every = 4, .sizes = &.{ .{ .cols = 120, .rows = 40 }, .{ .cols = 80, .rows = 24 } } })`.
 
