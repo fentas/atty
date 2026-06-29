@@ -12,7 +12,7 @@
 //!                               # optional cadence: instant (default) | fast |
 //!                               # consistent | slow | irregular | random —
 //!                               # paces keystrokes so a recording animates.
-//!   send "string"               # alias
+//!   send "string" [pattern]     # alias of type (same optional cadence)
 //!   key Enter|Tab|Up|Down|Left|Right|Escape|Backspace|^C|^D|^L|^[
 //!   sleep <ms>
 //!   wait_for "substring"        # block until grid contains substring (timeout_ms)

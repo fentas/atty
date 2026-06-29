@@ -2,9 +2,9 @@ const std = @import("std");
 const testing = std.testing;
 const typing = @import("typing.zig");
 
-/// Driver stand-in: counts sends + accumulates the bytes. pumpMs is a no-op
-/// (the paced patterns sleep on the real clock; tests use short text so the
-/// busy-wait is bounded to a few tens of ms).
+/// Driver stand-in: counts sends + accumulates the bytes. pumpMs actually sleeps
+/// the requested slice (models the real poll-blocking) so wait.sleepMs doesn't
+/// busy-spin; tests use short text so total wall-time is a few tens of ms.
 const Fake = struct {
     out: *std.ArrayList(u8),
     alloc: std.mem.Allocator,
@@ -13,8 +13,12 @@ const Fake = struct {
         self.sends += 1;
         try self.out.appendSlice(self.alloc, bytes);
     }
-    pub fn pumpMs(self: *Fake, _: i32) !bool {
+    pub fn pumpMs(self: *Fake, ms: i32) !bool {
         _ = self;
+        if (ms > 0) {
+            var ts: std.c.timespec = .{ .sec = 0, .nsec = @intCast(@as(i64, ms) * std.time.ns_per_ms) };
+            _ = std.c.nanosleep(&ts, null);
+        }
         return false;
     }
 };

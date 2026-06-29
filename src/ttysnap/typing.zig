@@ -25,8 +25,9 @@ pub const Pattern = enum {
     }
 };
 
-/// Type `text` into `driver` at the given cadence. UTF-8 aware — whole
-/// codepoints are sent, never split across keystrokes.
+/// Type `text` into `driver` at the given cadence. UTF-8 aware — for valid
+/// input each codepoint is one keystroke, never split; a pre-truncated trailing
+/// sequence (already-malformed input) is sent as-is rather than fabricated.
 pub fn typeText(driver: anytype, text: []const u8, pattern: Pattern) !void {
     if (pattern == .instant) {
         try driver.send(text);
