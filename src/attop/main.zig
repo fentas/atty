@@ -36,7 +36,7 @@ comptime {
 }
 
 /// The dashboard, specialised on the configured panel tuple.
-const Host = PanelHost(config.panels);
+pub const Host = PanelHost(config.panels);
 
 /// Re-fetch daemon data this often (poll timeout). Rendering happens on
 /// every keystroke regardless, off the cached data — so interactivity is
@@ -75,8 +75,9 @@ pub fn main() void {
 }
 
 /// Mutable dashboard state for one run. Holds the panel runtimes, the
-/// cached daemon snapshot, focus, and the frame buffer.
-const App = struct {
+/// cached daemon snapshot, focus, and the frame buffer. `pub` so the input
+/// routing (`handleRead`) is integration-testable.
+pub const App = struct {
     rts: Host.Runtimes,
     focus: usize = 0,
     host: panel.Host,
@@ -276,7 +277,7 @@ fn runLoop() void {
 /// to quit. The focused panel sees each key FIRST (so a panel can claim
 /// keys, e.g. Setup's wire gate); unclaimed keys fall through to global
 /// focus navigation. Ctrl-C always quits.
-fn handleRead(app: *App, bytes: []const u8) bool {
+pub fn handleRead(app: *App, bytes: []const u8) bool {
     var i: usize = 0;
     while (i < bytes.len) {
         // Mouse (SGR-1006) is checked before key decode — its `\x1b[<…`
@@ -287,8 +288,16 @@ fn handleRead(app: *App, bytes: []const u8) bool {
                 i += m.consumed;
                 continue;
             } else |_| {
-                i += 1; // malformed → skip a byte and resync
-                continue;
+                // Mouse-shaped but unparseable: skip past the event
+                // terminator (M/m) if the sequence is complete-but-malformed;
+                // otherwise it split across this read — stop and let the rest
+                // arrive next read. Either way, never re-emit the bytes as
+                // keystrokes (which would leak `[<digits…` to the shell view).
+                if (std.mem.indexOfAnyPos(u8, bytes, i, "Mm")) |t| {
+                    i = t + 1;
+                    continue;
+                }
+                break;
             }
         }
         if (key.decode(bytes[i..])) |d| {
