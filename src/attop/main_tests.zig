@@ -115,6 +115,31 @@ test "handleRead: a left-click on the tab bar focuses that tab" {
     try testing.expectEqual(@as(usize, 1), app.focus);
 }
 
+test "renderInto: first frame fully paints, an identical frame diffs to nothing" {
+    var app = mod.App{
+        .rts = try mod.Host.attachAll(testing.allocator),
+        .host = .{},
+        .sock = "",
+        .sz = .{ .rows = 24, .cols = 100 },
+        .out = -1,
+        .fetch_arena = std.heap.ArenaAllocator.init(testing.allocator),
+    };
+    defer mod.Host.detachAll(testing.allocator, &app.rts);
+    defer app.fetch_arena.deinit();
+
+    var b1: [65536]u8 = undefined;
+    var w1 = std.Io.Writer.fixed(&b1);
+    app.renderInto(&w1); // first frame: full paint
+    const f1 = b1[0..w1.end];
+    try testing.expect(std.mem.indexOf(u8, f1, "\x1b[2J") != null); // cleared
+    try testing.expect(f1.len > 0);
+
+    var b2: [65536]u8 = undefined;
+    var w2 = std.Io.Writer.fixed(&b2);
+    app.renderInto(&w2); // identical frame → the row diff emits nothing
+    try testing.expectEqual(@as(usize, 0), w2.end);
+}
+
 test "banner notes the atty session and is bounded" {
     var buf: [160]u8 = undefined;
 

@@ -124,18 +124,23 @@ pub const App = struct {
     /// or a metric tick rewrites a row or two, not the whole screen — no
     /// flicker.
     fn render(self: *App) void {
-        var frame_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer frame_arena.deinit();
-        var pw = std.Io.Writer.fixed(&self.framebuf);
-        self.paint(&pw, frame_arena.allocator()) catch {};
-
         var dw = std.Io.Writer.fixed(&self.diffbuf);
-        self.frame.diff(self.framebuf[0..pw.end], self.sz.rows, &dw) catch {};
-
+        self.renderInto(&dw);
         _ = std.c.write(self.out, begin_sync.ptr, begin_sync.len);
         const bytes = self.diffbuf[0..dw.end];
         _ = std.c.write(self.out, bytes.ptr, bytes.len);
         _ = std.c.write(self.out, end_sync.ptr, end_sync.len);
+    }
+
+    /// Paint the frame and emit the row-diff into `dw` (the fd-free core of
+    /// `render`, so the paint→diff path is integration-testable without a
+    /// terminal). Caller brackets the result with the sync markers.
+    pub fn renderInto(self: *App, dw: *std.Io.Writer) void {
+        var frame_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer frame_arena.deinit();
+        var pw = std.Io.Writer.fixed(&self.framebuf);
+        self.paint(&pw, frame_arena.allocator()) catch {};
+        self.frame.diff(self.framebuf[0..pw.end], self.sz.rows, dw) catch {};
     }
 
     fn paint(self: *App, w: *std.Io.Writer, frame_arena: std.mem.Allocator) !void {
