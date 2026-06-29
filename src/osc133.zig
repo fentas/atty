@@ -196,6 +196,21 @@ pub const Osc133 = struct {
         return self.phase == .in_input;
     }
 
+    /// End input capture as if `;C` had arrived. An emitter that sends
+    /// `;A`/`;B` but no `;C` would otherwise stay in `.in_input` through
+    /// command execution and capture the command's OUTPUT; a fragmented read
+    /// can leave that output in `input` for a later reader to absorb. Clears
+    /// `input` (already read by whoever submitted). Intentionally unlike the
+    /// `;C` arm: no `cmd_start` edge (one here would pop a pending launch into
+    /// a phantom frame) and an eager clear — keep them separate. No-op outside
+    /// `.in_input`.
+    pub fn endInputCapture(self: *Osc133) void {
+        if (self.phase == .in_input) {
+            self.phase = .in_command;
+            self.input.clearRetainingCapacity();
+        }
+    }
+
     /// True iff the next escape-free byte chunk is a guaranteed
     /// no-op — the proxy can fast-path past it without invoking
     /// the per-byte state machine.

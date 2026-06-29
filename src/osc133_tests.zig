@@ -20,6 +20,54 @@ test "Osc133: active stays false until any 133 marker arrives" {
     try testing.expectEqual(@as(usize, 0), o.currentInput().len);
 }
 
+test "Osc133: tracker invariant — ;A/;B clear the capture regardless of feed() chunking" {
+    // NOTE: this guards the TRACKER's split-marker handling, not the #525
+    // regression itself — the bug lives in the proxy's per-read
+    // syncFromCapture interleaving (captured output absorbed by an
+    // intermediate read before ;A/;B arrive), which the N=16 e2e scenarios
+    // guard. Here: with no ;C, phase stays .in_input from ;B through command
+    // execution so the echo OUTPUT is captured; the next prompt's ;A + ;B must
+    // still clear it no matter how the byte stream is chunked across feed().
+    const seq =
+        "\x1b]133;B\x07" ++ // input phase opens
+        "starship-survived-" ++ // prior command's OUTPUT (captured, no ;C)
+        "\x1b]133;D;0\x07" ++ // command done
+        "\x1b]133;A\x07$ " ++ // next prompt start (clears) + PS1
+        "\x1b]133;B\x07" ++ // next input phase (clears)
+        "cat /tmp/x"; // the next command, echoed
+
+    { // whole feed
+        var o = Osc133.init(testing.allocator);
+        defer o.deinit();
+        o.feed(seq);
+        try testing.expectEqualStrings("cat /tmp/x", o.currentInput());
+    }
+    { // one byte per feed — the worst-case fragmentation
+        var o = Osc133.init(testing.allocator);
+        defer o.deinit();
+        for (seq) |b| o.feed(&[_]u8{b});
+        try testing.expectEqualStrings("cat /tmp/x", o.currentInput());
+    }
+}
+
+test "Osc133: endInputCapture (synthesized ;C) stops the command output being captured" {
+    var o = Osc133.init(testing.allocator);
+    defer o.deinit();
+    o.feed("\x1b]133;B\x07"); // input phase opens
+    o.feed("echo hi"); // user types
+    try testing.expectEqualStrings("echo hi", o.currentInput());
+
+    o.endInputCapture(); // proxy: stdin Enter, the shell will execute (no ;C from the shell)
+    try testing.expect(!o.captureActive());
+    try testing.expectEqualStrings("", o.currentInput()); // submitted line cleared
+
+    o.feed("hi\r\n"); // command OUTPUT — must NOT be captured
+    try testing.expectEqualStrings("", o.currentInput());
+
+    o.feed("\x1b]133;A\x07$ \x1b]133;B\x07cat x"); // next prompt + next command
+    try testing.expectEqualStrings("cat x", o.currentInput());
+}
+
 test "Osc133: 133;B turns active on, starts capturing input" {
     var o = Osc133.init(testing.allocator);
     defer o.deinit();
