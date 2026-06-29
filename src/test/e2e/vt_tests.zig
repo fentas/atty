@@ -189,6 +189,20 @@ test "Grid alt screen saves + restores the primary buffer" {
     try std.testing.expectEqualStrings("primar\ny\n\n", w2.buffered());
 }
 
+test "Grid resize while on the alt screen keeps the primary restorable" {
+    var g = try Grid.init(std.testing.allocator, 3, 6);
+    defer g.deinit();
+    g.feed("hello"); // primary buffer
+    g.feed("\x1B[?1049h"); // enter alt — primary saved
+    g.feed("ALT");
+    try g.resize(4, 8); // resize WHILE in alt — the saved primary resizes too
+    g.feed("\x1B[?1049l"); // leave alt → primary restored at the new size
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderText(&w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "hello") != null);
+}
+
 test "Grid resize preserves top-left content and clamps the cursor" {
     var g = try Grid.init(std.testing.allocator, 3, 10);
     defer g.deinit();

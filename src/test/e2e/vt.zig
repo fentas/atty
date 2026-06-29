@@ -121,7 +121,7 @@ pub const Grid = struct {
             .rows = rows,
             .cols = cols,
             .cells = cells,
-            .scroll_bottom = rows - 1,
+            .scroll_bottom = if (rows == 0) 0 else rows - 1,
             .allocator = allocator,
         };
     }
@@ -143,34 +143,45 @@ pub const Grid = struct {
         const new_rows = @max(new_rows_in, 1);
         const new_cols = @max(new_cols_in, 1);
         if (new_rows == self.rows and new_cols == self.cols) return;
-        const new_cells = try self.allocator.alloc(Cell, @as(usize, new_rows) * new_cols);
-        @memset(new_cells, .{});
-        const copy_rows = @min(self.rows, new_rows);
-        const copy_cols = @min(self.cols, new_cols);
-        var r: u16 = 0;
-        while (r < copy_rows) : (r += 1) {
-            @memcpy(
-                new_cells[@as(usize, r) * new_cols ..][0..copy_cols],
-                self.cells[self.idx(r, 0)..][0..copy_cols],
-            );
-        }
+        const new_cells = try resizeBuf(self.allocator, self.cells, self.rows, self.cols, new_rows, new_cols);
+        errdefer self.allocator.free(new_cells);
+        // Resize the saved alt buffer too (rather than dropping it) so a later
+        // ?1049l stays faithful across a resize-during-alt (ttysnap SIGWINCH).
+        const new_saved: ?[]Cell = if (self.saved_screen) |s|
+            try resizeBuf(self.allocator, s, self.rows, self.cols, new_rows, new_cols)
+        else
+            null;
+
         self.allocator.free(self.cells);
         self.cells = new_cells;
+        if (self.saved_screen) |s| self.allocator.free(s);
+        self.saved_screen = new_saved;
         self.rows = new_rows;
         self.cols = new_cols;
         if (self.cur_row >= new_rows) self.cur_row = new_rows - 1;
         if (self.cur_col >= new_cols) self.cur_col = new_cols - 1;
         if (self.saved_row >= new_rows) self.saved_row = new_rows - 1;
         if (self.saved_col >= new_cols) self.saved_col = new_cols - 1;
-        // The scroll region is sized to the grid — reset it to full. Drop any
-        // alt-screen save (it's the old geometry; a resize mid-alt is rare).
+        if (self.alt_row >= new_rows) self.alt_row = new_rows - 1;
+        if (self.alt_col >= new_cols) self.alt_col = new_cols - 1;
+        // The scroll region is sized to the grid — reset it to full.
         self.scroll_top = 0;
         self.scroll_bottom = new_rows - 1;
-        if (self.saved_screen) |s| {
-            self.allocator.free(s);
-            self.saved_screen = null;
-        }
         self.wrap_pending = false;
+    }
+
+    /// Allocate a `new_rows`x`new_cols` cell buffer, copying the overlapping
+    /// top-left region from `old` (laid out `old_rows`x`old_cols`).
+    fn resizeBuf(allocator: Allocator, old: []const Cell, old_rows: u16, old_cols: u16, new_rows: u16, new_cols: u16) ![]Cell {
+        const buf = try allocator.alloc(Cell, @as(usize, new_rows) * new_cols);
+        @memset(buf, .{});
+        const cr = @min(old_rows, new_rows);
+        const cc = @min(old_cols, new_cols);
+        var r: u16 = 0;
+        while (r < cr) : (r += 1) {
+            @memcpy(buf[@as(usize, r) * new_cols ..][0..cc], old[@as(usize, r) * old_cols ..][0..cc]);
+        }
+        return buf;
     }
 
     inline fn idx(self: *const Grid, r: u16, c: u16) usize {
@@ -588,27 +599,23 @@ pub const Grid = struct {
                 self.wrap_pending = false;
             },
             'm' => self.sgr(params[0..n]),
-            'r' => { // DECSTBM — set scroll region (top;bottom, 1-indexed)
-                const top: u16 = if (p0 > 0) @intCast(p0 - 1) else 0;
-                const bot: u16 = if (p1 > 0) @min(@as(u16, @intCast(p1)), self.rows) - 1 else self.rows - 1;
+            'r' => { // DECSTBM — set scroll region (top;bottom, 1-indexed).
+                // Clamp params to rows BEFORE narrowing so a value > 65535 can't
+                // panic the @intCast (the parser's forgiving contract).
+                const top: u16 = if (p0 > 0) @as(u16, @intCast(@min(p0, self.rows))) - 1 else 0;
+                const bot: u16 = if (p1 > 0) @as(u16, @intCast(@min(p1, self.rows))) - 1 else self.rows - 1;
                 if (top < bot) {
                     self.scroll_top = top;
                     self.scroll_bottom = bot;
-                } else { // empty / invalid → full screen
-                    self.scroll_top = 0;
-                    self.scroll_bottom = self.rows - 1;
+                    self.cur_row = 0; // DECSTBM homes the cursor (no origin mode)
+                    self.cur_col = 0;
+                    self.wrap_pending = false;
                 }
-                // DECSTBM homes the cursor (no origin mode = absolute 0,0).
-                self.cur_row = 0;
-                self.cur_col = 0;
-                self.wrap_pending = false;
+                // An invalid region (top >= bot) is ignored, keeping the prior
+                // region + cursor (xterm-style) rather than resetting.
             },
-            'S' => { // SU — scroll region up
-                self.scrollUp(@intCast(@max(p0, 1)));
-            },
-            'T' => { // SD — scroll region down
-                self.scrollDown(@intCast(@max(p0, 1)));
-            },
+            'S' => self.scrollUp(@intCast(@min(@max(p0, 1), self.rows))), // SU
+            'T' => self.scrollDown(@intCast(@min(@max(p0, 1), self.rows))), // SD
             else => {},
         }
     }
