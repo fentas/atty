@@ -482,12 +482,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
 
     var read_buf: [buf_size]u8 = undefined;
 
-    // Test-only: `ATTY_TEST_FRAGMENT_READS=N` caps each master read to N
-    // bytes so the shell's escape sequences split across reads
-    // deterministically — this reproduces, without load, the fragmentation
-    // race CI hits intermittently (a read starting mid-escape defers the
-    // gated ghost clear; see the master-read path below). Unset/0 = normal
-    // full-size reads, so it is inert in production.
+    // Test-only: cap each master read to N bytes so escape sequences split
+    // across reads deterministically — exercises the fragmentation paths
+    // without needing real load. Unset/0 = full reads (inert in production).
     const master_read_cap: usize = blk: {
         const p = std.c.getenv("ATTY_TEST_FRAGMENT_READS") orelse break :blk read_buf.len;
         const n = std.fmt.parseInt(usize, std.mem.sliceTo(p, 0), 10) catch break :blk read_buf.len;
@@ -1649,18 +1646,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     }
                 }
 
-                // End OSC 133 input capture on submit. An integration that
-                // emits ;A/;B but omits ;C (a starship-style PROMPT_COMMAND
-                // wrapper, or an init that lost its DEBUG-trap ;C — NOT atty's
-                // shipped full-emitter init) leaves the tracker in INPUT phase
-                // through command execution, capturing the command's OUTPUT. A
-                // fragmented master read can then leave that output in the
-                // capture, where the next line's commit override (above) /
-                // syncFromCapture absorbs it — recording e.g.
-                // "<prev output><next cmd>" (#525). We just saw the user
-                // submit, so end capture ourselves — the ;C the shell omitted.
-                // MUST stay after the inInputPhase-gated logic above so it
-                // doesn't perturb this line's commit / launch-push / recording.
+                // Submit ends input capture even when the emitter omits ;C —
+                // otherwise the tracker captures the command's output and a
+                // fragmented read can leak it into the next line's commit.
+                // MUST stay below the inInputPhase-gated logic above, which
+                // reads the live phase for this line's commit / launch / record.
                 if (shell_will_execute) osc133_tracker.endInputCapture();
 
                 // Deliberately NO renderGhost here. The shell hasn't

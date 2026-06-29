@@ -15,10 +15,8 @@ cols 60
 rows 8
 timeout_ms 5000
 
-# Force the proxy to read the shell's output one byte at a time, so every
-# escape sequence (incl. the OSC-133 prompt markers) splits across reads.
-# This makes the fragmentation race deterministic — the ghost-orphan-on-scroll
-# bug (#525) reproduces every run instead of only under CI load.
+# Cap master reads so OSC-133 markers split at read boundaries, making the
+# capture-bleed race deterministic without needing CI load.
 env ATTY_TEST_FRAGMENT_READS=16
 
 spawn $ATTY bash --norc --noprofile -i

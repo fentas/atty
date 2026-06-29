@@ -196,27 +196,14 @@ pub const Osc133 = struct {
         return self.phase == .in_input;
     }
 
-    /// Synthesize the command-start the shell omitted. An integration that
-    /// emits `;A`/`;B` but no `;C` — a starship-style PROMPT_COMMAND wrapper,
-    /// or an init that lost its DEBUG-trap `;C` (atty's shipped `init bash` is
-    /// a full emitter and does NOT hit this; a partial emitter that also omits
-    /// `;B`, like Ghostty's default, never reaches `.in_input` so this is a
-    /// no-op there) — leaves the tracker in `.in_input` through command
-    /// execution, CAPTURING the command's OUTPUT. Normally the next prompt's
-    /// `;A`/`;B` clears that before anyone reads it, but a master read
-    /// fragmented mid-stream can leave the output sitting in `input`, where the
-    /// next line's commit / `syncFromCapture` absorbs it (#525). The proxy
-    /// calls this on stdin submit — when it KNOWS a command started — to end
-    /// capture deterministically. Clears `input` too: the submitted line has
-    /// already been read for the commit, and leaving it would let
-    /// `syncFromCapture` re-absorb a stale line.
-    ///
-    /// Intentionally diverges from `;C` handling (`dispatchOsc` 'C'): that
-    /// pushes a `cmd_start` edge and does NOT clear `input`; this clears
-    /// `input` and pushes NO edge — pushing one here would pop a
-    /// `pending_launch` and create a phantom subprocess frame. Don't "dedupe"
-    /// the two. No-op outside `.in_input`; a real `;C` that follows (full
-    /// emitters) is harmless (phase is already `.in_command`, no edge dup).
+    /// End input capture as if `;C` had arrived. An emitter that sends
+    /// `;A`/`;B` but no `;C` would otherwise stay in `.in_input` through
+    /// command execution and capture the command's OUTPUT; a fragmented read
+    /// can leave that output in `input` for a later reader to absorb. Clears
+    /// `input` (already read by whoever submitted). Intentionally unlike the
+    /// `;C` arm: no `cmd_start` edge (one here would pop a pending launch into
+    /// a phantom frame) and an eager clear — keep them separate. No-op outside
+    /// `.in_input`.
     pub fn endInputCapture(self: *Osc133) void {
         if (self.phase == .in_input) {
             self.phase = .in_command;
