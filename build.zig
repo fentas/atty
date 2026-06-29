@@ -206,6 +206,10 @@ pub fn build(b: *std.Build) void {
     const ttysnap_test_step = b.step("test-ttysnap", "Run only the ttysnap unit tests");
     ttysnap_test_step.dependOn(&run_ttysnap_tests.step);
 
+    // The shared wait/grid helpers test against a fake driver (no PTY).
+    const wait_tests = b.addTest(.{ .root_module = wait_module });
+    test_step.dependOn(&b.addRunArtifact(wait_tests).step);
+
     // -------------------------------------------------------------------------
     // Integration tests
     // -------------------------------------------------------------------------

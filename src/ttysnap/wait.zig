@@ -55,12 +55,13 @@ pub fn waitFor(driver: anytype, needle: []const u8, timeout_ms: u32) !bool {
 pub fn waitForAbsent(driver: anytype, needle: []const u8, timeout_ms: u32) !bool {
     const deadline = nowMs() + @as(i64, timeout_ms);
     while (gridContains(driver, needle)) {
-        if (nowMs() >= deadline) return !gridContains(driver, needle);
+        const remaining = deadline - nowMs(); // capture once, then guard the cast
+        if (remaining <= 0) return !gridContains(driver, needle);
         if (driver.exited) { // child gone: drain, then the screen can't change
             while (try driver.pumpMs(0)) {}
             return !gridContains(driver, needle);
         }
-        _ = try driver.pumpMs(@intCast(@min(deadline - nowMs(), 50)));
+        _ = try driver.pumpMs(@intCast(@min(remaining, 50)));
     }
     return true;
 }
@@ -87,11 +88,12 @@ pub fn waitForCount(driver: anytype, needle: []const u8, count: usize, timeout_m
 /// keystroke) is still awaited. Returns true if it settled, false on timeout.
 pub fn waitStable(driver: anytype, quiet_ms: u32, timeout_ms: u32) !bool {
     const deadline = nowMs() + @as(i64, timeout_ms);
+    const quiet = @max(@as(i64, quiet_ms), 1); // floor: quiet_ms=0 must still pump once
     var quiet_since = nowMs();
     while (true) {
-        if (nowMs() - quiet_since >= quiet_ms) return true;
+        if (nowMs() - quiet_since >= quiet) return true;
         if (nowMs() >= deadline) return false;
-        const got = try driver.pumpMs(@intCast(@min(quiet_ms, 25)));
+        const got = try driver.pumpMs(@intCast(@min(quiet, 25)));
         if (got) quiet_since = nowMs();
         if (driver.exited) {
             while (try driver.pumpMs(0)) {} // drain final output
@@ -103,8 +105,13 @@ pub fn waitStable(driver: anytype, quiet_ms: u32, timeout_ms: u32) !bool {
 /// Sleep `ms`, pumping output so the grid stays current.
 pub fn sleepMs(driver: anytype, ms: u32) !void {
     const deadline = nowMs() + @as(i64, ms);
-    while (nowMs() < deadline) {
-        const remaining: i64 = deadline - nowMs();
+    while (true) {
+        const remaining = deadline - nowMs(); // capture once, then guard the cast
+        if (remaining <= 0) return;
         _ = try driver.pumpMs(@intCast(@min(remaining, 50)));
     }
+}
+
+test {
+    _ = @import("wait_tests.zig");
 }
