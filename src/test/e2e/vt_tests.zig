@@ -146,20 +146,62 @@ test "Grid SGR 0 reset clears all attrs and colors mid-line" {
     try std.testing.expectEqualStrings("R0 C0-2 dim italic\n", w.buffered());
 }
 
-test "Grid DECSTBM is parsed without crashing (no grid effect today)" {
-    // Statusbar emits `\x1B[1;22r` to confine scrolling to rows 1..22.
-    // The VT grid doesn't model scroll regions, so the directive is a
-    // no-op — but it MUST NOT crash the parser or leave bytes in the
-    // buffer. If a future change adds DECSTBM semantics, the assert
-    // here gives us a concrete signal to update.
+test "Grid DECSTBM sets the scroll region and homes the cursor" {
+    // Statusbar emits `\x1B[1;Nr` to confine scrolling above the reserved row.
     var g = try Grid.init(std.testing.allocator, 4, 6);
     defer g.deinit();
-    g.feed("\x1B[1;3rabc"); // DECSTBM then ASCII
+    g.feed("\x1B[2;3H"); // cursor to (1,2) so we can see DECSTBM home it
+    g.feed("\x1B[1;3r"); // scroll region = rows 1..3 (0-indexed 0..2)
+    try std.testing.expectEqual(@as(u16, 0), g.scroll_top);
+    try std.testing.expectEqual(@as(u16, 2), g.scroll_bottom);
+    try std.testing.expectEqual(@as(u16, 0), g.cur_row); // DECSTBM homes
+    try std.testing.expectEqual(@as(u16, 0), g.cur_col);
+}
+
+test "Grid scroll region confines scrolling; rows outside it are pinned" {
+    var g = try Grid.init(std.testing.allocator, 4, 6);
+    defer g.deinit();
+    // Row 3 is a pinned "status" row; scroll region = rows 1..3 (0-indexed 0..2).
+    g.feed("\x1B[4;1HPIN"); // write PIN on the last row
+    g.feed("\x1B[1;3r"); // DECSTBM 1..3 (homes cursor to 0,0)
+    g.feed("A\r\nB\r\nC\r\nD"); // 4 lines into a 3-row region → one scroll
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try g.renderText(&w);
-    // "abc" lands on row 0; DECSTBM is silently consumed.
-    try std.testing.expectEqualStrings("abc\n\n\n\n", w.buffered());
+    // A scrolled off the region; B/C/D fill rows 0..2; PIN (row 3) untouched.
+    try std.testing.expectEqualStrings("B\nC\nD\nPIN\n", w.buffered());
+}
+
+test "Grid alt screen saves + restores the primary buffer" {
+    var g = try Grid.init(std.testing.allocator, 3, 6);
+    defer g.deinit();
+    g.feed("primary"); // wraps: "primar" row0, "y" row1
+    g.feed("\x1B[?1049h"); // enter alt → primary saved, screen cleared
+    var b1: [64]u8 = undefined;
+    var w1 = std.Io.Writer.fixed(&b1);
+    try g.renderText(&w1);
+    try std.testing.expectEqualStrings("\n\n\n", w1.buffered()); // alt is blank
+    g.feed("\x1B[1mALT"); // set bold inside the alt app
+    g.feed("\x1B[?1049l"); // leave alt → primary buffer + SGR restored
+    var b2: [64]u8 = undefined;
+    var w2 = std.Io.Writer.fixed(&b2);
+    try g.renderText(&w2);
+    try std.testing.expectEqualStrings("primar\ny\n\n", w2.buffered());
+    try std.testing.expect(!g.cur_attrs.bold); // alt SGR didn't leak to primary
+}
+
+test "Grid resize while on the alt screen keeps the primary restorable" {
+    var g = try Grid.init(std.testing.allocator, 3, 6);
+    defer g.deinit();
+    g.feed("hello"); // primary buffer
+    g.feed("\x1B[?1049h"); // enter alt — primary saved
+    g.feed("ALT");
+    try g.resize(4, 8); // resize WHILE in alt — the saved primary resizes too
+    g.feed("\x1B[?1049l"); // leave alt → primary restored at the new size
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try g.renderText(&w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "hello") != null);
 }
 
 test "Grid resize preserves top-left content and clamps the cursor" {
