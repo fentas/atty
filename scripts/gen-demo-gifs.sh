@@ -50,6 +50,7 @@ mkdir -p docs/assets
 echo ">> rendering GIFs (agg, theme=$THEME)"
 for cast in tests/demo/*/golden/cast.json; do
   feat="$(basename "$(dirname "$(dirname "$cast")")")"
+  feat="${feat//_/-}"   # dir mouse_links → gif atty-mouse-links.gif (match docs embeds)
   agg --theme "$THEME" --font-size 16 --idle-time-limit 1.5 "$cast" "docs/assets/atty-$feat.gif"
   echo "   docs/assets/atty-$feat.gif"
 done
