@@ -22,10 +22,11 @@ wait_for "uname -sm"
 wait_stable 250
 sleep 1300
 key Enter
-# Wait for the command's output, then hold on the done hint. Match "Linux"
-# (arch-neutral) so regeneration works on aarch64 too — the GIF then shows that
-# host's `uname -sm` (x86_64 on the committed recording).
+# Wait for the command's output (arch-neutral "Linux" so regen works on aarch64
+# too; the committed GIF shows x86_64), then for the AI's done confirmation so
+# the recording reliably captures the "done" state instead of relying on a sleep.
 wait_for "Linux"
-sleep 1800
+wait_for "printed the kernel info"
+sleep 1400
 type "exit\r"
 exit_code 0
