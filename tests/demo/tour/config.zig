@@ -1,35 +1,33 @@
-//! atty_demo:tour — the complete experience for the showcase GIF: status bar +
-//! history ghost-text + inline #: AI command generation, all with the footer
-//! visible. NOT a regression test; the e2e runner builds atty against this and
-//! records the cast that scripts/gen-demo-gifs.sh turns into a GIF.
-//!
-//! The LLM provider is a deterministic FIXTURE (no network/Ollama): the worker
-//! replays `fixture_responses` in order, so the AI turn is reproducible. The
-//! `#:` exec mode needs OSC 133, which the scenario installs by sourcing atty's
-//! real shell-integration snippet — so the suggested command is clean (a plain
-//! `echo`), not the marker-emitting printf the e2e fixtures use.
+//! atty_demo:tour — the FULL feature set in one take for the README hero:
+//! status-bar footer, click-to-open paths (mouse_links), history ghost-text +
+//! pick-list, the guardrail + security_guard safety gates, and inline #: AI.
+//! Deterministic: llm uses a fixture provider; security_guard runs in-proc
+//! Tier-1 (no daemon); mouse_links uses EDITOR=echo.
 const atty = @import("atty");
 
 pub const modules = .{
+    atty.modules.mouse_links.configure(.{ .editor = "echo" }),
+    // Before guardrail: both match `curl|sh`, first-match wins — security_guard
+    // should own that one. daemon empty → in-proc Tier-1.
+    atty.modules.security_guard.configure(.{ .enabled = true, .daemon_socket_path = "" }),
     atty.modules.guardrail.configure(.{}),
     atty.modules.history.configure(.{ .path = "/tmp/atty-demo-tour" }),
     atty.modules.llm.configure(.{
         .provider = .{ .http = .{ .api_base = "http://localhost:0", .model = "fixture-model" } },
         .fixture_responses = &.{
-            \\I'll print a greeting for you.
+            \\I'll print the kernel name and architecture.
             \\```exec
-            \\echo "Hello from atty's AI assistant"
+            \\uname -sm
             \\```
             ,
             \\```done
-            \\greeting printed
+            \\printed the kernel info
             \\```
             ,
         },
     }),
 };
 
-pub const statusbar: atty.StatusBar = .{
-    .enabled = true,
-    .base_text = "atty",
-};
+pub const mouse: atty.Mouse = .{ .enabled = true };
+pub const ghost: atty.Ghost = .{ .list_count = 3 };
+pub const statusbar: atty.StatusBar = .{ .enabled = true, .base_text = "atty" };

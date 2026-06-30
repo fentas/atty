@@ -1,24 +1,43 @@
-# atty ghost-text — history autosuggestions, accepted with the Right arrow.
-cols 80
-rows 12
-timeout_ms 18000
+# atty ghost-text — the dim inline suggestion AND a numbered pick-list of recent
+# matches (Ctrl+1..9). The inline ghost is the newest match; the list shows the
+# others, newest-first. Footer visible.
+cols 90
+rows 18
+timeout_ms 24000
 
 spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
-sleep 800
-type "echo hello-from-atty" irregular
+sleep 700
+# Seed four commands sharing a prefix → inline ghost + a 3-entry pick-list.
+type "echo deploy to staging" irregular
 key Enter
-wait_for "hello-from-atty"
-sleep 1000
-type "echo hello-f" irregular
-wait_for_count "echo hello-from-atty" 2
+wait_for "deploy to staging"
+sleep 350
+type "echo deploy to preview" irregular
+key Enter
+wait_for "deploy to preview"
+sleep 350
+type "echo deploy to canary" irregular
+key Enter
+wait_for "deploy to canary"
+sleep 350
+type "echo deploy to production" irregular
+key Enter
+wait_for "deploy to production"
+sleep 800
+
+# Type the shared prefix → inline ghost (newest = production) + the numbered list
+# (1: canary, 2: preview, 3: staging) below.
+type "echo deploy to " irregular
+wait_for " 3: echo deploy to staging"
 wait_stable 200
-sleep 1700
-key Right
+sleep 2000
+# Pick entry 2 from the list (Ctrl+2, kitty CSI-u) → preview.
+type "\x1b[50;5u"
 wait_stable 250
-sleep 800
+sleep 900
 key Enter
-wait_for_count "hello-from-atty" 3
-sleep 1300
+wait_stable 400
+sleep 1200
 type "exit\r"
 exit_code 0

