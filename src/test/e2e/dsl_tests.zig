@@ -53,10 +53,16 @@ test "DSL click rejects a missing coordinate" {
     try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 7\n"));
 }
 
-test "DSL clickBytes builds the SGR-1006 press+release" {
-    var buf: [96]u8 = undefined;
+test "DSL click rejects out-of-range coordinates (1-based u16)" {
+    try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 0 1\n"));
+    try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 1 0\n"));
+    try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 70000 1\n"));
+}
+
+test "DSL clickBytes builds the SGR-1006 press" {
+    var buf: [32]u8 = undefined;
     const seq = try mod.clickBytes(20, 2, &buf);
-    try std.testing.expectEqualStrings("\x1b[<0;20;2M\x1b[<0;20;2m", seq);
+    try std.testing.expectEqualStrings("\x1b[<0;20;2M", seq);
 }
 
 test "DSL type parses an optional cadence pattern" {

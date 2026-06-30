@@ -14,8 +14,8 @@
 //!                               # paces keystrokes so a recording animates.
 //!   send "string" [pattern]     # alias of type (same optional cadence)
 //!   key Enter|Tab|Up|Down|Left|Right|Escape|Backspace|^C|^D|^L|^[
-//!   click <col> <row>          # left-button SGR-1006 mouse click at 1-based
-//!                               # col,row (needs config.mouse.enabled)
+//!   click <col> <row>          # left-button SGR-1006 press at 1-based col,row
+//!                               # (1..65535; needs config.mouse.enabled)
 //!   sleep <ms>
 //!   wait_for "substring"        # block until grid contains substring (timeout_ms)
 //!   wait_for_count "substring" N  # block until substring appears >= N times
@@ -166,10 +166,13 @@ pub fn parse(allocator: Allocator, source: []const u8) ParseError!Script {
         } else if (eq(head, "key")) {
             try cmds.append(allocator, .{ .kind = .key, .line = line_no, .str_arg = tail });
         } else if (eq(head, "click")) {
-            // click <col> <row> — a left-button SGR-1006 click at 1-based col,row.
+            // click <col> <row> — a left-button SGR-1006 press at 1-based col,row.
             const gap = std.mem.indexOfScalar(u8, tail, ' ') orelse return ParseError.BadInteger;
             const col = try parseInt(trim(tail[0..gap]));
             const row = try parseInt(trim(tail[gap + 1 ..]));
+            // SGR-1006 coordinates are 1-based u16 — reject out-of-range so we
+            // never emit a sequence the mouse parser would discard.
+            if (col < 1 or col > 65535 or row < 1 or row > 65535) return ParseError.BadInteger;
             try cmds.append(allocator, .{ .kind = .click, .line = line_no, .int_arg = col, .int_arg2 = row });
         } else if (eq(head, "sleep")) {
             try cmds.append(allocator, .{ .kind = .sleep, .line = line_no, .int_arg = try parseInt(tail) });
@@ -347,11 +350,13 @@ pub fn keyBytes(name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// SGR-1006 left-button click at 1-based `col`,`row`: press (`M`) then release
-/// (`m`). Pure so the byte shape is unit-testable; `buf` must hold ~26 bytes for
-/// realistic coords (96 covers any in-range terminal size).
+/// SGR-1006 left-button PRESS at 1-based `col`,`row` — the event modules'
+/// `onMouseClick` act on (press only, today). A single sequence so atty's
+/// intercept consumes the whole read cleanly; a trailing release in the same
+/// read would be parsed-past and leak to the shell. Pure so the byte shape is
+/// unit-testable; `buf` needs ~18 bytes for u16-bounded coords.
 pub fn clickBytes(col: i64, row: i64, buf: []u8) std.fmt.BufPrintError![]const u8 {
-    return std.fmt.bufPrint(buf, "\x1b[<0;{d};{d}M\x1b[<0;{d};{d}m", .{ col, row, col, row });
+    return std.fmt.bufPrint(buf, "\x1b[<0;{d};{d}M", .{ col, row });
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────
