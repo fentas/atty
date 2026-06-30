@@ -15,7 +15,7 @@ shell prompt and press **`Alt+A`**. atty wipes the typed line and
 injects the LLM-generated command into the readline buffer. You
 hit Enter to actually run it (or edit it / `Ctrl+C` to discard).
 
-![atty inline #: AI — natural language becomes a reviewed shell command, runs, and reports done, all with the footer visible (here in Alt+S dialog mode)]({{ '/assets/atty-tour.gif' | relative_url }})
+![atty inline #: AI — type intent after #:, trigger the dialog, and the model writes a reviewed shell command (here `uname -sm`); run it and atty reports done — the footer stays visible throughout]({{ '/assets/atty-llm.gif' | relative_url }})
 
 Three action keys, each with its own follow-up flow:
 

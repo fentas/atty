@@ -1,0 +1,32 @@
+# atty LLM — inline #: turns plain English into a reviewed shell command that
+# you run (Alt+S dialog). Footer visible; deterministic via a fixture provider.
+cols 100
+rows 12
+timeout_ms 20000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 300
+# atty's real OSC 133 integration so the AI exec can observe the command — then
+# clear the setup off-screen.
+type "PS1='$ '; source src/snippets/init_osc133_bash.sh; clear\r"
+wait_for "$"
+sleep 900
+
+# Type intent after #:, trigger the dialog, review the suggested command, run it.
+type "#: print the kernel name and architecture" irregular
+sleep 700
+type "\x1bs"
+# Wait for the AI's suggested command to land on the prompt.
+wait_for "uname -sm"
+wait_stable 250
+sleep 1300
+key Enter
+# Wait for the command's output (arch-neutral "Linux" so regen works on aarch64
+# too; the committed GIF shows x86_64), then for the AI's done confirmation so
+# the recording reliably captures the "done" state instead of relying on a sleep.
+wait_for "Linux"
+wait_for "printed the kernel info"
+sleep 1400
+type "exit\r"
+exit_code 0
