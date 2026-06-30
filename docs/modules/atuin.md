@@ -14,7 +14,7 @@ Fish/zsh-autosuggestion-style ghost text driven by your [Atuin](https://github.c
 
 ![atty ghost-text — a dim suggestion completes the line; Right accepts it]({{ '/assets/atty-ghost.gif' | relative_url }})
 
-> The GIF above is the [`history`]({{ '/modules/history/' | relative_url }}) module (shell-native), shown because the ghost-text UX is identical — `atuin` sources the same suggestions from your Atuin database instead. A dedicated atuin recording needs a seeded DB; tracked as a follow-up.
+> The GIF above is the [`history`]({{ '/modules/history/' | relative_url }}) module (shell-native), shown because the ghost-text UX is identical — `atuin` sources the same suggestions from your Atuin database instead. A dedicated atuin recording needs a seeded DB; tracked in [#546](https://github.com/fentas/atty/issues/546).
 
 * TOC
 {:toc}
