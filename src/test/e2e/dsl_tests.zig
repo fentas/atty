@@ -53,6 +53,12 @@ test "DSL click rejects a missing coordinate" {
     try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 7\n"));
 }
 
+test "DSL clickBytes builds the SGR-1006 press+release" {
+    var buf: [96]u8 = undefined;
+    const seq = try mod.clickBytes(20, 2, &buf);
+    try std.testing.expectEqualStrings("\x1b[<0;20;2M\x1b[<0;20;2m", seq);
+}
+
 test "DSL type parses an optional cadence pattern" {
     const src =
         \\type "echo hi"

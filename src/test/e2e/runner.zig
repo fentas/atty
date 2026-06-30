@@ -370,11 +370,10 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
                 try session.writeInput(bytes);
             },
             .click => {
-                // SGR-1006 left-button click: press (M) then release (m) at the
-                // 1-based col,row. atty parses these when config.mouse.enabled.
-                var buf: [64]u8 = undefined;
-                const seq = try std.fmt.bufPrint(&buf, "\x1b[<0;{d};{d}M\x1b[<0;{d};{d}m", .{ c.int_arg, c.int_arg2, c.int_arg, c.int_arg2 });
-                try session.writeInput(seq);
+                // SGR-1006 left-button click (press + release) at the 1-based
+                // col,row. atty parses these when config.mouse.enabled.
+                var buf: [96]u8 = undefined;
+                try session.writeInput(try dsl.clickBytes(c.int_arg, c.int_arg2, &buf));
             },
             .sleep => try session.sleepMs(@intCast(c.int_arg)),
             .wait_stable => {

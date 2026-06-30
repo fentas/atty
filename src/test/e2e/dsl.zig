@@ -347,6 +347,13 @@ pub fn keyBytes(name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// SGR-1006 left-button click at 1-based `col`,`row`: press (`M`) then release
+/// (`m`). Pure so the byte shape is unit-testable; `buf` must hold ~26 bytes for
+/// realistic coords (96 covers any in-range terminal size).
+pub fn clickBytes(col: i64, row: i64, buf: []u8) std.fmt.BufPrintError![]const u8 {
+    return std.fmt.bufPrint(buf, "\x1b[<0;{d};{d}M\x1b[<0;{d};{d}m", .{ col, row, col, row });
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────
 
 // ===========================================================================
