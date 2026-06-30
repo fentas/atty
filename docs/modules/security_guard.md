@@ -7,6 +7,8 @@ permalink: /modules/security_guard/
 
 # `security_guard` module
 
+![atty security_guard: the in-proc Tier-1 classifier flags a `curl … | sh` remote-fetch-and-execute and arms a [y]/[a]/[t]/[B] banner before it runs — no daemon required]({{ '/assets/atty-security-guard.gif' | relative_url }})
+
 A second module in the guardrail family. Where [`guardrail`]({{ '/modules/' | relative_url }}#minimal-example--upper) matches a comptime list of patterns with a fixed `confirm`/`block`/`warn` behaviour, `security_guard` aims at supply-chain / drive-by-install shapes (`curl … | sh`, `npm install <flagged-pkg>`, `bash -c "<long-b64>"`) and is engineered for opt-in plus a tightening V2 path:
 
 | Layer  | What runs                                                                            |
