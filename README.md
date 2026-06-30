@@ -65,7 +65,13 @@ $ curl https://sketchy.sh/install.sh | sh
         match: curl … | sh                          ← daemon Block verdict; readline cleared
 ```
 
-A live, animated demo lives on [atty.sh](https://atty.sh).
+A live, animated demo lives on [atty.sh](https://atty.sh) — or see it here:
+
+<p align="center">
+	<img alt="atty in action: status-bar footer, history ghost-text accepted with →, and inline #: AI command generation" src="docs/assets/atty-tour.gif" width="800">
+</p>
+
+<p align="center"><sub>The full tour — the <code>atty</code> footer stays put while history ghost-text completes a line and <code>#:</code> turns plain English into a reviewed command. Regenerate with <code>make demo-gifs</code>.</sub></p>
 
 &nbsp;
 

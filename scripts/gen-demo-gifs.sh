@@ -32,6 +32,20 @@ echo ">> recording casts (zig build demo -- --update)"
 rm -f /tmp/atty-demo-*            # fresh history files → deterministic ghost suggestions
 zig build demo "$TARGET" -- --update
 
+# Strip OSC 7 cwd reports from every cast — atty's shell integration (sourced by
+# the tour) emits `ESC ]7;file://<host><path> BEL` each prompt, which would bake
+# the recording machine's hostname + checkout path into the committed cast. The
+# sequence is non-printing, so removing it doesn't change the rendered GIF; it
+# just keeps the cast portable + reproducible.
+echo ">> stripping OSC 7 cwd reports from casts"
+python3 - tests/demo/*/golden/cast.json <<'PY'
+import re, sys
+osc7 = re.compile(r'\\u001b\]7;.*?\\u0007')
+for path in sys.argv[1:]:
+    text = open(path).read()
+    open(path, "w").write(osc7.sub("", text))
+PY
+
 mkdir -p docs/assets
 echo ">> rendering GIFs (agg, theme=$THEME)"
 for cast in tests/demo/*/golden/cast.json; do

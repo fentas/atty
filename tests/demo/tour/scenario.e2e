@@ -1,0 +1,48 @@
+# atty tour — the complete experience in one take: the status-bar footer,
+# history ghost-text + accept, and inline #: AI command generation. Typed at
+# human cadence; the footer stays visible throughout.
+cols 100
+rows 16
+timeout_ms 30000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 300
+# Install atty's real OSC 133 integration (what `eval "$(atty init bash)"` does)
+# so the #: AI exec can observe commands — then clear the setup off-screen.
+type "PS1='$ '; source src/snippets/init_osc133_bash.sh; clear\r"
+wait_for "$"
+sleep 900
+
+# 1) A normal command — runs, and seeds history for the ghost below.
+type "echo building atty from source" irregular
+key Enter
+wait_for "building atty from source"
+sleep 1100
+
+# 2) History ghost-text — type a prefix; the dim completion appears; Right accepts.
+type "echo buil" irregular
+wait_for_count "echo building atty from source" 2
+wait_stable 200
+sleep 1500
+key Right
+wait_stable 250
+sleep 800
+key Enter
+wait_for_count "building atty from source" 3
+sleep 1200
+
+# 3) Inline #: AI — natural language → suggested command → runs → ✓ done hint.
+type "#: greet me as the atty assistant" irregular
+sleep 700
+type "\x1bs"
+# Wait for the AI suggestion to land (robust vs a fixed sleep on slow machines).
+wait_for "Hello from atty"
+wait_stable 250
+sleep 1000
+key Enter
+# Wait for the command's OUTPUT — a 2nd occurrence of the greeting.
+wait_for_count "Hello from atty" 2
+sleep 1800
+type "exit\r"
+exit_code 0
