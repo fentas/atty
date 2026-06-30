@@ -36,9 +36,13 @@ sleep 1200
 type "#: greet me as the atty assistant" irregular
 sleep 700
 type "\x1bs"
-sleep 1300
-key Enter
+# Wait for the AI suggestion to land (robust vs a fixed sleep on slow machines).
 wait_for "Hello from atty"
+wait_stable 250
+sleep 1000
+key Enter
+# Wait for the command's OUTPUT — a 2nd occurrence of the greeting.
+wait_for_count "Hello from atty" 2
 sleep 1800
 type "exit\r"
 exit_code 0
