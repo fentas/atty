@@ -369,6 +369,12 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
                 };
                 try session.writeInput(bytes);
             },
+            .click => {
+                // SGR-1006 left-button press at the 1-based col,row. atty parses
+                // it when config.mouse.enabled; fires modules' onMouseClick.
+                var buf: [32]u8 = undefined;
+                try session.writeInput(try dsl.clickBytes(c.int_arg, c.int_arg2, &buf));
+            },
             .sleep => try session.sleepMs(@intCast(c.int_arg)),
             .wait_stable => {
                 // A timeout (never settled) isn't a hard failure — the

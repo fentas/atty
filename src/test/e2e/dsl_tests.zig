@@ -40,6 +40,31 @@ test "DSL parses a minimal script" {
     try std.testing.expectEqualStrings("first", s.cmds[5].str_arg);
 }
 
+test "DSL click parses col + row" {
+    var s = try parse(std.testing.allocator, "click 12 5\n");
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 1), s.cmds.len);
+    try std.testing.expectEqual(Kind.click, s.cmds[0].kind);
+    try std.testing.expectEqual(@as(i64, 12), s.cmds[0].int_arg);
+    try std.testing.expectEqual(@as(i64, 5), s.cmds[0].int_arg2);
+}
+
+test "DSL click rejects a missing coordinate" {
+    try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 7\n"));
+}
+
+test "DSL click rejects out-of-range coordinates (1-based u16)" {
+    try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 0 1\n"));
+    try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 1 0\n"));
+    try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 70000 1\n"));
+}
+
+test "DSL clickBytes builds the SGR-1006 press" {
+    var buf: [32]u8 = undefined;
+    const seq = try mod.clickBytes(20, 2, &buf);
+    try std.testing.expectEqualStrings("\x1b[<0;20;2M", seq);
+}
+
 test "DSL type parses an optional cadence pattern" {
     const src =
         \\type "echo hi"
