@@ -22,8 +22,10 @@ wait_for "uname -sm"
 wait_stable 250
 sleep 1300
 key Enter
-# Wait for the command's output, then hold on the done hint.
-wait_for "x86_64"
+# Wait for the command's output, then hold on the done hint. Match "Linux"
+# (arch-neutral) so regeneration works on aarch64 too — the GIF then shows that
+# host's `uname -sm` (x86_64 on the committed recording).
+wait_for "Linux"
 sleep 1800
 type "exit\r"
 exit_code 0
