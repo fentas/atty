@@ -14,6 +14,8 @@
 //!                               # paces keystrokes so a recording animates.
 //!   send "string" [pattern]     # alias of type (same optional cadence)
 //!   key Enter|Tab|Up|Down|Left|Right|Escape|Backspace|^C|^D|^L|^[
+//!   click <col> <row>          # left-button SGR-1006 mouse click at 1-based
+//!                               # col,row (needs config.mouse.enabled)
 //!   sleep <ms>
 //!   wait_for "substring"        # block until grid contains substring (timeout_ms)
 //!   wait_for_count "substring" N  # block until substring appears >= N times
@@ -47,6 +49,7 @@ pub const Kind = enum {
     spawn,
     type_str,
     key,
+    click,
     sleep,
     wait_for,
     wait_for_count,
@@ -64,6 +67,8 @@ pub const Cmd = struct {
     line: u32,
     // payload — interpretation depends on kind
     int_arg: i64 = 0,
+    // for click: col in int_arg, row here
+    int_arg2: i64 = 0,
     str_arg: []const u8 = "",
     // for set_env: KEY in str_arg, VALUE here
     str_arg2: []const u8 = "",
@@ -160,6 +165,12 @@ pub fn parse(allocator: Allocator, source: []const u8) ParseError!Script {
             try cmds.append(allocator, .{ .kind = .type_str, .line = line_no, .str_arg = str, .int_arg = pat });
         } else if (eq(head, "key")) {
             try cmds.append(allocator, .{ .kind = .key, .line = line_no, .str_arg = tail });
+        } else if (eq(head, "click")) {
+            // click <col> <row> — a left-button SGR-1006 click at 1-based col,row.
+            const gap = std.mem.indexOfScalar(u8, tail, ' ') orelse return ParseError.BadInteger;
+            const col = try parseInt(trim(tail[0..gap]));
+            const row = try parseInt(trim(tail[gap + 1 ..]));
+            try cmds.append(allocator, .{ .kind = .click, .line = line_no, .int_arg = col, .int_arg2 = row });
         } else if (eq(head, "sleep")) {
             try cmds.append(allocator, .{ .kind = .sleep, .line = line_no, .int_arg = try parseInt(tail) });
         } else if (eq(head, "wait_for")) {

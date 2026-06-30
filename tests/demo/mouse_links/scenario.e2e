@@ -1,0 +1,20 @@
+# atty mouse_links — click a path:line token in command output and atty injects
+# `$EDITOR +line 'path'` to open it. Footer visible; EDITOR=echo for the demo.
+cols 100
+rows 14
+timeout_ms 15000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 800
+# Print a compiler-style path:line token.
+type "echo build error at src/main.zig:42" irregular
+key Enter
+wait_for "src/main.zig:42"
+sleep 1300
+# Click the path token on the output line (row 2, within "src/main.zig").
+click 20 2
+wait_for "+42"
+sleep 1600
+type "exit\r"
+exit_code 0

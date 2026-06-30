@@ -7,6 +7,8 @@ permalink: /modules/mouse_links/
 
 # `mouse_links` module — click a file path → `$EDITOR <path>`
 
+![atty mouse_links: clicking a path:line token in output injects `$EDITOR +line 'path'` to open it (shown here with EDITOR=echo)]({{ '/assets/atty-mouse-links.gif' | relative_url }})
+
 Wires a left-click on a path token in compiler / grep / ls output to a `$EDITOR +LINE 'path'\n` injection into the shell's input stream. Captures terminal output into a per-module ring (SGR + OSC stripped), maps screen (row, col) → captured row via a monotonic write counter, and uses the pure path detector at [`src/modules/mouse_links/path_detect.zig`](https://github.com/fentas/atty/blob/master/src/modules/mouse_links/path_detect.zig).
 
 Detected path shapes:

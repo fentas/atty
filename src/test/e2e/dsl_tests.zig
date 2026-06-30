@@ -40,6 +40,19 @@ test "DSL parses a minimal script" {
     try std.testing.expectEqualStrings("first", s.cmds[5].str_arg);
 }
 
+test "DSL click parses col + row" {
+    var s = try parse(std.testing.allocator, "click 12 5\n");
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 1), s.cmds.len);
+    try std.testing.expectEqual(Kind.click, s.cmds[0].kind);
+    try std.testing.expectEqual(@as(i64, 12), s.cmds[0].int_arg);
+    try std.testing.expectEqual(@as(i64, 5), s.cmds[0].int_arg2);
+}
+
+test "DSL click rejects a missing coordinate" {
+    try std.testing.expectError(ParseError.BadInteger, parse(std.testing.allocator, "click 7\n"));
+}
+
 test "DSL type parses an optional cadence pattern" {
     const src =
         \\type "echo hi"
