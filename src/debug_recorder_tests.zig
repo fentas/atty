@@ -54,3 +54,20 @@ test "recorder: double-buffer keeps a bounded, newest-biased window" {
     try testing.expect(std.mem.indexOf(u8, out.items, "in:000;") == null); // oldest evicted
     try testing.expect(std.mem.count(u8, out.items, ";") < 30); // bounded, not all 60
 }
+
+test "recorder: pushNow drops records while paused (incognito)" {
+    var r = try Recorder.init(testing.allocator, 4096);
+    defer r.deinit();
+    r.pushNow(.in, "before");
+    r.paused = true;
+    r.pushNow(.in, "during-incognito");
+    r.paused = false;
+    r.pushNow(.in, "after");
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    var c = Collector{ .out = &out, .alloc = testing.allocator };
+    r.forEach(&c, collect);
+    try testing.expect(std.mem.indexOf(u8, out.items, "before") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "during-incognito") == null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "after") != null);
+}

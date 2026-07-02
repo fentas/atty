@@ -1132,6 +1132,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                         .incognito_toggle => {
                             incognito_on = !incognito_on;
                             ctx.incognito = incognito_on;
+                            // Never record a private session.
+                            if (io_helpers.recorder) |r| r.paused = incognito_on;
                             // Don't forward the binding bytes to the shell.
                             swallow_after_binding = true;
                             // Force the status bar to repaint so the

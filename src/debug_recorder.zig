@@ -44,6 +44,7 @@ pub const Recorder = struct {
     pos: usize = 0, // write cursor within the active half
     prev_len: usize = 0, // bytes retained in the inactive (previous) half
     dropped: u64 = 0, // records dropped because a single record exceeded a half
+    paused: bool = false, // set while incognito — pushNow drops silently
 
     /// `half_bytes` is the size of ONE half; total footprint is 2×. A record
     /// larger than a half can never be stored intact, so it's dropped.
@@ -88,8 +89,10 @@ pub const Recorder = struct {
     }
 
     /// Monotonic-clock convenience for the hot-path tees. `clock_gettime`
-    /// MONOTONIC is a vDSO read, not a real syscall.
+    /// MONOTONIC is a vDSO read, not a real syscall. Silently drops while
+    /// `paused` (incognito) so private sessions are never recorded.
     pub fn pushNow(self: *Recorder, stream: Stream, bytes: []const u8) void {
+        if (self.paused) return;
         self.push(stream, nowMs(), bytes);
     }
 
