@@ -41,7 +41,13 @@ const Ctx = struct {
             '\n' => c.raw("\\n"),
             '\r' => c.raw("\\r"),
             '\t' => c.raw("\\t"),
-            else => if (ch < 0x20 or ch == 0x7f) {
+            // Escape everything outside printable ASCII — control bytes AND
+            // high bytes (>= 0x7f). The streams are raw bytes and can contain
+            // invalid UTF-8 (partial multibyte at a chunk boundary, binary
+            // output); emitting them raw would make the JSON unparseable. Each
+            // byte becomes `\u00XX` (latin-1 transparent), so the report stays
+            // valid JSON and a byte-exact decoder recovers the original stream.
+            else => if (ch < 0x20 or ch >= 0x7f) {
                 var b: [8]u8 = undefined;
                 c.raw(std.fmt.bufPrint(&b, "\\u{x:0>4}", .{ch}) catch "");
             } else {
@@ -66,8 +72,12 @@ fn emitEvent(c: *Ctx, ts: i64, stream: debug_recorder.Stream, data: []const u8) 
     const rel = @as(f64, @floatFromInt(ts - c.first_ts.?)) / 1000.0;
     if (!c.first_event) c.raw(",\n");
     c.first_event = false;
-    var b: [64]u8 = undefined;
-    c.raw(std.fmt.bufPrint(&b, "    [{d:.3}, \"{s}\", \"", .{ rel, stream.name() }) catch "");
+    var b: [96]u8 = undefined;
+    const hdr = std.fmt.bufPrint(&b, "    [{d:.3}, \"{s}\", \"", .{ rel, stream.name() }) catch {
+        c.oom = true;
+        return;
+    };
+    c.raw(hdr);
     c.jsonInner(data);
     c.raw("\"]");
 }
@@ -126,9 +136,13 @@ fn resolveDir(alloc: std.mem.Allocator, dir_cfg: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{s}/.local/share/atty/reports", .{hs});
 }
 
-/// `mkdir -p` each path component (ignoring "already exists").
+/// `mkdir -p` each path prefix (ignoring "already exists"). Works for both
+/// absolute and relative `dir`: starting at 1 only skips the empty prefix
+/// `dir[0..0]` (and a leading `/`, which can't be mkdir'd anyway); the first
+/// real component is still created at the first `/` — e.g. "a/b" → mkdir "a"
+/// then "a/b".
 fn mkdirp(alloc: std.mem.Allocator, dir: []const u8) !void {
-    var i: usize = 1; // skip a leading '/'
+    var i: usize = 1;
     while (i <= dir.len) : (i += 1) {
         if (i < dir.len and dir[i] != '/') continue;
         const z = try alloc.dupeZ(u8, dir[0..i]);
@@ -152,9 +166,10 @@ pub fn save(
     defer alloc.free(dir);
     try mkdirp(alloc, dir);
 
+    // sec + nsec so two captures in the same second don't overwrite.
     var now: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &now); // wall-clock seconds for the filename
-    const path = try std.fmt.allocPrint(alloc, "{s}/report-{d}.json", .{ dir, now.sec });
+    if (std.c.clock_gettime(.REALTIME, &now) != 0) now = .{ .sec = 0, .nsec = 0 };
+    const path = try std.fmt.allocPrint(alloc, "{s}/report-{d}-{d}.json", .{ dir, now.sec, now.nsec });
     errdefer alloc.free(path);
     const path_z = try alloc.dupeZ(u8, path);
     defer alloc.free(path_z);
@@ -165,8 +180,11 @@ pub fn save(
     var off: usize = 0;
     while (off < json.items.len) {
         const rc = std.c.write(fd, json.items[off..].ptr, json.items.len - off);
-        if (rc < 0) return error.WriteFailed;
-        if (rc == 0) break;
+        if (rc < 0) {
+            if (std.posix.errno(rc) == .INTR) continue; // retry a signal-interrupted write
+            return error.WriteFailed;
+        }
+        if (rc == 0) return error.WriteFailed; // a 0-byte write is a truncated report, not success
         off += @intCast(rc);
     }
     return path;

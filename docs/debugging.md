@@ -63,8 +63,21 @@ fragment or stray escape crept in — which is what makes debugging atty itself
 ## Privacy
 
 The streams contain your commands and their output. Reports stay **local**
-(atty never uploads anything). Review a report before sharing it. Incognito
-sessions are excluded from recording.
+(atty never uploads anything). Review a report before sharing it.
+
+- **Incognito** sessions are excluded from recording.
+- **Password entry** (sudo / ssh / passwd / `read -s` — any time the child turns
+  echo off) is excluded from the `in` stream, so typed passwords are never
+  recorded.
+- Per-command `subprocess.incognito_targets` (a *history-persistence* exclusion)
+  is **not** applied to this ephemeral debug window — review a report before
+  sharing if you rely on it. Phase 3 (anonymization) will scrub such material.
+
+## Limitations
+
+- The `term` stream captures atty's writes through its main output path. A few
+  one-time control sequences (kitty-keyboard / mouse enable at startup) and some
+  module-direct writes bypass that path and aren't teed.
 
 ## Roadmap
 

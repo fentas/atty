@@ -858,7 +858,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         if (pfds[0].revents & POLLIN != 0) {
             const read_n = posix.read(posix.STDIN_FILENO, &read_buf) catch 0;
             if (read_n > 0) {
-                if (io_helpers.recorder) |r| r.pushNow(.in, read_buf[0..read_n]);
+                // Never record keystrokes while the child has echo off (password
+                // entry: sudo / ssh / passwd / `read -s`) — the same gate the
+                // redaction path below uses. Only pays the tcgetattr when the
+                // recorder is active (debug enabled).
+                if (io_helpers.recorder) |r| {
+                    if (!slaveIsHiddenInput(pty.master)) r.pushNow(.in, read_buf[0..read_n]);
+                }
                 // DSR-6n reply intercept — `\x1B[<r>;<c>R` is the
                 // terminal's response to our cursor-position query;
                 // strip it before bash sees it as keyboard input.

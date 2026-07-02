@@ -1,6 +1,8 @@
 # debug_capture — Alt+Shift+D dumps the in-memory recorder to a report file and
-# prints a one-line toast with the path. Validates the Action → save → toast
-# wiring end-to-end (no snapshot: the report path carries a timestamp).
+# prints a one-line toast with the path. This scenario validates the Action →
+# save → toast WIRING end-to-end (no snapshot: the report path carries a
+# timestamp). Report *content* (valid JSON + the three streams + escaping) is
+# covered by the unit tests in src/debug_report_tests.zig.
 
 cols 80
 rows 8

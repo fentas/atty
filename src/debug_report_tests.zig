@@ -38,3 +38,28 @@ test "report: valid JSON with meta, escaping, and rebased stream timestamps" {
     try testing.expect(std.mem.indexOf(u8, s, "[0.100, \"shell\", \"a\\tb\\n\"]") != null); // tab/newline escaped
     try testing.expect(std.mem.indexOf(u8, s, "\\u001b") != null); // ESC escaped
 }
+
+test "report: invalid-UTF-8 stream bytes stay valid JSON (escaped as u00XX)" {
+    var r = try rec.Recorder.init(testing.allocator, 4096);
+    defer r.deinit();
+    r.push(.shell, 1000, "ok\xc3\x28\xff"); // 0xc3 0x28 = invalid seq; 0xff never valid
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try report.write(&out, testing.allocator, .{
+        .atty_version = "9.9.9",
+        .cols = 80,
+        .rows = 24,
+        .term = "xterm",
+        .shell = "/bin/bash",
+        .lang = "C",
+        .line_buffer = "",
+        .line_cursor = 0,
+        .line_uncertain = false,
+        .incognito = false,
+    }, &r);
+    // Would be rejected with SyntaxError if the high bytes were emitted raw.
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out.items, .{});
+    defer parsed.deinit();
+    try testing.expect(std.mem.indexOf(u8, out.items, "\\u00c3") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "\\u00ff") != null);
+}
