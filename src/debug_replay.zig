@@ -272,7 +272,7 @@ pub fn run(gpa: std.mem.Allocator, argv: []const []const u8) u8 {
     defer report.deinit();
 
     if (opts.info) {
-        printInfo(gpa, &report);
+        printInfo(&report);
         return 0;
     }
 
@@ -286,7 +286,10 @@ fn replayStream(report: *const Report, opts: Options) void {
         if (ev.stream != opts.stream) continue;
         if (!opts.fast) {
             if (last_t) |lt| {
-                const gap_ms: i64 = @intFromFloat(@min((ev.t - lt) * 1000.0, 2000.0)); // cap gaps at 2s
+                // Clamp to [0, 2000] before @intFromFloat: a foreign/out-of-order
+                // report can yield a huge or negative gap, which would otherwise
+                // panic the float→int cast in ReleaseSafe.
+                const gap_ms: i64 = @intFromFloat(@min(@max((ev.t - lt) * 1000.0, 0), 2000.0));
                 sleepMs(gap_ms);
             }
             last_t = ev.t;
@@ -295,7 +298,7 @@ fn replayStream(report: *const Report, opts: Options) void {
     }
 }
 
-fn printInfo(gpa: std.mem.Allocator, report: *const Report) void {
+fn printInfo(report: *const Report) void {
     var counts = [_]usize{ 0, 0, 0 };
     var bytes = [_]usize{ 0, 0, 0 };
     var duration: f64 = 0;
@@ -305,6 +308,9 @@ fn printInfo(gpa: std.mem.Allocator, report: *const Report) void {
         bytes[idx] += ev.data.len;
         if (ev.t > duration) duration = ev.t;
     }
+    // Cap the (report-supplied) version so a pathological value can't overflow
+    // the buffer and drop the whole summary.
+    const version = report.atty_version[0..@min(report.atty_version.len, 64)];
     var buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf,
         \\atty debug report
@@ -316,11 +322,10 @@ fn printInfo(gpa: std.mem.Allocator, report: *const Report) void {
         \\  term      : {d} events, {d} bytes
         \\
     , .{
-        report.atty_version, report.cols, report.rows, duration,
-        counts[0],           bytes[0],    counts[1],   bytes[1],
-        counts[2],           bytes[2],
+        version,   report.cols, report.rows, duration,
+        counts[0], bytes[0],    counts[1],   bytes[1],
+        counts[2], bytes[2],
     }) catch return;
-    _ = gpa;
     writeStdout(msg);
 }
 

@@ -74,3 +74,45 @@ test "replay run: exit codes for bad invocations" {
     try testing.expectEqual(@as(u8, 2), replay.run(a, &.{ "replay", "a.json", "b.json" })); // extra positional
     try testing.expectEqual(@as(u8, 1), replay.run(a, &.{ "replay", "/no/such/report-xyz.json" })); // unreadable
 }
+
+// run() writes to fd 1; during `zig build test` fd 1 is the test-runner IPC
+// channel, so redirect it to /dev/null for the success path (which emits output)
+// to avoid corrupting the protocol.
+extern "c" fn dup(fd: c_int) c_int;
+extern "c" fn dup2(old: c_int, new: c_int) c_int;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+
+test "replay run: happy path returns 0 for a real saved report" {
+    const a = testing.allocator;
+    var r = try rec.Recorder.init(a, 4096);
+    defer r.deinit();
+    r.push(.term, 0, "hi\n");
+    const path = try report.save(a, "/tmp/atty-replay-selftest", .{
+        .atty_version = "t",
+        .cols = 1,
+        .rows = 1,
+        .term = "",
+        .shell = "",
+        .lang = "",
+        .line_buffer = "",
+        .line_cursor = 0,
+        .line_uncertain = false,
+        .incognito = false,
+    }, &r);
+    defer a.free(path);
+
+    const O_WRONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .WRONLY });
+    const devnull = open("/dev/null", O_WRONLY);
+    if (devnull < 0) return error.OpenFailed;
+    const saved = dup(1);
+    defer {
+        _ = dup2(saved, 1);
+        _ = std.c.close(saved);
+        _ = std.c.close(devnull);
+    }
+    _ = dup2(devnull, 1);
+
+    try testing.expectEqual(@as(u8, 0), replay.run(a, &.{ "replay", path, "--info" }));
+    try testing.expectEqual(@as(u8, 0), replay.run(a, &.{ "replay", path, "--fast" })); // replays term "hi\n"
+    try testing.expectEqual(@as(u8, 0), replay.run(a, &.{ "replay", path, "--stream", "shell", "--fast" }));
+}
