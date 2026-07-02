@@ -150,7 +150,7 @@ extern "c" fn close(fd: c_int) c_int;
 const O_RDONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .RDONLY });
 const max_report_bytes = 64 * 1024 * 1024;
 
-fn readFile(gpa: std.mem.Allocator, path: []const u8) ![]u8 {
+pub fn readFile(gpa: std.mem.Allocator, path: []const u8) ![]u8 {
     const path_z = try gpa.dupeZ(u8, path);
     defer gpa.free(path_z);
     const fd = open(path_z.ptr, O_RDONLY);
@@ -199,6 +199,9 @@ const usage =
     \\    --stream <name>   which stream to replay (default: term)
     \\    --fast            skip inter-event delays (dump instantly)
     \\    --info            print a summary instead of replaying
+    \\
+    \\  Other debug verbs: `atty debug anonymize <report>` (scrub secrets) and
+    \\  `atty debug to-cast <report>` (export a shareable asciinema cast).
     \\
 ;
 

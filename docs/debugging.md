@@ -102,7 +102,43 @@ comparing it against the default `term` replay reveals atty's transformation.
 The replay is byte-exact: the report's `\u00XX`-encoded stream data decodes back
 to the original raw bytes.
 
+## Anonymize + share
+
+Before handing a report to anyone, scrub it:
+
+```sh
+atty debug anonymize report-….json > report.clean.json
+```
+
+The scrubber (pure, regex-free) applies:
+
+| kind          | rule                                                        |
+|---------------|-------------------------------------------------------------|
+| `$HOME`       | your home path → `~`                                         |
+| `$USER`       | your username → `USER`                                       |
+| `$HOSTNAME`   | your hostname → `HOST`                                       |
+| emails        | `a@b.tld` → `[EMAIL]`                                        |
+| IPv4          | `d.d.d.d` → `[IP]`                                           |
+| tokens / JWTs | `eyJ…` and long base64/hex runs (≥20 chars) → `[REDACTED]`   |
+
+The result is still a valid report you can `atty debug replay`. This is what
+closes the per-command `subprocess.incognito_targets` gap for the ephemeral
+debug window — anonymize covers the sharing path even for material the recorder
+itself doesn't exclude. **Still review the output before sharing** — the
+scrubber is best-effort, not a guarantee.
+
+To share a *visual* recording instead, export a scrubbed
+[asciinema](https://asciinema.org) cast of a stream:
+
+```sh
+atty debug to-cast report-….json > bug.cast        # the `term` stream
+atty debug to-cast report-….json --stream shell    # or another stream
+```
+
+`bug.cast` plays in any asciinema player (or renders to a GIF with `agg`).
+
 ## Roadmap
 
-- **Anonymize + convert to a test case** — scrub sensitive tokens and drop a
-  report straight into the end-to-end regression suite.
+- **Convert a report into a runnable regression test** — replay it through
+  atty's output pipeline offline and diff the resulting screen. Needs a
+  production VT model (the same one a grid-diff replay would use); not yet built.

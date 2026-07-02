@@ -19,6 +19,7 @@ pub const pty = @import("pty.zig");
 pub const terminal = @import("terminal.zig");
 pub const proxy = @import("proxy.zig");
 pub const debug_replay = @import("debug_replay.zig");
+pub const debug_anonymize = @import("debug_anonymize.zig");
 pub const keymap = @import("keymap.zig");
 pub const style = @import("style.zig");
 pub const Style = style.Style;
