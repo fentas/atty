@@ -50,6 +50,12 @@ pub const ParseOutcome = union(enum) {
     /// OSC 133 gate keeps firing — pinpoints which step of the
     /// integration chain is broken without rebuilding the binary.
     print_doctor,
+    /// `atty debug <verb> [args…]` — debug-capture tooling (see the `debug`
+    /// config + Alt+Shift+D). The payload is the tokens AFTER `debug` (e.g.
+    /// ["replay", "<report>", "--fast"]), so the debug module owns its own
+    /// verb/flag parsing. Allocator-owned (duped); free with `freeDebug`.
+    /// main.zig exits after handling, so it skips the free; tests must free.
+    debug: [][]const u8,
 };
 
 /// Free the allocator-owned shell string carried by `.print_init`.
@@ -57,6 +63,12 @@ pub const ParseOutcome = union(enum) {
 /// zero-length and `&.{}`-backed; otherwise frees normally).
 pub fn freePrintInit(allocator: std.mem.Allocator, shell: []const u8) void {
     if (shell.len > 0) allocator.free(shell);
+}
+
+/// Free the allocator-owned token slice carried by `.debug`.
+pub fn freeDebug(allocator: std.mem.Allocator, argv: [][]const u8) void {
+    for (argv) |s| allocator.free(s);
+    allocator.free(argv);
 }
 
 pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutcome {
@@ -118,6 +130,20 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
             for (positional.items) |s| allocator.free(s);
             positional.deinit(allocator);
             return .print_doctor;
+        }
+        // `atty debug <verb> …` — same positional-subcommand shape. Capture the
+        // rest of the tokens for the debug module to parse.
+        if (std.mem.eql(u8, a, "debug") and positional.items.len == 0) {
+            for (positional.items) |s| allocator.free(s);
+            positional.deinit(allocator);
+            var rest: std.ArrayList([]const u8) = .empty;
+            errdefer {
+                for (rest.items) |s| allocator.free(s);
+                rest.deinit(allocator);
+            }
+            var j = i + 1;
+            while (j < args.len) : (j += 1) try rest.append(allocator, try allocator.dupe(u8, args[j]));
+            return .{ .debug = try rest.toOwnedSlice(allocator) };
         }
         // First positional ends flag parsing.
         try positional.append(allocator, try allocator.dupe(u8, a));

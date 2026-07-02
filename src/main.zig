@@ -17,6 +17,7 @@
 const std = @import("std");
 const atty = @import("atty");
 const args_mod = atty.args;
+const debug_replay = atty.debug_replay;
 
 // Shell snippets live in `src/snippets/*.sh` rather than inline
 // Zig multi-line literals so shellcheck + editor highlighting
@@ -140,6 +141,9 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args) !CliOpts {
         .print_doctor => {
             writeStdout(shell_doctor_snippet);
             std.process.exit(0);
+        },
+        .debug => |dargs| {
+            std.process.exit(debug_replay.run(allocator, dargs));
         },
     }
 }
