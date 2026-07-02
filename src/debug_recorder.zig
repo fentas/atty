@@ -1,8 +1,9 @@
 //! In-memory 3-stream recorder behind the debug/feedback capture. Keeps the
 //! recent window of I/O — `in` (keystrokes atty received), `shell` (raw output
 //! the shell produced), `term` (atty's final bytes to the terminal) — each
-//! record timestamped. Nothing is written to disk until `dump` is called on the
-//! user's capture shortcut, so there is no passive on-disk log to leak.
+//! record timestamped. Nothing is written to disk until the user's capture
+//! shortcut serialises it (via `forEach` + `debug_report.save`), so there is no
+//! passive on-disk log to leak.
 //!
 //! Storage is a double buffer, not a byte ring: records are appended to the
 //! active half until it fills, then the halves swap (the just-filled half

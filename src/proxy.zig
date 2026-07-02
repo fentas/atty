@@ -861,7 +861,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // Never record keystrokes while the child has echo off (password
                 // entry: sudo / ssh / passwd / `read -s`) — the same gate the
                 // redaction path below uses. Only pays the tcgetattr when the
-                // recorder is active (debug enabled).
+                // recorder is active (debug enabled). Captures RAW stdin (before
+                // the DSR/CPR scrub), so `in` includes terminal auto-replies —
+                // intended, so a report reflects exactly what atty received.
                 if (io_helpers.recorder) |r| {
                     if (!slaveIsHiddenInput(pty.master)) r.pushNow(.in, read_buf[0..read_n]);
                 }
@@ -1283,6 +1285,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             swallow_after_binding = true;
                             if (debug_rec) |*r| {
                                 captureDebugReport(allocator, r, &line_state, &ctx);
+                            } else if (config.debug.enabled) {
+                                // Enabled but null → Recorder.init failed (OOM).
+                                writeAll(posix.STDOUT_FILENO, "\r\n[atty debug] recorder unavailable (init failed)\r\n") catch {};
                             } else {
                                 writeAll(posix.STDOUT_FILENO, "\r\n[atty debug] recorder off — set config.debug.enabled\r\n") catch {};
                             }

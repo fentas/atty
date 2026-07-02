@@ -36,7 +36,7 @@ When something looks wrong, press **`Alt+Shift+D`**. atty writes a JSON report
 to the report directory and prints the path:
 
 ```
-[atty debug] report saved: /home/you/.local/share/atty/reports/report-1751000000.json
+[atty debug] report saved: /home/you/.local/share/atty/reports/report-1751000000-123456789.json
 ```
 
 Nothing is written to disk until you press it — the recorder is a bounded

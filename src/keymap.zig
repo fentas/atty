@@ -261,7 +261,7 @@ pub const Action = union(enum) {
     security_guard_cycle_profile,
     /// Capture a debug/feedback report: dump the in-memory 3-stream recorder
     /// (recent stdin / shell output / atty's terminal writes) + context to a
-    /// JSON file. Inert unless `config.debug.enabled`. See `src/debug_recorder`.
+    /// JSON file. Inert unless `config.debug.enabled`. See `src/debug_recorder.zig`.
     debug_capture,
 };
 

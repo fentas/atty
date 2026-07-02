@@ -1,8 +1,8 @@
 //! Serialises a debug capture — context + the recent I/O streams — into a JSON
-//! report. Built into a caller-owned buffer (on the capture shortcut, off the
-//! hot path); the proxy then writes it to disk. Timestamps are rebased to the
-//! first event (seconds, asciinema-style) so a report is self-contained and,
-//! later, replayable.
+//! report. `write` builds it into a caller-owned buffer and `save` persists it
+//! to disk (both on the capture shortcut, off the hot path). Timestamps are
+//! rebased to the first event (seconds, asciinema-style) so a report is
+//! self-contained and, later, replayable.
 
 const std = @import("std");
 const debug_recorder = @import("debug_recorder.zig");
@@ -117,6 +117,7 @@ pub fn write(
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
+extern "c" fn unlink(path: [*:0]const u8) c_int;
 
 const O_WRONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .WRONLY });
 const O_CREAT: c_int = @bitCast(std.posix.O{ .CREAT = true });
@@ -177,6 +178,8 @@ pub fn save(
     const fd = open(path_z.ptr, O_WRONLY | O_CREAT | O_TRUNC, @as(std.c.mode_t, 0o600));
     if (fd < 0) return error.OpenFailed;
     defer _ = close(fd);
+    // Don't leave a truncated report behind if the write fails partway.
+    errdefer _ = unlink(path_z.ptr);
     var off: usize = 0;
     while (off < json.items.len) {
         const rc = std.c.write(fd, json.items[off..].ptr, json.items.len - off);
