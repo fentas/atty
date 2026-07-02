@@ -80,10 +80,15 @@ fn matchJwt(s: []const u8) usize {
     return 0;
 }
 
-/// A run of >=20 base64/hex chars (opaque token) → matched length, else 0.
+/// A run of >=20 base64/hex chars (opaque token) → matched length, else 0. Dots
+/// are allowed *inside* the run so a dotted token (or a JWT reached mid-run, e.g.
+/// `blob/eyJ….eyJ….sig`) is redacted whole rather than leaking a short segment.
+/// Must start on a token char, and a trailing dot is excluded.
 fn matchToken(s: []const u8) usize {
+    if (s.len == 0 or !isB64(s[0])) return 0;
     var i: usize = 0;
-    while (i < s.len and isB64(s[i])) i += 1;
+    while (i < s.len and (isB64(s[i]) or s[i] == '.')) i += 1;
+    while (i > 0 and s[i - 1] == '.') i -= 1;
     return if (i >= 20) i else 0;
 }
 
@@ -100,6 +105,25 @@ fn patternScrub(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
     errdefer out.deinit(alloc);
     var i: usize = 0;
     while (i < s.len) {
+        // Emit a JSON escape verbatim. scrub() runs on the raw report JSON, so a
+        // lone `\` starts an escape (\n \r \t \" \\ \uXXXX). Without this, the
+        // escape char after the `\` (n/u/…) is a base64 char and would merge
+        // into a following token run and be redacted — orphaning the `\` into an
+        // illegal `\[REDACTED]` escape. Skipping the whole escape keeps it valid.
+        if (s[i] == '\\') {
+            try out.append(alloc, '\\');
+            i += 1;
+            if (i < s.len) {
+                if (s[i] == 'u' and i + 5 <= s.len) {
+                    try out.appendSlice(alloc, s[i .. i + 5]); // u + 4 hex
+                    i += 5;
+                } else {
+                    try out.append(alloc, s[i]);
+                    i += 1;
+                }
+            }
+            continue;
+        }
         const rest = s[i..];
         const em = matchEmail(rest);
         if (em > 0) {
@@ -159,18 +183,61 @@ pub fn scrub(alloc: std.mem.Allocator, input: []const u8, opts: ScrubOpts) ![]u8
 
 // ── asciinema cast escaping (UTF-8 convention: escape control + " \, pass the
 // rest through, matching how the e2e casts are written). ───────────────────
+fn escapeByte(alloc: std.mem.Allocator, out: *std.ArrayList(u8), c: u8) !void {
+    var b: [8]u8 = undefined;
+    try out.appendSlice(alloc, std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch "");
+}
+
 fn castEscape(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
-    for (s) |c| switch (c) {
-        '"' => try out.appendSlice(alloc, "\\\""),
-        '\\' => try out.appendSlice(alloc, "\\\\"),
-        '\n' => try out.appendSlice(alloc, "\\n"),
-        '\r' => try out.appendSlice(alloc, "\\r"),
-        '\t' => try out.appendSlice(alloc, "\\t"),
-        else => if (c < 0x20) {
-            var b: [8]u8 = undefined;
-            try out.appendSlice(alloc, std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch "");
-        } else try out.append(alloc, c),
-    };
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        switch (c) {
+            '"' => {
+                try out.appendSlice(alloc, "\\\"");
+                i += 1;
+            },
+            '\\' => {
+                try out.appendSlice(alloc, "\\\\");
+                i += 1;
+            },
+            '\n' => {
+                try out.appendSlice(alloc, "\\n");
+                i += 1;
+            },
+            '\r' => {
+                try out.appendSlice(alloc, "\\r");
+                i += 1;
+            },
+            '\t' => {
+                try out.appendSlice(alloc, "\\t");
+                i += 1;
+            },
+            else => if (c < 0x20) {
+                try escapeByte(alloc, out, c);
+                i += 1;
+            } else if (c < 0x80) {
+                try out.append(alloc, c);
+                i += 1;
+            } else {
+                // High byte: pass a whole valid UTF-8 sequence through (a cast is
+                // a UTF-8 recording), but escape an invalid byte so the JSON
+                // stays parseable.
+                const n = std.unicode.utf8ByteSequenceLength(c) catch {
+                    try escapeByte(alloc, out, c);
+                    i += 1;
+                    continue;
+                };
+                if (i + n <= s.len and std.unicode.utf8ValidateSlice(s[i .. i + n])) {
+                    try out.appendSlice(alloc, s[i .. i + n]);
+                    i += n;
+                } else {
+                    try escapeByte(alloc, out, c);
+                    i += 1;
+                }
+            },
+        }
+    }
 }
 
 // ── env + IO helpers ───────────────────────────────────────────────────────
@@ -291,13 +358,17 @@ fn runToCast(gpa: std.mem.Allocator, json: []const u8, stream: replay.Stream) u8
     defer report.deinit();
     const opts = envOpts();
 
+    // Fall back to a sane size when the report didn't capture one (0 → 80x24).
+    const width: u16 = if (report.cols > 0) report.cols else 80;
+    const height: u16 = if (report.rows > 0) report.rows else 24;
+
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     var hdr: [160]u8 = undefined;
     out.appendSlice(gpa, std.fmt.bufPrint(
         &hdr,
         "{{\"version\":2,\"width\":{d},\"height\":{d},\"timestamp\":0,\"env\":{{\"TERM\":\"xterm-256color\",\"SHELL\":\"/bin/sh\"}}}}\n",
-        .{ report.cols, report.rows },
+        .{ width, height },
     ) catch return 1) catch return 1;
 
     for (report.events) |ev| {

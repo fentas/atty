@@ -3,6 +3,7 @@ const testing = std.testing;
 const anon = @import("debug_anonymize.zig");
 const report = @import("debug_report.zig");
 const rec = @import("debug_recorder.zig");
+const replay = @import("debug_replay.zig");
 
 test "scrub: literal env replacements + pattern redaction" {
     const a = testing.allocator;
@@ -90,4 +91,59 @@ test "anonymize run: exit codes + happy path" {
     try testing.expectEqual(@as(u8, 0), anon.run(a, &.{ "anonymize", path }));
     try testing.expectEqual(@as(u8, 0), anon.run(a, &.{ "to-cast", path }));
     try testing.expectEqual(@as(u8, 0), anon.run(a, &.{ "to-cast", path, "--stream", "term" }));
+}
+
+test "anonymize: a token right after a JSON escape stays valid JSON" {
+    const a = testing.allocator;
+    // The \n escape abuts a 23-char token — the pre-fix scanner orphaned the \.
+    const json =
+        \\{"streams":[[0.0,"term","x\ndeadbeefcafebabe1234567 done"]]}
+    ;
+    const scrubbed = try anon.scrub(a, json, .{});
+    defer a.free(scrubbed);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, scrubbed, .{}); // valid JSON
+    defer parsed.deinit();
+    try testing.expect(std.mem.indexOf(u8, scrubbed, "deadbeefcafebabe1234567") == null); // token redacted
+    try testing.expect(std.mem.indexOf(u8, scrubbed, "\\n") != null); // escape preserved
+}
+
+test "to-cast emits a valid asciinema v2 header + event" {
+    const a = testing.allocator;
+    var r = try rec.Recorder.init(a, 4096);
+    defer r.deinit();
+    r.push(.term, 0, "hi\x1b[K\n");
+    const path = try report.save(a, "/tmp/atty-anon-cast", .{
+        .atty_version = "t",
+        .cols = 40,
+        .rows = 10,
+        .term = "",
+        .shell = "",
+        .lang = "",
+        .line_buffer = "",
+        .line_cursor = 0,
+        .line_uncertain = false,
+        .incognito = false,
+    }, &r);
+    defer a.free(path);
+    const path_z = try a.dupeZ(u8, path);
+    defer a.free(path_z);
+    defer _ = unlink(path_z.ptr);
+
+    const outpath = "/tmp/atty-anon-cast-out.txt";
+    const O_WR: c_int = @bitCast(std.posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true });
+    const ofd = open(outpath, O_WR, @as(std.c.mode_t, 0o600));
+    if (ofd < 0) return error.OpenFailed;
+    const saved = dup(1);
+    _ = dup2(ofd, 1);
+    const code = anon.run(a, &.{ "to-cast", path });
+    _ = dup2(saved, 1);
+    _ = std.c.close(saved);
+    _ = std.c.close(ofd);
+    try testing.expectEqual(@as(u8, 0), code);
+
+    const cast = try replay.readFile(a, outpath);
+    defer a.free(cast);
+    defer _ = unlink("/tmp/atty-anon-cast-out.txt");
+    try testing.expect(std.mem.startsWith(u8, cast, "{\"version\":2,\"width\":40,\"height\":10"));
+    try testing.expect(std.mem.indexOf(u8, cast, "[0.000, \"o\", \"") != null);
 }
