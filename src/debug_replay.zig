@@ -69,7 +69,10 @@ pub fn parse(gpa: std.mem.Allocator, json_bytes: []const u8) Error!Report {
     errdefer arena.deinit();
     const a = arena.allocator();
 
-    var parsed = std.json.parseFromSlice(std.json.Value, gpa, json_bytes, .{}) catch return error.BadReport;
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, json_bytes, .{}) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory, // don't disguise OOM as a schema error
+        else => return error.BadReport,
+    };
     defer parsed.deinit();
     if (parsed.value != .object) return error.BadReport;
     const root = parsed.value.object;
@@ -239,7 +242,9 @@ pub fn run(gpa: std.mem.Allocator, argv: []const []const u8) u8 {
                 return 2;
             };
         } else if (a.len > 0 and a[0] == '-') {
-            writeStderr("error: unknown flag\n\n");
+            writeStderr("error: unknown flag: ");
+            writeStderr(a);
+            writeStderr("\n\n");
             writeStderr(usage);
             return 2;
         } else if (path == null) {
