@@ -362,25 +362,28 @@ fn runToCast(gpa: std.mem.Allocator, json: []const u8, stream: replay.Stream) u8
     const width: u16 = if (report.cols > 0) report.cols else 80;
     const height: u16 = if (report.rows > 0) report.rows else 24;
 
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
     var hdr: [160]u8 = undefined;
-    out.appendSlice(gpa, std.fmt.bufPrint(
+    writeStdout(std.fmt.bufPrint(
         &hdr,
         "{{\"version\":2,\"width\":{d},\"height\":{d},\"timestamp\":0,\"env\":{{\"TERM\":\"xterm-256color\",\"SHELL\":\"/bin/sh\"}}}}\n",
         .{ width, height },
-    ) catch return 1) catch return 1;
+    ) catch return 1);
 
+    // Stream one event at a time — a report may be tens of MB, so don't buffer
+    // the whole (escaped, larger) cast in memory.
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(gpa);
     for (report.events) |ev| {
         if (ev.stream != stream) continue;
         const clean = scrub(gpa, ev.data, opts) catch return 1;
         defer gpa.free(clean);
-        var line: [48]u8 = undefined;
-        out.appendSlice(gpa, std.fmt.bufPrint(&line, "[{d:.3}, \"o\", \"", .{ev.t}) catch return 1) catch return 1;
-        castEscape(gpa, &out, clean) catch return 1;
-        out.appendSlice(gpa, "\"]\n") catch return 1;
+        line.clearRetainingCapacity();
+        var pre: [48]u8 = undefined;
+        line.appendSlice(gpa, std.fmt.bufPrint(&pre, "[{d:.3}, \"o\", \"", .{ev.t}) catch return 1) catch return 1;
+        castEscape(gpa, &line, clean) catch return 1;
+        line.appendSlice(gpa, "\"]\n") catch return 1;
+        writeStdout(line.items);
     }
-    writeStdout(out.items);
     return 0;
 }
 
