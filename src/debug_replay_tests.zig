@@ -73,6 +73,9 @@ test "replay run: exit codes for bad invocations" {
     try testing.expectEqual(@as(u8, 2), replay.run(a, &.{ "replay", "x.json", "--nope" })); // unknown flag
     try testing.expectEqual(@as(u8, 2), replay.run(a, &.{ "replay", "a.json", "b.json" })); // extra positional
     try testing.expectEqual(@as(u8, 1), replay.run(a, &.{ "replay", "/no/such/report-xyz.json" })); // unreadable
+    // --stream= form is accepted (reaches the unreadable-file path → 1, not unknown-flag → 2)
+    try testing.expectEqual(@as(u8, 1), replay.run(a, &.{ "replay", "/no/such/report-xyz.json", "--stream=shell" }));
+    try testing.expectEqual(@as(u8, 2), replay.run(a, &.{ "replay", "x.json", "--stream=bogus" })); // bad = value
 }
 
 // run() writes to fd 1; during `zig build test` fd 1 is the test-runner IPC
@@ -81,6 +84,7 @@ test "replay run: exit codes for bad invocations" {
 extern "c" fn dup(fd: c_int) c_int;
 extern "c" fn dup2(old: c_int, new: c_int) c_int;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+extern "c" fn unlink(path: [*:0]const u8) c_int;
 
 test "replay run: happy path returns 0 for a real saved report" {
     const a = testing.allocator;
@@ -100,6 +104,9 @@ test "replay run: happy path returns 0 for a real saved report" {
         .incognito = false,
     }, &r);
     defer a.free(path);
+    const path_z = try a.dupeZ(u8, path);
+    defer a.free(path_z);
+    defer _ = unlink(path_z.ptr); // don't leave a test artifact behind
 
     const O_WRONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .WRONLY });
     const devnull = open("/dev/null", O_WRONLY);

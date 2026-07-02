@@ -115,6 +115,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
         if (std.mem.eql(u8, a, "init") and positional.items.len == 0) {
             for (positional.items) |s| allocator.free(s);
             positional.deinit(allocator);
+            positional = .empty; // deinit leaves it undefined; keep the fn-level errdefer safe if the dupe below OOMs
             const shell_name: []const u8 = if (i + 1 < args.len)
                 try allocator.dupe(u8, args[i + 1])
             else
@@ -136,6 +137,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, args: []const []const u8) !ParseO
         if (std.mem.eql(u8, a, "debug") and positional.items.len == 0) {
             for (positional.items) |s| allocator.free(s);
             positional.deinit(allocator);
+            positional = .empty; // deinit leaves it undefined; keep the fn-level errdefer safe if the appends below OOM
             var rest: std.ArrayList([]const u8) = .empty;
             errdefer {
                 for (rest.items) |s| allocator.free(s);

@@ -148,6 +148,7 @@ fn sleepMs(ms: i64) void {
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
 const O_RDONLY: c_int = @bitCast(std.posix.O{ .ACCMODE = .RDONLY });
+const max_report_bytes = 64 * 1024 * 1024;
 
 fn readFile(gpa: std.mem.Allocator, path: []const u8) ![]u8 {
     const path_z = try gpa.dupeZ(u8, path);
@@ -165,6 +166,9 @@ fn readFile(gpa: std.mem.Allocator, path: []const u8) ![]u8 {
             return error.ReadFailed;
         }
         if (rc == 0) break;
+        // Bound the read — a real report is a few MB at most; refuse a huge /
+        // wrong path rather than allocating it all.
+        if (buf.items.len + @as(usize, @intCast(rc)) > max_report_bytes) return error.ReportTooLarge;
         try buf.appendSlice(gpa, chunk[0..@intCast(rc)]);
     }
     return buf.toOwnedSlice(gpa);
@@ -207,9 +211,15 @@ pub const Options = struct {
 /// CLI entry for `atty debug <argv…>`. `argv` is the tokens after `debug`.
 /// Returns a process exit code.
 pub fn run(gpa: std.mem.Allocator, argv: []const []const u8) u8 {
-    if (argv.len == 0 or std.mem.eql(u8, argv[0], "help") or std.mem.eql(u8, argv[0], "-h")) {
+    if (argv.len == 0) {
+        // Missing verb is a usage error → stderr + non-zero.
+        writeStderr("error: debug needs a verb (replay)\n\n");
+        writeStderr(usage);
+        return 2;
+    }
+    if (std.mem.eql(u8, argv[0], "help") or std.mem.eql(u8, argv[0], "-h")) {
         writeStdout(usage);
-        return if (argv.len == 0) 2 else 0;
+        return 0;
     }
     if (!std.mem.eql(u8, argv[0], "replay")) {
         writeStderr("error: unknown debug verb (expected `replay`)\n\n");
