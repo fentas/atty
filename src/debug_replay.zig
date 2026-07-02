@@ -42,11 +42,23 @@ pub const Report = struct {
 pub const Error = error{ BadReport, OutOfMemory };
 
 /// Recover raw bytes from a `\u00XX`-transparent string as decoded by std.json.
+/// atty's encoder only emits code points <= 0xFF (each == one original byte); a
+/// code point > 0xFF can only come from a hand-edited / foreign report, so we
+/// preserve its UTF-8 bytes rather than truncating. (std.json always yields
+/// valid UTF-8, so the init fallback is a defensive no-op.)
 fn decodeData(arena: std.mem.Allocator, s: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     const view = std.unicode.Utf8View.init(s) catch return arena.dupe(u8, s);
     var it = view.iterator();
-    while (it.nextCodepoint()) |cp| try out.append(arena, @truncate(cp));
+    while (it.nextCodepoint()) |cp| {
+        if (cp <= 0xFF) {
+            try out.append(arena, @intCast(cp));
+        } else {
+            var b: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &b) catch continue;
+            try out.appendSlice(arena, b[0..n]);
+        }
+    }
     return out.toOwnedSlice(arena);
 }
 
@@ -117,7 +129,13 @@ pub fn streamBytes(report: *const Report, stream: Stream, alloc: std.mem.Allocat
 fn sleepMs(ms: i64) void {
     if (ms <= 0) return;
     var ts = std.c.timespec{ .sec = @intCast(@divFloor(ms, 1000)), .nsec = @intCast(@mod(ms, 1000) * std.time.ns_per_ms) };
-    _ = std.c.nanosleep(&ts, null);
+    var rem: std.c.timespec = undefined;
+    while (true) {
+        const rc = std.c.nanosleep(&ts, &rem);
+        if (rc == 0) break;
+        if (std.posix.errno(rc) != .INTR) break; // re-arm with the remaining time on a signal
+        ts = rem;
+    }
 }
 
 // libc file read (runtime; consistent with debug_report's libc write).
@@ -223,6 +241,10 @@ pub fn run(gpa: std.mem.Allocator, argv: []const []const u8) u8 {
             return 2;
         } else if (path == null) {
             path = a;
+        } else {
+            writeStderr("error: unexpected extra argument\n\n");
+            writeStderr(usage);
+            return 2;
         }
     }
 

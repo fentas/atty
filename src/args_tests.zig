@@ -167,3 +167,30 @@ test "parseArgv: a known atty flag in the spawned-command tail is preserved, not
     try testing.expectEqualStrings("-h", got.ok.positional[1]);
     freeOk(testing.allocator, got.ok);
 }
+
+test "parseArgv captures `debug <verb> …` tokens as the .debug payload" {
+    const argv = [_][]const u8{ "debug", "replay", "report.json", "--fast" };
+    const got = try parseArgv(testing.allocator, &argv);
+    try testing.expectEqual(ParseOutcome.debug, std.meta.activeTag(got));
+    try testing.expectEqual(@as(usize, 3), got.debug.len);
+    try testing.expectEqualStrings("replay", got.debug[0]);
+    try testing.expectEqualStrings("report.json", got.debug[1]);
+    try testing.expectEqualStrings("--fast", got.debug[2]);
+    mod.freeDebug(testing.allocator, got.debug);
+}
+
+test "parseArgv: a bare `debug` with no verb yields an empty .debug payload" {
+    const argv = [_][]const u8{"debug"};
+    const got = try parseArgv(testing.allocator, &argv);
+    try testing.expectEqual(ParseOutcome.debug, std.meta.activeTag(got));
+    try testing.expectEqual(@as(usize, 0), got.debug.len);
+    mod.freeDebug(testing.allocator, got.debug);
+}
+
+test "parseArgv: a shell literally named `debug` is still reachable via --" {
+    const argv = [_][]const u8{ "--", "debug" };
+    const got = try parseArgv(testing.allocator, &argv);
+    try testing.expectEqual(@as(usize, 1), got.ok.positional.len);
+    try testing.expectEqualStrings("debug", got.ok.positional[0]);
+    freeOk(testing.allocator, got.ok);
+}

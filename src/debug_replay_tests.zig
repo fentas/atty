@@ -46,3 +46,26 @@ test "replay: rejects non-report input" {
     try testing.expectError(error.BadReport, replay.parse(testing.allocator, "not json at all"));
     try testing.expectError(error.BadReport, replay.parse(testing.allocator, "[1,2,3]")); // valid JSON, not an object
 }
+
+test "replay: code points > 0xFF preserve their UTF-8 bytes (foreign report)" {
+    const json =
+        \\{ "atty_version":"x", "terminal":{"cols":1,"rows":1}, "streams":[[0.0,"term","éἀ"]] }
+    ;
+    var rep = try replay.parse(testing.allocator, json);
+    defer rep.deinit();
+    const term = try replay.streamBytes(&rep, .term, testing.allocator);
+    defer testing.allocator.free(term);
+    // U+00E9 → one byte 0xE9; U+1F00 (>0xFF, not atty-emitted) → its 3 UTF-8 bytes.
+    try testing.expectEqual(@as(usize, 4), term.len);
+    try testing.expectEqual(@as(u8, 0xE9), term[0]);
+}
+
+test "replay run: exit codes for bad invocations" {
+    const a = testing.allocator;
+    try testing.expectEqual(@as(u8, 2), replay.run(a, &.{"frobnicate"})); // unknown verb
+    try testing.expectEqual(@as(u8, 2), replay.run(a, &.{"replay"})); // missing path
+    try testing.expectEqual(@as(u8, 2), replay.run(a, &.{ "replay", "x.json", "--stream", "bogus" })); // bad stream
+    try testing.expectEqual(@as(u8, 2), replay.run(a, &.{ "replay", "x.json", "--nope" })); // unknown flag
+    try testing.expectEqual(@as(u8, 2), replay.run(a, &.{ "replay", "a.json", "b.json" })); // extra positional
+    try testing.expectEqual(@as(u8, 1), replay.run(a, &.{ "replay", "/no/such/report-xyz.json" })); // unreadable
+}
