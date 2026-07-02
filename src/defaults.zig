@@ -145,6 +145,11 @@ pub const Keymap = struct {
         // spelled out here.
         .{ .bytes = "\x1bW", .action = .security_guard_show_warnings, .label = "Alt+Shift+W", .description = "dump security_guard warn events to scrollback" },
         .{ .bytes = "\x1b[87;4u", .action = .security_guard_show_warnings },
+        // Alt+Shift+D — capture a debug/feedback report (inert unless
+        // config.debug.enabled). Legacy `\x1bD` + kitty CSI-u sibling (68='D',
+        // 4=Alt+Shift), like the other Alt+Shift bindings.
+        .{ .bytes = "\x1bD", .action = .debug_capture, .label = "Alt+Shift+D", .description = "capture a debug report (needs config.debug.enabled)" },
+        .{ .bytes = "\x1b[68;4u", .action = .debug_capture },
         // Alt+P drives the security profile per security_guard.
         // profile_switch_mode (default .sudo — stages the sudo command).
         // Dual-encoded: legacy Esc+p + the kitty-kbd CSI-u sibling
@@ -251,6 +256,25 @@ pub const StatusBar = struct {
     error_ttl_ms: u32 = 60_000,
 };
 pub const statusbar: StatusBar = .{};
+
+// ───── Debug / feedback capture ───────────────────────────────────────────
+pub const Debug = struct {
+    /// Master switch. When false the recorder is never allocated and the three
+    /// tees (stdin / shell output / atty's terminal writes) are a single null
+    /// check — zero cost. Opt-in: recording keystrokes + output is sensitive,
+    /// so it never runs unless the user turns it on.
+    enabled: bool = false,
+
+    /// Size of ONE half of the in-memory double-buffer ring, in bytes; the
+    /// total footprint is 2× and the retained window is 1–2× this of recent
+    /// I/O. Nothing hits disk until the capture shortcut fires.
+    ring_bytes: usize = 256 * 1024,
+
+    /// Directory for capture reports. Empty → `$XDG_DATA_HOME/atty/reports`,
+    /// falling back to `~/.local/share/atty/reports`.
+    report_dir: []const u8 = "",
+};
+pub const debug: Debug = .{};
 
 // ───── Subprocess-context tracking ────────────────────────────────────────
 

@@ -4,6 +4,12 @@
 
 const std = @import("std");
 const posix = std.posix;
+const debug_recorder = @import("../debug_recorder.zig");
+
+/// Optional debug recorder — so a capture can reproduce what atty emitted to
+/// the terminal (its own injections included), not just what the shell produced.
+/// Null (the default) keeps the tee a single branch, zero cost.
+pub var recorder: ?*debug_recorder.Recorder = null;
 
 /// True when `bytes` contains a CR or LF — the proxy uses this to
 /// recognise an Enter keystroke regardless of which legacy
@@ -35,6 +41,11 @@ pub fn writeFully(fd: posix.fd_t, bytes: []const u8) !void {
         }
         if (rc == 0) return error.EndOfFile;
         i += @intCast(rc);
+    }
+    // Tee only after the full write succeeds, so `term` reflects bytes that
+    // actually reached the terminal — not intent lost to a partial/failed write.
+    if (recorder) |r| {
+        if (fd == posix.STDOUT_FILENO) r.pushNow(.term, bytes);
     }
 }
 

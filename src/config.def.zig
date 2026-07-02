@@ -370,6 +370,22 @@ const atty = @import("atty");
 //
 // pub const terminal: atty.Terminal = .{ .enable_kitty_keyboard = false };
 
+// ───── Debug / feedback capture ─────────────────────────────────────────
+//
+// An in-memory recorder of the recent I/O window — stdin (keystrokes), the
+// shell's raw output, and atty's own bytes to the terminal — kept in RAM only
+// until you press Alt+Shift+D, which dumps it (plus context) to a JSON report
+// under $XDG_DATA_HOME/atty/reports (or ~/.local/share/atty/reports). Nothing
+// touches disk until you capture, so there's no passive log. Use it to file /
+// reproduce ghost-text, LLM, or render-artifact bugs. Opt-in: recording input
+// is sensitive, so it's off by default.
+//
+// pub const debug: atty.Debug = .{
+//     .enabled = true,
+//     .ring_bytes = 256 * 1024, // one half of the double buffer; window is 1–2×
+//     .report_dir = "",         // "" → XDG data dir; or set an explicit path
+// };
+
 // ───── Key bindings ─────────────────────────────────────────────────────
 //
 // Defaults: Right / End / Ctrl+F / Ctrl+Tab → ghost_accept;
