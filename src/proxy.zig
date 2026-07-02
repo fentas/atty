@@ -44,12 +44,15 @@ fn envOrEmpty(name: [*:0]const u8) []const u8 {
 /// Build a debug report from the recorder + current context and write it to
 /// disk, printing a one-line toast with the path (or the failure). Runs on the
 /// `debug_capture` shortcut — off the hot path.
+/// Build + save a debug report; returns a short status message (into `out_buf`
+/// or a static literal) for the caller to surface via the status-bar hint.
 fn captureDebugReport(
     allocator: std.mem.Allocator,
     r: *const debug_recorder.Recorder,
     ls: *const LineState,
     ctx: *const module.Context,
-) void {
+    out_buf: []u8,
+) []const u8 {
     const meta = debug_report.Meta{
         .atty_version = atty_version,
         .cols = ctx.terminal_cols orelse 0,
@@ -63,13 +66,10 @@ fn captureDebugReport(
         .incognito = ctx.incognito,
     };
     const path = debug_report.save(allocator, config.debug.report_dir, meta, r) catch {
-        writeAll(posix.STDOUT_FILENO, "\r\n[atty debug] report save failed\r\n") catch {};
-        return;
+        return "atty debug: report save failed";
     };
     defer allocator.free(path);
-    var buf: [1024]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "\r\n[atty debug] report saved: {s}\r\n", .{path}) catch return;
-    writeAll(posix.STDOUT_FILENO, msg) catch {};
+    return std.fmt.bufPrint(out_buf, "atty debug: report saved → {s}", .{path}) catch "atty debug: report saved";
 }
 
 const Pty = @import("pty.zig").Pty;
@@ -1278,18 +1278,29 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             }
                         },
                         .debug_capture => {
-                            // Dump the in-memory recorder + context to a report
-                            // file. Swallow the meta-bytes regardless (a bare
-                            // `D` would otherwise echo). Inert with a one-line
-                            // note when the recorder is off.
+                            // Dump the recorder + context to a report file and
+                            // surface the outcome as a status-bar hint (above the
+                            // footer) so it doesn't stack up in scrollback or
+                            // collide with the prompt. Swallow the meta-bytes
+                            // regardless (a bare `D` would otherwise echo).
                             swallow_after_binding = true;
-                            if (debug_rec) |*r| {
-                                captureDebugReport(allocator, r, &line_state, &ctx);
-                            } else if (config.debug.enabled) {
-                                // Enabled but null → Recorder.init failed (OOM).
-                                writeAll(posix.STDOUT_FILENO, "\r\n[atty debug] recorder unavailable (init failed)\r\n") catch {};
+                            var msg_buf: [640]u8 = undefined;
+                            const msg: []const u8 = if (debug_rec) |*r|
+                                captureDebugReport(allocator, r, &line_state, &ctx, &msg_buf)
+                            else if (config.debug.enabled)
+                                "atty debug: recorder unavailable (init failed)"
+                            else
+                                "atty debug: recording off — set config.debug.enabled";
+                            if (statusbar) |*sb| {
+                                const ttl: u32 = if (config.statusbar.hint_ttl_ms > 0) config.statusbar.hint_ttl_ms else 4000;
+                                sb.setHint(msg, ttl);
+                                if (!alt_screen.active and !cursor_tracker.inEscape())
+                                    renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
                             } else {
-                                writeAll(posix.STDOUT_FILENO, "\r\n[atty debug] recorder off — set config.debug.enabled\r\n") catch {};
+                                // No status bar → fall back to an inline toast.
+                                var line_buf: [700]u8 = undefined;
+                                const line = std.fmt.bufPrint(&line_buf, "\r\n{s}\r\n", .{msg}) catch "\r\natty debug\r\n";
+                                writeAll(posix.STDOUT_FILENO, line) catch {};
                             }
                         },
                         .llm_exec_toggle_help => {
