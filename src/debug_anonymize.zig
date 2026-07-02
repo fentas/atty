@@ -1,16 +1,9 @@
-//! `atty debug anonymize <report>` and `atty debug to-cast <report>` — scrub a
-//! captured report for safe sharing, and export a shareable asciinema cast.
-//!
-//! The scrubber is a pure, regex-free byte scan. Literal replacements (home →
-//! `~`, user → `USER`, host → `HOST`) run first, then pattern redaction of
-//! emails, IPv4s, JWTs, and long token/hex/base64 runs. `anonymize` scrubs the
-//! raw report JSON directly — stream data is stored as printable ASCII (only
-//! control/high bytes are `\u`-escaped), so ASCII secrets appear literally and
-//! the replacements stay JSON-safe. `to-cast` parses the report and emits an
-//! asciinema v2 cast of a scrubbed stream.
-//!
-//! This closes the `subprocess.incognito_targets` sharing gap noted in the
-//! capture docs: run a report through `anonymize` before handing it to anyone.
+//! `atty debug anonymize` / `to-cast` — scrub a captured report for sharing.
+//! `anonymize` scrubs the RAW report JSON in place (stream data is stored as
+//! printable ASCII, so the redaction replacements stay JSON-safe); `to-cast`
+//! parses + scrubs decoded bytes into an asciinema cast. This is the sharing
+//! path that covers material the ephemeral recorder itself can't exclude
+//! (e.g. `subprocess.incognito_targets`).
 
 const std = @import("std");
 const replay = @import("debug_replay.zig");
@@ -92,39 +85,52 @@ fn matchToken(s: []const u8) usize {
     return if (i >= 20) i else 0;
 }
 
-fn replaceAll(alloc: std.mem.Allocator, hay: []const u8, needle: []const u8, repl: []const u8) ![]u8 {
-    if (needle.len == 0) return alloc.dupe(u8, hay);
-    const n = std.mem.replacementSize(u8, hay, needle, repl);
-    const out = try alloc.alloc(u8, n);
-    _ = std.mem.replace(u8, hay, needle, repl, out);
-    return out;
-}
-
-fn patternScrub(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+/// Scrub `input` in a single pass — literal env replacements (home → `~`, user
+/// → `USER`, host → `HOST`) and pattern redaction (email / IPv4 / JWT / token).
+///
+/// `in_json` selects escape handling. When true (anonymize scrubs the raw report
+/// JSON) the scan is escape-aware: a `\` starts a JSON escape (`\n \r \t \" \\
+/// \uXXXX`) that is emitted verbatim and skipped whole — so neither an env
+/// replacement nor a token redaction can start inside an escape and corrupt it
+/// (e.g. a hex USER mangling a unicode escape, or a token after `\n` orphaning the `\`).
+/// When false (to-cast scrubs decoded bytes) `\` is an ordinary byte.
+pub fn scrub(alloc: std.mem.Allocator, input: []const u8, opts: ScrubOpts, in_json: bool) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
     var i: usize = 0;
-    while (i < s.len) {
-        // Emit a JSON escape verbatim. scrub() runs on the raw report JSON, so a
-        // lone `\` starts an escape (\n \r \t \" \\ \uXXXX). Without this, the
-        // escape char after the `\` (n/u/…) is a base64 char and would merge
-        // into a following token run and be redacted — orphaning the `\` into an
-        // illegal `\[REDACTED]` escape. Skipping the whole escape keeps it valid.
-        if (s[i] == '\\') {
+    while (i < input.len) {
+        if (in_json and input[i] == '\\') {
             try out.append(alloc, '\\');
             i += 1;
-            if (i < s.len) {
-                if (s[i] == 'u' and i + 5 <= s.len) {
-                    try out.appendSlice(alloc, s[i .. i + 5]); // u + 4 hex
+            if (i < input.len) {
+                if (input[i] == 'u' and i + 5 <= input.len) {
+                    try out.appendSlice(alloc, input[i .. i + 5]); // u + 4 hex
                     i += 5;
                 } else {
-                    try out.append(alloc, s[i]);
+                    try out.append(alloc, input[i]);
                     i += 1;
                 }
             }
             continue;
         }
-        const rest = s[i..];
+        const rest = input[i..];
+        // Literal env replacements — home first (it usually contains the user);
+        // >=2 for home (a path), >=3 for user/host to avoid mangling tiny names.
+        if (opts.home.len >= 2 and std.mem.startsWith(u8, rest, opts.home)) {
+            try out.appendSlice(alloc, "~");
+            i += opts.home.len;
+            continue;
+        }
+        if (opts.user.len >= 3 and std.mem.startsWith(u8, rest, opts.user)) {
+            try out.appendSlice(alloc, "USER");
+            i += opts.user.len;
+            continue;
+        }
+        if (opts.host.len >= 3 and std.mem.startsWith(u8, rest, opts.host)) {
+            try out.appendSlice(alloc, "HOST");
+            i += opts.host.len;
+            continue;
+        }
         const em = matchEmail(rest);
         if (em > 0) {
             try out.appendSlice(alloc, "[EMAIL]");
@@ -149,43 +155,18 @@ fn patternScrub(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
             i += tk;
             continue;
         }
-        try out.append(alloc, s[i]);
+        try out.append(alloc, input[i]);
         i += 1;
     }
     return out.toOwnedSlice(alloc);
-}
-
-/// Scrub `input`: literal env replacements first (home usually contains user),
-/// then pattern redaction. Returns newly-allocated bytes.
-pub fn scrub(alloc: std.mem.Allocator, input: []const u8, opts: ScrubOpts) ![]u8 {
-    var cur = try alloc.dupe(u8, input);
-    errdefer alloc.free(cur);
-    // >=2 for home (a path), >=3 for user/host to avoid mangling on tiny names.
-    if (opts.home.len >= 2) {
-        const b = try replaceAll(alloc, cur, opts.home, "~");
-        alloc.free(cur);
-        cur = b;
-    }
-    if (opts.user.len >= 3) {
-        const b = try replaceAll(alloc, cur, opts.user, "USER");
-        alloc.free(cur);
-        cur = b;
-    }
-    if (opts.host.len >= 3) {
-        const b = try replaceAll(alloc, cur, opts.host, "HOST");
-        alloc.free(cur);
-        cur = b;
-    }
-    const result = try patternScrub(alloc, cur);
-    alloc.free(cur);
-    return result;
 }
 
 // ── asciinema cast escaping (UTF-8 convention: escape control + " \, pass the
 // rest through, matching how the e2e casts are written). ───────────────────
 fn escapeByte(alloc: std.mem.Allocator, out: *std.ArrayList(u8), c: u8) !void {
     var b: [8]u8 = undefined;
-    try out.appendSlice(alloc, std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch "");
+    // `\u00XX` is 6 bytes into an 8-byte buffer — it cannot fail.
+    try out.appendSlice(alloc, std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch unreachable);
 }
 
 fn castEscape(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
@@ -344,7 +325,7 @@ pub fn run(gpa: std.mem.Allocator, argv: []const []const u8) u8 {
 fn runAnonymize(gpa: std.mem.Allocator, json: []const u8) u8 {
     // Scrub the raw JSON directly — replacements are JSON-safe, so the result
     // stays valid JSON while ASCII secrets in the stream data are redacted.
-    const scrubbed = scrub(gpa, json, envOpts()) catch return 1;
+    const scrubbed = scrub(gpa, json, envOpts(), true) catch return 1; // raw JSON → escape-aware
     defer gpa.free(scrubbed);
     writeStdout(scrubbed);
     return 0;
@@ -375,7 +356,7 @@ fn runToCast(gpa: std.mem.Allocator, json: []const u8, stream: replay.Stream) u8
     defer line.deinit(gpa);
     for (report.events) |ev| {
         if (ev.stream != stream) continue;
-        const clean = scrub(gpa, ev.data, opts) catch return 1;
+        const clean = scrub(gpa, ev.data, opts, false) catch return 1; // decoded bytes → `\` is literal
         defer gpa.free(clean);
         line.clearRetainingCapacity();
         var pre: [48]u8 = undefined;

@@ -18,7 +18,7 @@ test "scrub: literal env replacements + pattern redaction" {
         .{ "hello world 1.2.3 v4", "hello world 1.2.3 v4" }, // untouched: short, 3-octet, no long run
     };
     inline for (cases) |c| {
-        const got = try anon.scrub(a, c[0], opts);
+        const got = try anon.scrub(a, c[0], opts, false);
         defer a.free(got);
         try testing.expectEqualStrings(c[1], got);
     }
@@ -27,7 +27,7 @@ test "scrub: literal env replacements + pattern redaction" {
 test "scrub: short user/host names are not mangled" {
     const a = testing.allocator;
     // user "al" (<3) must not turn every "al" into USER.
-    const got = try anon.scrub(a, "alpha always all", .{ .home = "", .user = "al", .host = "" });
+    const got = try anon.scrub(a, "alpha always all", .{ .home = "", .user = "al", .host = "" }, false);
     defer a.free(got);
     try testing.expectEqualStrings("alpha always all", got);
 }
@@ -37,7 +37,7 @@ test "anonymize: scrubbed report stays valid JSON with the secret gone" {
     const json =
         \\{"atty_version":"1.0","terminal":{"cols":80,"rows":24},"streams":[[0.0,"in","export TOKEN=AKIA1234567890ABCDEFGHIJ"]]}
     ;
-    const scrubbed = try anon.scrub(a, json, .{});
+    const scrubbed = try anon.scrub(a, json, .{}, true);
     defer a.free(scrubbed);
     try testing.expect(std.mem.indexOf(u8, scrubbed, "AKIA1234567890ABCDEFGHIJ") == null);
     try testing.expect(std.mem.indexOf(u8, scrubbed, "[REDACTED]") != null);
@@ -99,7 +99,7 @@ test "anonymize: a token right after a JSON escape stays valid JSON" {
     const json =
         \\{"streams":[[0.0,"term","x\ndeadbeefcafebabe1234567 done"]]}
     ;
-    const scrubbed = try anon.scrub(a, json, .{});
+    const scrubbed = try anon.scrub(a, json, .{}, true);
     defer a.free(scrubbed);
     var parsed = try std.json.parseFromSlice(std.json.Value, a, scrubbed, .{}); // valid JSON
     defer parsed.deinit();
@@ -146,4 +146,15 @@ test "to-cast emits a valid asciinema v2 header + event" {
     defer _ = unlink("/tmp/atty-anon-cast-out.txt");
     try testing.expect(std.mem.startsWith(u8, cast, "{\"version\":2,\"width\":40,\"height\":10"));
     try testing.expect(std.mem.indexOf(u8, cast, "[0.000, \"o\", \"") != null);
+}
+
+test "anonymize: a hex user value cannot corrupt a JSON u-escape" {
+    const a = testing.allocator;
+    // A JSON \u escape whose hex body a pure-hex USER value overlaps.
+    const json = "{\"streams\":[[0.0,\"term\",\"x\\u000ey\"]]}";
+    const scrubbed = try anon.scrub(a, json, .{ .user = "000e" }, true);
+    defer a.free(scrubbed);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, scrubbed, .{}); // still valid JSON
+    defer parsed.deinit();
+    try testing.expect(std.mem.indexOf(u8, scrubbed, "\\u000e") != null); // escape untouched
 }
