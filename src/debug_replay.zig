@@ -90,22 +90,25 @@ pub fn parse(gpa: std.mem.Allocator, json_bytes: []const u8) Error!Report {
         };
     };
 
+    // `streams` must be present and an array for this to be a report at all;
+    // individual malformed events inside it are skipped (best-effort — a
+    // partially-odd capture should still replay what's valid).
+    const streams = root.get("streams") orelse return error.BadReport;
+    if (streams != .array) return error.BadReport;
     var events: std.ArrayList(Event) = .empty;
-    if (root.get("streams")) |st| if (st == .array) {
-        for (st.array.items) |ev| {
-            if (ev != .array or ev.array.items.len < 3) continue;
-            const sv = ev.array.items[1];
-            const dv = ev.array.items[2];
-            if (sv != .string or dv != .string) continue;
-            const stream = Stream.fromName(sv.string) orelse continue;
-            const t: f64 = switch (ev.array.items[0]) {
-                .float => |f| f,
-                .integer => |n| @floatFromInt(n),
-                else => 0,
-            };
-            try events.append(a, .{ .t = t, .stream = stream, .data = try decodeData(a, dv.string) });
-        }
-    };
+    for (streams.array.items) |ev| {
+        if (ev != .array or ev.array.items.len < 3) continue;
+        const sv = ev.array.items[1];
+        const dv = ev.array.items[2];
+        if (sv != .string or dv != .string) continue;
+        const stream = Stream.fromName(sv.string) orelse continue;
+        const t: f64 = switch (ev.array.items[0]) {
+            .float => |f| f,
+            .integer => |n| @floatFromInt(n),
+            else => 0,
+        };
+        try events.append(a, .{ .t = t, .stream = stream, .data = try decodeData(a, dv.string) });
+    }
 
     return .{
         .arena = arena,

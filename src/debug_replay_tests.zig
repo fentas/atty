@@ -45,6 +45,11 @@ test "replay: parse round-trips a report's streams byte-exactly" {
 test "replay: rejects non-report input" {
     try testing.expectError(error.BadReport, replay.parse(testing.allocator, "not json at all"));
     try testing.expectError(error.BadReport, replay.parse(testing.allocator, "[1,2,3]")); // valid JSON, not an object
+    try testing.expectError(error.BadReport, replay.parse(testing.allocator, "{\"atty_version\":\"x\"}")); // no streams key
+    try testing.expectError(error.BadReport, replay.parse(testing.allocator, "{\"streams\":5}")); // streams not an array
+    // An empty streams array is a valid (0-event) report, not an error.
+    var rep = try replay.parse(testing.allocator, "{\"streams\":[]}");
+    rep.deinit();
 }
 
 test "replay: code points > 0xFF preserve their UTF-8 bytes (foreign report)" {
