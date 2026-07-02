@@ -57,6 +57,7 @@ test "anonymize run: exit codes + happy path" {
     try testing.expectEqual(@as(u8, 2), anon.run(a, &.{"frob"})); // unknown verb
     try testing.expectEqual(@as(u8, 2), anon.run(a, &.{"anonymize"})); // missing path
     try testing.expectEqual(@as(u8, 1), anon.run(a, &.{ "anonymize", "/no/such-xyz.json" })); // unreadable
+    try testing.expectEqual(@as(u8, 2), anon.run(a, &.{ "anonymize", "x.json", "--stream", "term" })); // --stream is to-cast-only
 
     var r = try rec.Recorder.init(a, 4096);
     defer r.deinit();
@@ -91,6 +92,7 @@ test "anonymize run: exit codes + happy path" {
     try testing.expectEqual(@as(u8, 0), anon.run(a, &.{ "anonymize", path }));
     try testing.expectEqual(@as(u8, 0), anon.run(a, &.{ "to-cast", path }));
     try testing.expectEqual(@as(u8, 0), anon.run(a, &.{ "to-cast", path, "--stream", "term" }));
+    try testing.expectEqual(@as(u8, 0), anon.run(a, &.{"help"})); // help → stdout, exit 0
 }
 
 test "anonymize: a token right after a JSON escape stays valid JSON" {
@@ -111,7 +113,7 @@ test "to-cast emits a valid asciinema v2 header + event" {
     const a = testing.allocator;
     var r = try rec.Recorder.init(a, 4096);
     defer r.deinit();
-    r.push(.term, 0, "hi\x1b[K\n");
+    r.push(.term, 0, "hi\x1b[K caf\xc3\xa9\n"); // includes a multibyte UTF-8 char (é)
     const path = try report.save(a, "/tmp/atty-anon-cast", .{
         .atty_version = "t",
         .cols = 40,
@@ -146,6 +148,13 @@ test "to-cast emits a valid asciinema v2 header + event" {
     defer _ = unlink("/tmp/atty-anon-cast-out.txt");
     try testing.expect(std.mem.startsWith(u8, cast, "{\"version\":2,\"width\":40,\"height\":10"));
     try testing.expect(std.mem.indexOf(u8, cast, "[0.000, \"o\", \"") != null);
+    // Valid multibyte UTF-8 passes through raw (not latin-1 \u-escaped).
+    try testing.expect(std.mem.indexOf(u8, cast, "caf\xc3\xa9") != null);
+    try testing.expect(std.mem.indexOf(u8, cast, "\\u00c3") == null);
+    // ...but the cast is still valid JSON (each event line parses).
+    const l0 = std.mem.indexOfScalar(u8, cast, '\n').?;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, cast[l0 + 1 .. std.mem.indexOfScalarPos(u8, cast, l0 + 1, '\n').?], .{});
+    parsed.deinit();
 }
 
 test "anonymize: a hex user value cannot corrupt a JSON u-escape" {

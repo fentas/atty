@@ -265,6 +265,10 @@ const usage =
 pub fn run(gpa: std.mem.Allocator, argv: []const []const u8) u8 {
     if (argv.len == 0) return 2;
     const verb = argv[0];
+    if (std.mem.eql(u8, verb, "help") or std.mem.eql(u8, verb, "-h") or std.mem.eql(u8, verb, "--help")) {
+        writeStdout(usage);
+        return 0;
+    }
     const want_cast = std.mem.eql(u8, verb, "to-cast");
     if (!want_cast and !std.mem.eql(u8, verb, "anonymize")) {
         writeStderr("error: unknown debug verb\n\n");
@@ -277,18 +281,23 @@ pub fn run(gpa: std.mem.Allocator, argv: []const []const u8) u8 {
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const a = argv[i];
-        if (std.mem.eql(u8, a, "--stream")) {
-            i += 1;
-            if (i >= argv.len) {
-                writeStderr("error: --stream needs a value\n");
+        if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
+            writeStdout(usage);
+            return 0;
+        } else if (std.mem.eql(u8, a, "--stream") or std.mem.startsWith(u8, a, "--stream=")) {
+            if (!want_cast) {
+                writeStderr("error: --stream applies only to `to-cast`\n");
                 return 2;
             }
-            stream = replay.Stream.fromName(argv[i]) orelse {
-                writeStderr("error: --stream must be in|shell|term\n");
-                return 2;
-            };
-        } else if (std.mem.startsWith(u8, a, "--stream=")) {
-            stream = replay.Stream.fromName(a["--stream=".len..]) orelse {
+            const val = if (std.mem.eql(u8, a, "--stream")) blk: {
+                i += 1;
+                if (i >= argv.len) {
+                    writeStderr("error: --stream needs a value\n");
+                    return 2;
+                }
+                break :blk argv[i];
+            } else a["--stream=".len..];
+            stream = replay.Stream.fromName(val) orelse {
                 writeStderr("error: --stream must be in|shell|term\n");
                 return 2;
             };
