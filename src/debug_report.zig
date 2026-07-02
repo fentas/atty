@@ -148,7 +148,10 @@ fn mkdirp(alloc: std.mem.Allocator, dir: []const u8) !void {
         if (i < dir.len and dir[i] != '/') continue;
         const z = try alloc.dupeZ(u8, dir[0..i]);
         defer alloc.free(z);
-        _ = std.c.mkdir(z.ptr, 0o700); // EEXIST is fine
+        // EEXIST is expected for existing prefixes; any other failure
+        // (permission, ENOSPC, …) is real — surface it rather than mask it.
+        const rc = std.c.mkdir(z.ptr, 0o700);
+        if (rc != 0 and std.posix.errno(rc) != .EXIST) return error.MkdirFailed;
     }
 }
 

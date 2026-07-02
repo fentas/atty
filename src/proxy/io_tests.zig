@@ -74,3 +74,54 @@ test "writeFully: write to a pipe whose reader closed returns error.WriteFailed 
 
     try testing.expectError(error.WriteFailed, writeFully(fds[1], "x"));
 }
+
+const debug_recorder = @import("../debug_recorder.zig");
+
+extern "c" fn pipe(fds: *[2]c_int) c_int;
+extern "c" fn dup(fd: c_int) c_int;
+extern "c" fn dup2(old: c_int, new: c_int) c_int;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+
+const TeeSink = struct {
+    data: *std.ArrayList(u8),
+    alloc: std.mem.Allocator,
+    fn cb(self: *TeeSink, ts: i64, s: debug_recorder.Stream, d: []const u8) void {
+        _ = ts;
+        if (s != .term) return;
+        self.data.appendSlice(self.alloc, d) catch {};
+    }
+};
+
+test "writeFully tees STDOUT into the recorder byte-exactly, and no other fd" {
+    var r = try debug_recorder.Recorder.init(testing.allocator, 4096);
+    defer r.deinit();
+    mod.recorder = &r;
+    defer mod.recorder = null;
+
+    // A non-STDOUT fd (pipe) must NOT be teed as `term`.
+    var fds: [2]c_int = undefined;
+    if (pipe(&fds) != 0) return error.PipeFailed;
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    try mod.writeFully(fds[1], "pipe-bytes");
+
+    // STDOUT IS teed. Redirect fd 1 to /dev/null so the test stays quiet.
+    const O_WRONLY: c_int = @bitCast(posix.O{ .ACCMODE = .WRONLY });
+    const devnull = open("/dev/null", O_WRONLY);
+    if (devnull < 0) return error.OpenFailed;
+    const saved = dup(posix.STDOUT_FILENO);
+    defer {
+        _ = dup2(saved, posix.STDOUT_FILENO);
+        _ = std.c.close(saved);
+        _ = std.c.close(devnull);
+    }
+    _ = dup2(devnull, posix.STDOUT_FILENO);
+    try mod.writeFully(posix.STDOUT_FILENO, "term-bytes");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var sink = TeeSink{ .data = &buf, .alloc = testing.allocator };
+    r.forEach(&sink, TeeSink.cb);
+    // Only the STDOUT write is present — the pipe write was not teed.
+    try testing.expectEqualStrings("term-bytes", buf.items);
+}

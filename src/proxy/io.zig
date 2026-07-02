@@ -6,11 +6,9 @@ const std = @import("std");
 const posix = std.posix;
 const debug_recorder = @import("../debug_recorder.zig");
 
-/// Optional debug recorder. When set (config.debug.enabled), every write to
-/// STDOUT — atty's final byte stream to the terminal, including its own
-/// statusbar / ghost / overlay injections — is teed into the `term` stream so a
-/// capture reproduces what atty actually emitted, not just what the shell
-/// produced. Null (the default) is a single branch, zero cost.
+/// Optional debug recorder — so a capture can reproduce what atty emitted to
+/// the terminal (its own injections included), not just what the shell produced.
+/// Null (the default) keeps the tee a single branch, zero cost.
 pub var recorder: ?*debug_recorder.Recorder = null;
 
 /// True when `bytes` contains a CR or LF — the proxy uses this to
@@ -34,9 +32,6 @@ pub fn containsEnter(bytes: []const u8) bool {
 /// teardown is the other path this gate guards against — those
 /// used to spin at 100% CPU.
 pub fn writeFully(fd: posix.fd_t, bytes: []const u8) !void {
-    if (recorder) |r| {
-        if (fd == posix.STDOUT_FILENO) r.pushNow(.term, bytes);
-    }
     var i: usize = 0;
     while (i < bytes.len) {
         const rc = std.c.write(fd, bytes[i..].ptr, bytes.len - i);
@@ -46,6 +41,11 @@ pub fn writeFully(fd: posix.fd_t, bytes: []const u8) !void {
         }
         if (rc == 0) return error.EndOfFile;
         i += @intCast(rc);
+    }
+    // Tee only after the full write succeeds, so `term` reflects bytes that
+    // actually reached the terminal — not intent lost to a partial/failed write.
+    if (recorder) |r| {
+        if (fd == posix.STDOUT_FILENO) r.pushNow(.term, bytes);
     }
 }
 
