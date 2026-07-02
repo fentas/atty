@@ -11,6 +11,10 @@ Usage: atty [flags] [shell [args...]]
   atty debug replay <report.json>
                         replay a captured debug report
                           (--stream in|shell|term, --fast, --info)
+  atty debug anonymize <report.json>
+                        scrub secrets from a report (→ stdout)
+  atty debug to-cast <report.json>
+                        export a scrubbed asciinema cast (→ stdout)
 
 Flags:
   -h, --help            Print this help

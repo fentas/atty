@@ -18,6 +18,7 @@ const std = @import("std");
 const atty = @import("atty");
 const args_mod = atty.args;
 const debug_replay = atty.debug_replay;
+const debug_anonymize = atty.debug_anonymize;
 
 // Shell snippets live in `src/snippets/*.sh` rather than inline
 // Zig multi-line literals so shellcheck + editor highlighting
@@ -143,7 +144,12 @@ fn parseArgs(allocator: std.mem.Allocator, args: std.process.Args) !CliOpts {
             std.process.exit(0);
         },
         .debug => |dargs| {
-            std.process.exit(debug_replay.run(allocator, dargs));
+            const to_anon = dargs.len > 0 and
+                (std.mem.eql(u8, dargs[0], "anonymize") or std.mem.eql(u8, dargs[0], "to-cast"));
+            std.process.exit(if (to_anon)
+                debug_anonymize.run(allocator, dargs)
+            else
+                debug_replay.run(allocator, dargs));
         },
     }
 }
