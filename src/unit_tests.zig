@@ -10,6 +10,8 @@ test {
     _ = @import("dispatch.zig");
     _ = @import("mouse.zig");
     _ = @import("line_state.zig");
+    _ = @import("debug_recorder.zig");
+    _ = @import("debug_report.zig");
     _ = @import("ansi.zig");
     _ = @import("trace.zig");
     _ = @import("ghost.zig");

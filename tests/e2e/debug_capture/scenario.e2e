@@ -1,0 +1,20 @@
+# debug_capture — Alt+Shift+D dumps the in-memory recorder to a report file and
+# prints a one-line toast with the path. Validates the Action → save → toast
+# wiring end-to-end (no snapshot: the report path carries a timestamp).
+
+cols 80
+rows 8
+timeout_ms 6000
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 200
+type "echo hello-debug\r"
+wait_for "hello-debug"
+sleep 200
+# Alt+Shift+D (legacy ESC + D) → debug_capture.
+type "\x1bD"
+wait_for "report saved"
+sleep 100
+type "exit\r"
+exit_code 0

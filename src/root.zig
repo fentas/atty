@@ -37,6 +37,7 @@ pub const Terminal = config.Terminal;
 pub const Mouse = config.Mouse;
 pub const Keymap = config.Keymap;
 pub const StatusBar = config.StatusBar;
+pub const Debug = config.Debug;
 pub const Subprocess = config.Subprocess;
 
 /// Built-in modules. User configs compose these via

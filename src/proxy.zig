@@ -18,6 +18,9 @@ const config = @import("config");
 const dispatch = @import("dispatch.zig");
 const module = @import("module.zig");
 const trace = @import("trace.zig");
+const debug_recorder = @import("debug_recorder.zig");
+const debug_report = @import("debug_report.zig");
+const atty_version = @import("version.zig").version;
 const io_helpers = @import("proxy/io.zig");
 const containsEnter = io_helpers.containsEnter;
 const writeAll = io_helpers.writeAll;
@@ -29,6 +32,44 @@ fn nowMs() i64 {
     // 6, …); a hardcoded Linux `1` is wrong on Darwin.
     if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.nsec), std.time.ns_per_ms);
+}
+
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+
+fn envOrEmpty(name: [*:0]const u8) []const u8 {
+    if (getenv(name)) |v| return std.mem.sliceTo(v, 0);
+    return "";
+}
+
+/// Build a debug report from the recorder + current context and write it to
+/// disk, printing a one-line toast with the path (or the failure). Runs on the
+/// `debug_capture` shortcut — off the hot path.
+fn captureDebugReport(
+    allocator: std.mem.Allocator,
+    r: *const debug_recorder.Recorder,
+    ls: *const LineState,
+    ctx: *const module.Context,
+) void {
+    const meta = debug_report.Meta{
+        .atty_version = atty_version,
+        .cols = ctx.terminal_cols orelse 0,
+        .rows = ctx.terminal_rows orelse 0,
+        .term = envOrEmpty("TERM"),
+        .shell = envOrEmpty("SHELL"),
+        .lang = envOrEmpty("LANG"),
+        .line_buffer = ls.current(),
+        .line_cursor = ls.cursor_pos,
+        .line_uncertain = ls.uncertain,
+        .incognito = ctx.incognito,
+    };
+    const path = debug_report.save(allocator, config.debug.report_dir, meta, r) catch {
+        writeAll(posix.STDOUT_FILENO, "\r\n[atty debug] report save failed\r\n") catch {};
+        return;
+    };
+    defer allocator.free(path);
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "\r\n[atty debug] report saved: {s}\r\n", .{path}) catch return;
+    writeAll(posix.STDOUT_FILENO, msg) catch {};
 }
 
 const Pty = @import("pty.zig").Pty;
@@ -262,6 +303,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
     // --- Module runtimes ---------------------------------------------------
     var runtimes = try D.attachAll(allocator, io);
     defer D.detachAll(allocator, io, &runtimes);
+
+    // Debug/feedback recorder — in-memory only until the capture shortcut
+    // dumps it. When off, `io_helpers.recorder` stays null and the three tees
+    // (stdin / shell output / atty's STDOUT writes) are a single branch.
+    var debug_rec: ?debug_recorder.Recorder =
+        if (config.debug.enabled) (debug_recorder.Recorder.init(allocator, config.debug.ring_bytes) catch null) else null;
+    if (debug_rec) |*r| io_helpers.recorder = r;
+    defer if (debug_rec) |*r| {
+        io_helpers.recorder = null;
+        r.deinit();
+    };
 
     // --- Loop state --------------------------------------------------------
     var line_state = LineState{};
@@ -806,6 +858,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
         if (pfds[0].revents & POLLIN != 0) {
             const read_n = posix.read(posix.STDIN_FILENO, &read_buf) catch 0;
             if (read_n > 0) {
+                if (io_helpers.recorder) |r| r.pushNow(.in, read_buf[0..read_n]);
                 // DSR-6n reply intercept — `\x1B[<r>;<c>R` is the
                 // terminal's response to our cursor-position query;
                 // strip it before bash sees it as keyboard input.
@@ -1212,6 +1265,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 swallow_after_binding = true;
                             } else {
                                 matched_binding = false;
+                            }
+                        },
+                        .debug_capture => {
+                            // Dump the in-memory recorder + context to a report
+                            // file. Swallow the meta-bytes regardless (a bare
+                            // `D` would otherwise echo). Inert with a one-line
+                            // note when the recorder is off.
+                            swallow_after_binding = true;
+                            if (debug_rec) |*r| {
+                                captureDebugReport(allocator, r, &line_state, &ctx);
+                            } else {
+                                writeAll(posix.STDOUT_FILENO, "\r\n[atty debug] recorder off — set config.debug.enabled\r\n") catch {};
                             }
                         },
                         .llm_exec_toggle_help => {
@@ -1691,6 +1756,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
             const read_n = posix.read(pty.master, read_buf[0..master_read_cap]) catch 0;
             if (read_n > 0) {
                 const output = read_buf[0..read_n];
+                if (io_helpers.recorder) |r| r.pushNow(.shell, output);
                 trace.logBytes(.input, "master_read", output);
                 const alt_before = alt_screen.active;
 

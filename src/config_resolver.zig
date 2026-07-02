@@ -29,7 +29,7 @@ const defaults = @import("defaults.zig");
 const known_config_decls = [_][]const u8{
     "modules",   "proxy",      "ghost",
     "terminal",  "mouse",      "keymap",
-    "statusbar", "subprocess",
+    "statusbar", "subprocess", "debug",
 };
 
 /// Comma-joined `known_config_decls` for the diagnostic — derived from
@@ -70,6 +70,7 @@ pub const Terminal = defaults.Terminal;
 pub const Mouse = defaults.Mouse;
 pub const Keymap = defaults.Keymap;
 pub const StatusBar = defaults.StatusBar;
+pub const Debug = defaults.Debug;
 pub const Subprocess = defaults.Subprocess;
 
 // ───── Resolved values ─────────────────────────────────────────────────
@@ -107,6 +108,11 @@ pub const statusbar = if (@hasDecl(user, "statusbar"))
     user.statusbar
 else
     defaults.statusbar;
+
+pub const debug = if (@hasDecl(user, "debug"))
+    user.debug
+else
+    defaults.debug;
 
 pub const subprocess = if (@hasDecl(user, "subprocess"))
     user.subprocess
