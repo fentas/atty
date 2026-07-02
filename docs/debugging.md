@@ -79,9 +79,30 @@ The streams contain your commands and their output. Reports stay **local**
   one-time control sequences (kitty-keyboard / mouse enable at startup) and some
   module-direct writes bypass that path and aren't teed.
 
+## Replay
+
+Re-see a captured session (or bug) from a report:
+
+```sh
+atty debug replay report-1751000000-123456789.json
+```
+
+By default it replays the `term` stream — exactly the bytes atty wrote to the
+terminal, with the recorded timing — so a render artifact reappears the way it
+happened. Options:
+
+| flag              | effect                                                    |
+|-------------------|-----------------------------------------------------------|
+| `--stream <name>` | replay `in`, `shell`, or `term` (default `term`)          |
+| `--fast`          | skip the inter-event delays and dump instantly            |
+| `--info`          | print a summary (version, size, per-stream counts) instead|
+
+Replaying `--stream shell` shows what the shell produced *without* atty, so
+comparing it against the default `term` replay reveals atty's transformation.
+The replay is byte-exact: the report's `\u00XX`-encoded stream data decodes back
+to the original raw bytes.
+
 ## Roadmap
 
-- **Replay** — feed a report's `in` + `shell` back through atty to regenerate
-  `term` and diff it against the recorded output (deterministic repro).
 - **Anonymize + convert to a test case** — scrub sensitive tokens and drop a
   report straight into the end-to-end regression suite.

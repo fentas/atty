@@ -12,6 +12,7 @@ test {
     _ = @import("line_state.zig");
     _ = @import("debug_recorder.zig");
     _ = @import("debug_report.zig");
+    _ = @import("debug_replay.zig");
     _ = @import("ansi.zig");
     _ = @import("trace.zig");
     _ = @import("ghost.zig");

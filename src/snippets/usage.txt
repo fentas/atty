@@ -8,6 +8,9 @@ Usage: atty [flags] [shell [args...]]
                           (use as: eval "$(atty init bash)")
   atty doctor           print health-check snippet
                           (use as: eval "$(atty doctor)")
+  atty debug replay <report.json>
+                        replay a captured debug report
+                          (--stream in|shell|term, --fast, --info)
 
 Flags:
   -h, --help            Print this help
