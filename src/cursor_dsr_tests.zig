@@ -387,3 +387,29 @@ test "dropWellFormedCpr: CUP sequence (\\x1b[24;80H) is NOT a CPR — must pass 
     const n = mod.dropWellFormedCpr(input, &out, false);
     try testing.expectEqualStrings("before\x1B[24;80Hafter", out[0..n]);
 }
+
+test "DsrParser: abandonQuery clears the gate so a child's reply passes through" {
+    var p = DsrParser{};
+    p.markQuerySent(); // atty has a query outstanding
+    var out: [64]u8 = undefined;
+    // A foreground child (atuin) queried the cursor; before its reply arrives we
+    // learn it owns the terminal → abandon. Its `\x1B[…R` must NOT be consumed.
+    _ = p.abandonQuery(&out);
+    try testing.expect(!p.expecting_reply);
+    const r = p.feed("\x1B[24;80R", &out);
+    try testing.expect(r.pos == null); // not claimed
+    try testing.expectEqualStrings("\x1B[24;80R", out[0..r.filtered_len]); // passed through verbatim
+}
+
+test "DsrParser: abandonQuery flushes a half-buffered cross-chunk sequence" {
+    var p = DsrParser{};
+    p.markQuerySent();
+    var out: [64]u8 = undefined;
+    // Chunk 1: partial reply withheld in pending_buf.
+    const r1 = p.feed("\x1B[12;", &out);
+    try testing.expectEqual(@as(usize, 0), r1.filtered_len); // withheld
+    // Child takes over before chunk 2 → abandon must release the buffered bytes.
+    const flushed = p.abandonQuery(&out);
+    try testing.expectEqualStrings("\x1B[12;", out[0..flushed]);
+    try testing.expect(!p.expecting_reply);
+}
