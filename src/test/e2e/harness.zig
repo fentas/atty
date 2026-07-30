@@ -136,6 +136,10 @@ pub const Session = struct {
                 continue;
             }
             self.dsr_match = 0;
+            // Position is the cursor AFTER the whole chunk was fed, not at the
+            // query byte — so several queries batched into one read all get the
+            // same answer. Fine for liveness/shape assertions; revisit if a
+            // scenario ever asserts the coordinates themselves.
             var buf: [32]u8 = undefined;
             const reply = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{
                 self.grid.cur_row + 1,

@@ -371,7 +371,11 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
             // Also honoured pre-spawn (applied at session creation); allowed
             // here so a scenario can toggle the terminal's DSR answering
             // mid-run.
-            .dsr_reply => session.dsr_reply = c.int_arg == 1,
+            .dsr_reply => {
+                session.dsr_reply = c.int_arg == 1;
+                // Drop any partial match carried from before the toggle.
+                session.dsr_match = 0;
+            },
             .type_str => try session.typeWith(c.str_arg, @enumFromInt(c.int_arg)),
             .key => {
                 const bytes = dsl.keyBytes(c.str_arg) orelse {

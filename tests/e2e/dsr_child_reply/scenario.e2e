@@ -14,8 +14,10 @@
 # a regression test for the atuin hang (still unreproduced, see #553).
 #
 # The child validates the SHAPE of what it received (`ESC[<row>;<col>`), not just
-# that some R-terminated blob arrived: atty leaking its own CPR into the child
-# would satisfy the weaker check while actually violating the contract.
+# that some R-terminated blob arrived — so stray non-CPR bytes can't be mistaken
+# for a reply. Note the limit: a CPR that atty leaked is itself CPR-shaped, so
+# this separates "a cursor report" from "anything else", not "the child's own
+# reply" from "atty's".
 #
 # The child is a separate `bash -c` (its own process group, so it owns the
 # terminal foreground) rather than a builtin, matching how atuin runs. The
