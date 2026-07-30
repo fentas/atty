@@ -135,20 +135,22 @@ pub const Keymap = struct {
         .{ .bytes = atty.keymap.key("Alt+i"), .action = .incognito_toggle },
         .{ .bytes = "\x1b[105;3u", .action = .incognito_toggle },
         .{ .bytes = atty.keymap.key("Ctrl+Shift+D"), .action = .delete_history_match, .label = "Ctrl+Shift+D", .description = "delete the current ghost match from history" },
-        // Alt+Shift+W — dump security_guard warn events into
-        // scrollback + clear the buffer. Dual-encoded: legacy
-        // terminals emit `\x1b` + uppercase `W` for Alt+Shift+W;
-        // terminals that push the kitty kbd disambiguate flag
-        // (Ghostty / kitty / foot / WezTerm) emit `\x1b[87;4u`
-        // (87 = 'W', modifier 4 = shift+alt). The keymap parser
-        // doesn't grok `Alt+Shift+<letter>` so the raw bytes are
-        // spelled out here.
+        // Alt+Shift+W — dump security_guard warn events into scrollback + clear
+        // the buffer. Legacy terminals emit `\x1b` + uppercase `W`. Kitty-kbd
+        // terminals (Ghostty / kitty / foot / WezTerm) report the UNSHIFTED
+        // keycode + a shift modifier → `\x1b[119;4u` (119='w', mod 4=alt+shift);
+        // 87 ('W') is kept for any terminal that reports the shifted code.
         .{ .bytes = "\x1bW", .action = .security_guard_show_warnings, .label = "Alt+Shift+W", .description = "dump security_guard warn events to scrollback" },
+        .{ .bytes = "\x1b[119;4u", .action = .security_guard_show_warnings },
         .{ .bytes = "\x1b[87;4u", .action = .security_guard_show_warnings },
         // Alt+Shift+D — capture a debug/feedback report (inert unless
-        // config.debug.enabled). Legacy `\x1bD` + kitty CSI-u sibling (68='D',
-        // 4=Alt+Shift), like the other Alt+Shift bindings.
+        // config.debug.enabled). Legacy `\x1bD` (ESC + shifted letter) + kitty
+        // kbd CSI-u. Kitty reports the UNSHIFTED keycode plus a shift modifier,
+        // so Alt+Shift+D is `\x1b[100;4u` (100='d', mod 4=alt+shift) — NOT the
+        // uppercase 'D'=68 (Ghostty/kitty/foot/WezTerm send the lowercase form).
+        // 68 is kept too for any terminal that reports the shifted code instead.
         .{ .bytes = "\x1bD", .action = .debug_capture, .label = "Alt+Shift+D", .description = "capture a debug report (needs config.debug.enabled)" },
+        .{ .bytes = "\x1b[100;4u", .action = .debug_capture },
         .{ .bytes = "\x1b[68;4u", .action = .debug_capture },
         // Alt+P drives the security profile per security_guard.
         // profile_switch_mode (default .sudo — stages the sudo command).

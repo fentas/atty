@@ -6,7 +6,7 @@
 
 cols 80
 rows 8
-timeout_ms 6000
+timeout_ms 12000
 
 spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
@@ -14,8 +14,17 @@ sleep 200
 type "echo hello-debug\r"
 wait_for "hello-debug"
 sleep 200
-# Alt+Shift+D (legacy ESC + D) → debug_capture.
+# Legacy encoding (ESC + shifted letter).
 type "\x1bD"
+wait_for "report saved"
+# Let the hint TTL expire so the next assertion can't match this message.
+wait_for_absent "report saved"
+
+# Kitty-keyboard encoding — the form Ghostty/kitty/foot/WezTerm actually send.
+# Kitty reports the UNSHIFTED keycode plus a shift bit, so Alt+Shift+D is
+# 100 ('d'), not 68 ('D'). Without this step the binding fix has no coverage:
+# the legacy form above passes even with the CSI-u binding wrong.
+type "\x1b[100;4u"
 wait_for "report saved"
 sleep 100
 type "exit\r"
