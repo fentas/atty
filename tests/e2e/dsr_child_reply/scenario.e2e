@@ -1,25 +1,32 @@
+# A foreground child that queries the cursor must receive the terminal's DSR-6n
+# reply. atty issues its own `ESC[6n` queries to track the prompt and strips the
+# `ESC[r;cR` answers off stdin so the shell never sees them as keystrokes — so
+# there is a real risk of it consuming a reply that belongs to a child (atuin's
+# Ctrl+R search is the motivating case).
+#
+# `dsr_reply on` makes the harness answer cursor queries like a real terminal.
+# Without it no replies exist at all and none of this is observable: the harness
+# is otherwise a pure screen scraper.
+#
+# SCOPE: this is a CHARACTERISATION test of the contract "a foreground child gets
+# its cursor reply", and it passes on today's atty. It is NOT a regression test
+# for the atuin hang — that failure is still unreproduced (see #553). It guards
+# the contract against future changes to the DSR interception path.
+#
+# The child is a separate `bash -c` (its own process group, so it owns the
+# terminal foreground) rather than a builtin, matching how atuin runs. The
+# marker is assembled at runtime (`"CURSOR""-$M"`) so the result strings never
+# appear in the echoed command line — otherwise the assertions would match the
+# echo instead of the child's output.
+
 cols 80
 rows 24
 timeout_ms 10000
-env ATTY_TRACE=cursor
-dsr_reply off
+dsr_reply on
 
 spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
-type "__atty_osc133_d() { local __code=$?; printf '\\033]133;D;%s\\007' \"$__code\"; }\r"
-wait_for "$"
-type "PROMPT_COMMAND='__atty_osc133_d'\r"
-wait_for "$"
-type "PS1=$'\\[\\033]133;A\\007\\]# \\[\\033]133;B\\007\\]'\r"
-wait_for "#"
 sleep 300
-
-type "echo warm\"\"up\r"
-wait_for "warmup"
-sleep 500
-
-dsr_reply on
-sleep 150
 
 type "bash -c 'printf \"\\033[6n\"; IFS= read -s -r -d R -t 3 _r && M=OK || M=LOST; echo \"CURSOR\"\"-$M\"'\r"
 wait_for "CURSOR-"
