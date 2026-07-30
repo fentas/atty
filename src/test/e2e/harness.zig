@@ -40,6 +40,13 @@ pub const Session = struct {
     text_buf: []u8,
     exited: bool = false,
     exit_status: u32 = 0,
+    /// Answer DSR-6n cursor queries like a real terminal would. Off by default:
+    /// the harness is otherwise a pure screen scraper, and replying changes what
+    /// the child receives (so it would churn every existing golden). Opt in per
+    /// scenario with the `dsr_reply on` verb — required to exercise anything
+    /// that depends on cursor-query round-trips (atty's own re-anchoring, or a
+    /// foreground child like atuin querying the cursor).
+    dsr_reply: bool = false,
 
     pub fn deinit(self: *Session) void {
         if (!self.exited) self.terminate();
@@ -102,6 +109,32 @@ pub const Session = struct {
         }
     }
 
+    /// Reply to every DSR-6n (`\x1b[6n`) in `chunk` with the grid's current
+    /// cursor as `\x1b[<row>;<col>R`, 1-based — what a real terminal sends back.
+    /// Called after `grid.feed` so the position reflects the chunk just drawn.
+    /// Whoever queried (atty, or a foreground child like atuin) reads it off the
+    /// same stdin, which is exactly the contention this models.
+    fn answerDsr(self: *Session, chunk: []const u8) void {
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, chunk, i, "\x1b[6n")) |at| : (i = at + 4) {
+            var buf: [32]u8 = undefined;
+            const reply = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{
+                self.grid.cur_row + 1,
+                self.grid.cur_col + 1,
+            }) catch continue;
+            // Write straight to the master — NOT writeInput, which drains via
+            // pumpMs when the buffer is full and would re-enter the pump we're
+            // called from. A reply is <= 12 bytes, so one write always suffices;
+            // best-effort on a (never observed) short write.
+            var off: usize = 0;
+            while (off < reply.len) {
+                const rc = std.c.write(self.master, reply[off..].ptr, reply.len - off);
+                if (rc <= 0) break;
+                off += @intCast(rc);
+            }
+        }
+    }
+
     /// Pump output for up to `ms` milliseconds. Returns true if we read
     /// any bytes, false on timeout with nothing.
     pub fn pumpMs(self: *Session, ms: i32) !bool {
@@ -128,6 +161,7 @@ pub const Session = struct {
             }
             self.grid.feed(buf[0..r]);
             try self.cast.record('o', buf[0..r]);
+            if (self.dsr_reply) self.answerDsr(buf[0..r]);
             return true;
         }
         if (pfd[0].revents & 0x018 != 0) {

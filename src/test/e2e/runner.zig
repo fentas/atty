@@ -307,6 +307,7 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     var spawn_argv: []const []const u8 = &.{};
     var spawn_seen = false;
     var first_cmd_after_spawn: usize = 0;
+    var dsr_reply_on = false;
 
     for (script.cmds, 0..) |c, i| {
         switch (c.kind) {
@@ -314,6 +315,7 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
             .set_rows => rows = @intCast(c.int_arg),
             .set_timeout_ms => timeout_ms = @intCast(c.int_arg),
             .set_env => try extra_env.append(gpa, .{ .key = c.str_arg, .value = c.str_arg2 }),
+            .dsr_reply => dsr_reply_on = c.int_arg == 1,
             .spawn => {
                 if (spawn_seen) return .{ .fail = "multiple spawn directives" };
                 spawn_argv = c.argv;
@@ -347,6 +349,8 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
         .extra_env = extra_env.items,
     });
     defer session.deinit();
+    // Apply before the first pump so atty's startup cursor query gets answered.
+    session.dsr_reply = dsr_reply_on;
 
     // ── Pass 2: execute commands after spawn.
     var first_failure: ?[]const u8 = null;
@@ -361,6 +365,10 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
             .set_cols, .set_rows, .set_timeout_ms, .set_env, .spawn => {
                 // Config directives must come before spawn; ignore here.
             },
+            // Also honoured pre-spawn (applied at session creation); allowed
+            // here so a scenario can toggle the terminal's DSR answering
+            // mid-run.
+            .dsr_reply => session.dsr_reply = c.int_arg == 1,
             .type_str => try session.typeWith(c.str_arg, @enumFromInt(c.int_arg)),
             .key => {
                 const bytes = dsl.keyBytes(c.str_arg) orelse {

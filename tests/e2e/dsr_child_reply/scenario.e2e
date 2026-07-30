@@ -1,0 +1,31 @@
+cols 80
+rows 24
+timeout_ms 10000
+env ATTY_TRACE=cursor
+dsr_reply off
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+type "__atty_osc133_d() { local __code=$?; printf '\\033]133;D;%s\\007' \"$__code\"; }\r"
+wait_for "$"
+type "PROMPT_COMMAND='__atty_osc133_d'\r"
+wait_for "$"
+type "PS1=$'\\[\\033]133;A\\007\\]# \\[\\033]133;B\\007\\]'\r"
+wait_for "#"
+sleep 300
+
+type "echo warm\"\"up\r"
+wait_for "warmup"
+sleep 500
+
+dsr_reply on
+sleep 150
+
+type "bash -c 'printf \"\\033[6n\"; IFS= read -s -r -d R -t 3 _r && M=OK || M=LOST; echo \"CURSOR\"\"-$M\"'\r"
+wait_for "CURSOR-"
+sleep 200
+expect_substr "CURSOR-OK"
+expect_no_substr "CURSOR-LOST"
+
+type "exit\r"
+exit_code 0
