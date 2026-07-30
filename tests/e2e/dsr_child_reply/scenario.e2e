@@ -8,10 +8,14 @@
 # Without it no replies exist at all and none of this is observable: the harness
 # is otherwise a pure screen scraper.
 #
-# SCOPE: this is a CHARACTERISATION test of the contract "a foreground child gets
-# its cursor reply", and it passes on today's atty. It is NOT a regression test
-# for the atuin hang — that failure is still unreproduced (see #553). It guards
-# the contract against future changes to the DSR interception path.
+# WHAT THIS GUARDS: "a foreground child's cursor reply is never consumed by
+# atty's CPR filter." It passes on today's atty — it is a characterisation test
+# pinning that contract against future changes to the DSR interception path, NOT
+# a regression test for the atuin hang (still unreproduced, see #553).
+#
+# The child validates the SHAPE of what it received (`ESC[<row>;<col>`), not just
+# that some R-terminated blob arrived: atty leaking its own CPR into the child
+# would satisfy the weaker check while actually violating the contract.
 #
 # The child is a separate `bash -c` (its own process group, so it owns the
 # terminal foreground) rather than a builtin, matching how atuin runs. The
@@ -28,11 +32,12 @@ spawn $ATTY bash --norc --noprofile -i
 wait_for "$"
 sleep 300
 
-type "bash -c 'printf \"\\033[6n\"; IFS= read -s -r -d R -t 3 _r && M=OK || M=LOST; echo \"CURSOR\"\"-$M\"'\r"
+type "bash -c 'printf \"\\033[6n\"; re=\"\\[[0-9]+;[0-9]+$\"; IFS= read -s -r -d R -t 3 _r && { [[ $_r =~ $re ]] && M=OK || M=BAD; } || M=LOST; echo \"CURSOR\"\"-$M\"'\r"
 wait_for "CURSOR-"
 sleep 200
 expect_substr "CURSOR-OK"
 expect_no_substr "CURSOR-LOST"
+expect_no_substr "CURSOR-BAD"
 
 type "exit\r"
 exit_code 0

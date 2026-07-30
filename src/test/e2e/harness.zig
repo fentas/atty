@@ -27,6 +27,10 @@ pub const SpawnOpts = struct {
     rows: u16,
     forced_env: []const KV,
     extra_env: []const KV,
+    /// Answer DSR-6n cursor queries like a real terminal. Set at construction so
+    /// it is live before the first pump — a post-spawn assignment would miss
+    /// atty's startup query if `spawn` ever grew a pump of its own.
+    dsr_reply: bool = false,
 };
 
 pub const Session = struct {
@@ -47,6 +51,8 @@ pub const Session = struct {
     /// that depends on cursor-query round-trips (atty's own re-anchoring, or a
     /// foreground child like atuin querying the cursor).
     dsr_reply: bool = false,
+    /// Bytes of the `\x1b[6n` query matched so far, carried across reads.
+    dsr_match: usize = 0,
 
     pub fn deinit(self: *Session) void {
         if (!self.exited) self.terminate();
@@ -115,8 +121,21 @@ pub const Session = struct {
     /// Whoever queried (atty, or a foreground child like atuin) reads it off the
     /// same stdin, which is exactly the contention this models.
     fn answerDsr(self: *Session, chunk: []const u8) void {
-        var i: usize = 0;
-        while (std.mem.indexOfPos(u8, chunk, i, "\x1b[6n")) |at| : (i = at + 4) {
+        // Incremental match so a query SPLIT ACROSS READS is still answered —
+        // `\x1b[6n` can straddle a chunk boundary, and a per-chunk substring
+        // search would silently miss it (an intermittent, timing-dependent
+        // no-reply, i.e. a CI flake).
+        const query = "\x1b[6n";
+        for (chunk) |b| {
+            if (b == query[self.dsr_match]) {
+                self.dsr_match += 1;
+                if (self.dsr_match < query.len) continue;
+            } else {
+                // Mismatch — restart, but this byte may itself open a new match.
+                self.dsr_match = if (b == query[0]) 1 else 0;
+                continue;
+            }
+            self.dsr_match = 0;
             var buf: [32]u8 = undefined;
             const reply = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{
                 self.grid.cur_row + 1,
@@ -279,5 +298,6 @@ pub fn spawn(allocator: Allocator, opts: SpawnOpts) !Session {
         .grid = grid,
         .cast = cast,
         .text_buf = text_buf,
+        .dsr_reply = opts.dsr_reply,
     };
 }

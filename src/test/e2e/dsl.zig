@@ -6,6 +6,10 @@
 //!   rows <int>
 //!   timeout_ms <int>            # default 5000, caps wait_for + wait_stable
 //!   env KEY=VALUE
+//!   dsr_reply on|off          # answer DSR-6n cursor queries like a real
+//!                             # terminal (default off — the harness is
+//!                             # otherwise a pure screen scraper). Needed for
+//!                             # anything depending on a cursor round-trip.
 //!   spawn <argv...>             # argv0 is the binary (token-split, no quoting yet)
 //!                               # if argv0 is "$ATTY", harness substitutes the binary
 //!   type "string" [pattern]     # quoted; \n \r \t \\ \" \xNN supported.

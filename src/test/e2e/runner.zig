@@ -347,10 +347,9 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
         .rows = rows,
         .forced_env = &forced_env,
         .extra_env = extra_env.items,
+        .dsr_reply = dsr_reply_on,
     });
     defer session.deinit();
-    // Apply before the first pump so atty's startup cursor query gets answered.
-    session.dsr_reply = dsr_reply_on;
 
     // ── Pass 2: execute commands after spawn.
     var first_failure: ?[]const u8 = null;
