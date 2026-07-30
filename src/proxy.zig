@@ -878,7 +878,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // DSR-6n reply intercept — `\x1B[<r>;<c>R` is the
                 // terminal's response to our cursor-position query;
                 // strip it before bash sees it as keyboard input.
-                const dsr_result = dsr_parser.feed(read_buf[0..read_n], &stdin_filtered_buf);
+                //
+                // But a foreground child (e.g. atuin's Ctrl+R search) that
+                // queried the cursor owns any `\x1B[…R` reply on stdin — if we
+                // still have a query outstanding we'd swallow the child's reply
+                // and strand it blocked reading its cursor position. Abandon our
+                // query so `feed` passes the reply through. Gated on
+                // expecting_reply so the tcgetpgrp ioctl only runs in the rare
+                // arm window, never on ordinary typing.
+                var dsr_pre: usize = 0;
+                if (dsr_parser.expecting_reply and !shellOwnsForeground(pty.master, child_pid)) {
+                    dsr_pre = dsr_parser.abandonQuery(stdin_filtered_buf[0..]);
+                }
+                const dsr_result = dsr_parser.feed(read_buf[0..read_n], stdin_filtered_buf[dsr_pre..]);
+                const dsr_filtered_len = dsr_pre + dsr_result.filtered_len;
                 if (dsr_result.pos) |pos| {
                     cursor_tracker.setPosition(pos.row, pos.col);
                     trace.log(.cursor, "DSR-6n reply: row={d} col={d}", .{ pos.row, pos.col });
@@ -891,7 +904,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                 // is the answer to ITS OWN cursor query — scrubbing it
                 // strands a program blocked reading the reply. Only the
                 // shell-at-its-prompt case is safe to scrub.
-                var input: []const u8 = stdin_filtered_buf[0..dsr_result.filtered_len];
+                var input: []const u8 = stdin_filtered_buf[0..dsr_filtered_len];
                 // Only a chunk carrying an ESC can hold a CPR reply —
                 // gate the foreground-pgrp ioctl behind that cheap scan
                 // so ordinary typing never pays for it.
@@ -900,12 +913,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                     shellOwnsForeground(pty.master, child_pid))
                 {
                     const cpr_drop_len = cursor_dsr.dropWellFormedCpr(
-                        stdin_filtered_buf[0..dsr_result.filtered_len],
-                        stdin_filtered_buf[0..dsr_result.filtered_len],
+                        stdin_filtered_buf[0..dsr_filtered_len],
+                        stdin_filtered_buf[0..dsr_filtered_len],
                         false,
                     );
-                    if (cpr_drop_len < dsr_result.filtered_len) {
-                        trace.log(.cursor, "cpr_scrub: pre={d} post={d} dropped={d}", .{ dsr_result.filtered_len, cpr_drop_len, dsr_result.filtered_len - cpr_drop_len });
+                    if (cpr_drop_len < dsr_filtered_len) {
+                        trace.log(.cursor, "cpr_scrub: pre={d} post={d} dropped={d}", .{ dsr_filtered_len, cpr_drop_len, dsr_filtered_len - cpr_drop_len });
                     }
                     input = stdin_filtered_buf[0..cpr_drop_len];
                 }

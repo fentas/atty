@@ -237,6 +237,21 @@ pub const DsrParser = struct {
     pub fn markQuerySent(self: *DsrParser) void {
         self.expecting_reply = true;
     }
+
+    /// Abandon an outstanding query. A foreground child (e.g. atuin's Ctrl+R
+    /// search) now owns the terminal, so a `\x1B[…R` on stdin is the answer to
+    /// ITS `\x1B[6n`, not ours — clear the gate so `feed` passes the reply
+    /// straight through instead of swallowing it (which strands the child
+    /// blocked reading its cursor position). Any half-buffered cross-chunk
+    /// sequence is flushed to `out` so it reaches the child too; returns the
+    /// number of bytes written. `out` must hold at least `pending_buf.len`.
+    pub fn abandonQuery(self: *DsrParser, out: []u8) usize {
+        const n = self.flushPending(out);
+        self.state = .ground;
+        self.digits_len = 0;
+        self.expecting_reply = false;
+        return n;
+    }
 };
 
 /// Strip well-formed CPR replies that atty didn't query for.
