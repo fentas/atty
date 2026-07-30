@@ -132,3 +132,13 @@ test "DSL string escapes" {
     defer s.deinit();
     try std.testing.expectEqualStrings("a\tb\ncA", s.cmds[0].str_arg);
 }
+
+test "DSL dsr_reply parses on/off and rejects anything else" {
+    var s = try parse(std.testing.allocator, "dsr_reply on\ndsr_reply off\n");
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 2), s.cmds.len);
+    try std.testing.expectEqual(Kind.dsr_reply, s.cmds[0].kind);
+    try std.testing.expectEqual(@as(i64, 1), s.cmds[0].int_arg);
+    try std.testing.expectEqual(@as(i64, 0), s.cmds[1].int_arg);
+    try std.testing.expectError(ParseError.UnknownDirective, parse(std.testing.allocator, "dsr_reply maybe\n"));
+}

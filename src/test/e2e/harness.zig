@@ -27,6 +27,10 @@ pub const SpawnOpts = struct {
     rows: u16,
     forced_env: []const KV,
     extra_env: []const KV,
+    /// Answer DSR-6n cursor queries like a real terminal. Set at construction so
+    /// it is live before the first pump — a post-spawn assignment would miss
+    /// atty's startup query if `spawn` ever grew a pump of its own.
+    dsr_reply: bool = false,
 };
 
 pub const Session = struct {
@@ -40,6 +44,15 @@ pub const Session = struct {
     text_buf: []u8,
     exited: bool = false,
     exit_status: u32 = 0,
+    /// Answer DSR-6n cursor queries like a real terminal would. Off by default:
+    /// the harness is otherwise a pure screen scraper, and replying changes what
+    /// the child receives (so it would churn every existing golden). Opt in per
+    /// scenario with the `dsr_reply on` verb — required to exercise anything
+    /// that depends on cursor-query round-trips (atty's own re-anchoring, or a
+    /// foreground child like atuin querying the cursor).
+    dsr_reply: bool = false,
+    /// Bytes of the `\x1b[6n` query matched so far, carried across reads.
+    dsr_match: usize = 0,
 
     pub fn deinit(self: *Session) void {
         if (!self.exited) self.terminate();
@@ -102,6 +115,64 @@ pub const Session = struct {
         }
     }
 
+    /// Reply to every DSR-6n (`\x1b[6n`) in `chunk` with the grid's current
+    /// cursor as `\x1b[<row>;<col>R`, 1-based — what a real terminal sends back.
+    /// Called after `grid.feed` so the position reflects the chunk just drawn.
+    /// Whoever queried (atty, or a foreground child like atuin) reads it off the
+    /// same stdin, which is exactly the contention this models.
+    fn answerDsr(self: *Session, chunk: []const u8) void {
+        // Incremental match so a query SPLIT ACROSS READS is still answered —
+        // `\x1b[6n` can straddle a chunk boundary, and a per-chunk substring
+        // search would silently miss it (an intermittent, timing-dependent
+        // no-reply, i.e. a CI flake).
+        const query = "\x1b[6n";
+        for (chunk) |b| {
+            if (b == query[self.dsr_match]) {
+                self.dsr_match += 1;
+                if (self.dsr_match < query.len) continue;
+            } else {
+                // Mismatch — restart, but this byte may itself open a new match.
+                self.dsr_match = if (b == query[0]) 1 else 0;
+                continue;
+            }
+            self.dsr_match = 0;
+            // Position is the cursor AFTER the whole chunk was fed, not at the
+            // query byte — so several queries batched into one read all get the
+            // same answer. Fine for liveness/shape assertions; revisit if a
+            // scenario ever asserts the coordinates themselves.
+            var buf: [32]u8 = undefined;
+            const reply = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{
+                self.grid.cur_row + 1,
+                self.grid.cur_col + 1,
+            }) catch continue;
+            // Write straight to the master — NOT writeInput, which drains via
+            // pumpMs when the buffer is full and would re-enter the pump we're
+            // called from. Retry INTR/AGAIN rather than dropping the reply: a
+            // dropped reply strands whoever queried, which surfaces as an
+            // intermittent scenario timeout. Bounded so a wedged fd can't hang
+            // the run; EPIPE/EIO (child gone) exits immediately.
+            var off: usize = 0;
+            var retries: usize = 0;
+            while (off < reply.len) {
+                const rc = std.c.write(self.master, reply[off..].ptr, reply.len - off);
+                if (rc > 0) {
+                    off += @intCast(rc);
+                    continue;
+                }
+                switch (std.posix.errno(rc)) {
+                    .INTR => continue,
+                    .AGAIN => {
+                        retries += 1;
+                        if (retries > 50) break;
+                        var ts = std.c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+                        _ = std.c.nanosleep(&ts, null);
+                    },
+                    else => break,
+                }
+            }
+        }
+    }
+
     /// Pump output for up to `ms` milliseconds. Returns true if we read
     /// any bytes, false on timeout with nothing.
     pub fn pumpMs(self: *Session, ms: i32) !bool {
@@ -128,6 +199,7 @@ pub const Session = struct {
             }
             self.grid.feed(buf[0..r]);
             try self.cast.record('o', buf[0..r]);
+            if (self.dsr_reply) self.answerDsr(buf[0..r]);
             return true;
         }
         if (pfd[0].revents & 0x018 != 0) {
@@ -245,5 +317,6 @@ pub fn spawn(allocator: Allocator, opts: SpawnOpts) !Session {
         .grid = grid,
         .cast = cast,
         .text_buf = text_buf,
+        .dsr_reply = opts.dsr_reply,
     };
 }

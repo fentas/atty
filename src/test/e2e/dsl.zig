@@ -6,6 +6,10 @@
 //!   rows <int>
 //!   timeout_ms <int>            # default 5000, caps wait_for + wait_stable
 //!   env KEY=VALUE
+//!   dsr_reply on|off          # answer DSR-6n cursor queries like a real
+//!                             # terminal (default off — the harness is
+//!                             # otherwise a pure screen scraper). Needed for
+//!                             # anything depending on a cursor round-trip.
 //!   spawn <argv...>             # argv0 is the binary (token-split, no quoting yet)
 //!                               # if argv0 is "$ATTY", harness substitutes the binary
 //!   type "string" [pattern]     # quoted; \n \r \t \\ \" \xNN supported.
@@ -46,6 +50,7 @@ pub const Kind = enum {
     set_rows,
     set_timeout_ms,
     set_env,
+    dsr_reply,
     spawn,
     type_str,
     key,
@@ -174,6 +179,14 @@ pub fn parse(allocator: Allocator, source: []const u8) ParseError!Script {
             // never emit a sequence the mouse parser would discard.
             if (col < 1 or col > 65535 or row < 1 or row > 65535) return ParseError.BadInteger;
             try cmds.append(allocator, .{ .kind = .click, .line = line_no, .int_arg = col, .int_arg2 = row });
+        } else if (eq(head, "dsr_reply")) {
+            // dsr_reply on|off — make the harness answer DSR-6n cursor queries
+            // like a real terminal. Off by default (the harness is otherwise a
+            // pure scraper; replying changes what the child reads and would
+            // churn every existing golden). Needed for cursor-query round-trips.
+            const on = eq(tail, "on") or eq(tail, "true") or eq(tail, "1");
+            if (!on and !(eq(tail, "off") or eq(tail, "false") or eq(tail, "0"))) return ParseError.UnknownDirective;
+            try cmds.append(allocator, .{ .kind = .dsr_reply, .line = line_no, .int_arg = if (on) 1 else 0 });
         } else if (eq(head, "sleep")) {
             try cmds.append(allocator, .{ .kind = .sleep, .line = line_no, .int_arg = try parseInt(tail) });
         } else if (eq(head, "wait_for")) {

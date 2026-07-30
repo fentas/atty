@@ -307,6 +307,7 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
     var spawn_argv: []const []const u8 = &.{};
     var spawn_seen = false;
     var first_cmd_after_spawn: usize = 0;
+    var dsr_reply_on = false;
 
     for (script.cmds, 0..) |c, i| {
         switch (c.kind) {
@@ -314,6 +315,11 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
             .set_rows => rows = @intCast(c.int_arg),
             .set_timeout_ms => timeout_ms = @intCast(c.int_arg),
             .set_env => try extra_env.append(gpa, .{ .key = c.str_arg, .value = c.str_arg2 }),
+            // Only a PRE-spawn directive sets the initial state; one placed after
+            // `spawn` is a mid-run toggle and is applied by pass 2 instead.
+            .dsr_reply => if (!spawn_seen) {
+                dsr_reply_on = c.int_arg == 1;
+            },
             .spawn => {
                 if (spawn_seen) return .{ .fail = "multiple spawn directives" };
                 spawn_argv = c.argv;
@@ -345,6 +351,7 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
         .rows = rows,
         .forced_env = &forced_env,
         .extra_env = extra_env.items,
+        .dsr_reply = dsr_reply_on,
     });
     defer session.deinit();
 
@@ -360,6 +367,14 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
         switch (c.kind) {
             .set_cols, .set_rows, .set_timeout_ms, .set_env, .spawn => {
                 // Config directives must come before spawn; ignore here.
+            },
+            // Also honoured pre-spawn (applied at session creation); allowed
+            // here so a scenario can toggle the terminal's DSR answering
+            // mid-run.
+            .dsr_reply => {
+                session.dsr_reply = c.int_arg == 1;
+                // Drop any partial match carried from before the toggle.
+                session.dsr_match = 0;
             },
             .type_str => try session.typeWith(c.str_arg, @enumFromInt(c.int_arg)),
             .key => {

@@ -1,0 +1,45 @@
+# A foreground child that queries the cursor must receive the terminal's DSR-6n
+# reply. atty issues its own `ESC[6n` queries to track the prompt and strips the
+# `ESC[r;cR` answers off stdin so the shell never sees them as keystrokes — so
+# there is a real risk of it consuming a reply that belongs to a child (atuin's
+# Ctrl+R search is the motivating case).
+#
+# `dsr_reply on` makes the harness answer cursor queries like a real terminal.
+# Without it no replies exist at all and none of this is observable: the harness
+# is otherwise a pure screen scraper.
+#
+# WHAT THIS GUARDS: "a foreground child's cursor reply is never consumed by
+# atty's CPR filter." It passes on today's atty — it is a characterisation test
+# pinning that contract against future changes to the DSR interception path, NOT
+# a regression test for the atuin hang (still unreproduced, see #553).
+#
+# The child validates the SHAPE of what it received (`ESC[<row>;<col>`), not just
+# that some R-terminated blob arrived — so stray non-CPR bytes can't be mistaken
+# for a reply. Note the limit: a CPR that atty leaked is itself CPR-shaped, so
+# this separates "a cursor report" from "anything else", not "the child's own
+# reply" from "atty's".
+#
+# The child is a separate `bash -c` (its own process group, so it owns the
+# terminal foreground) rather than a builtin, matching how atuin runs. The
+# marker is assembled at runtime (`"CURSOR""-$M"`) so the result strings never
+# appear in the echoed command line — otherwise the assertions would match the
+# echo instead of the child's output.
+
+cols 80
+rows 24
+timeout_ms 10000
+dsr_reply on
+
+spawn $ATTY bash --norc --noprofile -i
+wait_for "$"
+sleep 300
+
+type "bash -c 'printf \"\\033[6n\"; re=\"\\[[0-9]+;[0-9]+$\"; IFS= read -s -r -d R -t 3 _r && { [[ $_r =~ $re ]] && M=OK || M=BAD; } || M=LOST; echo \"CURSOR\"\"-$M\"'\r"
+wait_for "CURSOR-"
+sleep 200
+expect_substr "CURSOR-OK"
+expect_no_substr "CURSOR-LOST"
+expect_no_substr "CURSOR-BAD"
+
+type "exit\r"
+exit_code 0
