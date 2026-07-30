@@ -143,13 +143,28 @@ pub const Session = struct {
             }) catch continue;
             // Write straight to the master — NOT writeInput, which drains via
             // pumpMs when the buffer is full and would re-enter the pump we're
-            // called from. A reply is <= 12 bytes, so one write always suffices;
-            // best-effort on a (never observed) short write.
+            // called from. Retry INTR/AGAIN rather than dropping the reply: a
+            // dropped reply strands whoever queried, which surfaces as an
+            // intermittent scenario timeout. Bounded so a wedged fd can't hang
+            // the run; EPIPE/EIO (child gone) exits immediately.
             var off: usize = 0;
+            var retries: usize = 0;
             while (off < reply.len) {
                 const rc = std.c.write(self.master, reply[off..].ptr, reply.len - off);
-                if (rc <= 0) break;
-                off += @intCast(rc);
+                if (rc > 0) {
+                    off += @intCast(rc);
+                    continue;
+                }
+                switch (std.posix.errno(rc)) {
+                    .INTR => continue,
+                    .AGAIN => {
+                        retries += 1;
+                        if (retries > 50) break;
+                        var ts = std.c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+                        _ = std.c.nanosleep(&ts, null);
+                    },
+                    else => break,
+                }
             }
         }
     }

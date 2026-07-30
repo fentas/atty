@@ -315,7 +315,11 @@ fn runScenario(io: std.Io, gpa: Allocator, sc: Scenario, atty_bin: []const u8, u
             .set_rows => rows = @intCast(c.int_arg),
             .set_timeout_ms => timeout_ms = @intCast(c.int_arg),
             .set_env => try extra_env.append(gpa, .{ .key = c.str_arg, .value = c.str_arg2 }),
-            .dsr_reply => dsr_reply_on = c.int_arg == 1,
+            // Only a PRE-spawn directive sets the initial state; one placed after
+            // `spawn` is a mid-run toggle and is applied by pass 2 instead.
+            .dsr_reply => if (!spawn_seen) {
+                dsr_reply_on = c.int_arg == 1;
+            },
             .spawn => {
                 if (spawn_seen) return .{ .fail = "multiple spawn directives" };
                 spawn_argv = c.argv;
