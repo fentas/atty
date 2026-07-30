@@ -1305,7 +1305,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                             var shown_in_hint = false;
                             if (config.statusbar.hint_ttl_ms > 0) {
                                 if (statusbar) |*sb| {
-                                    const room: usize = if (ctx.terminal_cols) |c| c else msg.len;
+                                    // Bound by the hint buffer too — setHint's own
+                                    // clamp is byte-wise and would split a codepoint.
+                                    const cols: usize = if (ctx.terminal_cols) |c| c else msg.len;
+                                    const room = @min(cols, sb.hint_buf.len);
                                     sb.setHint(clipUtf8(msg, room), config.statusbar.hint_ttl_ms);
                                     if (!alt_screen.active and !cursor_tracker.inEscape())
                                         renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};

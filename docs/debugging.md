@@ -37,7 +37,7 @@ to the report directory and shows the path in the status bar's hint row (just
 above the footer), so repeated captures don't pile up in your scrollback:
 
 ```
-atty debug: report saved -> /home/you/.local/share/atty/reports/report-1751000000-123456789.json
+atty debug: report saved → /home/you/.local/share/atty/reports/report-1751000000-123456789.json
 ```
 
 With no status bar configured — or with hints disabled (`statusbar.hint_ttl_ms
