@@ -33,11 +33,15 @@ Recompile (`make build`) and run atty as usual.
 ## Capture
 
 When something looks wrong, press **`Alt+Shift+D`**. atty writes a JSON report
-to the report directory and prints the path:
+to the report directory and shows the path in the status bar's hint row (just
+above the footer), so repeated captures don't pile up in your scrollback:
 
 ```
-[atty debug] report saved: /home/you/.local/share/atty/reports/report-1751000000-123456789.json
+atty debug: report saved -> /home/you/.local/share/atty/reports/report-1751000000-123456789.json
 ```
+
+With no status bar configured — or with hints disabled (`statusbar.hint_ttl_ms
+= 0`) — the same message is printed inline instead.
 
 Nothing is written to disk until you press it — the recorder is a bounded
 **in-memory** ring, so there is no passive log sitting around to leak.

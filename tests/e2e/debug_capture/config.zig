@@ -10,4 +10,7 @@ pub const debug: atty.Debug = .{
     .report_dir = "/tmp/atty-e2e-debug",
 };
 
-pub const statusbar: atty.StatusBar = .{ .enabled = true };
+// Short hint TTL so the scenario can watch the row clear between the two
+// captures — that's how it proves the SECOND (kitty CSI-u) binding fired
+// rather than just re-reading the first capture's message.
+pub const statusbar: atty.StatusBar = .{ .enabled = true, .hint_ttl_ms = 1500 };

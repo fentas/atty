@@ -41,11 +41,19 @@ fn envOrEmpty(name: [*:0]const u8) []const u8 {
     return "";
 }
 
-/// Build a debug report from the recorder + current context and write it to
-/// disk, printing a one-line toast with the path (or the failure). Runs on the
-/// `debug_capture` shortcut — off the hot path.
+/// Truncate to at most `max` bytes without splitting a UTF-8 codepoint. The
+/// status-bar hint row paints its text unclipped, so an over-wide message wraps
+/// onto the padding row — which the bar never erases, leaving a stale fragment.
+fn clipUtf8(s: []const u8, max: usize) []const u8 {
+    if (s.len <= max) return s;
+    var n = max;
+    while (n > 0 and (s[n] & 0xC0) == 0x80) n -= 1;
+    return s[0..n];
+}
+
 /// Build + save a debug report; returns a short status message (into `out_buf`
-/// or a static literal) for the caller to surface via the status-bar hint.
+/// or a static literal) for the caller to surface. Runs on the `debug_capture`
+/// shortcut — off the hot path.
 fn captureDebugReport(
     allocator: std.mem.Allocator,
     r: *const debug_recorder.Recorder,
@@ -1291,13 +1299,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: Args) !ExitInfo {
                                 "atty debug: recorder unavailable (init failed)"
                             else
                                 "atty debug: recording off — set config.debug.enabled";
-                            if (statusbar) |*sb| {
-                                const ttl: u32 = if (config.statusbar.hint_ttl_ms > 0) config.statusbar.hint_ttl_ms else 4000;
-                                sb.setHint(msg, ttl);
-                                if (!alt_screen.active and !cursor_tracker.inEscape())
-                                    renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
-                            } else {
-                                // No status bar → fall back to an inline toast.
+                            // `hint_ttl_ms == 0` means the user disabled the hint
+                            // surface — don't force a TTL onto it; fall back to the
+                            // inline toast so an explicit keypress still reports back.
+                            var shown_in_hint = false;
+                            if (config.statusbar.hint_ttl_ms > 0) {
+                                if (statusbar) |*sb| {
+                                    const room: usize = if (ctx.terminal_cols) |c| c else msg.len;
+                                    sb.setHint(clipUtf8(msg, room), config.statusbar.hint_ttl_ms);
+                                    if (!alt_screen.active and !cursor_tracker.inEscape())
+                                        renderStatus(&runtimes, &ctx, sb, &out_buf, incognito_on) catch {};
+                                    shown_in_hint = true;
+                                }
+                            }
+                            if (!shown_in_hint) {
                                 var line_buf: [700]u8 = undefined;
                                 const line = std.fmt.bufPrint(&line_buf, "\r\n{s}\r\n", .{msg}) catch "\r\natty debug\r\n";
                                 writeAll(posix.STDOUT_FILENO, line) catch {};
